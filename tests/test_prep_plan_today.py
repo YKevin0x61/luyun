@@ -39,7 +39,7 @@ class PrepPlanRebuildFixture(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         await self.db.close()
 
-    async def _seed_item(self, *, item_name=ITEM_NAME, unit=UNIT, station=STATION):
+    async def _seed_item(self, *, item_name=ITEM_NAME, unit=UNIT, station=STATION, position='熟笼'):
         items = self.db.table("prep_items")
         async with items.conn.cursor() as cursor:
             await cursor.execute(
@@ -48,9 +48,9 @@ class PrepPlanRebuildFixture(unittest.IsolatedAsyncioTestCase):
                     item_name, station, position, category, unit, kind, active,
                     shelf_life_hours, lead_time_hours, min_batch_qty,
                     safety_stock_ratio, notes, created_at, updated_at
-                ) VALUES (?, ?, '熟笼', '半成品', ?, 'made', 1, 24, 0, 0, 0.15, '', ?, ?)
+                ) VALUES (?, ?, ?, '半成品', ?, 'made', 1, 24, 0, 0, 0.15, '', ?, ?)
                 """,
-                (item_name, station, unit, self.stamp, self.stamp),
+                (item_name, station, position, unit, self.stamp, self.stamp),
             )
             item_id = cursor.lastrowid
         await items.commit()
@@ -351,23 +351,24 @@ class StaffStationTests(PrepPlanRebuildFixture):
         self.assertIsNone(result["staff_station"])
 
     async def test_staff_sees_only_own_station(self):
-        await self._seed_item(item_name=ITEM_NAME, station="shulong")
-        await self._seed_item(item_name="蛋挞盏", station="xibing")
+        # 员工选的是**岗位**：两个品同档口（shulong）、不同岗位，只该看到自己岗位的那个
+        await self._seed_item(item_name=ITEM_NAME, station="shulong", position="熟笼")
+        await self._seed_item(item_name="蛋挞盏", station="shulong", position="馅档")
         await self._seed_rule(semi_name=ITEM_NAME)
         await self._seed_rule(semi_name="蛋挞盏")
         await self._seed_orders(CANDIDATE_DAYS, hour=9, minute=0, qty=40)
         await self._seed_orders(CANDIDATE_DAYS, hour=9, minute=0, qty=10, dish_name=DISH_NAME)
 
-        await self.service.set_staff_station(self.db, self.employee_id, "shulong", now=TODAY_MORNING)
+        await self.service.set_staff_station(self.db, self.employee_id, "熟笼", now=TODAY_MORNING)
         result = await self.service.get_today(self.db, now=TODAY_MORNING, employee_id=self.employee_id)
-        self.assertEqual({row["station"] for row in result["entries"]}, {"shulong"})
+        self.assertEqual({row["position"] for row in result["entries"]}, {"熟笼"})
 
     async def test_staff_cannot_touch_another_station(self):
-        await self._seed_item(item_name="蛋挞盏", station="xibing")
+        await self._seed_item(item_name="蛋挞盏", station="xibing", position="西饼")
         await self._seed_rule(semi_name="蛋挞盏")
         await self._seed_orders(CANDIDATE_DAYS, hour=9, minute=0, qty=10)
 
-        await self.service.set_staff_station(self.db, self.employee_id, "shulong", now=TODAY_MORNING)
+        await self.service.set_staff_station(self.db, self.employee_id, "熟笼", now=TODAY_MORNING)
         today = await self.service.get_today(self.db, now=TODAY_MORNING)
         entry = self._entry(today, item_name="蛋挞盏")
 

@@ -246,6 +246,114 @@ async def create_prep_item(body: PrepItemCreate, db: DatabaseManager = Depends(g
     return {"success": True, "item": created}
 
 
+# ------------------------------------------------------------------ 备货品主数据（管理面）
+
+_PREP_ITEM_KIND_CATEGORY = {"made": "半成品", "bought": "原料"}
+
+
+def _prep_item_payload(row: dict) -> dict:
+    """给页面的行：`active` 归一成布尔，其余原样。"""
+    return {
+        "id": int(row["id"]),
+        "item_name": row["item_name"] or "",
+        "unit": row["unit"] or "",
+        "position": row["position"] or "",
+        "station": row["station"] or "",
+        "kind": row["kind"] or "made",
+        "category": row["category"] or "",
+        "active": bool(row["active"]),
+        "notes": row["notes"] or "",
+        "rule_count": int(row.get("rule_count") or 0),
+    }
+
+
+@router.get("/prep-items/manage", dependencies=_ADMIN_WRITE)
+async def list_prep_items_for_admin(db: DatabaseManager = Depends(get_db)):
+    """备货品主数据清单（管理面）：含停用行，并带被引用条数。
+
+    与 `/prep-items`（选品下拉用、只返回 active=1）分开：这里是「维护主数据」的视角，
+    停用的品也得看得见，否则停用之后就再也找不回来了。
+    """
+    rows = await db.prep_items_all()
+    return {"success": True, "items": [_prep_item_payload(row) for row in rows]}
+
+
+class PrepItemUpdate(BaseModel):
+    item_name: Optional[str] = None
+    unit: Optional[str] = None
+    position: Optional[str] = None
+    kind: Optional[str] = None
+    active: Optional[bool] = None
+    notes: Optional[str] = None
+
+
+@router.patch("/prep-items/{item_id}", dependencies=_ADMIN_WRITE)
+async def update_prep_item(
+    item_id: int, body: PrepItemUpdate, db: DatabaseManager = Depends(get_db)
+):
+    """改备货品主数据：名称 / 单位 / 岗位 / 半成品·原料 / 启用 / 备注。
+
+    三条派生规则（与新建一致）：`kind` 决定 `category`（半成品 / 原料）；
+    `position` 决定 `station`（`POSITION_STATION_MAP`，与备货计划同一张表）；
+    改名不动规则 —— 规则按 `prep_item_id` 关联，名字只用于展示。
+    """
+    current = await db.prep_item_get(item_id)
+    if not current:
+        raise HTTPException(status_code=404, detail="备货品不存在")
+
+    patch: dict = {}
+    if body.item_name is not None:
+        name = body.item_name.strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="备货品名称不能为空")
+        if name != (current["item_name"] or "") and await db.prep_item_name_taken(name, item_id):
+            raise HTTPException(status_code=409, detail=f"清单里已经有「{name}」了")
+        patch["item_name"] = name
+    if body.unit is not None:
+        patch["unit"] = body.unit.strip()
+    if body.position is not None:
+        position = body.position.strip()
+        patch["position"] = position
+        patch["station"] = POSITION_STATION_MAP.get(position, "")
+    if body.kind is not None:
+        if body.kind not in _PREP_ITEM_KIND_CATEGORY:
+            raise HTTPException(status_code=400, detail="kind 只能是 made / bought")
+        patch["kind"] = body.kind
+        patch["category"] = _PREP_ITEM_KIND_CATEGORY[body.kind]
+    if body.active is not None:
+        patch["active"] = 1 if body.active else 0
+    if body.notes is not None:
+        patch["notes"] = body.notes.strip()
+
+    if not patch:
+        raise HTTPException(status_code=400, detail="没有要改的字段")
+    if not await db.prep_item_update(item_id, patch):
+        raise HTTPException(status_code=500, detail="保存失败")
+
+    updated = await db.prep_item_get(item_id)
+    return {"success": True, "item": _prep_item_payload(updated or current)}
+
+
+@router.delete("/prep-items/{item_id}", dependencies=_ADMIN_WRITE)
+async def delete_prep_item(item_id: int, db: DatabaseManager = Depends(get_db)):
+    """删一个备货品。
+
+    引用它的换算规则**不删**，由外键 `ON DELETE SET NULL` 回到「未对准备货品」——
+    那是两个动作，页面会把未对齐的规则标出来让人重新接。
+    """
+    current = await db.prep_item_get(item_id)
+    if not current:
+        raise HTTPException(status_code=404, detail="备货品不存在")
+    if not await db.prep_item_delete(item_id):
+        raise HTTPException(status_code=500, detail="删除失败")
+    return {
+        "success": True,
+        "id": item_id,
+        "item_name": current.get("item_name") or "",
+        "rules_detached": int(current.get("rule_count") or 0),
+    }
+
+
 @router.get("/board")
 async def get_rule_board(
     days: int = Query(90, ge=1, le=365, description="销量回看天数"),

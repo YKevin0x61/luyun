@@ -1,6 +1,5 @@
 import { computed, ref } from 'vue'
 import { api } from '../api/client'
-import { useStationsStore } from '../stores/stations'
 
 /** 备货计划（ADR 0117）的读路径与几个写动作。
  *
@@ -8,8 +7,6 @@ import { useStationsStore } from '../stores/stations'
  *  后端按「现在 → 打烊」现算，勾选与手改落在当日计划里。
  */
 export function usePrepPlan() {
-  const stations = useStationsStore()
-
   const state = ref('idle') // idle | loading | ready | error
   const errorText = ref('')
   const planDay = ref('')
@@ -29,15 +26,16 @@ export function usePrepPlan() {
   const remainingEntries = computed(() => entries.value.filter((row) => !row.done_at))
   const doneEntries = computed(() => entries.value.filter((row) => row.done_at))
 
+  /** 备货计划按**岗位**分组（案板 / 熟笼 / 西饼…）：`station` 是 POS 的档口维度，
+   *  后厨怎么分工看的是备货品清单里的 `position`。 */
   function stationKey(entry) {
-    return entry.station || 'uncategorized'
+    return entry.position || 'uncategorized'
   }
 
   function stationLabel(key) {
     if (key === 'uncategorized') return '未分类'
-    // 员工身份拿不到管理端的 `/api/stations`，档口名由后端随清单一起下发
     const match = stationOptions.value.find((row) => row.id === key)
-    return match ? match.label : stations.nameOf(key)
+    return match ? match.label : key
   }
 
   /** 档口页签：只列真的有品的档口，按 `KITCHEN_STATIONS` 的顺序排。 */
@@ -50,14 +48,19 @@ export function usePrepPlan() {
       if (!entry.done_at) row.remaining += 1
       counts.set(key, row)
     }
-    const order = stations.list.map((row) => row.id)
+    // 顺序由后端给的岗位清单决定（后厨动线：熟笼 → 馅档 → 案板 → 西饼 → 肠粉 → 明档 → 煎炸）
+    const order = stationOptions.value.map((row) => row.id)
+    const rank = (id) => {
+      const index = order.indexOf(id)
+      return index === -1 ? order.length : index
+    }
     return [...counts.values()]
       .map((row) => ({ ...row, label: stationLabel(row.id) }))
       .sort((a, b) => {
-        // 「未分类」永远排最后：它是收容所，不是第一个该看的档口
+        // 「未分类」永远排最后：它是收容所，不是第一个该看的组
         if (a.id === 'uncategorized') return 1
         if (b.id === 'uncategorized') return -1
-        return order.indexOf(a.id) - order.indexOf(b.id)
+        return rank(a.id) - rank(b.id)
       })
   })
 
@@ -84,11 +87,8 @@ export function usePrepPlan() {
 
   const remainingCount = computed(() => remainingEntries.value.length)
 
-  /** 员工选档口用：全部档口（不只是已经有备货品的那几个）。 */
-  const allStations = computed(() => {
-    if (stationOptions.value.length) return stationOptions.value
-    return stations.list.map((row) => ({ id: row.id, label: row.name || row.id }))
-  })
+  /** 员工选岗位用：后端随清单下发的岗位清单（备货品里实际出现的岗位）。 */
+  const allStations = computed(() => stationOptions.value)
 
   function applyPayload(data) {
     planDay.value = data.plan_day || ''
@@ -115,13 +115,6 @@ export function usePrepPlan() {
       // 先问清单再决定要不要拉管理端档口：员工会话调 `/api/stations` 是 401，
       // 而后端已经把「全部后厨档口」随清单下发，员工那一档不需要那条接口。
       const data = await api.get('/api/prep-plan/today')
-      if (!data.staff) {
-        try {
-          await stations.load()
-        } catch {
-          // 档口名读不到就退回 id，页面仍然可用
-        }
-      }
       applyPayload(data)
       state.value = 'ready'
     } catch (err) {

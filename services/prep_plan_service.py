@@ -496,6 +496,7 @@ class PrepPlanService:
                     "item_name": item["item_name"],
                     "unit": item["unit"],
                     "station": station,
+                    "position": item["position"],
                     "kind": item["kind"],
                     "suggested_qty": suggested,
                     "next_hour_qty": next_hour_qty,
@@ -532,9 +533,14 @@ class PrepPlanService:
         entries.sort(
             key=lambda e: (e["station"], e["kind"], -e["suggested_qty"], e["item_name"])
         )
+        used_positions = {item["position"] for item in items if item["position"]}
+        positions = [p for p in POSITION_STATION_MAP if p in used_positions]
+        positions += sorted(used_positions - set(POSITION_STATION_MAP))
+
         return {
             "plan_day": today.isoformat(),
             "generated_at": now.isoformat(),
+            "positions": positions,
             "window": {
                 "start": window_start.isoformat(),
                 "end": window_end.isoformat(),
@@ -671,23 +677,35 @@ class PrepPlanService:
         await self._persist_entries(db, day_id, computed["entries"])
         entries = await self._read_entries(db, day_id)
 
+        # 备货计划按**岗位**分组（案板 / 熟笼 / 西饼…），档口只在 POS 侧有意义。
+        # `prep_plan_entries` 里只落了 station，岗位从这次算好的 entries 按品补回来。
+        source_by_item = {e["prep_item_id"]: e for e in computed["entries"]}
+        for entry in entries:
+            source = source_by_item.get(entry["prep_item_id"])
+            entry["history7"] = source["history7"] if source else []
+            entry["position"] = (source["position"] if source else "") or ""
+
         staff_station: Optional[str] = None
         needs_station_pick = False
         if employee_id is not None:
             staff_station = await self.get_staff_station(db, employee_id, now)
             needs_station_pick = not staff_station
             if staff_station:
-                entries = [e for e in entries if e["station"] == staff_station]
+                entries = [e for e in entries if e["position"] == staff_station]
             else:
-                # 员工还没选档口：先让他选，不拿全店清单糊他一脸
+                # 员工还没选岗位：先让他选，不拿全店清单糊他一脸
                 entries = []
         elif station and station not in ("", "all"):
-            entries = [e for e in entries if e["station"] == station]
+            entries = [e for e in entries if e["position"] == station]
 
-        source_by_item = {e["prep_item_id"]: e for e in computed["entries"]}
-        for entry in entries:
-            source = source_by_item.get(entry["prep_item_id"])
-            entry["history7"] = source["history7"] if source else []
+        position_rank = {name: index for index, name in enumerate(computed.get("positions") or [])}
+        entries.sort(key=lambda e: (
+            position_rank.get(e["position"], len(position_rank)),
+            "" if e["position"] else "z",
+            e["kind"],
+            -e["suggested_qty"],
+            e["item_name"],
+        ))
 
         remaining = [e for e in entries if not e["done_at"]]
         done = [e for e in entries if e["done_at"]]
@@ -697,10 +715,10 @@ class PrepPlanService:
             "generated_at": computed["generated_at"],
             "window": computed["window"],
             "missing_rule": computed["missing_rule"],
-            # 全部后厨档口（不是「有品的那些」）：员工选档口时要能选到还没配备货品的档。
+            # 岗位清单（不是档口）：员工选岗位、管理端切换分组都用它。
             "stations": [
-                {"id": station_id, "label": config.get("name") or station_id}
-                for station_id, config in KITCHEN_STATIONS.items()
+                {"id": position, "label": position}
+                for position in (computed.get("positions") or [])
             ],
             "staff": employee_id is not None,
             "staff_station": staff_station,
@@ -723,14 +741,15 @@ class PrepPlanService:
         tdb = db.table("prep_plan_entries")
         async with tdb.conn.cursor() as cursor:
             await cursor.execute(
-                "SELECT id, station FROM prep_plan_entries WHERE id = ?", (entry_id,)
+                "SELECT id, prep_item_id FROM prep_plan_entries WHERE id = ?", (entry_id,)
             )
             row = await cursor.fetchone()
             if row is None:
                 raise ValueError("entry_not_found")
             if employee_id is not None:
-                staff_station = await self.get_staff_station(db, employee_id)
-                if not staff_station or row["station"] != staff_station:
+                staff_position = await self.get_staff_station(db, employee_id)
+                position = await self._item_position(db, int(row["prep_item_id"] or 0))
+                if not staff_position or position != staff_position:
                     raise PermissionError("station_forbidden")
             stamp = datetime.now(CHINA_TZ).isoformat()
             if final_qty is not None:
@@ -759,9 +778,15 @@ class PrepPlanService:
         today = await self.get_today(db, now=now)
         buckets: Dict[str, dict] = {}
         for entry in today["entries"]:
-            station = entry["station"] or "uncategorized"
+            position = entry.get("position") or "uncategorized"
             bucket = buckets.setdefault(
-                station, {"station": station, "total": 0, "remaining": 0}
+                position,
+                {
+                    "station": position,
+                    "label": "未分类" if position == "uncategorized" else position,
+                    "total": 0,
+                    "remaining": 0,
+                },
             )
             bucket["total"] += 1
             if not entry["done_at"]:
@@ -777,6 +802,14 @@ class PrepPlanService:
         }
 
     # ------------------------------------------------------------------ 员工档口
+
+    async def _item_position(self, db, prep_item_id: int) -> str:
+        """备货品的岗位（员工越权校验用；entries 表里没落岗位）。"""
+        tdb = db.table("prep_items")
+        async with tdb.conn.cursor() as cursor:
+            await cursor.execute("SELECT position FROM prep_items WHERE id = ?", (prep_item_id,))
+            row = await cursor.fetchone()
+        return (row["position"] if row else "") or ""
 
     async def get_staff_station(
         self, db, employee_id: int, now: Optional[datetime] = None

@@ -160,6 +160,7 @@ describe('页面清单（唯一来源）', () => {
       '/workbench/kitchen/prep-review',
       // 备货品换算规则（2026-10-26）：从销售报表的 tab 搬进后勤组，同套工作台外壳。
       '/workbench/kitchen/prep-rules',
+      '/workbench/kitchen/prep-items',
       // 损耗分析（从 worktool2 那个小程序搬过来）：后勤组的第三页，同套工作台外壳。
       '/workbench/kitchen/loss',
       // 员工三页搬进工作台的「我的」组（票 03）：套工作台外壳，后台导航照样不渲染；

@@ -168,6 +168,11 @@ const routes = [
   workbenchKitchenPage('/workbench/kitchen/prep-rules', 'prep-rules', () =>
     import('../views/prep/PrepRulesView.vue'),
   ),
+  // 备货品主数据（2026-10-27）：清单 + 编辑。备货计划按「备货品」出清单、换算规则按它算
+  // 系数，这一页是那份主数据的维护面（之前只能在数据管理那张裸表里改）。
+  workbenchKitchenPage('/workbench/kitchen/prep-items', 'prep-items', () =>
+    import('../views/prep/PrepItemsView.vue'),
+  ),
   // 损耗分析（从 worktool2 那个小程序搬过来）：后勤组的第三页 —— 店长按月看损耗的
   // 总数 / 原因分布 / 高损耗物料 / 逐日趋势，下半页是按条件翻的明细。清单里是
   // `audience: admin` + `staffCap: wastage`（2026-10-14 用户裁定）：管理端会话直接进，

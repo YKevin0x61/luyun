@@ -22,6 +22,10 @@ const TODAY = {
   needs_station_pick: false,
   remaining_count: 2,
   done_count: 0,
+  stations: [
+    { id: '熟笼', label: '熟笼' },
+    { id: '西饼', label: '西饼' },
+  ],
   entries: [
     {
       id: 1,
@@ -29,6 +33,7 @@ const TODAY = {
       item_name: '虾饺馅',
       unit: '份',
       station: 'shulong',
+      position: '熟笼',
       kind: 'made',
       suggested_qty: 80,
       final_qty: 80,
@@ -46,6 +51,7 @@ const TODAY = {
       item_name: '河粉',
       unit: '斤',
       station: 'shulong',
+      position: '熟笼',
       kind: 'bought',
       suggested_qty: 20,
       final_qty: 20,
@@ -150,7 +156,7 @@ describe('档口与层级', () => {
     ...TODAY,
     entries: [
       TODAY.entries[0],
-      { ...TODAY.entries[1], id: 3, prep_item_id: 13, item_name: '蛋挞盖', station: 'xibing', kind: 'bought' },
+      { ...TODAY.entries[1], id: 3, prep_item_id: 13, item_name: '蛋挞盖', station: 'xibing', position: '西饼', kind: 'bought' },
     ],
   }
 
@@ -245,7 +251,7 @@ describe('勾选与改数量', () => {
 describe('员工这一档', () => {
   const staffToday = {
     ...TODAY,
-    stations: [{ id: 'shulong', label: '熟笼档' }],
+    stations: [{ id: '熟笼', label: '熟笼' }],
     staff: true,
     staff_station: null,
     needs_station_pick: true,
@@ -257,7 +263,7 @@ describe('员工这一档', () => {
     vi.stubGlobal('fetch', probeFetch({ today: staffToday }))
     const wrapper = await mountView()
 
-    expect(wrapper.text()).toContain('先选你在哪个档口')
+    expect(wrapper.text()).toContain('先选你在哪个岗位')
     expect(wrapper.text()).not.toContain('虾饺馅')
     // 还没选档口时清单是空的：别用「0 项」告诉他今天没活，别让复制清单去复制一张空单
     expect(wrapper.get('.pp-title').text()).not.toContain('0')
@@ -274,7 +280,7 @@ describe('员工这一档', () => {
 
     const post = fetchMock.calls.find((call) => call.method === 'POST')
     expect(post.path).toContain('/api/prep-plan/staff-station')
-    expect(JSON.parse(post.body)).toEqual({ station: 'shulong' })
+    expect(JSON.parse(post.body)).toEqual({ station: '熟笼' })
   })
 
   it('员工端点整行（含数量那一块）都能展开近 7 天依据', async () => {
@@ -287,6 +293,21 @@ describe('员工这一档', () => {
     await flushPromises()
     expect(wrapper.find('.pp-detail').exists()).toBe(true)
     expect(wrapper.find('.pp-detail').text()).toContain('同星期几')
+  })
+
+  it('员工端点名称也是「开一次」——不会开了又被冒泡回来的第二次 toggle 关掉', async () => {
+    const picked = { ...TODAY, staff: true, staff_station: 'shulong', needs_station_pick: false }
+    vi.stubGlobal('fetch', probeFetch({ today: picked }))
+    const wrapper = await mountView()
+
+    // 行主区（名称 + 小三角）是 button，点它会先触发自己的展开、再冒泡到 li 的展开
+    await wrapper.get('.pp-row-main').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.pp-detail').exists()).toBe(true)
+
+    await wrapper.get('.pp-row-main').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.pp-detail').exists()).toBe(false)
   })
 
   it('管理端点行空白不展开（点名称才展开，数量那一格是改数量）', async () => {

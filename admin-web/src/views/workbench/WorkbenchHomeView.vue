@@ -143,10 +143,6 @@ async function loadManager() {
  * 先经过它、再转进月历那一天的操作单（`TodayView` 里只做转发，不在这两页摆第二套表单）。
  * 日期取服务端营业日 `businessDate`（`/me` 的 `today`），不拿手机上的今天。
  */
-function prepStationName(id) {
-  return id === 'uncategorized' ? '未分类' : stationsStore.nameOf(id)
-}
-
 function staffDayLink(act) {
   return {
     path: '/workbench/staff/today',
@@ -272,7 +268,7 @@ useNudgePull({
             </header>
             <ul v-if="prep && prep.stations && prep.stations.length" class="wbh-prep">
               <li v-for="row in prep.stations" :key="row.station">
-                <b>{{ prepStationName(row.station) }}</b>
+                <b>{{ row.label || row.station }}</b>
                 <span>{{ row.remaining }}</span>
               </li>
             </ul>

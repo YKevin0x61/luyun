@@ -16,6 +16,10 @@ const TODAY = {
   staff_station: null,
   needs_station_pick: false,
   remaining_count: 2,
+  stations: [
+    { id: '熟笼', label: '熟笼' },
+    { id: '西饼', label: '西饼' },
+  ],
   entries: [
     {
       id: 1,
@@ -23,6 +27,7 @@ const TODAY = {
       item_name: '虾饺馅',
       unit: '份',
       station: 'shulong',
+      position: '熟笼',
       kind: 'made',
       suggested_qty: 80,
       final_qty: 80,
@@ -36,6 +41,7 @@ const TODAY = {
       item_name: '河粉',
       unit: '斤',
       station: 'shulong',
+      position: '熟笼',
       kind: 'bought',
       suggested_qty: 20,
       final_qty: 20,
@@ -49,6 +55,7 @@ const TODAY = {
       item_name: '蛋挞盏',
       unit: '个',
       station: 'xibing',
+      position: '西饼',
       kind: 'made',
       suggested_qty: 30,
       final_qty: 30,
@@ -65,28 +72,22 @@ beforeEach(() => {
   api.post.mockReset()
   api.patch.mockReset()
   api.get.mockImplementation(async (path) => {
-    if (path === '/api/stations') {
-      return [
-        { id: 'shulong', name: '熟笼' },
-        { id: 'xibing', name: '西饼' },
-      ]
-    }
     if (path === '/api/prep-plan/today') return TODAY
     return {}
   })
 })
 
-describe('档口页签与两段分组', () => {
-  it('按档口分组、带剩余计数，默认落在第一个还有待办项的档口', async () => {
+describe('岗位页签与两段分组', () => {
+  it('按岗位分组、带剩余计数，默认落在第一个还有待办项岗位', async () => {
     const plan = usePrepPlan()
     await plan.load()
 
     expect(plan.state.value).toBe('ready')
     expect(plan.stationTabs.value.map((tab) => [tab.id, tab.remaining])).toEqual([
-      ['shulong', 2],
-      ['xibing', 0],
+      ['熟笼', 2],
+      ['西饼', 0],
     ])
-    expect(plan.activeStation.value).toBe('shulong')
+    expect(plan.activeStation.value).toBe('熟笼')
   })
 
   it('档口内分成「半成品」与「原料」两段', async () => {
@@ -104,7 +105,7 @@ describe('档口页签与两段分组', () => {
   it('勾掉的进已做，不进待办', async () => {
     const plan = usePrepPlan()
     await plan.load()
-    plan.activeStation.value = 'xibing'
+    plan.activeStation.value = '西饼'
 
     expect(plan.groups.value).toEqual([])
     expect(plan.doneInStation.value.map((row) => row.item_name)).toEqual(['蛋挞盏'])

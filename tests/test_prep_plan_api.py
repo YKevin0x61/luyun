@@ -60,7 +60,7 @@ def staff_client():
     _run(db.close())
 
 
-def _seed(db, *, item_name="虾饺馅", unit="份", station="shulong"):
+def _seed(db, *, item_name="虾饺馅", unit="份", station="shulong", position="熟笼"):
     async def work():
         items = db.table("prep_items")
         async with items.conn.cursor() as cursor:
@@ -70,9 +70,9 @@ def _seed(db, *, item_name="虾饺馅", unit="份", station="shulong"):
                     item_name, station, position, category, unit, kind, active,
                     shelf_life_hours, lead_time_hours, min_batch_qty,
                     safety_stock_ratio, notes, created_at, updated_at
-                ) VALUES (?, ?, '熟笼', '半成品', ?, 'made', 1, 24, 0, 0, 0.15, '', ?, ?)
+                ) VALUES (?, ?, ?, '半成品', ?, 'made', 1, 24, 0, 0, 0.15, '', ?, ?)
                 """,
-                (item_name, station, unit, STAMP, STAMP),
+                (item_name, station, position, unit, STAMP, STAMP),
             )
             item_id = cursor.lastrowid
         await items.commit()
@@ -128,13 +128,14 @@ def test_staff_must_pick_a_station_first(staff_client):
 
 
 def test_staff_sees_only_own_station(staff_client):
+    """员工选的「岗位」：清单按备货品的 position 分组，档口只是 POS 维度。"""
     client, db = staff_client
-    _seed(db, item_name="虾饺馅", station="shulong")
-    _seed(db, item_name="蛋挞盏", unit="个", station="xibing")
+    _seed(db, item_name="虾饺馅", station="shulong", position="熟笼")
+    _seed(db, item_name="蛋挞盏", unit="个", station="xibing", position="西饼")
 
-    client.post("/api/prep-plan/staff-station", json={"station": "shulong"})
+    client.post("/api/prep-plan/staff-station", json={"station": "熟笼"})
     body = client.get("/api/prep-plan/today").json()
-    assert {row["station"] for row in body["entries"]} == {"shulong"}
+    assert {row["position"] for row in body["entries"]} == {"熟笼"}
 
 
 def test_staff_cannot_patch_another_station(staff_client):
@@ -173,7 +174,8 @@ def test_summary_lists_station_remaining(admin_client):
     _seed(db)
     body = client.get("/api/prep-plan/summary").json()
     assert body["success"] is True
-    assert body["stations"][0]["station"] == "shulong"
+    assert body["stations"][0]["station"] == "熟笼"
+    assert body["stations"][0]["label"] == "熟笼"
     assert body["stations"][0]["remaining"] == 1
 
 

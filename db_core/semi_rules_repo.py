@@ -85,6 +85,108 @@ class _SemiRulesRepoMixin:
             logger.error(f"❌ 获取备货品列表失败: {e}")
             return []
 
+    async def prep_items_all(self) -> List[Dict]:
+        """备货品主数据（管理面）：**含停用行**，并带「被多少条规则引用」。
+
+        与 `prep_items_simple`（只给 active=1、给选品下拉用）的区别就是这两点：
+        管理页要能看见停用的品并重新启用，也要能一眼看出哪个品没有任何规则在用。
+        """
+        try:
+            tdb = self._connection.table("prep_items")
+            async with tdb.conn.cursor() as cursor:
+                await cursor.execute(
+                    """
+                    SELECT p.id, p.item_name, p.unit, p.position, p.station,
+                           p.kind, p.category, p.active, p.notes,
+                           (SELECT COUNT(*) FROM semi_finished_rules r
+                             WHERE r.prep_item_id = p.id) AS rule_count
+                    FROM prep_items p
+                    ORDER BY p.position, p.item_name
+                    """
+                )
+                rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+        except Exception as e:
+            logger.error(f"❌ 获取备货品主数据失败: {e}")
+            return []
+
+    async def prep_item_get(self, item_id: int) -> Optional[Dict]:
+        """按 id 取一行备货品（编辑前读当前值）。"""
+        try:
+            tdb = self._connection.table("prep_items")
+            async with tdb.conn.cursor() as cursor:
+                await cursor.execute(
+                    "SELECT p.id, p.item_name, p.unit, p.position, p.station, p.kind,"
+                    " p.category, p.active, p.notes,"
+                    " (SELECT COUNT(*) FROM semi_finished_rules r"
+                    "   WHERE r.prep_item_id = p.id) AS rule_count"
+                    " FROM prep_items p WHERE p.id = ?",
+                    (item_id,),
+                )
+                row = await cursor.fetchone()
+            return dict(row) if row else None
+        except Exception as e:
+            logger.error(f"❌ 查备货品失败: {e}")
+            return None
+
+    async def prep_item_delete(self, item_id: int) -> bool:
+        """删一个备货品。
+
+        `semi_finished_rules.prep_item_id` 是 `ON DELETE SET NULL`（0035），引用它的规则
+        会自动回到「未对准备货品」状态 —— 不连带删规则（规则是另一件事，页面会标出来）。
+        `prep_plan_entries` 没有外键，已算过的备货记录原样保留（名字还在，岗位查不到 →
+        那条旧记录下次展开时没有依据，这是删除的已知代价）。
+        """
+        try:
+            tdb = self._connection.table("prep_items")
+            async with tdb.conn.cursor() as cursor:
+                await cursor.execute("DELETE FROM prep_items WHERE id = ?", (item_id,))
+            await tdb.commit()
+            return True
+        except Exception as e:
+            logger.error(f"❌ 删除备货品失败: {e}")
+            return False
+
+    async def prep_item_name_taken(self, item_name: str, exclude_id: int = 0) -> bool:
+        """改名前的重名检查（同名的另一行存在就算占用）。"""
+        try:
+            tdb = self._connection.table("prep_items")
+            async with tdb.conn.cursor() as cursor:
+                await cursor.execute(
+                    "SELECT id FROM prep_items WHERE item_name = ? AND id <> ? LIMIT 1",
+                    (item_name, exclude_id),
+                )
+                row = await cursor.fetchone()
+            return row is not None
+        except Exception as e:
+            logger.error(f"❌ 查备货品重名失败: {e}")
+            return False
+
+    async def prep_item_update(self, item_id: int, fields: Dict) -> bool:
+        """按白名单更新备货品（名称 / 单位 / 岗位 / 档口 / 分类 / 归属 / 启用 / 备注）。"""
+        allowed = {
+            "item_name", "unit", "position", "station",
+            "category", "kind", "active", "notes",
+        }
+        patch = {key: value for key, value in fields.items() if key in allowed}
+        if not patch:
+            return False
+        try:
+            now = datetime.now(CHINA_TZ).isoformat()
+            patch["updated_at"] = now
+            columns = ", ".join(f"{name} = ?" for name in patch)
+            values = list(patch.values()) + [item_id]
+            tdb = self._connection.table("prep_items")
+            async with tdb.conn.cursor() as cursor:
+                await cursor.execute(
+                    f"UPDATE prep_items SET {columns} WHERE id = ?", tuple(values)
+                )
+            await tdb.commit()
+            return True
+        except Exception as e:
+            logger.error(f"❌ 更新备货品失败: {e}")
+            return False
+
     async def prep_item_find(self, item_name: str) -> Optional[Dict]:
         """按名字找备货品（新建前的重名检查）。"""
         try:

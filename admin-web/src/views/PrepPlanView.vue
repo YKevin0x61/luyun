@@ -3,7 +3,6 @@ import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import MiniBarChart from '../components/prep/MiniBarChart.vue'
 import { api } from '../api/client'
 import { usePrepPlan } from '../composables/usePrepPlan'
-import { useStationsStore } from '../stores/stations'
 import { BASIS_HINT, COPIED_LABEL, COPY_LABEL, PREP_PLAN_TITLE } from '../utils/prepPlanCopy'
 import { buildPrepPlanText } from '../utils/prepPlanText'
 import { workbenchDocumentTitle } from '../utils/workbenchCopy'
@@ -15,7 +14,6 @@ import { workbenchDocumentTitle } from '../utils/workbenchCopy'
  * 没有时间窗选择器，没有「先点刷新」的空态，没有信心 / 裕度 / 风险读数。
  */
 
-const stations = useStationsStore()
 const {
   state,
   errorText,
@@ -216,12 +214,12 @@ watch(activeStation, () => {
 
     <p v-if="isStaff && staffStation && !needsStationPick" class="pp-staff-bar">
       <span>你在 <b>{{ staffStationLabel }}</b></span>
-      <button type="button" class="pp-staff-switch" @click="requestStationChange">换档口</button>
+      <button type="button" class="pp-staff-switch" @click="requestStationChange">换岗位</button>
     </p>
 
     <section v-if="needsStationPick" class="pp-pick">
-      <p class="pp-pick-title">先选你在哪个档口</p>
-      <p class="pp-pick-hint">选了只看得到这个档口的参考值。</p>
+      <p class="pp-pick-title">先选你在哪个岗位</p>
+      <p class="pp-pick-hint">选了只看得到这个岗位的参考值。</p>
       <div class="pp-pick-chips">
         <button
           v-for="station in allStations"
@@ -270,7 +268,10 @@ watch(activeStation, () => {
             :class="{ 'is-zero': isZero(entry), 'is-staff': isStaff }"
             @click="isStaff && toggleExpand(entry)"
           >
-            <button type="button" class="pp-row-main" @click="toggleExpand(entry)">
+            <!-- `.stop`：员工端整行（`li`）也挂了同一个展开动作。点名称时事件会先到这颗按钮、
+                 再冒泡到行上执行第二次 —— 两次 toggle 互相抵消，实测表现是「点名称没反应，
+                 只有点数字（穿透到行上）才开」。按钮自己停掉冒泡，每条路径就只toggle一次。 -->
+            <button type="button" class="pp-row-main" @click.stop="toggleExpand(entry)">
               <span class="pp-name">{{ entry.item_name }}</span>
               <span class="pp-caret" aria-hidden="true">{{ expandedId === entry.id ? '▾' : '▸' }}</span>
             </button>

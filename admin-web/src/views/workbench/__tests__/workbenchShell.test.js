@@ -7,6 +7,7 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { createMemoryHistory, createRouter } from 'vue-router'
 import { createPinia, setActivePinia } from 'pinia'
 import { WORKBENCH_FIELD_HOME, WORKBENCH_HR_HOME } from '../../../utils/workbenchCopy.js'
+import { PREP_ITEMS_PATH } from '../../../utils/prepItemPaths.js'
 import { PREP_PLAN_PATH, PREP_REVIEW_PATH } from '../../../utils/prepPlanPaths.js'
 import { PREP_RULES_PATH } from '../../../utils/prepRulePaths.js'
 import { RECIPE_DETAIL_PATH, RECIPE_PRINT_PATH } from '../../../utils/recipePaths.js'
@@ -276,11 +277,11 @@ describe('工作台外壳的导航', () => {
     // 损耗分析）。
     const items = wrapper.findAll('.wb-nav-item')
     expect(items.map((item) => item.text())).toEqual([
-      '今天', '人事', '现场', '选择岗位', '备货计划', '备货复盘', '换算规则', '损耗分析',
+      '今天', '人事', '现场', '选择岗位', '备货计划', '备货复盘', '换算规则', '备货品', '损耗分析',
     ])
     expect(items.map((item) => item.attributes('href'))).toEqual([
       '/workbench', WORKBENCH_HR_HOME, WORKBENCH_FIELD_HOME,
-      '/workbench/kitchen/recipe', PREP_PLAN_PATH, PREP_REVIEW_PATH, PREP_RULES_PATH, WASTAGE_ANALYSIS_PATH,
+      '/workbench/kitchen/recipe', PREP_PLAN_PATH, PREP_REVIEW_PATH, PREP_RULES_PATH, PREP_ITEMS_PATH, WASTAGE_ANALYSIS_PATH,
     ])
   })
 
