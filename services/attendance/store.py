@@ -707,7 +707,11 @@ class AttendanceStore:
     async def set_half_rest(
         self, employee_id: int, business_date: str, half_rest: bool = True
     ) -> dict:
-        """把某人某一天标成「休半天」/ 取消（票 07，ADR 0114）。**只有这一扇门能设它。**
+        """把某人某一天标成「休半天」/ 取消（票 07，ADR 0114）。
+
+        2026-10-29 起它**不是唯一的门**：排班周表的「休半天」笔走批量端点
+        `action=half_rest`，与这里写同一个 `half_rest` 标志、同一句校验（那天得有
+        结果行且班次非空），见 ADR 0122。两处都是「只改标志」这一种终态。
 
         改的是 `staff_assignments` 那一行上的 `half_rest` 一个字段：班次、工作区、来源
         （`source`）与那一天是不是单日覆盖，**一个字都不动** —— 半天休不是第二个班次，

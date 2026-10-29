@@ -66,10 +66,9 @@ describe('店长端周表（员工 × 周）', () => {
     }
   })
 
-  it('半天休在格子上写一个「半」，只读（票 07 / ADR 0114）', () => {
+  it('半天休在格子上写一个「半」；周表笔栏也能标 / 取消（票 07 / ADR 0114）', () => {
     // 那天仍然挂着班次（格子里照旧是班次缩写），只是旁边多一个「半」——
-    // 员工与店长都不会以为要上整天。**只读**的一位：这里没有设置它的控件，
-    // 设置它的地方只有考勤表页（考勤表那条 PUT 的 `half_rest`）。
+    // 员工与店长都不会以为要上整天。
     expect(view).toMatch(/v-if="weekCellHalf\(employee, day\)"/)
     expect(view).toMatch(/function weekCellHalf\(employee, day\)/)
     expect(view).toMatch(/class="gW-half"/)
@@ -77,9 +76,11 @@ describe('店长端周表（员工 × 周）', () => {
     // 图例里解释那个「半」（只在真有这样的格子时才出现）。
     expect(view).toMatch(/const weekHalfCount = computed/)
     expect(view).toMatch(/class="gB-half"><i><\/i>半 = 休半天/)
-    // 周表上**没有**写它的路：那一行只有「刷」/「清」/ 班次 / 休。
-    expect(view).not.toMatch(/half_rest:\s*true/)
-    expect(view).not.toMatch(/half_rest:\s*!/)
+    // 2026-10-29：「只读」这条退役 —— 周表自己就是设置方之一（笔栏「休半天」），
+    // 发 action=half_rest；考勤表页那条 PUT 仍是另一条路，两边写同一个 half_rest。
+    expect(view).toMatch(/<i class="dt half"><\/i>休半天<\/button>/)
+    expect(view).toMatch(/PICK_HALF_REST/)
+    expect(view).toMatch(/halfRest: cell \? !cell\.half_rest : true/)
   })
 
   it('点一格＝立刻落笔；笔栏常驻并给页面留出底部空间', () => {
@@ -119,9 +120,9 @@ describe('店长端周表（员工 × 周）', () => {
     expect(view).not.toMatch(/:class="\{ on: penZoneOpen \}"/)
     // 批量只走选区那一行的「刷」/「清」；不选区时那一行整条不渲染。
     expect(view).toMatch(/@click="applyRegion\(\)"/)
-    // v5（2026-10-18 审查）：区域那颗改名「退回规则」并加二次确认（`askRegionClear`），
+    // v5（2026-10-18 审查）：区域那颗改名「退回规则」并加二次确认（`askRegionRestore`），
     // 与笔上那颗「清」分开 —— 原来同名同距，点一下立刻清一片。
-    expect(view).toMatch(/@click="askRegionClear\(\)"/)
+    expect(view).toMatch(/@click="askRegionRestore\(\)"/)
     // 写路径是**批量端点**（单格也只是 items 里的一条）：一次校验、一次写锁、一次提交。
     expect(view).toMatch(/api\.post\('\/api\/scheduling\/overrides\/batch'/)
     expect(view).toMatch(/batchPayload\(action, options, cells\)/)
@@ -150,14 +151,14 @@ describe('店长端周表（员工 × 周）', () => {
     expect(view).toMatch(/:disabled="pickBusy \|\| !pickUndo"/)
     // 撤销是内存级的：这台手机、刷新之前（ADR 0107 决策 7）。这句说明跟着回执那一行走。
     expect(view).toMatch(/撤销只留最近一批、也只在这台手机上/)
-    expect(view).toMatch(/undoPlan\(snapshot, result\.skipped\)/)
+    expect(view).toMatch(/undoPlan\(snapshot, result\.skipped, action\)/)
   })
 
   it('过去的日子：点一下就弹一次确认；超 30 天与已批的假先拦下来点名', () => {
     // ADR 0108：过去 30 天内可补记，弹**一次**确认点名是哪几天（不是每格弹一次）——
     // 单格也一样，点一格就是一笔。
     expect(view).toMatch(/const dates = pastDatesIn\(cells, \{ today: week\.value/)
-    expect(view).toMatch(/pastConfirm\.value = \{ action, options, cells, dates, clear: action === PICK_CLEAR \}/)
+    expect(view).toMatch(/pastConfirm\.value = \{ action, options, cells, dates, voiding: action === PICK_VOID \}/)
     expect(view).toMatch(/<ConfirmDialog/)
     expect(view).toMatch(/:message="pastConfirmText"/)
     expect(view).toMatch(/@confirm="runPaint\(pastConfirm\.action, pastConfirm\.options, pastConfirm\.cells\)"/)
@@ -170,7 +171,7 @@ describe('店长端周表（员工 × 周）', () => {
   })
 
   it('回执与待批提醒收进一行提示，逐格点名的进「看全部」，而且会自己消失', () => {
-    expect(view).toMatch(/已(清|排休|改班)/)
+    expect(view).toMatch(/已(清空|排休|改班|退回规则|标休半天|取消休半天)/)
     expect(view).toMatch(/跳过 \$\{result\.skipped\.length\} 格/)
     expect(view).toMatch(/可撤销（只留最近一批、也只在这台手机上）/)
     // 待批提醒看得出是「照刷」：先信服务端回执里那一份，它没给就退回既有的待办那一份。
@@ -335,5 +336,70 @@ describe('选区手柄与笔栏（票 14 / ADR 0107，2026-10-13 方向修订）
     expect(view).toMatch(/noticeOpen/)
     expect(view).toMatch(/aria-live="polite"/)
     expect(view).toMatch(/@click="noticeOpen = !noticeOpen"/)
+  })
+})
+
+// 2026-10-29 用户裁定：周表补「休半天」笔 + 「清」真正清空（空白，规则展开不铺回来）。
+// 这里的断言只钉**接线**（模板与调用点）；请求体形状 / 跳过预判 / 撤销计划在
+// `utils/__tests__/schedulingWeekPick.test.js` 里逐条断。
+describe('周表笔栏：「休半天」笔与「清」真正清空（2026-10-29）', () => {
+  it('笔栏在「休」与「清」之间多一颗「休半天」，选中态用 info', () => {
+    // 顺序是用户点名的：休 → 休半天 → 清。用整段模板断顺序，别让后来的人把它挪到「清」后面。
+    const pen = view.slice(view.indexOf('class="gPick"'), view.indexOf('<!-- 笔栏结束 -->'))
+    expect(pen).toMatch(
+      /<i class="dt rest"><\/i>休<\/button>[\s\S]*?<i class="dt half"><\/i>休半天<\/button>[\s\S]*?<i class="dt clear"><\/i>清<\/button>/,
+    )
+    expect(view).toMatch(/@click="pickPenHalfRest\(\)"/)
+    expect(view).toMatch(/class="gChip gPen-half"/)
+    // 沿用 `.gChip` 与 `<i class="dt ...">`；选中色走 info（与图例里「半 = 休半天」同色）。
+    expect(view).toMatch(/\.gChip \.dt\.half \{ background: var\(--info\); \}/)
+    expect(view).toMatch(/\.gPen-half\.on \{ box-shadow: 0 0 0 2px var\(--info\); \}/)
+  })
+
+  it('「休半天」笔点有班次的格：发 action=half_rest，half_rest = !该格.half_rest', () => {
+    expect(view).toMatch(/const penHalfRest = ref\(false\)/)
+    expect(view).toMatch(/if \(penHalfRest\.value\) return PICK_HALF_REST/)
+    // 单格用那一格的现值取反 —— 点一下标、再点同一格取消。
+    expect(view).toMatch(/if \(!penHalfRest\.value\) return base/)
+    expect(view).toMatch(/halfRest: cell \? !cell\.half_rest : true/)
+    // 仍走同一条批量端点（单格就是 items 一条），不新开接口。
+    expect(view).toMatch(/api\.post\('\/api\/scheduling\/overrides\/batch'/)
+  })
+
+  it('「休半天」落到休 / 空白格：不发请求，回一句「那天没有班次」', () => {
+    expect(view).toMatch(/function cellHasShift\(employee, day\)/)
+    expect(view).toMatch(/action === PICK_HALF_REST && !cellHasShift\(employee, day\)/)
+    expect(view).toMatch(/跳过：\$\{monthDayText\(day\.business_date\)\} 那天没有班次，标不上休半天/)
+    // 这句提示与 `return` 在 `executePaint`（真正发请求那一步）之前。
+    const guard = view.slice(
+      view.indexOf('if (action === PICK_HALF_REST && !cellHasShift'),
+      view.indexOf('const options = penOptions(employee, day)'),
+    )
+    expect(guard).toMatch(/sayNotice/)
+    expect(guard).toMatch(/return/)
+  })
+
+  it('「清」笔发 action=void，回执写「已清空」（不再是「退回规则」）', () => {
+    expect(view).toMatch(/const penClear = ref\(false\)/)
+    expect(view).toMatch(/if \(penClear\.value\) return PICK_VOID/)
+    expect(view).toMatch(/action === PICK_VOID\s*\? '已清空'/)
+    // 过去的日子那一笔也要说清是「清成空白」，不是「回到规则」。
+    expect(view).toMatch(/「清空」会把过去那几天清成空白/)
+  })
+
+  it('选区摘要行的「退回规则」发 action=restore，回执「已退回规则」', () => {
+    expect(view).toMatch(/@click="askRegionRestore\(\)"/)
+    expect(view).toMatch(/await requestPaint\(PICK_RESTORE, \{\}, view\.cells\)/)
+    expect(view).toMatch(/action === PICK_RESTORE\s*\? '已退回规则'/)
+  })
+
+  it('回执按笔说话：休半天分「已标」与「已取消」', () => {
+    expect(view).toMatch(/options\.halfRest \? '已标休半天' : '已取消休半天'/)
+  })
+
+  it('撤销「休半天」：按原值发单格 half_rest，撤销计划吃当前动作', () => {
+    expect(view).toMatch(/undoPlan\(snapshot, result\.skipped, action\)/)
+    expect(view).toMatch(/step\.kind === 'half_rest'/)
+    expect(view).toMatch(/PICK_HALF_REST,\s*\{ halfRest: step\.payload\.half_rest \}/)
   })
 })

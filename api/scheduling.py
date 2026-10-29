@@ -56,9 +56,20 @@ _ERROR_DETAILS = {
     # 批量落笔（票 14）：只有这四种是**整批拒绝**的（其余「这一格刷不了」一律跳过并点名 ——
     # 部分成功是那张票的预期语义）。带 `{}` 的那条由服务层填 `MAX_BATCH_CELLS`。
     "batch_too_large": "一次最多刷 {} 格：请缩小选区再试",
-    "invalid_batch_action": "这条批量动作不认识：只能是选一个班次、改成休，或清除班次",
+    # 2026-10-29 起动作词表多了 restore（clear 的兼容别名）/ void / half_rest —— 文案把
+    # 能做的都说全，别让店长对着「清除班次」猜「清空」是哪一个。
+    "invalid_batch_action": (
+        "这条批量动作不认识：只能是选一个班次、改成休、清空这一天、退回规则，或标休半天"
+    ),
     "invalid_batch_items": "这一批格子没看懂：请刷新页面重新选一次",
     "invalid_employee_id": "格子里的员工编号不合法：请刷新页面重新选一次",
+    # 「休半天」（2026-10-29 周表「休半天」笔）：跟考勤表页那条 `half_rest_needs_shift`
+    # 同一句文案 —— 同一个事实（那天没有班次）不该在两张页面上说成两句不同的话。
+    "half_rest_needs_shift": "那天没有班次（休 / 还没排到），标不上「休半天」：先给那天排一个班次",
+    # `action=half_rest` 却没带 `half_rest`（或带了个不是布尔的值）：这一格要「标上」还是
+    # 「取消」，客户端得说清楚，服务端不猜。
+    "missing_half_rest": "「休半天」得说清是标上还是取消：请刷新页面重新点一次",
+    "invalid_half_rest": "「休半天」只能开或关：请刷新页面重新点一次",
     # 请假申请（票 08）：日期没给、区间反了、事由太长、申请不存在 / 已经处理过，各说各的。
     # 字段整个没给（`{}`）也走这条：模型里 `start_date` 有默认值，缺字段不会变成
     # pydantic 的 422 —— 那个 `detail` 是一串英文的字段错误，员工看不懂。
@@ -116,13 +127,14 @@ _ERROR_DETAILS = {
     "shift_order_mismatch": "班次顺序对不上（可能刚有人加过或删过班次）：刷新一下再调",
     "last_active_shift": "至少得留一个能用的班次：不然谁都没班可排",
     # **逐条点名**是票 02 起的验收（503 要说清该跑哪个脚本，测试也按文件名断言），
-    # 所以每加一条排班迁移都要回来补一句 —— 0010 就是收尾时补的。这条注释就是那个提醒。
+    # 所以每加一条排班迁移都要回来补一句 —— 0010 / 0040 就是收尾时补的。这条注释就是那个提醒。
     "not_migrated": (
         "排班表还没建好：请在 Admin「系统更新 → 数据库迁移」应用 "
         "migrations/pg/0005_scheduling.sql、0006_scheduling_zone_defaults.sql、"
         "0007_scheduling_overrides.sql、0008_scheduling_requests.sql、"
-        "0009_scheduling_swap.sql、0010_shift_duty_slot.sql 与 "
-        "0028_staff_assignments_half_rest.sql，然后刷新本页"
+        "0009_scheduling_swap.sql、0010_shift_duty_slot.sql、"
+        "0028_staff_assignments_half_rest.sql 与 "
+        "0040_scheduling_overrides_voided.sql，然后刷新本页"
     ),
 }
 
@@ -210,9 +222,15 @@ class BatchOverrideItem(BaseModel):
 class BatchOverrideRequest(BaseModel):
     """一次刷一片（票 14；ADR 0107 决策 5/6）：`action` 整批同一个，`items` 最多 200 格。
 
-    `action` = `shift`（`shift_id` 必给）/ `rest` / `clear`。`zone_id` 只对 `shift` 有意义，
-    不给（或 `null`）= 每格跟**这个人这个班次**的固定区。`action` 特意不是必填：缺字段、
-    写个不认识的值都由服务层报一句中文的 400（同 `CreateShiftRequest.name`）。
+    `action` = `shift`（`shift_id` 必给）/ `rest` / `restore`（退回规则）/ `void`（清空
+    这一天）/ `half_rest`（`half_rest` 必给）；`clear` 是 `restore` 的兼容别名。
+    `zone_id` 只对 `shift` 有意义，不给（或 `null`）= 每格跟**这个人这个班次**的固定区。
+    `action` 特意不是必填：缺字段、写个不认识的值都由服务层报一句中文的 400（同
+    `CreateShiftRequest.name`）。
+
+    `half_rest` 只对 `action=half_rest` 有意义：`true` 标上、`false` 取消。跟 `shift` /
+    `rest` 一起发不报错，只是没意义（同 `shift_id` / `zone_id` 在别的动作里的待遇）。
+    没给时服务层整批拒绝（`missing_half_rest`）—— 「标上」还是「取消」不能猜。
 
     `items` 的形状是**固定**的（谁、哪天）；格数上限不在这里判 —— 上限是服务层的数
     （`MAX_BATCH_CELLS`），超了要给一句中文话，而不是 pydantic 的 422。
@@ -221,6 +239,7 @@ class BatchOverrideRequest(BaseModel):
     action: Optional[str] = None
     shift_id: Optional[int] = None
     zone_id: Optional[int] = None
+    half_rest: Optional[bool] = None
     items: list[BatchOverrideItem] = Field(default_factory=list)
 
 
@@ -794,12 +813,17 @@ async def batch_overrides(
 ) -> dict:
     """先选一片、再一次刷完（票 14；ADR 0107 决策 5/6）。
 
+    `action` 决定这一批做什么（词表见服务层 `BATCH_ACTIONS`）：`shift` 换班、`rest`
+    改成休、`restore` 退回轮转规则（`clear` 是兼容别名）、`void` 清空这一天（写
+    `voided=1` 的覆盖行并删结果行 —— 空白能持久，展开不会重铺）、`half_rest` 设 / 清
+    那天的「休半天」标志。
+
     **一次校验、一次写锁、一次提交**，写完只播一次 nudge（前端照它整批只重拉一次周表）。
     能写的写、不能写的逐格进 `skipped`（`reason` 是定死的词表）—— 部分成功是预期语义，
     不是整批拒绝。`reminders` 是「这一格的人那天有申请等着批」：照刷，只提醒。
 
     整批拒绝只有三种：格数超上限、动作不认识、输入本身写错（日期 / 人员编号 / 班次 /
-    工作区）—— 那些不是「某一格刷不了」，是这次请求不成立。
+    工作区 / `half_rest` 的取值）—— 那些不是「某一格刷不了」，是这次请求不成立。
 
     让位给批量：`POST /overrides/batch` 与单格的 `PUT /overrides/{employee_id}/{business_date}`
     路径段数不同，不会互相遮住；声明顺序仍是批量在前，跟 `/shifts/order` 那条一个道理。
@@ -814,6 +838,7 @@ async def batch_overrides(
                 {"employee_id": item.employee_id, "business_date": item.business_date}
                 for item in payload.items
             ],
+            payload.half_rest,
         )
     except SchedulingError as exc:
         raise _bad_request(exc) from exc

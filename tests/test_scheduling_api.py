@@ -1150,13 +1150,15 @@ def test_single_day_override_refuses_an_approved_leave(scheduling_http):
 # ── 票 14：选区批量落笔（批量端点 + 行序 + 近 30 天可补记）──────────────────
 
 
-def _batch(client, action, items, shift_id=None, zone_id=None):
-    """打一次批量端点。`shift_id` / `zone_id` 不给就是不放进请求体（= 跟固定区）。"""
+def _batch(client, action, items, shift_id=None, zone_id=None, half_rest=None):
+    """打一次批量端点。`shift_id` / `zone_id` / `half_rest` 不给就是不放进请求体。"""
     payload = {"action": action, "items": items}
     if shift_id is not None:
         payload["shift_id"] = shift_id
     if zone_id is not None:
         payload["zone_id"] = zone_id
+    if half_rest is not None:
+        payload["half_rest"] = half_rest
     return client.post("/api/scheduling/overrides/batch", json=payload)
 
 
@@ -1265,6 +1267,81 @@ def test_batch_paints_a_region_with_each_action(scheduling_http):
         ) == (ids["白班"], False)
     # 只动选中的那格：前一天刷的夜班还在。
     assert cells["李四"]["2026-09-26"]["shift_id"] == ids["夜班"]
+
+
+def test_batch_can_void_a_day_and_mark_half_rest(scheduling_http):
+    """2026-10-29 契约：`void` 清空一天、`half_rest` 标 / 取消半天休、`restore` 退回规则。
+
+    读取端一个字没改：清空后的那天就是「没有结果行」—— 周表读到空白、月历不算人数。
+    API 这层只确认词表接住了、请求体字段透传到了、回执是那三个键。
+    """
+    client, _db, accounts = scheduling_http
+    employee_id = _employee_id(accounts)
+    ids = _shift_ids(client)
+    assert client.put(
+        f"/api/scheduling/rules/{employee_id}", json={"cycle": [ids["白班"]]}
+    ).status_code == 200
+    cell = {"employee_id": employee_id, "business_date": "2026-09-26"}
+
+    # 有班次的天：标上 / 取消「休半天」——班次与「跟规则一样」都不变。
+    marked = _batch(client, "half_rest", [cell], half_rest=True)
+    assert marked.status_code == 200, marked.text
+    assert marked.json() == {"applied": 1, "skipped": [], "reminders": []}
+    assert (
+        _week_cells(client)[NAME]["2026-09-26"]["shift_id"],
+        _week_cells(client)[NAME]["2026-09-26"]["half_rest"],
+        _week_cells(client)[NAME]["2026-09-26"]["overridden"],
+    ) == (ids["白班"], True, False)
+    assert _batch(client, "half_rest", [cell], half_rest=False).json()["applied"] == 1
+    assert _week_cells(client)[NAME]["2026-09-26"]["half_rest"] is False
+
+    # 清空这一天：周表空白（不是休）、月历那天 0 人 0 个覆盖点。
+    voided = _batch(client, "void", [cell])
+    assert voided.status_code == 200, voided.text
+    assert voided.json() == {"applied": 1, "skipped": [], "reminders": []}
+    assert _week_cells(client)[NAME]["2026-09-26"] == {
+        "scheduled": False,
+        "shift_id": None,
+        "shift_name": None,
+        "zone_id": None,
+        "zone_name": None,
+        "overridden": False,
+        "half_rest": False,
+        "leave": False,
+    }
+    assert client.get("/api/scheduling/day", params={"date": "2026-09-26"}).json()["total"] == 0
+    month = client.get("/api/scheduling/calendar", params={"month": "2026-09"}).json()
+    target = next(day for day in month["days"] if day["business_date"] == "2026-09-26")
+    assert (target["total"], target["overridden"]) == (0, 0)
+
+    # 清空的天没有班次：标不上半天休，逐格点名（部分成功语义：200，不是整批 400）。
+    denied = _batch(client, "half_rest", [cell], half_rest=True)
+    assert denied.status_code == 200, denied.text
+    assert denied.json() == {
+        "applied": 0,
+        "skipped": [
+            {
+                "employee_id": employee_id,
+                "business_date": "2026-09-26",
+                "reason": "half_rest_needs_shift",
+            }
+        ],
+        "reminders": [],
+    }
+
+    # 退回规则：白班回来了（不是留在空白里）。
+    restored = _batch(client, "restore", [cell])
+    assert restored.status_code == 200, restored.text
+    assert restored.json() == {"applied": 1, "skipped": [], "reminders": []}
+    assert (
+        _week_cells(client)[NAME]["2026-09-26"]["shift_id"],
+        _week_cells(client)[NAME]["2026-09-26"]["overridden"],
+    ) == (ids["白班"], False)
+
+    # `action=half_rest` 没说标上还是取消：整批 400（服务端不猜）。
+    missing = _batch(client, "half_rest", [cell])
+    assert missing.status_code == 400
+    assert missing.json()["detail"] == "「休半天」得说清是标上还是取消：请刷新页面重新点一次"
 
 
 def test_batch_skips_what_it_cannot_paint_and_names_every_reason(scheduling_http):
@@ -1409,7 +1486,7 @@ def test_batch_rejects_bad_requests_and_needs_a_manager_session(scheduling_http)
     bad_action = _batch(client, "paint", [cell])
     assert bad_action.status_code == 400
     assert bad_action.json()["detail"] == (
-        "这条批量动作不认识：只能是选一个班次、改成休，或清除班次"
+        "这条批量动作不认识：只能是选一个班次、改成休、清空这一天、退回规则，或标休半天"
     )
 
     no_shift = _batch(client, "shift", [cell])

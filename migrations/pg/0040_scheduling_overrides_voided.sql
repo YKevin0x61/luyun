@@ -1,0 +1,37 @@
+-- 0040_scheduling_overrides_voided.sql
+--
+-- 「清空这一天」（周表「清」笔，契约 `.scratch/week-half-rest/contract.md`）：给单日覆盖
+-- `scheduling_overrides` 加一个「这一天被清空过」的布尔式标志。
+--
+-- 为什么需要它：以前的「清」= 删掉覆盖行、按规则重算那天 —— 可轮转规则随即把那天重新
+-- 铺回来，店长看到的还是原来的班次。2026-10-29 用户裁定「清」= **真正清空这一天**
+-- （变成「还没排到」的空白，不是「排休」、也不是「退回规则」），而且空白要**持久**：
+-- 规则展开不能把清空的那天重新铺回来。于是清空不再只是「没有覆盖」，而是一个**记下来
+-- 的状态**：`voided=1` 的覆盖行。
+--
+-- 语义：`voided=1` 表示「这一天不按轮转规则排，且没有排班结果（空白）」。这样的覆盖行
+-- 必须 `shift_id` / `zone_id` 都是 NULL、`kind='manual'`（它是一次店长手改，不是请假 /
+-- 换班）。空白本身由「那天没有 `staff_assignments` 行」表达 —— 读取端一个字都不用改：
+-- 周表=空白、月历不算人数、考勤表=待补、员工端=还没排。
+--
+-- 谁写它：
+--   * `services/scheduling/store.py` 的批量动作 `void`（`_void_batch_rows`）写
+--     `voided=1` 的覆盖行，并 DELETE 那天的 `staff_assignments` 行；
+--   * 同一文件的其它写路径（`set_override` / 批量 `shift` / `rest` / 批请假 / 批换班）
+--     一律**显式写 `voided=0`** —— 清空过的天再排班 / 再改休，那条覆盖行必须回到
+--     「正常的覆盖」，否则展开会继续把它当 voided 跳过；
+--   * `restore`（含兼容别名 `clear`）删覆盖行，那天回到规则；`_restore_day` 写回规则行
+--     时把 `half_rest` 清 0。
+--
+-- 谁读它：
+--   * `_expand_rows`：读到某天覆盖 `voided=1` 时**跳过不写结果行**（以前会照覆盖写成
+--     一行 `shift_id=NULL` 的「休」，那正是「清」被改回「休」的原因）；
+--   * 读接口不读它：清空后那天没有结果行，天然就是空白。
+--
+-- 布尔口径沿用仓库既有写法：BIGINT 0/1（同 `staff_assignments.half_rest`、
+-- `staff_shifts.is_active`），判断一律写 `voided = 1`，不要写 `IS TRUE`。
+--
+-- 幂等：IF NOT EXISTS，可重复执行。纯加成性变更（加列带默认值），既有覆盖行一律回填 0
+-- （= 正常覆盖），应用前后读接口与展开行为完全一样。
+
+ALTER TABLE scheduling_overrides ADD COLUMN IF NOT EXISTS "voided" BIGINT NOT NULL DEFAULT 0;

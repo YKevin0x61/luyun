@@ -115,12 +115,31 @@ KIND_MANUAL = "manual"
 KIND_LEAVE = "leave"
 KIND_SWAP = "swap"
 
-# 批量落笔（`POST /overrides/batch`）的三种动作：整批同一个。`clear` 是**退回轮转规则**
-# （摘掉覆盖记录 + 按现在的规则重算那天），不是「那天休」—— 后者是 `rest`。
+# 批量落笔（`POST /overrides/batch`）的动作：整批同一个。
+#
+# `restore` 是**退回轮转规则**（摘掉覆盖记录 + 按现在的规则重算那天），不是「那天休」
+# —— 后者是 `rest`。`clear` 是它的**兼容别名**（2026-10-29 前的前端只会发这个），
+# 两个词落到同一段逻辑上，别再长出第二套。
+#
+# `void` 是**清空这一天**（2026-10-29 用户裁定）：「还没排到」的空白，不是休、也不是
+# 退回规则。它写一条 `voided=1` 的覆盖行并删掉那天的结果行（见 0040 迁移的头注释）。
+#
+# `half_rest` 只改那天的「休半天」标志（ADR 0114），不换班次、不换工作区、不改来源
+# —— 与考勤表页 `AttendanceStore.set_half_rest` 同一口径。
 BATCH_SHIFT = "shift"
 BATCH_REST = "rest"
 BATCH_CLEAR = "clear"
-BATCH_ACTIONS = (BATCH_SHIFT, BATCH_REST, BATCH_CLEAR)
+BATCH_RESTORE = "restore"
+BATCH_VOID = "void"
+BATCH_HALF_REST = "half_rest"
+BATCH_ACTIONS = (
+    BATCH_SHIFT,
+    BATCH_REST,
+    BATCH_CLEAR,
+    BATCH_RESTORE,
+    BATCH_VOID,
+    BATCH_HALF_REST,
+)
 
 # 批量回执里「这个人这天有申请等着批」那一条的 kind（前端照它渲染提醒）。
 # 提醒**不阻断**写入：申请批下来会把那天换成请假 / 对调（`_write_override_row` 的既有
@@ -1327,7 +1346,9 @@ class SchedulingStore:
         kind: str = KIND_MANUAL,
     ) -> None:
         stamp = self._now_iso()
-        await self._write_override_row(employee_id, day, shift_id, zone_id, kind, stamp)
+        await self._write_override_row(
+            employee_id, day, shift_id, zone_id, kind, stamp, voided=0
+        )
         await self._write_day_row(employee_id, day, shift_id, zone_id, SOURCE_OVERRIDE, stamp)
         await self._conn.commit()
 
@@ -1339,6 +1360,7 @@ class SchedulingStore:
         zone_id: Optional[int],
         kind: str,
         stamp: str,
+        voided: int = 0,
     ) -> None:
         """把覆盖记录写成给定样子（有则改、无则插）。不自己上锁、不提交。
 
@@ -1346,6 +1368,11 @@ class SchedulingStore:
         请假批过的那天，店长又点着改了一次，那天现在就是店长定的（换回 `manual`）。
         `kind` 是参数而不是写死的 `manual`：批准请假写的就是同一条记录、另一个来源
         （票 08），两者进的是同一张表、同一行。
+
+        `voided`（0040）是「这一天被清空过」的标志（BIGINT 0/1，见迁移头注释）：
+        清空那天的覆盖行写 1 且班次 / 工作区都为空。**其余每个写路径都写 0** ——
+        默认值就是 0，但 `set_override` / 批量的 `shift` / `rest` 都显式传，
+        免得哪天有人给默认值换了个数，清空过的天再排班就被展开当成「还是空白」跳过。
         """
         cur = await self._conn.execute(
             """SELECT id FROM scheduling_overrides
@@ -1356,16 +1383,17 @@ class SchedulingStore:
         if existing is None:
             await self._conn.execute(
                 """INSERT INTO scheduling_overrides
-                       (employee_id, business_date, shift_id, zone_id, kind, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (employee_id, day, shift_id, zone_id, kind, stamp, stamp),
+                       (employee_id, business_date, shift_id, zone_id, kind, voided,
+                        created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (employee_id, day, shift_id, zone_id, kind, voided, stamp, stamp),
             )
         else:
             await self._conn.execute(
                 """UPDATE scheduling_overrides
-                   SET shift_id = ?, zone_id = ?, kind = ?, updated_at = ?
+                   SET shift_id = ?, zone_id = ?, kind = ?, voided = ?, updated_at = ?
                    WHERE employee_id = ? AND business_date = ?""",
-                (shift_id, zone_id, kind, stamp, employee_id, day),
+                (shift_id, zone_id, kind, voided, stamp, employee_id, day),
             )
 
     @_needs_migration
@@ -1405,12 +1433,33 @@ class SchedulingStore:
         **删之前先问一句「那天批过假没有」**（`_leave_ids`），命中就拒绝 —— 与批量清除
         的 `skipped: leave_approved` 同一处判据、同一个错误码。判据放在锁里而不是
         `clear_override` 那道锁外：判完到删之间正好有人批下那天的假，锁外会漏掉。
+
+        **清空过的那天（`voided=1`）要按规则重新铺回来**：`void` 已经把结果行删了，
+        「退回规则」若照 `_restore_day` 的「没有结果行就 no-op」走，店长点了「退回规则」
+        看到的仍是空白（前端撤销「清空」走的也是这两条接口）。所以删之前先记下这条覆盖
+        是不是 void 行，再让 `_restore_day` 强制按规则重算那一天 —— 判据是**这行证据**
+        在，而不是「结果行还在」（那正是被 void 删掉的东西）。
         """
         if employee_id in await self._leave_ids([employee_id], day):
             raise SchedulingError("leave_approved", "leave_approved")
+        voided = await self._override_voided(employee_id, day)
         await self._delete_override_row(employee_id, day)
-        await self._restore_day(employee_id, day, today)
+        await self._restore_day(employee_id, day, today, force=voided)
         await self._conn.commit()
+
+    async def _override_voided(self, employee_id: int, day: str) -> bool:
+        """这条覆盖是不是「清空这一天」写下的（`voided = 1`，0040）。不自己上锁。
+
+        没有覆盖行（或还没应用 0040）一律 False —— 调用方据此决定「退回规则」要不要
+        在结果行已被 void 删掉的情况下照样按规则重铺。
+        """
+        cur = await self._conn.execute(
+            """SELECT voided FROM scheduling_overrides
+               WHERE employee_id = ? AND business_date = ?""",
+            (employee_id, day),
+        )
+        row = await cur.fetchone()
+        return row is not None and int(dict(row)["voided"] or 0) == 1
 
     async def _delete_override_row(self, employee_id: int, day: str) -> bool:
         """摘掉某人某天的覆盖记录（结果行不动）。不自己上锁、不提交。
@@ -1426,17 +1475,23 @@ class SchedulingStore:
         )
         return cur.rowcount > 0
 
-    async def _restore_day(self, employee_id: int, day: str, today: str) -> bool:
+    async def _restore_day(
+        self, employee_id: int, day: str, today: str, force: bool = False
+    ) -> bool:
         """把某一天按**现在的规则**重算回 `source='rule'`。不自己上锁、不提交。
 
         没有规则、或那天已经在窗口外：把这一行删掉，那天回到「还没铺到」——
         跟月历上窗口尽头的空格是同一个状态，不是「那天休」。
 
-        **没有结果行就什么都不做并返回 False**：过去的日子只在它当年是「今天」时才被
-        铺过，从没排过的那些天本来就没有行。清除 / 退回规则是「把覆盖撤掉、让规则重新
-        说话」，不是「补一行上班」—— 在空日子上按现在的规则 INSERT 会把考勤表从「待补」
-        改成「上班」、把月历格子填上、把一个从没发生过的班次写进历史。要补记某天，
-        走 `set_override` / 批量 `shift` 那条明示的路。
+        **没有结果行就什么都不做并返回 False**（`force=False`，默认）：过去的日子只在它
+        当年是「今天」时才被铺过，从没排过的那些天本来就没有行。清除 / 退回规则是「把
+        覆盖撤掉、让规则重新说话」，不是「补一行上班」—— 在空日子上按现在的规则 INSERT
+        会把考勤表从「待补」改成「上班」、把月历格子填上、把一个从没发生过的班次写进
+        历史。要补记某天，走 `set_override` / 批量 `shift` 那条明示的路。
+
+        `force=True` 只给「撤销清空过的那天」用（见 `_clear_override`）：`void` 删掉了
+        结果行，而这行覆盖本身就是「这天曾被排过、被清空了」的证据；返回 `True` 表示
+        这条证据已被处理（重铺了规则行、或那天本就在窗口外 / 没规则，删掉残留）。
 
         规则只读**他自己**那一条（`_rule_for`）而不是全店的：别人的规则写坏了，
         不该把这个人「撤掉覆盖」也一起挡住。`today` 由调用方给，见 `clear_override`。
@@ -1444,13 +1499,14 @@ class SchedulingStore:
         返回这一天有没有被真的处理过（写回规则行 / 删掉覆盖行）：批量回执的 `applied`
         只数这些格子。
         """
-        cur = await self._conn.execute(
-            """SELECT id FROM staff_assignments
-               WHERE employee_id = ? AND business_date = ?""",
-            (employee_id, day),
-        )
-        if await cur.fetchone() is None:
-            return False
+        if not force:
+            cur = await self._conn.execute(
+                """SELECT id FROM staff_assignments
+                   WHERE employee_id = ? AND business_date = ?""",
+                (employee_id, day),
+            )
+            if await cur.fetchone() is None:
+                return False
         rule = await self._rule_for(employee_id)
         if rule is None or day > self._window_from(today)[1]:
             await self._conn.execute(
@@ -1464,7 +1520,13 @@ class SchedulingStore:
         if shift_id is not REST:
             zone_id = (await self._zone_defaults_for(employee_id)).get(shift_id)
         await self._write_day_row(
-            employee_id, day, shift_id, zone_id, SOURCE_RULE, self._now_iso()
+            employee_id,
+            day,
+            shift_id,
+            zone_id,
+            SOURCE_RULE,
+            self._now_iso(),
+            reset_half_rest=True,
         )
         return True
 
@@ -1476,15 +1538,20 @@ class SchedulingStore:
         zone_id: Optional[int],
         source: str,
         stamp: str,
+        reset_half_rest: bool = False,
     ) -> None:
         """把某人某天的结果行写成给定样子（有则改、无则插）。不自己上锁、不提交。
 
         **写成「休」（`shift_id` 为空）时把 `half_rest` 一起清成 0**（票 07）：`休 + 休半天`
         是自相矛盾的一行，而且标志留着的话，哪天这一格又被改回某个班次，它会**自己**变成
         「休半天」—— 没人点过它。反过来，写成某个班次时**一个字都不动它**：店长改的是
-        「上哪个班」，不是「上不上这半天」（半天休只由考勤表页那扇门设/清，
-        `AttendanceStore.set_half_rest`），而且 `set_day_override` 判出未决申请要把这一天
-        **原样写回去**时，也不该顺手抹掉一个跟这次请求无关的决定。
+        「上哪个班」，不是「上不上这半天」（半天休只在考勤表页与周表「休半天」笔那两扇
+        门设/清），而且 `set_day_override` 判出未决申请要把这一天**原样写回去**时，也不该
+        顺手抹掉一个跟这次请求无关的决定。
+
+        `reset_half_rest=True` 是唯一一个「写成班次也清标志」的例外：`_restore_day` 把
+        覆盖撤掉、按规则重铺那天时用 —— 回到规则 = 规则里没有半天休，残留的半天休标记
+        会让那天同时是「规则班次」和「休半天」，而这是上一次手改留下的。
 
         清标志那条 UPDATE 才引用 `half_rest`（加列 0028）：没应用迁移的库上，写「休」会
         报缺列并由 `_needs_migration` 翻成 503，**其余写路径（改班次、改区、铺规则）
@@ -1503,7 +1570,7 @@ class SchedulingStore:
                    VALUES (?, ?, ?, ?, ?, ?, ?)""",
                 (employee_id, day, shift_id, zone_id, source, stamp, stamp),
             )
-        elif shift_id is None:
+        elif shift_id is None or reset_half_rest:
             await self._conn.execute(
                 """UPDATE staff_assignments
                    SET shift_id = ?, zone_id = ?, source = ?, updated_at = ?, half_rest = 0
@@ -1527,20 +1594,24 @@ class SchedulingStore:
         shift_id: Any = None,
         zone_id: Any = None,
         items: Any = None,
+        half_rest: Any = None,
     ) -> dict:
         """一次刷一片：能写的写、不能写的逐格点名（票 14；ADR 0107 决策 5/6）。
 
-        `action` 整批同一个：`shift` 改成某个班（`shift_id` 必给）、`rest` 改成休、
-        `clear` 清除班次退回轮转规则。`zone_id` 只对 `shift` 有意义 —— 不给（或给
+        `action` 整批同一个（词表见 `BATCH_ACTIONS`）：
+        `shift` 改成某个班（`shift_id` 必给）、`rest` 改成休、`restore` 退回轮转规则
+        （`clear` 是它的兼容别名）、`void` 清空这一天、`half_rest` 设/清那天的
+        「休半天」标志（`half_rest` 必给）。`zone_id` 只对 `shift` 有意义 —— 不给（或给
         `null`）表示每格跟**这个人这个班次**的固定区，跟 `set_override` 同一条口径；
-        `rest` 与 `clear` 带着 `shift_id` / `zone_id` 也不报错（客户端把当前选中的班次
-        一起发过来是常态，那两个值在那两支里没有意义）。
+        其它动作带着 `shift_id` / `zone_id` / `half_rest` 也不报错（客户端把当前选中的
+        班次一起发过来是常态，那些值在别的动作里没有意义）。
 
         **部分成功是预期语义**：`skipped` 逐格说清谁、哪天、为什么（词表定死在
-        `past_day` / `past_clear` / `beyond_window` / `leave_approved` / `out_of_roster`），
-        不接受「一格里有人请假、整片白刷」。整批拒绝的只有三类：格数超上限
-        （`MAX_BATCH_CELLS`）、动作不认识、输入本身写错（日期 / 人员编号 / 班次 / 工作区）
-        —— 那些不是「某一格刷不了」，是这次请求不成立。
+        `past_day` / `past_clear` / `beyond_window` / `leave_approved` / `out_of_roster` /
+        `half_rest_needs_shift`），不接受「一格里有人请假、整片白刷」。整批拒绝的只有
+        三类：格数超上限（`MAX_BATCH_CELLS`）、动作不认识、输入本身写错（日期 / 人员
+        编号 / 班次 / 工作区 / `half_rest` 的布尔值）—— 那些不是「某一格刷不了」，
+        是这次请求不成立。
 
         `reminders` 是「这一格的人那天有申请等着批」：**照刷，只提醒**（批下来会把那天
         换成请假 / 对调），选择权留给店长。
@@ -1551,9 +1622,10 @@ class SchedulingStore:
 
         `employee_ids` 是**真写下去的那些人**，只给路由层广播用（响应里不带出去）。
 
-        `applied` 同样是**真写下去/真清掉的那些格**：`clear` 在「既没有覆盖记录、也没有
-        结果行」的日子上无事可做（`_restore_day` 的 no-op），那些格既不算 applied 也不进
-        `skipped` —— 它不是失败，只是没有理由可写进那张定死的词表（ADR 0107 决策 6）。
+        `applied` 同样是**真写下去/真清掉的那些格**：`clear` / `restore` 在「既没有
+        覆盖记录、也没有结果行」的日子上无事可做（`_restore_day` 的 no-op），那些格
+        既不算 applied 也不进 `skipped` —— 它不是失败，只是没有理由可写进那张定死的
+        词表（ADR 0107 决策 6）。
         """
         if action not in BATCH_ACTIONS:
             raise SchedulingError("invalid_batch_action", "invalid_batch_action")
@@ -1574,9 +1646,12 @@ class SchedulingStore:
         shift: Optional[int] = None
         zone: Optional[int] = None
         defaults: dict[int, dict[int, Optional[int]]] = {}
+        flag: Optional[bool] = None
         if action == BATCH_SHIFT:
             shift = await self._batch_shift(shift_id)
             zone, defaults = await self._batch_zone(zone_id)
+        elif action == BATCH_HALF_REST:
+            flag = self._batch_half_rest(half_rest)
 
         # 一格一格判「能不能刷」，判完还留在场上的才去查请假 —— 那天有已批的假的一格
         # 都不许动（连「清除」也不行：覆盖记录就是那条假，删了等于把批过的假抹掉）。
@@ -1607,11 +1682,21 @@ class SchedulingStore:
             if reasons[index] is None and employee_id in leave_days[day]:
                 reasons[index] = "leave_approved"
 
+        if action == BATCH_HALF_REST:
+            # 「休半天」只认**那一天真有班次**的结果行（休 / 空白都标不上）：与考勤表页
+            # 同一道闸（`AttendanceStore.set_half_rest` 的 `half_rest_needs_shift`），
+            # 只是这里逐格跳过而不是整笔拒绝。
+            reasons = await self._half_rest_reasons(cells, reasons)
+
         written = [cell for cell, reason in zip(cells, reasons) if reason is None]
-        if action == BATCH_CLEAR:
-            # 「清除」可能对某几格无事可做（既没覆盖、也没结果行，见 `_restore_day`）：
+        if action in (BATCH_CLEAR, BATCH_RESTORE):
+            # 「退回规则」可能对某几格无事可做（既没覆盖、也没结果行，见 `_restore_day`）：
             # 只有真被处理过的那些格才算 `applied`、才广播。
             written = await self._clear_batch_rows(written, today)
+        elif action == BATCH_VOID:
+            written = await self._void_batch_rows(written, self._now_iso())
+        elif action == BATCH_HALF_REST:
+            await self._half_rest_batch_rows(written, bool(flag), self._now_iso())
         else:
             rows = []
             for employee_id, day in written:
@@ -1639,6 +1724,47 @@ class SchedulingStore:
             ],
             "employee_ids": sorted({employee_id for employee_id, _ in written}),
         }
+
+    @staticmethod
+    def _batch_half_rest(value: Any) -> bool:
+        """批量 `action=half_rest` 的那个标志：必给，且得真是布尔。
+
+        `None` / 空串 = 客户端没说清要**标上**还是**取消** —— 这个动作不能猜（猜成
+        「标上」会把取消点成标上），整批拒绝。字符串 `"true"` / `"false"` 也不收：
+        请求体是 JSON，布尔就该是布尔，别的形状说明调用方写错了。
+        """
+        if value is None:
+            raise SchedulingError("missing_half_rest", "missing_half_rest")
+        if not isinstance(value, bool):
+            raise SchedulingError("invalid_half_rest", "invalid_half_rest")
+        return value
+
+    async def _half_rest_reasons(
+        self, cells: list[tuple[int, str]], reasons: list[Optional[str]]
+    ) -> list[Optional[str]]:
+        """把「那天没有班次」的格子记为 `half_rest_needs_shift`（其余照旧）。
+
+        判据与考勤表页那条同口径：那天**必须有结果行、且 `shift_id` 非空**。清空过的
+        天（void）没有结果行，休的那天班次为空 —— 两种都标不上半天休，逐格跳过。
+        按天分组查一次（同 `leave_days` 的写法）：200 格上别逐格打一条 SQL。
+        """
+        ready: dict[str, set[int]] = {}
+        for index, (_, day) in enumerate(cells):
+            if reasons[index] is not None or day in ready:
+                continue
+            cur = await self._conn.execute(
+                """SELECT employee_id FROM staff_assignments
+                   WHERE business_date = ? AND shift_id IS NOT NULL""",
+                (day,),
+            )
+            ready[day] = {int(dict(row)["employee_id"]) for row in await cur.fetchall()}
+        gated = list(reasons)
+        for index, (employee_id, day) in enumerate(cells):
+            if gated[index] is not None:
+                continue
+            if employee_id not in ready.get(day, set()):
+                gated[index] = "half_rest_needs_shift"
+        return gated
 
     @staticmethod
     def _batch_cell(item: Any) -> tuple[int, str]:
@@ -1691,10 +1817,13 @@ class SchedulingStore:
         复用那两个不上锁、不提交的写入件（`_write_override_row` / `_write_day_row`）——
         批量不另造一套写库逻辑（与批请假 `_approve` 同构）。中途哪一格抛错都会被
         `serialized_write` 整批回滚：不会留下「写了一半」的排班。
+
+        `voided=0` 是**显式**的：清空过的天再排班 / 再改休，那条覆盖行必须回到正常覆盖，
+        否则展开会继续把它当 voided 跳过（见 0040 迁移的头注释）。
         """
         for employee_id, day, shift_id, zone_id in rows:
             await self._write_override_row(
-                employee_id, day, shift_id, zone_id, KIND_MANUAL, stamp
+                employee_id, day, shift_id, zone_id, KIND_MANUAL, stamp, voided=0
             )
             await self._write_day_row(
                 employee_id, day, shift_id, zone_id, SOURCE_OVERRIDE, stamp
@@ -1702,24 +1831,77 @@ class SchedulingStore:
         await self._conn.commit()
 
     @serialized_write
+    async def _void_batch_rows(
+        self, cells: list[tuple[int, str]], stamp: str
+    ) -> list[tuple[int, str]]:
+        """这一批「清空这一天」：写 `voided=1` 的覆盖行 + 删掉那天的结果行，最后一次提交。
+
+        **为什么写一条覆盖行**：空白得能**持久**。只删结果行的话，下一次 `expand()`
+        就会按规则把那天重新铺回来（「清」被改回原班次的旧缺陷）。`voided=1` 的覆盖行
+        是「这一天不按规则排」的证据，`_expand_rows` 见到它就跳过（0040 迁移）。
+
+        **为什么删结果行**：读取端（周表 / 月历 / 考勤表 / 员工端）把「没有行」天然读成
+        空白 / 待补 / 还没排 —— 读取端一个字都不用改，这是「空白」本身该有的表达。
+        删的是这个人那一天的那一行，不管它是规则铺的还是覆盖写的：店长点的是「清空这一天」。
+
+        能走到这里的格子都已经过三道闸（在册 / 窗口 / 没有已批的假），更早的在筛选那一步
+        就进 `skipped` 了。每个格子都真写下了覆盖行，所以整批都算 `applied`。
+        """
+        for employee_id, day in cells:
+            await self._write_override_row(
+                employee_id, day, None, None, KIND_MANUAL, stamp, voided=1
+            )
+            await self._conn.execute(
+                """DELETE FROM staff_assignments
+                   WHERE employee_id = ? AND business_date = ?""",
+                (employee_id, day),
+            )
+        await self._conn.commit()
+        return list(cells)
+
+    @serialized_write
+    async def _half_rest_batch_rows(
+        self, cells: list[tuple[int, str]], half_rest: bool, stamp: str
+    ) -> None:
+        """这一批「设 / 清休半天」：只 UPDATE 那个标志与 `updated_at`，最后一次提交。
+
+        班次 / 工作区 / 来源（`source`）与那一天是不是单日覆盖**一个字都不动** —— 与考勤表
+        页 `AttendanceStore.set_half_rest` 同一口径：半天休不是第二个班次，也不是一次
+        「跟规则不一样」的改写。能走到这里的格子都已确认「那天有结果行且班次非空」
+        （见 `_half_rest_reasons`），所以 UPDATE 一定命中。
+        """
+        for employee_id, day in cells:
+            await self._conn.execute(
+                """UPDATE staff_assignments SET half_rest = ?, updated_at = ?
+                   WHERE employee_id = ? AND business_date = ?""",
+                (1 if half_rest else 0, stamp, employee_id, day),
+            )
+        await self._conn.commit()
+
+    @serialized_write
     async def _clear_batch_rows(
         self, cells: list[tuple[int, str]], today: str
     ) -> list[tuple[int, str]]:
-        """这一批「清除班次」：每格摘掉覆盖记录、按现在的规则重算，最后一次提交。
+        """这一批「退回规则」：每格摘掉覆盖记录、按现在的规则重算，最后一次提交。
 
-        与单格撤销（`_clear_override`）共用同一个删法 —— 批量清除与逐格撤销必须落到
+        与单格撤销（`_clear_override`）共用同一个删法 —— 批量退回与逐格撤销必须落到
         同一件事上。能走到这里的格子都在可补记窗口内（含过去 30 天；更早的在筛选那一步
         就记 `past_day`）；那天有已批的假的一组早在筛选那一步就记 `leave_approved`。
 
+        **清空过的那天（voided）要重铺规则行**：`void` 删了结果行，照 `_restore_day` 的
+        「没有结果行就 no-op」走，店长点「退回规则」看到的仍是空白。删之前先记下这条
+        覆盖是不是 void 行，再让 `_restore_day` 强制重算（同 `_clear_override`）。
+
         返回**真被处理过的那些格**（`_delete_override_row` / `_restore_day` 两个返回值
-        里有一个是真的）：既没有覆盖记录、也没有结果行的格子在清除时无事可做
-        （`_restore_day` 的 no-op），不能算进回执的 `applied` —— 店长点「清除」之后
-        被告知「已清 N 格」，而其中有些格子本来就什么都没有。
+        里有一个是真的）：既没有覆盖记录、也没有结果行的格子在退回时无事可做
+        （`_restore_day` 的 no-op），不能算进回执的 `applied` —— 店长点「退回规则」之后
+        被告知「已退 N 格」，而其中有些格子本来就什么都没有。
         """
         handled: list[tuple[int, str]] = []
         for employee_id, day in cells:
+            voided = await self._override_voided(employee_id, day)
             removed = await self._delete_override_row(employee_id, day)
-            restored = await self._restore_day(employee_id, day, today)
+            restored = await self._restore_day(employee_id, day, today, force=voided)
             if removed or restored:
                 handled.append((employee_id, day))
         await self._conn.commit()
@@ -1854,7 +2036,7 @@ class SchedulingStore:
         # 规则改动删不到它）；万一结果行丢了（换了库、手工清过），照记录补回来的
         # 是「那天被改成什么」，而不是照规则铺一个跟记录不符的班次。
         cur = await self._conn.execute(
-            """SELECT business_date, shift_id, zone_id FROM scheduling_overrides
+            """SELECT business_date, shift_id, zone_id, voided FROM scheduling_overrides
                WHERE employee_id = ? AND business_date >= ? AND business_date <= ?""",
             (employee_id, first, last),
         )
@@ -1872,6 +2054,11 @@ class SchedulingStore:
             if business_date in already:
                 continue
             override = overrides.get(business_date)
+            if override is not None and int(override["voided"] or 0) == 1:
+                # 「清空这一天」（2026-10-29）：那天就是不排。它不是「休」—— 以前照
+                # 覆盖写成一行 `shift_id=NULL` 的休，等于把「清空」改回了「排休」。
+                # 空白本身由「没有结果行」表达，读取端天然读成空白 / 待补。
+                continue
             if override is not None:
                 shift_id = override["shift_id"]
                 zone_id = override["zone_id"]
@@ -2045,8 +2232,8 @@ class SchedulingStore:
         这个字段就是为那句「和本来就休看得出区别」给的判据，前端不自己猜。
 
         `half_rest`（票 07 / ADR 0114）是「这个人这天只上半天」：他仍然在自己的班次那一
-        组里（那天确实上班），面板靠这个字段在他名字旁边写一句「休半天」。**只读** ——
-        设置它的地方只有考勤表页。
+        组里（那天确实上班），面板靠这个字段在他名字旁边写一句「休半天」。设置它的门有
+        考勤表页与周表「休半天」笔两扇（ADR 0122）。
 
         **只出在册的人**（`_on_roster_ids`）：停用（离职）/ 还没批准的人名下可能还留着
         结果行（停用不删行），他们不该出现在「这天谁上班」的名单里，也不该把人数字段
@@ -2161,8 +2348,8 @@ class SchedulingStore:
         窗口外照样返回 7 天、不报错：店长会往两头翻，翻到的那一周得是空的而不是 400。
 
         `cells[].half_rest`（票 07 / ADR 0114）：这一格是**半天休** —— 那天仍然挂着
-        `shift_id` 那个班次（格子里照旧写班次缩写），只是旁边多一个「半」标记；店长在
-        周表上**只读**这一位，设置它的地方只有考勤表页。
+        `shift_id` 那个班次（格子里照旧写班次缩写），只是旁边多一个「半」标记。周表读
+        它做展示、也能用笔栏那颗「休半天」写它（ADR 0122）。
         """
         today = self.today()
         if start in (None, ""):
@@ -2293,8 +2480,8 @@ class SchedulingStore:
                     "zone_id": zone_id,
                     "zone_name": None if zone_id is None else zone_names.get(zone_id),
                     "overridden": False if row is None else row["overridden"],
-                    # 半天休（票 07）：这一格是「只上半天」——**只读**的一位，周表照旧
-                    # 写班次缩写，旁边多一个「半」标记（设置它的地方只有考勤表页）。
+                    # 半天休（票 07）：这一格是「只上半天」——读侧照旧写班次缩写，
+                    # 旁边多一个「半」标记（周表笔栏也能设它，ADR 0122）。
                     "half_rest": False if row is None else row["half_rest"],
                     # 只有不上班的人可能是请假（跟 `day_detail` 同一条口径）。
                     "leave": bool(

@@ -23,11 +23,13 @@ import { eachDayInRange } from '../../utils/dateRange'
 // `cellHandle` 不再被这一页用：格子从「选区手柄」改回「点一下就落笔」，手柄只剩
 // 日期列头与人名两种（纯逻辑那边仍覆盖格子手柄，见它的单测）。
 import {
-  PICK_CLEAR,
+  PICK_HALF_REST,
   PICK_MAX_CELLS,
   PICK_REST,
+  PICK_RESTORE,
   PICK_SHIFT,
   PICK_SKIP_TEXT,
+  PICK_VOID,
   batchPayload,
   colHandle,
   normalizeResult,
@@ -135,7 +137,7 @@ const overriddenDays = computed(() =>
 )
 
 // 这个月有几天有人「休半天」（票 07 / ADR 0114）：>0 时图例里多一句，免得格子上那个
-// 「半N」看起来像装饰。**只读** —— 设置它的地方只有考勤表页。
+// 「半N」看起来像装饰。月历**只读**；设置它的门有考勤表页与周表笔栏（ADR 0122）。
 const halfRestDays = computed(() =>
   ((calendar.value && calendar.value.days) || []).filter((day) => day.half_rest > 0).length
 )
@@ -472,6 +474,12 @@ function shortDate(value) {
   return month && day ? `${month}/${day}` : ''
 }
 
+/** 回执里点名的日期写法（「10月14日」）：与周表格子里的日期同一套，不加年份也不写星期。 */
+function monthDayText(value) {
+  const [, month, day] = String(value || '').split('-').map(Number)
+  return month && day ? `${month}月${day}日` : ''
+}
+
 // 标题写**日期区间**，不写「10 月第一周」：跨月周（9/28–10/4）那种写法天生有歧义。
 const weekRangeLabel = computed(() => {
   const data = week.value
@@ -572,10 +580,18 @@ function weekCellZone(employee, day) {
 }
 
 /** 这一格是不是「休半天」（票 07 / ADR 0114）：那天仍然挂着班次，只是只上半天 ——
- *  格子里在班次缩写后面加一个「半」。**只读**的一位（设置它的地方只有考勤表页）。 */
+ *  格子里在班次缩写后面加一个「半」。2026-10-29 起周表自己也能标它（笔栏那颗「休半天」），
+ *  考勤表页那条 PUT 仍是另一条路；两边写的是同一个 `staff_assignments.half_rest`。 */
 function weekCellHalf(employee, day) {
   const cell = cellOf(employee, day)
   return Boolean(cell && cell.half_rest)
+}
+
+/** 这一格有没有班次（休 / 请假 / 空白都没有）：标「休半天」得有班次可挂，与 `weekCellZone`
+ *  是同一套判据。点「休半天」笔落到这种格子上时本地就拦下来、不发请求。 */
+function cellHasShift(employee, day) {
+  const cell = cellOf(employee, day)
+  return Boolean(cell && cell.scheduled && cell.shift_id !== null && cell.shift_id !== undefined)
 }
 
 function weekCellClass(employee, day) {
@@ -604,7 +620,7 @@ function weekCellLabel(employee, day) {
   const when = `${day.month}月${day.day}日 周${WEEK_HEADS[day.weekday]}`
   // 格子是**落笔点**（票 14 修订：点一下就用笔栏上那支笔改写这一格）：名字里那半句是给
   // 读屏的（角色是 button，光有内容读不出点下去会发生什么）。
-  const pick = '，点一下就用笔栏上的班次或休改写这一格'
+  const pick = '，点一下就用笔栏上的班次、休、休半天或清改写这一格'
   if (!cell || !cell.scheduled) {
     return `${employee.name} ${when}：${blankReason(day, cell) || '还没排到'}${pick}`
   }
@@ -672,27 +688,28 @@ const weekExcludedNote = computed(() => {
 // 过去 30 天内补记要先弹一次确认（ADR 0108 决策 3）、`skipped` / `reminders` 照旧点名。
 const penShiftId = ref(null) // 笔上的班次；null = 还没选过，用第一个在用的班次
 const penRest = ref(false) // 笔是「休」：写下去的是 action=rest
-const penClear = ref(false) // 笔是「清」：写下去的是 action=clear（把这格的班次清掉、回到规则）
+const penHalfRest = ref(false) // 笔是「休半天」：写下去的是 action=half_rest（该格有班次才写）
+const penClear = ref(false) // 笔是「清」：写下去的是 action=void（把这一格清成空白，不再是「退回规则」）
 const penZoneId = ref('') // '' = 跟这个班次的固定区
 const penZoneOpen = ref(false) // 工作区按钮点开才多展开一行
 const pick = ref(null) // { anchor, target } | null；手柄只有日期列头与人名两种
 const pickBusy = ref(false)
 // 撤销只留**最近一批**、内存级（ADR 0107 决策 7）：刷新或换设备就没了。
 const pickUndo = ref(null) // { plan: [...] } | null
-const pastConfirm = ref(null) // { action, options, cells, dates, clear }：过去的二次确认（只弹一次）
+const pastConfirm = ref(null) // { action, options, cells, dates, voiding }：过去的二次确认（只弹一次）
 /** 区域「退回规则」的二次确认（4 秒不点自动复位）。 */
-const regionClearArmed = ref(false)
-let regionClearTimer = 0
-function askRegionClear() {
-  if (regionClearArmed.value) {
-    regionClearArmed.value = false
-    clearTimeout(regionClearTimer)
-    void applyRegionClear()
+const regionRestoreArmed = ref(false)
+let regionRestoreTimer = 0
+function askRegionRestore() {
+  if (regionRestoreArmed.value) {
+    regionRestoreArmed.value = false
+    clearTimeout(regionRestoreTimer)
+    void applyRegionRestore()
     return
   }
-  regionClearArmed.value = true
-  clearTimeout(regionClearTimer)
-  regionClearTimer = setTimeout(() => { regionClearArmed.value = false }, 4000)
+  regionRestoreArmed.value = true
+  clearTimeout(regionRestoreTimer)
+  regionRestoreTimer = setTimeout(() => { regionRestoreArmed.value = false }, 4000)
 }
 
 /** 笔上此刻的班次：没选过（或选中的那个停用了）就是**第一个还在用的班次** —— 与旧口径一致。 */
@@ -709,27 +726,47 @@ const penZoneName = computed(() => {
 function pickPenShift(shift) {
   penShiftId.value = shift.id
   penRest.value = false
+  penHalfRest.value = false
   penClear.value = false
 }
 
 function pickPenRest() {
   penRest.value = true
+  penHalfRest.value = false
   penClear.value = false
 }
 
-/** 「清」也是一支笔：点一格 = 清掉这一格的班次（写 action=clear，与选区那个「清」同一口径）。 */
+/** 「休半天」也是一支笔：点一格 = 把那一格标成半天休；**再点同一格 = 取消**（见 `penOptions`）。 */
+function pickPenHalfRest() {
+  penHalfRest.value = true
+  penRest.value = false
+  penClear.value = false
+}
+
+/** 「清」也是一支笔：点一格 = 把这一格**清空**（写 action=void，空白 = 还没排到）；
+ *  不是「退回规则」（那是选区摘要行那颗，发 action=restore）。 */
 function pickPenClear() {
   penClear.value = true
   penRest.value = false
+  penHalfRest.value = false
 }
 
 function penAction() {
-  if (penClear.value) return PICK_CLEAR
+  if (penClear.value) return PICK_VOID
+  if (penHalfRest.value) return PICK_HALF_REST
   return penRest.value ? PICK_REST : PICK_SHIFT
 }
 
-function penOptions() {
-  return { shiftId: penShift.value ? penShift.value.id : null, zoneId: penZoneId.value }
+/** 笔上的选项。
+ *
+ *  「休半天」按**这一格的现值取反**（点一下标、再点取消）：所以它必须知道点的是哪一格；
+ *  选区那一行整片刷时没有「这一格」，统一标上（`true`），没有班次的格子由服务端跳过。
+ */
+function penOptions(employee, day) {
+  const base = { shiftId: penShift.value ? penShift.value.id : null, zoneId: penZoneId.value }
+  if (!penHalfRest.value) return base
+  const cell = employee && day ? cellOf(employee, day) : null
+  return { ...base, halfRest: cell ? !cell.half_rest : true }
 }
 
 // 表里看得见的那几行 / 那几列就是选区的轴：筛了人之后选区跟着缩，不会偷偷刷到看不见的人。
@@ -905,11 +942,18 @@ function reminderText(items) {
 
 /** 一次落笔之后的回执（**一行**）：写了几格、跳过几格、能不能撤。
  *  逐格点名的那几行收进 `details`（「看全部」展开）—— 跳过与待批的信息不丢。 */
-function sayResult(result, cells, action) {
+function sayResult(result, cells, action, options) {
   const undoable = !!pickUndo.value && pickUndo.value.plan.length > 0
   const parts = []
   // 回执说清**这一笔是什么**：原来一律「已刷 N 格」，选错笔（清当成了休）也看不出来。
-  const verb = action === PICK_CLEAR ? '已清' : action === PICK_REST ? '已排休' : '已改班'
+  // 「休半天」按这一笔实际写的值说话（单格就是那一格的新值，整片刷统一标上）。
+  const verb = action === PICK_VOID
+    ? '已清空'
+    : action === PICK_RESTORE
+      ? '已退回规则'
+      : action === PICK_HALF_REST
+        ? (options && options.halfRest ? '已标休半天' : '已取消休半天')
+        : action === PICK_REST ? '已排休' : '已改班'
   if (result.applied) parts.push(`${verb} ${result.applied} 格`)
   if (result.skipped.length) parts.push(`跳过 ${result.skipped.length} 格`)
   if (!parts.length) parts.push('没有格子被改动')
@@ -977,6 +1021,7 @@ async function executePaint(employee, day, action, options) {
 /** 点一格 = 立刻用当前笔写这一格（票 14 修订口径 2）：不选区、不点「应用」，一步。
  *
  *  会被跳过的那种格子**不发请求**：超 30 天、已批的假（词表与回执同一套 `PICK_SKIP_TEXT`）。
+ *  「休半天」还有一条本地闸：休 / 空白那格没有班次可挂，直接说一句、不发请求。
  *  整片刷的时候跳过由服务端回执点名（它才是权威），这里只是省掉一次注定被跳过的往返。
  *  **上一笔还在写时不再静默丢弃**：进队列，写完这一笔按顺序补（见上面 `queuePaint`）。 */
 async function paintCell(employee, day) {
@@ -984,7 +1029,11 @@ async function paintCell(employee, day) {
     `周${WEEK_HEADS[day.weekday]} · ${employee.name} ${weekCellText(employee, day)}` +
     `${weekCellHalf(employee, day) ? '半' : ''}`
   const action = penAction()
-  const options = penOptions()
+  if (action === PICK_HALF_REST && !cellHasShift(employee, day)) {
+    sayNotice(`跳过：${monthDayText(day.business_date)} 那天没有班次，标不上休半天`)
+    return
+  }
+  const options = penOptions(employee, day)
   if (pickBusy.value) {
     queuePaint(employee, day, action, options)
     return
@@ -999,11 +1048,12 @@ async function applyRegion() {
   await requestPaint(penAction(), penOptions(), view.cells)
 }
 
-/** 选区那一行的「清」：撤掉这一片的手动覆盖，让它们回到规则（过去的日子服务端照旧跳过）。 */
-async function applyRegionClear() {
+/** 选区那一行的「退回规则」：撤掉这一片的手动覆盖，让他们回到轮转规则（action=restore；
+ *  过去的日子服务端照旧跳过）。注意它**不是**笔上那颗「清」——那颗是把格子清成空白。 */
+async function applyRegionRestore() {
   const view = pickActive.value
   if (!view) return
-  await requestPaint(PICK_CLEAR, {}, view.cells)
+  await requestPaint(PICK_RESTORE, {}, view.cells)
 }
 
 /** 落笔前的三道闸（有没有格子 / 超没超 200 格 / 请求体全不全）；这一笔里有过去的日子
@@ -1020,7 +1070,7 @@ async function requestPaint(action, options, cells) {
   }
   const dates = pastDatesIn(cells, { today: week.value ? week.value.today : '' })
   if (dates.length) {
-    pastConfirm.value = { action, options, cells, dates, clear: action === PICK_CLEAR }
+    pastConfirm.value = { action, options, cells, dates, voiding: action === PICK_VOID }
     return
   }
   await runPaint(action, options, cells)
@@ -1034,8 +1084,8 @@ const pastConfirmText = computed(() => {
   const when = confirm.cells.length > 1
     ? `这一批 ${confirm.cells.length} 格里有 ${confirm.dates.length} 天已经过去了（${days}）`
     : `这天已经过去了（${days}）`
-  if (confirm.clear) {
-    return `${when}：「清除班次」也会把过去那几天清掉（回到规则铺出来的样子），员工看到的记录会跟着变。照清吗？`
+  if (confirm.voiding) {
+    return `${when}：「清空」会把过去那几天清成空白（还没排到），员工看到的记录会跟着变。照清吗？`
   }
   return `${when}：改了以后员工看到的记录也会跟着变，而且没有「退回上一次」这一步。照改吗？`
 })
@@ -1051,9 +1101,10 @@ async function runPaint(action, options, cells) {
       await api.post('/api/scheduling/overrides/batch', batchPayload(action, options, cells)),
     )
     // 这一笔顶掉上一笔：撤销只留最近一批（ADR 0107 决策 7）。
-    const plan = undoPlan(snapshot, result.skipped)
+    // 「休半天」那一笔改的不是班次，撤销按原值写回 half_rest（见 `undoPlan` 的第三个参数）。
+    const plan = undoPlan(snapshot, result.skipped, action)
     pickUndo.value = plan.length ? { plan } : null
-    sayResult(result, cells, action)
+    sayResult(result, cells, action, options)
     await loadWeek(week.value ? week.value.start : weekStart.value)
     await refreshMonthCounts()
   } catch (err) {
@@ -1091,6 +1142,13 @@ async function undoLast() {
         try {
           if (step.kind === 'clear') {
             await api.delete(`/api/scheduling/overrides/${step.employeeId}/${step.date}`)
+          } else if (step.kind === 'half_rest') {
+            // 那一笔只改了半天休：按原值发一条单格的批量（与落笔同一个端点，不多开一条路）。
+            await api.post('/api/scheduling/overrides/batch', batchPayload(
+              PICK_HALF_REST,
+              { halfRest: step.payload.half_rest },
+              [{ employeeId: step.employeeId, date: step.date }],
+            ))
           } else {
             await api.put(`/api/scheduling/overrides/${step.employeeId}/${step.date}`, step.payload)
           }
@@ -1525,8 +1583,8 @@ useNudgePull({
               </span>
               <!-- 待批角标（spec US 11）：这天有等着批的申请。票 07 定标记时特意把琥珀留给
                    「待处理」、青点留给「这天被改过」—— 两种记号不能混。 -->
-              <!-- 半天休（票 07）：这天有几个人只上半天。只读的一位 —— 设置它的地方
-                   只有考勤表页（ADR 0114）；跟右上角那个「待批」的琥珀圆点分开摆。 -->
+              <!-- 半天休（票 07）：这天有几个人只上半天。月历只读 —— 设置它的门有
+                   考勤表页与周表笔栏（ADR 0122）；跟右上角那个「待批」的琥珀圆点分开摆。 -->
               <span v-if="day.half_rest" class="half">半{{ day.half_rest }}</span>
               <span v-if="pendingMarks[day.business_date]" class="pend">
                 {{ pendingMarks[day.business_date] }}
@@ -1801,17 +1859,19 @@ useNudgePull({
           <span class="gW-tip">{{ pickCountText }}</span>
           <button class="gChip" type="button" :disabled="pickBusy" @click="applyRegion()">刷</button>
           <!-- 这一颗原来也叫「清」、与笔上那颗同名又同距，点一下立刻清掉整片（最多 200 格）。
-               v5（2026-10-18 审查）：改名「退回规则」+ 点两次（第二次才真写，4 秒不点自动复位）。 -->
+               v5（2026-10-18 审查）：改名「退回规则」+ 点两次（第二次才真写，4 秒不点自动复位）。
+               2026-10-29：语义与笔上那颗「清」彻底分开 —— 这里发 action=restore（回到轮转规则），
+               笔上那颗发 action=void（把格子清成空白）。 -->
           <button
             class="gChip"
             type="button"
-            :class="{ on: regionClearArmed, danger: regionClearArmed }"
+            :class="{ on: regionRestoreArmed, danger: regionRestoreArmed }"
             :disabled="pickBusy"
-            :title="regionClearArmed
-              ? '再点一次就清掉这一片（最多 200 格）'
+            :title="regionRestoreArmed
+              ? '再点一次就退回规则（最多 200 格）'
               : '退回规则：把选中的日子里手改过的那几天清掉、回到轮转规则'"
-            @click="askRegionClear()"
-          >{{ regionClearArmed ? '确认清' : '退回规则' }}</button>
+            @click="askRegionRestore()"
+          >{{ regionRestoreArmed ? '确认退回' : '退回规则' }}</button>
         </div>
 
         <!-- 工作区：点按钮才展开这一行横滑的区名（默认收起 —— 少一行就少压掉一行员工）。
@@ -1846,8 +1906,8 @@ useNudgePull({
             :key="shift.id"
             type="button"
             class="gChip"
-            :class="[toneClass(shift.id), { on: !penRest && !penClear && !!penShift && penShift.id === shift.id }]"
-            :aria-pressed="!penRest && !penClear && !!penShift && penShift.id === shift.id ? 'true' : 'false'"
+            :class="[toneClass(shift.id), { on: !penRest && !penHalfRest && !penClear && !!penShift && penShift.id === shift.id }]"
+            :aria-pressed="!penRest && !penHalfRest && !penClear && !!penShift && penShift.id === shift.id ? 'true' : 'false'"
             :disabled="pickBusy"
             @click="pickPenShift(shift)"
           ><i class="dt"></i>{{ shift.name }}</button>
@@ -1859,14 +1919,25 @@ useNudgePull({
             :disabled="pickBusy"
             @click="pickPenRest()"
           ><i class="dt rest"></i>休</button>
-          <!-- 「清」：清掉这一格的班次（回到规则）。它不是「休」——休是排班的一种值，清是把值撤掉。 -->
+          <!-- 「休半天」：点一格标上（再点同一格取消）。那天得先有班次 —— 休 / 空白格
+               没有班次可挂，点了只回一句提示、不发请求。 -->
+          <button
+            class="gChip gPen-half"
+            type="button"
+            :class="{ on: penHalfRest }"
+            :aria-pressed="penHalfRest ? 'true' : 'false'"
+            :disabled="pickBusy"
+            title="休半天：把这一格标成只上半天；再点同一格取消（那天要有班次）"
+            @click="pickPenHalfRest()"
+          ><i class="dt half"></i>休半天</button>
+          <!-- 「清」：把这一格**清成空白**（还没排到），不是「退回规则」—— 后者是选区摘要行那一颗。 -->
           <button
             class="gChip gPen-clear"
             type="button"
             :class="{ on: penClear }"
             :aria-pressed="penClear ? 'true' : 'false'"
             :disabled="pickBusy"
-            title="清：把这格的班次清掉（回到规则）"
+            title="清：把这一格清成空白（还没排到）"
             @click="pickPenClear()"
           ><i class="dt clear"></i>清</button>
           <button
@@ -2007,7 +2078,9 @@ useNudgePull({
                 <summary>?</summary>
                 <p class="gB-note">
                   点一格 = 用上方工具条上的班次写这一格；点日期列头 / 人名选一片，再用「刷」批量写。
-                  「清」把选中日子里手改过的那几天退回规则；改轮转规则在「名单」里。
+                  「休半天」把那一格标成只上半天（再点一下取消），那天得先有班次。
+                  「清」把这一格清成空白（还没排到）；「退回规则」把选中日子里手改过的那几天退回轮转规则；
+                  改轮转规则在「名单」里。
                 </p>
                 <p v-if="weekNoDataNote" class="gB-note">{{ weekNoDataNote }}</p>
                 <p v-if="weekBeyondDays.length" class="gB-note">
@@ -2137,9 +2210,9 @@ useNudgePull({
            不是每次应用都弹，也不是每格弹一次。 -->
       <ConfirmDialog
         v-if="pastConfirm"
-        :title="pastConfirm.clear ? '清除过去的日子' : '改过去的日子'"
+        :title="pastConfirm.voiding ? '清空过去的日子' : '改过去的日子'"
         :message="pastConfirmText"
-        :confirm-label="pastConfirm.clear ? '照样清除' : '照改'"
+        :confirm-label="pastConfirm.voiding ? '照样清空' : '照改'"
         cancel-label="再想想"
         @confirm="runPaint(pastConfirm.action, pastConfirm.options, pastConfirm.cells)"
         @cancel="pastConfirm = null"
@@ -2640,6 +2713,10 @@ useNudgePull({
 .gChip.tone-rose { color: var(--hy-rose); background: var(--wb-ink-a04); border-color: var(--line-strong); }
 .gChip .dt { width: 9px; height: 9px; flex: none; margin-right: 7px; border-radius: 50%; background: currentColor; }
 .gChip .dt.rest { background: var(--ink-faint); }
+/* 休半天：圆点用 info（与图例里那个「半 = 休半天」同色），选中外环也走 info ——
+   其余棋子仍用 `.gChip.on` 的 `--action`，这一颗是半天休自己的记号。 */
+.gChip .dt.half { background: var(--info); }
+.gPen-half.on { box-shadow: 0 0 0 2px var(--info); }
 /* ── 笔栏（票 14 修订，2026-10-13 用户真机裁定）──────────────────────────────
    **一行**：`刷` 标签 + 班次按钮组（横滑）+ 工作区 + ↺ 撤销；选区的摘要行、工作区的展开行
    与那一行提示都只在需要时出现。目标高度 ~70px —— 上一版那条 6 行、把表格压掉半屏的动作条

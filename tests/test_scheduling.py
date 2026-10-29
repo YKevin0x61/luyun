@@ -163,6 +163,18 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
         )
         return [dict(row) for row in await cur.fetchall()]
 
+    async def _overrides_with_voided(self):
+        """覆盖表连 `voided`（0040）一起的快照。
+
+        单独一条而不是往 `_overrides()` 里加列：那份快照是票 07/08 定下的形状，票 08 的
+        用例整字典比对，加一列会让那些断言跟着变红。
+        """
+        cur = await self.db._conn.execute(
+            """SELECT employee_id, business_date, shift_id, zone_id, kind, voided
+               FROM scheduling_overrides ORDER BY employee_id ASC, business_date ASC""",
+        )
+        return [dict(row) for row in await cur.fetchall()]
+
     async def _peer_of(self, request_id):
         """某条申请「想跟谁换」（0009 加的那一列）。
 
@@ -1840,6 +1852,240 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
         # 对照：真补记走明示的那条路（`set_override`）—— 过去的日子照样能改。
         await self.store.set_override(employee["id"], "2026-09-01", shift_id=day)
         self.assertEqual((await self.store.day_detail("2026-09-01"))["total"], 1)
+
+    # ── 周表「休半天」+「清」真正清空（2026-10-29 契约）──────────────────
+
+    async def test_void_writes_a_voided_override_and_deletes_the_result_row(self):
+        """`void` = 清空这一天：写 `voided=1` 的覆盖行、删掉那天结果行，且**展开不重铺**。
+
+        旧「清」删的是覆盖行，规则随即把那天重新铺回来 —— 用户看到的还是原班次。
+        空白要持久，所以判据是 `voided=1` 的覆盖行 + 不存在结果行。
+        """
+        employee = await self._employee()
+        day = await self._shift_id("白班")
+        zone = await self._zone("案板")
+        await self.store.set_rule(employee["id"], [day])
+        await self.store.set_zone_default(employee["id"], day, zone)
+        self.assertEqual((await self._full_rows(employee["id"]))[TODAY]["shift_id"], day)
+
+        cleared = await self.store.set_overrides_batch(
+            "void", items=[{"employee_id": employee["id"], "business_date": TODAY}]
+        )
+
+        self.assertEqual(
+            (cleared["applied"], cleared["skipped"], cleared["employee_ids"]),
+            (1, [], [employee["id"]]),
+        )
+        # 那天没有结果行了：周表 / 月历 / 考勤表各自天然读成空白 / 0 人 / 待补。
+        self.assertNotIn(TODAY, await self._full_rows(employee["id"]))
+        self.assertEqual((await self.store.day_detail(TODAY))["total"], 0)
+        # 证据是那条 void 覆盖行：班次 / 工作区都空，kind 仍是 manual（不是「休」）。
+        self.assertEqual(
+            await self._overrides_with_voided(),
+            [
+                {
+                    "employee_id": employee["id"],
+                    "business_date": TODAY,
+                    "shift_id": None,
+                    "zone_id": None,
+                    "kind": "manual",
+                    "voided": 1,
+                }
+            ],
+        )
+
+        # 再展开一次：清空过的那天**不重铺**（这正是旧缺陷）。
+        written = await self.store.expand()
+        self.assertEqual(written, 0)
+        self.assertNotIn(TODAY, await self._full_rows(employee["id"]))
+        # 别日子照旧：明天还是规则的白班（清空只动这一天）。
+        self.assertEqual((await self._full_rows(employee["id"]))["2026-09-25"]["shift_id"], day)
+
+    async def test_a_voided_day_can_be_scheduled_again(self):
+        """清空过的天再排班：覆盖行的 `voided` 被清回 0，展开不会再把它当空白跳过。"""
+        employee = await self._employee()
+        day = await self._shift_id("白班")
+        night = await self._shift_id("夜班")
+        await self.store.set_rule(employee["id"], [day])
+        await self.store.set_overrides_batch(
+            "void", items=[{"employee_id": employee["id"], "business_date": TODAY}]
+        )
+
+        await self.store.set_override(employee["id"], TODAY, shift_id=night)
+
+        row = (await self._full_rows(employee["id"]))[TODAY]
+        self.assertEqual((row["shift_id"], row["source"]), (night, "override"))
+        overrides = await self._overrides_with_voided()
+        self.assertEqual(
+            [(item["shift_id"], item["kind"], item["voided"]) for item in overrides],
+            [(night, "manual", 0)],
+        )
+        # 展开既没有把结果行写坏，也没有把那天当成「还空着」再铺一遍。
+        self.assertEqual(await self.store.expand(), 0)
+        self.assertEqual(
+            (await self._full_rows(employee["id"]))[TODAY]["shift_id"], night
+        )
+
+    async def test_restoring_a_voided_day_puts_the_rule_back(self):
+        """`restore` 撤销清空：删掉 void 覆盖行，并按现在的规则重铺那一天。
+
+        `void` 删掉了结果行，`_restore_day` 原本遇到「没有结果行」就 no-op —— 那会让
+        「退回规则」在清空过的天上永远是个空白（前端撤销清空也走这条）。哪天被清空过
+        的证据就在覆盖行上，所以删它之前先记下 `voided`，再强制按规则重算。
+        """
+        employee = await self._employee()
+        day = await self._shift_id("白班")
+        zone = await self._zone("案板")
+        await self.store.set_rule(employee["id"], [day])
+        await self.store.set_zone_default(employee["id"], day, zone)
+        await self.store.set_overrides_batch(
+            "void", items=[{"employee_id": employee["id"], "business_date": TODAY}]
+        )
+
+        restored = await self.store.set_overrides_batch(
+            "restore", items=[{"employee_id": employee["id"], "business_date": TODAY}]
+        )
+
+        self.assertEqual(
+            (restored["applied"], restored["skipped"], restored["employee_ids"]),
+            (1, [], [employee["id"]]),
+        )
+        row = (await self._full_rows(employee["id"]))[TODAY]
+        self.assertEqual((row["shift_id"], row["zone_id"], row["source"]), (day, zone, "rule"))
+        self.assertEqual(await self._overrides(), [])
+
+    async def test_restore_and_clear_are_the_same_action(self):
+        """`clear` 是 `restore` 的兼容别名：两个词落到同一段逻辑、写出同一个终态。"""
+        employee = await self._employee()
+        day = await self._shift_id("白班")
+        night = await self._shift_id("夜班")
+        await self.store.set_rule(employee["id"], [day])
+        await self.store.set_override(employee["id"], TODAY, shift_id=night)
+
+        restored = await self.store.set_overrides_batch(
+            "restore", items=[{"employee_id": employee["id"], "business_date": TODAY}]
+        )
+        restored_row = (await self._full_rows(employee["id"]))[TODAY]
+
+        await self.store.set_override(employee["id"], TODAY, shift_id=night)
+        cleared = await self.store.set_overrides_batch(
+            "clear", items=[{"employee_id": employee["id"], "business_date": TODAY}]
+        )
+
+        self.assertEqual(cleared, restored)
+        self.assertEqual((await self._full_rows(employee["id"]))[TODAY], restored_row)
+        self.assertEqual((restored["applied"], restored["skipped"]), (1, []))
+        self.assertEqual(await self._overrides(), [])
+        self.assertEqual(
+            (restored_row["shift_id"], restored_row["source"]), (day, "rule")
+        )
+
+    async def test_batch_half_rest_only_touches_the_flag(self):
+        """`half_rest` 只改标志与 `updated_at`：班次 / 工作区 / 来源一个字都不动。
+
+        与考勤表页 `AttendanceStore.set_half_rest` 同一口径（半天休不是第二个班次，
+        也不是一次「跟规则不一样」的改写），只是这里从周表那支笔进来。
+        """
+        employee = await self._employee()
+        day = await self._shift_id("白班")
+        zone = await self._zone("案板")
+        await self.store.set_rule(employee["id"], [day])
+        await self.store.set_zone_default(employee["id"], day, zone)
+        before = (await self._full_rows(employee["id"]))[TODAY]
+
+        marked = await self.store.set_overrides_batch(
+            "half_rest",
+            items=[{"employee_id": employee["id"], "business_date": TODAY}],
+            half_rest=True,
+        )
+
+        self.assertEqual(
+            (marked["applied"], marked["skipped"], marked["employee_ids"]),
+            (1, [], [employee["id"]]),
+        )
+        self.assertEqual((await self._half_rest(employee["id"]))[TODAY], 1)
+        after = (await self._full_rows(employee["id"]))[TODAY]
+        self.assertEqual(
+            (after["shift_id"], after["zone_id"], after["source"], after["id"]),
+            (before["shift_id"], before["zone_id"], before["source"], before["id"]),
+        )
+        # 不是一次覆盖：覆盖表仍是空的，周表那格「跟规则一样」。
+        self.assertEqual(await self._overrides(), [])
+
+        unmarked = await self.store.set_overrides_batch(
+            "half_rest",
+            items=[{"employee_id": employee["id"], "business_date": TODAY}],
+            half_rest=False,
+        )
+
+        self.assertEqual(unmarked["applied"], 1)
+        self.assertEqual((await self._half_rest(employee["id"]))[TODAY], 0)
+
+    async def test_batch_half_rest_skips_days_without_a_shift(self):
+        """没班次的天标不上半天休：休的那天、清空了的那天都逐格跳过并点名。
+
+        与考勤表页 `half_rest_needs_shift` 同一句判据（那天得有结果行、且班次非空）；
+        批量是逐格跳过，不是整笔拒绝。窗口那两道闸在它之前照旧生效。
+        """
+        employee = await self._employee()
+        day = await self._shift_id("白班")
+        await self.store.set_rule(employee["id"], [day])
+        # 9/25 改成休（有结果行、班次空）；9/26 清空（连结果行都没有）。
+        await self.store.set_override(employee["id"], "2026-09-25", is_rest=True)
+        await self.store.set_overrides_batch(
+            "void", items=[{"employee_id": employee["id"], "business_date": "2026-09-26"}]
+        )
+
+        result = await self.store.set_overrides_batch(
+            "half_rest",
+            items=[
+                {"employee_id": employee["id"], "business_date": "2026-09-25"},
+                {"employee_id": employee["id"], "business_date": "2026-09-26"},
+                {"employee_id": employee["id"], "business_date": "2026-12-23"},  # 窗口外
+                {"employee_id": employee["id"], "business_date": "2026-08-01"},  # 补记窗口外
+                {"employee_id": employee["id"], "business_date": "2026-09-27"},
+            ],
+            half_rest=True,
+        )
+
+        self.assertEqual(result["applied"], 1)
+        self.assertEqual(
+            [(item["business_date"], item["reason"]) for item in result["skipped"]],
+            [
+                ("2026-09-25", "half_rest_needs_shift"),
+                ("2026-09-26", "half_rest_needs_shift"),
+                ("2026-12-23", "beyond_window"),
+                ("2026-08-01", "past_day"),
+            ],
+        )
+        flags = await self._half_rest(employee["id"])
+        self.assertEqual((flags["2026-09-24"], flags["2026-09-27"]), (0, 1))
+
+    async def test_restoring_a_day_clears_the_half_rest_flag(self):
+        """回到规则 = 规则里没有半天休：`_restore_day` 写回规则行时把标志清 0。
+
+        名单面板上「这天跟规则一样」的格子同时挂着「休半天」，是上一次手改留下的标志 ——
+        退回规则之后不该还在。
+        """
+        employee = await self._employee()
+        day = await self._shift_id("白班")
+        night = await self._shift_id("夜班")
+        await self.store.set_rule(employee["id"], [day])
+        await self.store.set_override(employee["id"], TODAY, shift_id=night)
+        await self.store.set_overrides_batch(
+            "half_rest",
+            items=[{"employee_id": employee["id"], "business_date": TODAY}],
+            half_rest=True,
+        )
+        self.assertEqual((await self._half_rest(employee["id"]))[TODAY], 1)
+
+        await self.store.set_overrides_batch(
+            "restore", items=[{"employee_id": employee["id"], "business_date": TODAY}]
+        )
+
+        row = (await self._full_rows(employee["id"]))[TODAY]
+        self.assertEqual((row["shift_id"], row["source"]), (day, "rule"))
+        self.assertEqual((await self._half_rest(employee["id"]))[TODAY], 0)
 
     async def test_rule_change_does_not_wipe_an_overridden_day(self):
         """验收 6：改规则时已被覆盖的那天不被冲掉（一个字都不动，含 `updated_at`）。"""

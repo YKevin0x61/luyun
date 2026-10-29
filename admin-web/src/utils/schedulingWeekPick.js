@@ -24,10 +24,18 @@ export const PICK_MAX_CELLS = 200
 /** 过去可补记的天数（ADR 0108：30 天一处定义，这里只是同一口径的前端镜像）。 */
 export const PICK_PAST_DAYS = 30
 
-/** 三种动作，整批同一个。 */
+/** 五种动作，整批同一个。
+ *
+ *  · `shift` / `rest`：改成某个班 / 改成休（原有）；
+ *  · `void`：把这一天**清空**（空白 = 还没排到，规则展开也不会铺回来，2026-10-29 用户裁定）；
+ *  · `restore`：退回轮转规则（原来那颗「清」的语义；服务端仍收 `clear` 作别名）；
+ *  · `half_rest`：设 / 清这一天的「休半天」（ADR 0114；顶层带 `half_rest: bool`）。
+ */
 export const PICK_SHIFT = 'shift'
 export const PICK_REST = 'rest'
-export const PICK_CLEAR = 'clear'
+export const PICK_VOID = 'void'
+export const PICK_RESTORE = 'restore'
+export const PICK_HALF_REST = 'half_rest'
 
 /** 服务端 `skipped[].reason` 的词表 → 回执里那句人话（词表定死，见 ADR 0107 决策 6）。 */
 export const PICK_SKIP_TEXT = {
@@ -37,6 +45,8 @@ export const PICK_SKIP_TEXT = {
   beyond_window: '还没铺到',
   leave_approved: '已批的假',
   out_of_roster: '不在册',
+  // 休 / 空白那格没有班次可标半天休（周表点「休半天」笔时本地就先拦下来，不会发请求）。
+  half_rest_needs_shift: '那天没有班次，标不上休半天',
 }
 
 // ── 手柄与选区 ────────────────────────────────────────────────────────────
@@ -237,6 +247,9 @@ export function pickPending(cells, pending) {
  *  覆盖」既不是休也不是某个班，服务端只能拒。`zoneId` 给 `''`（跟固定区）时翻成 `null`，
  *  后端会把那个班次的固定区回填进来 —— 批量时这正是默认：19 个人各有各的固定区，硬指
  *  一个区通常没意义。
+ *
+ *  `action='half_rest'` 必须显式给布尔 `options.halfRest`（设 = true、取消 = false）：
+ *  整批同一个值，单格时调用方用那一格的现值取反。
  */
 export function batchPayload(action, options, cells) {
   const items = (cells || []).map((cell) => ({
@@ -255,7 +268,14 @@ export function batchPayload(action, options, cells) {
       items,
     }
   }
-  if (action === PICK_REST || action === PICK_CLEAR) return { action, items }
+  if (action === PICK_HALF_REST) {
+    const halfRest = options ? options.halfRest : undefined
+    if (typeof halfRest !== 'boolean') return null
+    return { action: PICK_HALF_REST, half_rest: halfRest, items }
+  }
+  if (action === PICK_REST || action === PICK_VOID || action === PICK_RESTORE) {
+    return { action, items }
+  }
   return null
 }
 
@@ -280,7 +300,12 @@ export function normalizeResult(result) {
 // ADR 0107 决策 7 / ADR 0108 决策 5：应用前把选区内每格的**原值**拿在手上，点 ↺ 逐格还原；
 // 刷新页面或换一台手机就没了 —— 服务端不留快照（`staff_assignments` 是原地 upsert）。
 
-/** 应用**之前**记下选区内每一格的当前值（调用方只保留最近一批）。 */
+/** 应用**之前**记下选区内每一格的当前值（调用方只保留最近一批）。
+ *
+ *  `half_rest` 是「休半天」的原值（撤销 `half_rest` 那一笔要按它写回）。周表每格只有
+ *  `scheduled/shift_id/shift_name/zone_id/zone_name/overridden/leave`（契约里的七个键），
+ *  没有 `voided` —— 撤销「清空」靠 `overridden` 分两条现有路径还原，不需要它。
+ */
 export function snapshotCells(cells, cellOf) {
   return (cells || []).map((cell) => {
     const data = (cellOf ? cellOf(cell.employeeId, cell.date) : null) || {}
@@ -290,6 +315,7 @@ export function snapshotCells(cells, cellOf) {
       scheduled: !!data.scheduled,
       overridden: !!data.overridden,
       leave: !!data.leave,
+      half_rest: !!data.half_rest,
       shift_id: data.shift_id === undefined ? null : data.shift_id,
       zone_id: data.zone_id === undefined ? null : data.zone_id,
     }
@@ -303,12 +329,25 @@ export function snapshotCells(cells, cellOf) {
  *  一个「还没铺到」的格子写成休），所以整个不进计划。
  *  返回项的 `kind`：`clear`（删覆盖）/ `restore`（写回原值）/ `keep`（撤不回来：那一格原本是
  *  **批出来的假**，覆盖行的 kind=leave 不是这两条接口写得回去的），如实说，不假装撤掉了。
+ *
+ *  `action` 是刚写下去的那一笔的动作：只有 `half_rest` 需要它 —— 那一笔改的是半天休标志，
+ *  班次 / 工作区原样没动，所以按格子原值写回 `half_rest`（新增 `half_rest` 这一种计划项），
+ *  不能拿「写回原班次」那条路盖上去（那一笔写班次时不会顺带把半天休改回来）。
  */
-export function undoPlan(snapshot, skipped) {
+export function undoPlan(snapshot, skipped, action) {
   const missed = new Set((skipped || []).map((item) => `${item.employeeId}|${item.date}`))
   const plan = []
   for (const item of snapshot || []) {
     if (missed.has(`${item.employeeId}|${item.date}`)) continue
+    if (action === PICK_HALF_REST) {
+      plan.push({
+        employeeId: item.employeeId,
+        date: item.date,
+        kind: 'half_rest',
+        payload: { half_rest: !!item.half_rest },
+      })
+      continue
+    }
     if (!item.overridden) {
       plan.push({ employeeId: item.employeeId, date: item.date, kind: 'clear' })
       continue

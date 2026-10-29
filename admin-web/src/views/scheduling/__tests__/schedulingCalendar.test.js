@@ -122,9 +122,10 @@ describe('店长端排班月历（原型 B）', () => {
     expect(view).toMatch(/const halfRestDays = computed/)
     expect(view).toMatch(/class="gB-half"><i><\/i>半N = 这天 N 人休半天/)
     expect(view).toMatch(/v-if="person\.half_rest" class="gB-zone half">休半天/)
-    // 只读：月历 / 当天卡上没有任何写 `half_rest` 的地方（设置它只有考勤表页一条路）。
-    expect(view).not.toMatch(/half_rest:\s*true/)
-    expect(view).not.toMatch(/half_rest:\s*!/)
+    // 月历 / 当天卡只读（它们只报数）；写它的地方是**周表笔栏**那颗「休半天」
+    // （2026-10-29 起；考勤表页那条 PUT 是另一条路，两边写同一个 half_rest）。
+    expect(view).toMatch(/<i class="dt half"><\/i>休半天/)
+    expect(view).toMatch(/PICK_HALF_REST/)
   })
 
   it('marks the days that were changed by hand (票 07)', () => {

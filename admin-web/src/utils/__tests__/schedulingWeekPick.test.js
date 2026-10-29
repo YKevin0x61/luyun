@@ -2,10 +2,13 @@
 import { describe, expect, it } from 'vitest'
 
 import {
-  PICK_CLEAR,
+  PICK_HALF_REST,
   PICK_MAX_CELLS,
   PICK_REST,
+  PICK_RESTORE,
   PICK_SHIFT,
+  PICK_SKIP_TEXT,
+  PICK_VOID,
   batchPayload,
   cellHandle,
   colHandle,
@@ -203,9 +206,9 @@ describe('周表选区：跳过预判（服务端仍是权威）', () => {
   })
 
   it('过去的日子上执行清除**不再跳过**（2026-10-18 用户裁定：清也能清过去的）', () => {
-    // 放开 ADR 0108 决策 6 的「过去只能改成某个班」：清除与改班次同一条下界
+    // 放开 ADR 0108 决策 6 的「过去只能改成某个班」：清空与改班次同一条下界
     // （可补记窗口），窗口内过去的日子照常写，超出窗口才是 past_day。
-    const clear = { ...ctx, action: PICK_CLEAR }
+    const clear = { ...ctx, action: PICK_VOID }
     expect(predictSkips([{ employeeId: 7, date: '2026-10-13' }], clear)).toEqual([])
     expect(predictSkips([{ employeeId: 7, date: '2026-10-13' }], ctx)).toEqual([])
     // 今天清除照旧
@@ -243,7 +246,7 @@ describe('周表选区：批量请求体（POST /api/scheduling/overrides/batch�
     { employeeId: 9, date: '2026-10-12' },
   ]
 
-  it('三种动作各自的形状：班次要班次、休与清除不带', () => {
+  it('五种动作各自的形状：班次要班次，其余各带自己的顶层参数', () => {
     expect(batchPayload(PICK_SHIFT, { shiftId: '3', zoneId: '5' }, cells)).toEqual({
       action: 'shift',
       shift_id: 3,
@@ -262,7 +265,30 @@ describe('周表选区：批量请求体（POST /api/scheduling/overrides/batch�
         { employee_id: 9, business_date: '2026-10-12' },
       ],
     })
-    expect(batchPayload(PICK_CLEAR, {}, cells).action).toBe('clear')
+    // 「清」笔清空（空白），「退回规则」撤销手改 —— 两颗棋子两个动作，不能再混成一个 clear。
+    expect(batchPayload(PICK_VOID, {}, cells)).toEqual({
+      action: 'void',
+      items: [
+        { employee_id: 7, business_date: '2026-10-12' },
+        { employee_id: 9, business_date: '2026-10-12' },
+      ],
+    })
+    expect(batchPayload(PICK_RESTORE, {}, cells).action).toBe('restore')
+  })
+
+  it('「休半天」带布尔的顶层 half_rest；不给 / 给错类型就别发请求', () => {
+    expect(batchPayload(PICK_HALF_REST, { halfRest: true }, cells)).toEqual({
+      action: 'half_rest',
+      half_rest: true,
+      items: [
+        { employee_id: 7, business_date: '2026-10-12' },
+        { employee_id: 9, business_date: '2026-10-12' },
+      ],
+    })
+    expect(batchPayload(PICK_HALF_REST, { halfRest: false }, cells).half_rest).toBe(false)
+    expect(batchPayload(PICK_HALF_REST, {}, cells)).toBeNull()
+    expect(batchPayload(PICK_HALF_REST, { halfRest: null }, cells)).toBeNull()
+    expect(batchPayload(PICK_HALF_REST, { halfRest: 'true' }, cells)).toBeNull()
   })
 
   it('没选班次 / 没选格子就别发请求（返回 null，由调用方说一句）', () => {
@@ -270,6 +296,10 @@ describe('周表选区：批量请求体（POST /api/scheduling/overrides/batch�
     expect(batchPayload(PICK_SHIFT, { shiftId: '' }, cells)).toBeNull()
     expect(batchPayload(PICK_SHIFT, { shiftId: 3 }, [])).toBeNull()
     expect(batchPayload('paint', {}, cells)).toBeNull()
+  })
+
+  it('跳过词表补了「休半天要有班次」这句人话', () => {
+    expect(PICK_SKIP_TEXT.half_rest_needs_shift).toBe('那天没有班次，标不上休半天')
   })
 
   it('回执翻成界面形状：snake_case 只在这里翻一次', () => {
@@ -294,20 +324,21 @@ describe('周表选区：撤销只留最近一批（ADR 0107 决策 7）', () =>
   ]
   const weekCells = {
     '7|2026-10-12': { scheduled: true, overridden: false, shift_id: 3, zone_id: 5 },
-    '9|2026-10-12': { scheduled: true, overridden: true, shift_id: 4, zone_id: 6 },
+    // 这一格已经是半天休：撤销「休半天」那一笔要按原值写回 true。
+    '9|2026-10-12': { scheduled: true, overridden: true, half_rest: true, shift_id: 4, zone_id: 6 },
     '11|2026-10-13': { scheduled: true, overridden: true, leave: true, shift_id: null, zone_id: null },
   }
   const cellOf = (employeeId, date) => weekCells[`${employeeId}|${date}`]
 
-  it('应用前记下每格的原值（含 overridden / 班次 / 区 / 休 / 假）', () => {
+  it('应用前记下每格的原值（含 overridden / 班次 / 区 / 休 / 假 / 休半天）', () => {
     expect(snapshotCells(cells, cellOf)).toEqual([
-      { employeeId: 7, date: '2026-10-12', scheduled: true, overridden: false, leave: false, shift_id: 3, zone_id: 5 },
-      { employeeId: 9, date: '2026-10-12', scheduled: true, overridden: true, leave: false, shift_id: 4, zone_id: 6 },
-      { employeeId: 11, date: '2026-10-13', scheduled: true, overridden: true, leave: true, shift_id: null, zone_id: null },
+      { employeeId: 7, date: '2026-10-12', scheduled: true, overridden: false, leave: false, half_rest: false, shift_id: 3, zone_id: 5 },
+      { employeeId: 9, date: '2026-10-12', scheduled: true, overridden: true, leave: false, half_rest: true, shift_id: 4, zone_id: 6 },
+      { employeeId: 11, date: '2026-10-13', scheduled: true, overridden: true, leave: true, half_rest: false, shift_id: null, zone_id: null },
     ])
     // 那一格读不出来（不在当周）时给空值，不抛
     expect(snapshotCells([{ employeeId: 1, date: '2026-01-01' }], () => null))
-      .toEqual([{ employeeId: 1, date: '2026-01-01', scheduled: false, overridden: false, leave: false, shift_id: null, zone_id: null }])
+      .toEqual([{ employeeId: 1, date: '2026-01-01', scheduled: false, overridden: false, leave: false, half_rest: false, shift_id: null, zone_id: null }])
   })
 
   it('逐格还原计划：原本没覆盖的走删覆盖，原本有覆盖的写回原值', () => {
@@ -324,6 +355,24 @@ describe('周表选区：撤销只留最近一批（ADR 0107 决策 7）', () =>
     const snapshot = [{ employeeId: 7, date: '2026-10-12', overridden: true, leave: false, shift_id: null, zone_id: null }]
     expect(undoPlan(snapshot, [])).toEqual([
       { employeeId: 7, date: '2026-10-12', kind: 'restore', payload: { is_rest: true } },
+    ])
+  })
+
+  it('撤销「休半天」：按原值写回 half_rest，不拿「写回原班次」那条路盖上去', () => {
+    // 那一笔只动 half_rest（班次 / 工作区原样），所以计划项是 `half_rest` 而不是 clear / restore；
+    // 否则写回班次时后端不会把半天休改回来，撤销等于没撤。
+    const snapshot = snapshotCells(cells, cellOf)
+    expect(undoPlan(snapshot, [], PICK_HALF_REST)).toEqual([
+      { employeeId: 7, date: '2026-10-12', kind: 'half_rest', payload: { half_rest: false } },
+      { employeeId: 9, date: '2026-10-12', kind: 'half_rest', payload: { half_rest: true } },
+      { employeeId: 11, date: '2026-10-13', kind: 'half_rest', payload: { half_rest: false } },
+    ])
+    // 服务端跳过（那一格没班次 / 没被写过）的格子不进计划。
+    expect(undoPlan(snapshot, [
+      { employeeId: 7, date: '2026-10-12', reason: 'half_rest_needs_shift' },
+      { employeeId: 11, date: '2026-10-13', reason: 'leave_approved' },
+    ], PICK_HALF_REST)).toEqual([
+      { employeeId: 9, date: '2026-10-12', kind: 'half_rest', payload: { half_rest: true } },
     ])
   })
 
