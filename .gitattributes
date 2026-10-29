@@ -1,0 +1,10 @@
+# 发行包裁剪：scripts/publish_release.sh 用 `git archive HEAD` 打包，
+# git archive 会自动跳过带 export-ignore 的路径。
+#
+# design/ 与 design-demos/ 是设计阶段的截图与方向稿（合计约 16 MB，PNG 已压缩、
+# gzip 压不动），门店运行时没有任何引用，进包只会让 Release Bundle 平白大一倍。
+# 需要它们时照常 `git checkout` / 直接看工作区文件，只是不随发行包下发。
+# 用 `/**` 而不是 `design/`：尾斜杠写法 git archive 认、git check-attr 不认，
+# 两种工具结论不一致会让"包里到底有没有"变得没法自证。
+design/**        export-ignore
+design-demos/**  export-ignore
