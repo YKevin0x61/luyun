@@ -10,6 +10,8 @@
  * 真的完成过；判断不出来的步骤一律标 pending，不假装知道。
  */
 
+import { formatBytes } from './backupProgress'
+
 export const UPDATE_STEPS = [
   { key: 'backing_up', label: '备份', stages: ['backing_up'] },
   { key: 'fetching_bundle', label: '下载发行包', stages: ['fetching_bundle', 'fetching'] },
@@ -129,4 +131,66 @@ export function stepSymbol(state) {
   if (state === 'failed') return '✗'
   if (state === 'active') return '●'
   return '○'
+}
+
+/**
+ * 速率文案（字节/秒 →「1.2 MB/s」）。
+ *
+ * `null` / 空串表示「还算不出来」（刚连上、窗口内只有一个样点），要返回空串让
+ * 页面不显示 —— 显示成「0 B/s」会被读成「卡住了」，那是另一回事。
+ */
+export function formatRate(bytesPerSecond) {
+  if (bytesPerSecond === null || bytesPerSecond === undefined) return ''
+  if (typeof bytesPerSecond === 'string' && bytesPerSecond.trim() === '') return ''
+  const value = Number(bytesPerSecond)
+  if (!Number.isFinite(value) || value < 0) return ''
+  if (value === 0) return '0 B/s'
+  return `${formatBytes(value)}/s`
+}
+
+/**
+ * 下载发行包阶段的实时进度视图（其余阶段或没有数据时为 null）。
+ *
+ * `percent` 为 null 表示服务端没给 `Content-Length`：只报「已下载多少、多快」，
+ * 不编一个百分比出来。重试时 `attempt > 1` 单独给出，让操作者知道卡过。
+ *
+ * @returns {null | {
+ *   percent: number|null,
+ *   doneText: string,
+ *   totalText: string,
+ *   rateText: string,
+ *   attempt: number|null,
+ *   indeterminate: boolean,
+ *   ariaText: string,
+ * }}
+ */
+export function updateDownloadView(job) {
+  if (job?.stage !== 'fetching_bundle') return null
+  const download = job?.download
+  if (!download || typeof download !== 'object') return null
+
+  const done = Number(download.done_bytes)
+  if (!Number.isFinite(done) || done < 0) return null
+  const total = Number(download.total_bytes)
+  const hasTotal = Number.isFinite(total) && total > 0
+  const percent = hasTotal
+    ? Math.min(100, Math.max(0, Math.round((done / total) * 100)))
+    : null
+  const attempt = Number(download.attempt)
+
+  const doneText = formatBytes(done)
+  const totalText = hasTotal ? formatBytes(total) : ''
+  const rateText = formatRate(download.bytes_per_second)
+  const progressText = hasTotal ? `${doneText} / ${totalText}` : `已下载 ${doneText}`
+
+  return {
+    percent,
+    doneText,
+    totalText,
+    rateText,
+    attempt: Number.isFinite(attempt) && attempt > 1 ? attempt : null,
+    indeterminate: percent === null,
+    ariaText: `发行包下载 ${percent === null ? progressText : `${percent}%`}`
+      + (rateText ? `，${rateText}` : ''),
+  }
 }

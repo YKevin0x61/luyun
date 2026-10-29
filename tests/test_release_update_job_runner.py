@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 import unittest
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import List, Optional
 
 from services.release_update import UpdateJobState
@@ -53,8 +53,25 @@ class FakeBundle:
     fail_activate: bool = False
     previous_fp: Optional[str] = "sha256:old"
     new_fp: Optional[str] = "sha256:new"
+    store: Optional[FakeJobStore] = None
 
     def fetch_bundle(self, tag: str) -> None:
+        # 真实适配器在下载中把进度写进状态文件；给了 store 的 fake 照做，
+        # 好验证「离开下载阶段必须清空 download」。
+        if self.store is not None:
+            self.store.write(
+                replace(
+                    self.store.read(),
+                    download={
+                        "asset": "luyun-release-bundle.tar.gz",
+                        "attempt": 1,
+                        "done_bytes": 1024,
+                        "total_bytes": 4096,
+                        "bytes_per_second": 512.0,
+                        "updated_at": "2026-10-30T01:00:00+08:00",
+                    },
+                )
+            )
         if self.fail_checksum:
             raise RuntimeError("checksum mismatch for luyun-release-bundle.tar.gz")
         self.fetched_tag = tag
@@ -235,6 +252,33 @@ class UpdateJobRunnerTest(unittest.TestCase):
                 "restarting",
             ],
         )
+
+    def test_download_progress_never_leaks_into_later_stages(self):
+        """下载进度只属于 fetching_bundle：进安装/重启后必须清空，失败也是。"""
+        store = FakeJobStore(_queued())
+        runner, _, _, _, _ = _runner(store, bundle=FakeBundle(store=store))
+
+        final = runner.run()
+
+        self.assertEqual(final.stage, "restarting")
+        self.assertIsNone(final.download)
+        self.assertTrue(
+            any(w.download for w in store.writes), "下载阶段应当写入过进度"
+        )
+        for write in store.writes:
+            if write.stage != "fetching_bundle":
+                self.assertIsNone(write.download)
+
+    def test_download_progress_is_cleared_on_failure_before_switch(self):
+        store = FakeJobStore(_queued())
+        runner, _, _, _, _ = _runner(
+            store, bundle=FakeBundle(store=store, fail_checksum=True)
+        )
+
+        final = runner.run()
+
+        self.assertEqual(final.stage, "failed")
+        self.assertIsNone(final.download)
 
     def test_persists_awaiting_health_before_restart_so_docker_self_kill_is_ok(self):
         """Docker restart kills the in-container job; the switched+restarting fact

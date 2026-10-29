@@ -7,7 +7,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, replace
 from datetime import datetime
-from typing import List, Optional, Protocol, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Protocol, Sequence, Tuple
 import time
 
 from database import CHINA_TZ
@@ -182,6 +182,11 @@ class UpdateJobState:
     health_confirmed_at: Optional[str] = None
     startup_id: Optional[str] = None
     health_detail: Optional[str] = None
+    # 下载发行包阶段的实时进度（只在 fetching_bundle 期间有值，离开该阶段即清空）。
+    # 形状见 job_adapters.DownloadProgress：asset / attempt / done_bytes /
+    # total_bytes / bytes_per_second / updated_at。total_bytes 为 None 表示服务端
+    # 没给 Content-Length（无法算百分比），不影响作业本身。
+    download: Optional[Dict[str, Any]] = None
 
 
 @dataclass(frozen=True)

@@ -14,6 +14,7 @@ import argparse
 import logging
 import os
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 # Ensure project root is on sys.path when launched via systemd WorkingDirectory.
@@ -22,6 +23,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from services.github_release_config import get_effective_config  # noqa: E402
+from services.release_update import STAGE_FETCHING_BUNDLE  # noqa: E402
 from services.release_update.factory import default_deploy_dir  # noqa: E402
 from services.release_update.job_adapters import (  # noqa: E402
     DeployTreeMigrationsAdapter,
@@ -59,13 +61,32 @@ def _configure_logging(log_file: Path) -> None:
 
 def build_runner(deploy_dir: Path) -> UpdateJobRunner:
     gh = get_effective_config()
+    store = FileJobStateStore(job_state_path())
+
+    def report_download(info):
+        """写出下载进度：读-改-写，别把同一时刻写进来的 cancel_requested 覆盖掉。
+
+        `stage` 已经不是 fetching_bundle 时直接丢弃（迟到的回调不该把旧阶段的数据
+        写回状态文件）。写失败只记日志 —— 进度是观测，不该让下载失败。
+        """
+        try:
+            state = store.read()
+            if state.stage != STAGE_FETCHING_BUNDLE:
+                return
+            store.write(replace(state, download=info))
+        except Exception as exc:  # noqa: BLE001 - 进度上报绝不影响更新本身
+            logging.getLogger("update_job").warning(
+                "download progress report failed: %s", exc
+            )
+
     return UpdateJobRunner(
-        job_store=FileJobStateStore(job_state_path()),
+        job_store=store,
         backup=SnapshotBackupAdapter(),
         bundle=ReleaseBundleInstallAdapter(
             deploy_dir,
             github_repo=gh.repo or "",
             token=gh.token,
+            on_download_progress=report_download,
         ),
         deps=PipDepsSyncAdapter(
             deploy_dir,

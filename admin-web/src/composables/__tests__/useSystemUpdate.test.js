@@ -400,11 +400,13 @@ describe('useSystemUpdate', () => {
     expect(job.value.stage).toBe('fetching_bundle')
     expect(jobStageLabel.value).toBe('正在下载发行包')
 
-    // Brief main-service restart: keep polling.
-    await vi.advanceTimersByTimeAsync(1000)
+    // 下载阶段多一条 500ms 的附加轮询：第一次就撞上网断，作业本身不受影响。
+    await vi.advanceTimersByTimeAsync(500)
     expect(jobPolling.value).toBe(true)
+    expect(job.value.stage).toBe('fetching_bundle')
 
-    await vi.advanceTimersByTimeAsync(1000)
+    // 1s 的常规轮询拿到 installing。
+    await vi.advanceTimersByTimeAsync(500)
     expect(job.value.stage).toBe('installing')
     expect(jobStageLabel.value).toBe('正在安装发行包')
 
@@ -413,6 +415,60 @@ describe('useSystemUpdate', () => {
     expect(jobPolling.value).toBe(false)
     expect(STAGE_LABELS.succeeded).toBeTruthy()
     expect(showAlert).toHaveBeenCalledWith('success', expect.stringContaining('成功'))
+  })
+
+  it('下载发行包阶段额外每 500ms 拉一次进度，离开该阶段就不再加密轮询', async () => {
+    vi.useFakeTimers()
+    apiPost.mockResolvedValue({
+      success: true,
+      accepted: true,
+      job: { stage: 'queued', target_tag: 'v0.2.0', message: 'queued' },
+    })
+    apiGet.mockResolvedValue({
+      success: true,
+      job: {
+        stage: 'fetching_bundle',
+        target_tag: 'v0.2.0',
+        message: 'downloading',
+        log_path: 'data/update_job.log',
+        download: {
+          asset: 'luyun-release-bundle.tar.gz',
+          attempt: 1,
+          done_bytes: 1024,
+          total_bytes: 4096,
+          bytes_per_second: 512,
+        },
+      },
+    })
+
+    const { openApplyConfirm, confirmApply, job } = useSystemUpdate({
+      showAlert: vi.fn(),
+      clearAlert: vi.fn(),
+      // 常规轮询给足 60s，确保下面数到的全是下载阶段的附加轮询。
+      pollIntervalMs: 60_000,
+    })
+
+    openApplyConfirm('v0.2.0')
+    await confirmApply()
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(job.value.download.done_bytes).toBe(1024)
+    const afterKick = apiGet.mock.calls.length
+
+    await vi.advanceTimersByTimeAsync(500)
+    await vi.advanceTimersByTimeAsync(500)
+    expect(apiGet.mock.calls.length).toBe(afterKick + 2)
+
+    // 进入安装阶段：附加轮询必须停，回到 60s 的常规节奏。
+    apiGet.mockResolvedValue({
+      success: true,
+      job: { stage: 'installing', target_tag: 'v0.2.0', message: 'switch' },
+    })
+    await vi.advanceTimersByTimeAsync(500)
+    expect(job.value.stage).toBe('installing')
+    const afterLeave = apiGet.mock.calls.length
+    await vi.advanceTimersByTimeAsync(500)
+    expect(apiGet.mock.calls.length).toBe(afterLeave)
   })
 
   it('labels bundle Update Job stages for Admin polling', () => {

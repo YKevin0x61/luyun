@@ -18,10 +18,13 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+from collections import deque
+from datetime import datetime
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Any, Callable, Deque, Dict, Optional, Tuple
 
 from config import settings
+from database import CHINA_TZ
 from services import backup_service
 from services.playwright_env import (
     BrowserCacheStatus,
@@ -63,10 +66,128 @@ DOWNLOAD_ATTEMPTS = 5
 DOWNLOAD_BACKOFF_SECONDS = 2.0  # 2 / 4 / 8 / 16 秒
 DOWNLOAD_TIMEOUT_SECONDS = 120  # 单次尝试的 socket 超时（不是总时长）
 DOWNLOAD_CHUNK_BYTES = 256 * 1024
+# 下载进度：门店弱网一单能下几分钟，管理员要能看出「在动、多快、还剩多少」。
+# 0.5s 上报一次足够人眼看出速率变化，又不会把状态文件写得过密（作业进程独占它）。
+DOWNLOAD_PROGRESS_INTERVAL_SECONDS = 0.5
+# 速率用滑动窗口而不是「上次回调到这次」的瞬时值：分块大小固定、网络有抖动，
+# 单段差分会在几十 KB/s 到几 MB/s 之间跳，看不出真实带宽。
+DOWNLOAD_RATE_WINDOW_SECONDS = 3.0
 
 
 class _DownloadIncomplete(RuntimeError):
     """一次尝试读到了 0 字节 —— 交给 `_download_asset` 的退避循环重试，不直接冒到作业层。"""
+
+
+class _DownloadRateMeter:
+    """滚动窗口速率表：窗口内首末样点的字节差 / 时间差。
+
+    只依赖调用方传入的单调时间戳，自身不读时钟 —— 单测可以直接喂时间轴。
+    """
+
+    def __init__(self, window_seconds: float = DOWNLOAD_RATE_WINDOW_SECONDS) -> None:
+        self._window = float(window_seconds)
+        self._samples: Deque[Tuple[float, int]] = deque()
+
+    def observe(self, now: float, done_bytes: int) -> None:
+        self._samples.append((now, int(done_bytes)))
+        while len(self._samples) > 2 and now - self._samples[0][0] > self._window:
+            self._samples.popleft()
+
+    def rate(self) -> Optional[float]:
+        """字节/秒；样点不足或时间不前进时返回 None（调用方显示「计算中」）。"""
+        if len(self._samples) < 2:
+            return None
+        (t0, b0), (t1, b1) = self._samples[0], self._samples[-1]
+        elapsed = t1 - t0
+        if elapsed <= 0:
+            return None
+        return max(0.0, (b1 - b0) / elapsed)
+
+
+def _header_value(resp: Any, name: str) -> Optional[str]:
+    """从 urlopen 的响应里取一个头；测试桩没有 headers 时返回 None 而不是炸。"""
+    headers = getattr(resp, "headers", None)
+    if headers is None:
+        return None
+    try:
+        value = headers.get(name)
+    except Exception:  # noqa: BLE001 - 头缺失/畸形只影响百分比，不该影响下载
+        return None
+    return str(value) if value is not None else None
+
+
+def _response_total_bytes(resp: Any, *, resume_offset: int) -> Optional[int]:
+    """整份资产的字节数（用于百分比），拿不到就返回 None。
+
+    续传响应（206）的 `Content-Length` 只是**这次**要传的剩余长度，所以先看
+    `Content-Range: bytes 100-999/1000` 里的总长；没有这个头才用
+    `resume_offset + Content-Length` 退而求其次。
+    """
+    content_range = _header_value(resp, "Content-Range")
+    if content_range and "/" in content_range:
+        _, _, tail = content_range.partition("/")
+        tail = tail.strip()
+        if tail and tail != "*":
+            try:
+                total = int(tail)
+            except ValueError:
+                total = None
+            if total is not None and total >= 0:
+                return total
+    raw = _header_value(resp, "Content-Length")
+    if raw is None:
+        return None
+    try:
+        length = int(raw.strip())
+    except (TypeError, ValueError):
+        return None
+    if length < 0:
+        return None
+    return length + max(0, int(resume_offset))
+
+
+class _ProgressReporter:
+    """把「下到哪了」节流写进作业状态；回调失败只记日志，不打断下载。"""
+
+    def __init__(
+        self,
+        *,
+        callback: Optional[Callable[[Optional[Dict[str, Any]]], None]],
+        name: str,
+        attempt: int,
+        total_bytes: Optional[int],
+    ) -> None:
+        self._callback = callback
+        self._name = name
+        self._attempt = attempt
+        self._total_bytes = total_bytes
+        self._last_emit = float("-inf")
+
+    def tick(
+        self,
+        done_bytes: int,
+        *,
+        rate: Optional[float] = None,
+        force: bool = False,
+    ) -> None:
+        if self._callback is None:
+            return
+        now = time.monotonic()
+        if not force and (now - self._last_emit) < DOWNLOAD_PROGRESS_INTERVAL_SECONDS:
+            return
+        self._last_emit = now
+        payload: Dict[str, Any] = {
+            "asset": self._name,
+            "attempt": int(self._attempt),
+            "done_bytes": int(done_bytes),
+            "total_bytes": self._total_bytes,
+            "bytes_per_second": None if rate is None else round(float(rate), 1),
+            "updated_at": datetime.now(CHINA_TZ).isoformat(),
+        }
+        try:
+            self._callback(payload)
+        except Exception as exc:  # noqa: BLE001 - 进度上报绝不影响更新本身
+            logger.warning("Update Job download progress report failed: %s", exc)
 
 # Shop state that must survive atomic application-tree swap (never from the bundle).
 _PRESERVE_DIR_NAMES = ("data", ".venv", "venv", "secrets")
@@ -99,12 +220,16 @@ class ReleaseBundleInstallAdapter:
         *,
         github_repo: str,
         token: Optional[str],
+        on_download_progress: Optional[Callable[[Optional[Dict[str, Any]]], None]] = None,
     ) -> None:
         self._deploy = Path(deploy_dir)
         self._github_repo = github_repo
         self._token = (token or "").strip() or None
         self._staging: Optional[tempfile.TemporaryDirectory] = None
         self._verified_bundle: Optional[Path] = None
+        # 进度回调由作业入口注入（写进 Update Job 状态文件）；None 表示不上报，
+        # 下载本身与冷启动校验都不受影响。
+        self._on_download_progress = on_download_progress
 
     def fetch_bundle(self, tag: str) -> None:
         """Download bundle + SHA256SUMS and hard-fail on integrity problems."""
@@ -115,7 +240,9 @@ class ReleaseBundleInstallAdapter:
         stage_path = Path(staging.name)
         bundle_path = stage_path / BUNDLE_ASSET
         sums_path = stage_path / CHECKSUMS_ASSET
-        self._download_asset(tag, BUNDLE_ASSET, bundle_path)
+        # 只有发行包本身值得展示进度：SHA256SUMS 只有几百字节，为它刷一次 0%→100%
+        # 只会让界面跳一下。
+        self._download_asset(tag, BUNDLE_ASSET, bundle_path, report_progress=True)
         try:
             self._download_asset(tag, CHECKSUMS_ASSET, sums_path)
         except RuntimeError as exc:
@@ -240,11 +367,22 @@ class ReleaseBundleInstallAdapter:
         base = (settings.RELEASE_DOWNLOAD_BASE or "").strip().rstrip("/")
         return base or "https://github.com"
 
-    def _download_asset(self, tag: str, name: str, dest: Path) -> None:
+    def _download_asset(
+        self,
+        tag: str,
+        name: str,
+        dest: Path,
+        *,
+        report_progress: bool = False,
+    ) -> None:
         """把一份 Release 资产拉到 `dest`：分块写、失败从已下载处续传、退避重试。
 
         返回时文件**只保证是完整读到的**（字节数 > 0），完整性由调用方的
         `verify_bundle_checksum` 按 SHA256SUMS 硬校验 —— 续传错位会被那一步抓住。
+
+        `report_progress=True` 时按 `DOWNLOAD_PROGRESS_INTERVAL_SECONDS` 节流回调
+        `on_download_progress`；进度只是观测，回调抛异常一律吞掉，绝不让界面问题
+        把更新作业拉失败（弱网门店已经够难了）。
         """
         url = f"{self._download_base()}/{self._github_repo}/releases/download/{tag}/{name}"
         last_exc: Optional[BaseException] = None
@@ -264,6 +402,17 @@ class ReleaseBundleInstallAdapter:
                     resume = bool(done) and getattr(resp, "status", 200) == 206
                     if not resume:
                         done = 0
+                    metre: Optional[_DownloadRateMeter] = None
+                    reporter: Optional[_ProgressReporter] = None
+                    if report_progress:
+                        metre = _DownloadRateMeter()
+                        reporter = _ProgressReporter(
+                            callback=self._on_download_progress,
+                            name=name,
+                            attempt=attempt,
+                            total_bytes=_response_total_bytes(resp, resume_offset=done),
+                        )
+                        reporter.tick(done, force=True)
                     with dest.open("ab" if resume else "wb") as handle:
                         while True:
                             chunk = resp.read(DOWNLOAD_CHUNK_BYTES)
@@ -271,6 +420,11 @@ class ReleaseBundleInstallAdapter:
                                 break
                             handle.write(chunk)
                             done += len(chunk)
+                            if metre is not None and reporter is not None:
+                                metre.observe(time.monotonic(), done)
+                                reporter.tick(done, rate=metre.rate())
+                    if metre is not None and reporter is not None:
+                        reporter.tick(done, force=True, rate=metre.rate())
                 if done <= 0:
                     raise _DownloadIncomplete(f"downloaded 0 bytes for {name}")
                 logger.info(

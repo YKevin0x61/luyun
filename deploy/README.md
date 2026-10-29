@@ -180,7 +180,7 @@ cp deploy/.env.docker.example deploy/.env.docker   # 按需改端口/目录
 |---|---|
 | `queued` | 已记录意图，oneshot / Docker 旁路作业待跑/刚启动 |
 | `backing_up` | **强制备份**（失败则不改动线上应用树） |
-| `fetching_bundle` | 下载发行包 + `SHA256SUMS` 并硬校验 |
+| `fetching_bundle` | 下载发行包 + `SHA256SUMS` 并硬校验。下载期间作业把实时进度写进状态文件的 `download` 字段（`done_bytes` / `total_bytes` / `bytes_per_second` / `attempt`），管理后台据此显示进度条与速率；离开本阶段即清空 |
 | `installing` | 旁路解压后原子切换（保留上一版目录；不覆盖 `data/` / 凭据） |
 | `syncing_deps` | 仅当 `requirements_fingerprint` 变化时 pip；随后幂等同步 Playwright 浏览器（失败只告警，不阻断更新） |
 | `applying_migrations` | 用**新树自己的**入口（`scripts/apply_db_migrations.py`）应用待执行迁移（ADR 0096）；没有待应用项时跳过，失败则作业失败并回滚代码树 |

@@ -222,6 +222,7 @@ class UpdateJobRunner:
                 finished_at=None,
                 cancel_requested=False,
                 restart_requested_at=_now_iso(),
+                download=None,
             )
             self._store.write(switched)
             try:
@@ -243,7 +244,10 @@ class UpdateJobRunner:
             return self._fail_with_rollback(self._store.read(), error=str(exc))
 
     def _set(self, base: UpdateJobState, stage: str, message: str) -> None:
-        self._store.write(replace(base, stage=stage, message=message))
+        # 下载进度只属于 fetching_bundle 这一刻：进到安装/依赖/迁移/重启，或任何
+        # 终止态，都必须清掉，否则页面会在新阶段继续显示一条停在 100% 的下载条。
+        download = base.download if stage == STAGE_FETCHING_BUNDLE else None
+        self._store.write(replace(base, stage=stage, message=message, download=download))
 
     def _fail_before_leave(self, state: UpdateJobState, *, error: str) -> UpdateJobState:
         """Abort without changing the live application tree (e.g. backup/checksum)."""
@@ -258,6 +262,7 @@ class UpdateJobRunner:
             finished_at=_now_iso(),
             rollback_attempted=False,
             rollback_ok=None,
+            download=None,
         )
         self._store.write(final)
         return final
@@ -293,6 +298,7 @@ class UpdateJobRunner:
             rollback_attempted=True,
             rollback_ok=rollback_ok,
             cancel_requested=cancelled or state.cancel_requested,
+            download=None,
         )
         # Write terminal failure before restart — same Docker self-kill hazard.
         self._store.write(final)

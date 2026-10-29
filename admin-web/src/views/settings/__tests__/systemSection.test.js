@@ -727,8 +727,10 @@ describe('契约：本票只动展示层', () => {
     expect(source.match(/<style(?! scoped)/)).toBeNull()
   })
 
-  it('请求逻辑与迁移服务一字未改（git diff HEAD 为空）', () => {
-    // 本票只重排展示：composable 与 db_migrations 服务不在改动范围内。
+  it('数据库迁移服务一字未改（git diff HEAD 为空）', () => {
+    // 这条原本是「本票只重排展示」的旁证，清单里还有 useSystemUpdate.js。后来
+    // 「下载发行包要显示速率与进度」给 composable 加了下载阶段的附加轮询，那份
+    // 清单不再成立；迁移服务仍不属于任何展示改动范围，保护保留。
     // 只有"根本没有 git / 不是仓库"（预打包源码树）才跳过；CI 是 git 检出，会真跑这一条。
     let repo
     try {
@@ -741,7 +743,6 @@ describe('契约：本票只动展示层', () => {
     }
 
     const paths = [
-      'admin-web/src/composables/useSystemUpdate.js',
       'services/db_migrations.py',
     ]
     // 先证明 pathspec 真的命中仓库里的文件：`git diff` 对不匹配的 pathspec **静默**返回空，

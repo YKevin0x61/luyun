@@ -68,6 +68,11 @@ export const UNHEALTHY_NEXT_STEPS = [
 ]
 
 const DEFAULT_POLL_INTERVAL_MS = 2000
+/**
+ * 下载发行包阶段的附加轮询间隔：常规 2s 只够看到阶段切换，看不到速率怎么变；
+ * 那段（弱网门店可达几分钟）单独每 500ms 拉一次 `/job`，出进度条才有意义。
+ */
+const DOWNLOAD_POLL_INTERVAL_MS = 500
 const DEFAULT_RECHECK_INTERVAL_MS = 10_000
 const RECHECK_TICK_MS = 1000
 
@@ -128,6 +133,8 @@ export function useSystemUpdate({
   const jobPolling = ref(false)
   const cancelling = ref(false)
   let pollTimer = null
+  /** 下载阶段的附加快速轮询（一次性 setTimeout 链，随 stopPolling 一起清）。 */
+  let fastPollTimer = null
 
   /** 健康确认：手动重检的结果与状态。 */
   const healthChecking = ref(false)
@@ -262,7 +269,29 @@ export function useSystemUpdate({
       clearInterval(pollTimer)
       pollTimer = null
     }
+    if (fastPollTimer != null) {
+      clearTimeout(fastPollTimer)
+      fastPollTimer = null
+    }
     jobPolling.value = false
+  }
+
+  /**
+   * 下载发行包时的附加轮询：500ms 一次，只为让进度条与速率看起来是连续的。
+   *
+   * 只在下一次拉取**成功**且仍处于 fetching_bundle 时续链 —— 主服务正在重启时
+   * 请求会失败，那时刻不该以 500ms 频率去捅一个还没起来的服务，交给常规 2s 轮询。
+   */
+  function scheduleFastPoll() {
+    if (fastPollTimer != null) return
+    fastPollTimer = setTimeout(async () => {
+      fastPollTimer = null
+      if (!jobPolling.value) return
+      const ok = await pollJobOnce()
+      if (ok && jobPolling.value && job.value?.stage === 'fetching_bundle') {
+        scheduleFastPoll()
+      }
+    }, DOWNLOAD_POLL_INTERVAL_MS)
   }
 
   function stopAutoRecheck() {
@@ -339,6 +368,7 @@ export function useSystemUpdate({
     return runHealthCheck()
   }
 
+  /** @returns {Promise<boolean>} 这次拉取是否成功（失败时调用方不该加密轮询节奏）。 */
   async function pollJobOnce() {
     try {
       const data = await api.get('/api/release-update/job', null, null, 'no-store')
@@ -348,13 +378,13 @@ export function useSystemUpdate({
         stopPolling()
         stopAutoRecheck()
         showAlert('success', `应用更新成功：${job.value.target_tag || ''}`)
-        return
+        return true
       }
       if (stage === 'succeeded_but_unhealthy') {
         // 已切换但健康确认未通过：终态，保留日志与回退点，等操作者决定。
         stopPolling()
         stopAutoRecheck()
-        return
+        return true
       }
       if (stage === 'failed') {
         stopPolling()
@@ -362,14 +392,18 @@ export function useSystemUpdate({
         const reason = job.value?.error || '未知错误'
         const log = job.value?.log_path ? `（日志：${job.value.log_path}）` : ''
         showAlert('error', `应用更新失败：${reason}${log}`)
-        return
+        return true
       }
       // restarting 不是成功：继续轮询，并准备好冷却自动重检。
       if (stage === 'restarting' && autoRecheckActive.value) {
         startAutoRecheck()
       }
+      // 下载发行包：切到 500ms 的附加轮询，让进度与速率连续可见。
+      if (stage === 'fetching_bundle') scheduleFastPoll()
+      return true
     } catch (_) {
       // Brief main-service restart: keep polling until success/failure.
+      return false
     }
   }
 

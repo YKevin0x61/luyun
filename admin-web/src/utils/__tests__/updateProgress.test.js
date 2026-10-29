@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import { UPDATE_STEPS, stepSymbol, updateStageSteps } from '../updateProgress'
+import {
+  UPDATE_STEPS,
+  formatRate,
+  stepSymbol,
+  updateDownloadView,
+  updateStageSteps,
+} from '../updateProgress'
 
 const KEYS = UPDATE_STEPS.map((step) => step.key)
 
@@ -125,5 +131,86 @@ describe('stepSymbol', () => {
     expect(stepSymbol('active')).toBe('●')
     expect(stepSymbol('failed')).toBe('✗')
     expect(stepSymbol('pending')).toBe('○')
+  })
+})
+
+describe('formatRate', () => {
+  it('字节/秒按人类可读的速率显示', () => {
+    expect(formatRate(0)).toBe('0 B/s')
+    expect(formatRate(2048)).toBe('2.0 KB/s')
+    expect(formatRate(1.5 * 1024 * 1024)).toBe('1.50 MB/s')
+  })
+
+  it('非数值不硬编一个假速率', () => {
+    expect(formatRate(undefined)).toBe('')
+    expect(formatRate(null)).toBe('')
+    expect(formatRate('abc')).toBe('')
+    expect(formatRate(-1)).toBe('')
+  })
+})
+
+describe('updateDownloadView', () => {
+  const download = {
+    asset: 'luyun-release-bundle.tar.gz',
+    attempt: 1,
+    done_bytes: 2 * 1024 * 1024,
+    total_bytes: 8 * 1024 * 1024,
+    bytes_per_second: 1024 * 1024,
+    updated_at: '2026-10-30T01:00:00+08:00',
+  }
+
+  it('只在下载发行包阶段出现，其他阶段一律 null', () => {
+    expect(updateDownloadView({ stage: 'fetching_bundle', download })).not.toBeNull()
+    expect(updateDownloadView({ stage: 'installing', download })).toBeNull()
+    expect(updateDownloadView({ stage: 'fetching_bundle' })).toBeNull()
+    expect(updateDownloadView({ stage: 'fetching_bundle', download: {} })).toBeNull()
+    expect(updateDownloadView(null)).toBeNull()
+  })
+
+  it('有总量时给出百分比与「已下载 / 总量」', () => {
+    const view = updateDownloadView({ stage: 'fetching_bundle', download })
+    expect(view.percent).toBe(25)
+    expect(view.doneText).toBe('2.00 MB')
+    expect(view.totalText).toBe('8.00 MB')
+    expect(view.rateText).toBe('1.00 MB/s')
+    expect(view.indeterminate).toBe(false)
+    expect(view.ariaText).toContain('25%')
+    expect(view.ariaText).toContain('1.00 MB/s')
+  })
+
+  it('服务端没给 Content-Length 时只报已下载与速率，不编百分比', () => {
+    const view = updateDownloadView({
+      stage: 'fetching_bundle',
+      download: { ...download, total_bytes: null },
+    })
+    expect(view.percent).toBeNull()
+    expect(view.totalText).toBe('')
+    expect(view.indeterminate).toBe(true)
+    expect(view.doneText).toBe('2.00 MB')
+    expect(view.rateText).toBe('1.00 MB/s')
+    // 进度条走不确定动画，但读屏仍要说出「已下载多少」。
+    expect(view.ariaText).toContain('已下载 2.00 MB')
+  })
+
+  it('重试时标出第几次尝试，第一次不显示', () => {
+    expect(updateDownloadView({ stage: 'fetching_bundle', download }).attempt).toBeNull()
+    const retried = updateDownloadView({
+      stage: 'fetching_bundle',
+      download: { ...download, attempt: 3 },
+    })
+    expect(retried.attempt).toBe(3)
+  })
+
+  it('百分比夹在 0–100 之间，不因异常字节数溢出', () => {
+    const over = updateDownloadView({
+      stage: 'fetching_bundle',
+      download: { ...download, done_bytes: 99 * 1024 * 1024 },
+    })
+    expect(over.percent).toBe(100)
+    const negative = updateDownloadView({
+      stage: 'fetching_bundle',
+      download: { ...download, done_bytes: -1 },
+    })
+    expect(negative).toBeNull()
   })
 })

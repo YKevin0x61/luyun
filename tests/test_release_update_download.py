@@ -28,17 +28,27 @@ from unittest import mock
 from services.release_update.job_adapters import (
     DOWNLOAD_ATTEMPTS,
     ReleaseBundleInstallAdapter,
+    _DownloadRateMeter,
+    _response_total_bytes,
 )
 
 
 class _FakeResponse:
     """够用的 urlopen 返回物：分块吐字节，可选在读满 N 块之后抛 RemoteDisconnected。"""
 
-    def __init__(self, chunks=None, status: int = 200, drop_after: int | None = None):
+    def __init__(
+        self,
+        chunks=None,
+        status: int = 200,
+        drop_after: int | None = None,
+        headers: dict | None = None,
+    ):
         self._chunks = list(chunks or [])
         self._drop_after = drop_after
         self._index = 0
         self.status = status
+        # 下载进度要读 Content-Length / Content-Range；不传就是「服务端没给」。
+        self.headers = dict(headers or {})
 
     def read(self, _size: int = -1) -> bytes:
         if self._drop_after is not None and self._index >= self._drop_after:
@@ -150,6 +160,137 @@ class GiveUpTest(_DownloadTestCase):
 
         self.assertEqual(self.dest.read_bytes(), b"ok")
         self.assertEqual(urlopen.call_count, 2)
+
+
+class DownloadProgressTest(_DownloadTestCase):
+    """下载进度：界面要能看出「下到哪、多快」，而不是一直一个阶段名。"""
+
+    def _adapter_with(self, events):
+        self.adapter = ReleaseBundleInstallAdapter(
+            self.root,
+            github_repo="o/r",
+            token=None,
+            on_download_progress=events.append,
+        )
+        return self.adapter
+
+    def test_reports_done_and_total_from_content_length(self):
+        events = []
+        adapter = self._adapter_with(events)
+        response = _FakeResponse(
+            [b"ab", b"cd", b"ef"], status=200, headers={"Content-Length": "6"}
+        )
+        with self._patch_urlopen(response):
+            adapter._download_asset(
+                "v1", "bundle.tar.gz", self.dest, report_progress=True
+            )
+
+        self.assertTrue(events, "下载过程中至少要上报一次进度")
+        last = events[-1]
+        self.assertEqual(last["asset"], "bundle.tar.gz")
+        self.assertEqual(last["attempt"], 1)
+        self.assertEqual(last["done_bytes"], 6)
+        self.assertEqual(last["total_bytes"], 6)
+        self.assertIn("updated_at", last)
+        # 只有一次样点时算不出速率，允许 None；给了就必须是非负数。
+        rate = last["bytes_per_second"]
+        self.assertTrue(rate is None or rate >= 0)
+
+    def test_resumed_download_counts_total_from_content_range(self):
+        # 已经落了 6 字节，服务端回 206：本次只传 4 字节，但总量是 10。
+        self.dest.write_bytes(b"hello ")
+        events = []
+        adapter = self._adapter_with(events)
+        response = _FakeResponse(
+            [b"world"],
+            status=206,
+            headers={"Content-Length": "5", "Content-Range": "bytes 6-10/11"},
+        )
+        with self._patch_urlopen(response):
+            adapter._download_asset(
+                "v1", "bundle.tar.gz", self.dest, report_progress=True
+            )
+
+        last = events[-1]
+        self.assertEqual(last["done_bytes"], 11)
+        self.assertEqual(last["total_bytes"], 11)
+
+    def test_progress_is_off_by_default(self):
+        # SHA256SUMS 这类小文件不报进度（否则界面会为几百字节闪一次 0%→100%）。
+        events = []
+        adapter = self._adapter_with(events)
+        with self._patch_urlopen(_FakeResponse([b"x"], status=200)):
+            adapter._download_asset("v1", "SHA256SUMS", self.dest)
+
+        self.assertEqual(events, [])
+
+    def test_progress_callback_failure_never_breaks_the_download(self):
+        def boom(_info):
+            raise OSError("state file is locked")
+
+        self.adapter = ReleaseBundleInstallAdapter(
+            self.root, github_repo="o/r", token=None, on_download_progress=boom
+        )
+        response = _FakeResponse([b"payload"], status=200, headers={"Content-Length": "7"})
+        with self._patch_urlopen(response):
+            self.adapter._download_asset(
+                "v1", "bundle.tar.gz", self.dest, report_progress=True
+            )
+
+        self.assertEqual(self.dest.read_bytes(), b"payload")
+
+    def test_reports_a_retry_when_the_first_attempt_is_dropped(self):
+        events = []
+        adapter = self._adapter_with(events)
+        first = _FakeResponse(
+            [b"hello "], drop_after=1, headers={"Content-Length": "11"}
+        )
+        second = _FakeResponse(
+            [b"world"],
+            status=206,
+            headers={"Content-Length": "5", "Content-Range": "bytes 6-10/11"},
+        )
+        with self._patch_urlopen(first, second):
+            adapter._download_asset(
+                "v1", "bundle.tar.gz", self.dest, report_progress=True
+            )
+
+        attempts = sorted({event["attempt"] for event in events})
+        self.assertEqual(attempts, [1, 2])
+
+
+class DownloadProgressHelpersTest(unittest.TestCase):
+    def test_rate_meter_uses_a_rolling_window(self):
+        metre = _DownloadRateMeter(window_seconds=3.0)
+        metre.observe(0.0, 0)
+        metre.observe(1.0, 1000)
+        self.assertAlmostEqual(metre.rate(), 1000.0)
+
+        # 4 秒后：窗口里只保留最近的样点，速率仍按 1000 B/s。
+        metre.observe(4.0, 4000)
+        self.assertAlmostEqual(metre.rate(), 1000.0)
+
+        # 时间不前进算不出速率，不能除零给一个假值。
+        stalled = _DownloadRateMeter()
+        stalled.observe(1.0, 100)
+        stalled.observe(1.0, 200)
+        self.assertIsNone(stalled.rate())
+
+    def test_total_bytes_prefers_content_range_over_length(self):
+        resume = _FakeResponse(
+            status=206,
+            headers={"Content-Length": "5", "Content-Range": "bytes 6-10/11"},
+        )
+        self.assertEqual(_response_total_bytes(resume, resume_offset=6), 11)
+
+    def test_total_bytes_falls_back_to_length_plus_resume_offset(self):
+        resume = _FakeResponse(status=206, headers={"Content-Length": "5"})
+        self.assertEqual(_response_total_bytes(resume, resume_offset=6), 11)
+
+    def test_total_bytes_is_none_without_headers(self):
+        self.assertIsNone(_response_total_bytes(_FakeResponse(), resume_offset=0))
+        bad = _FakeResponse(headers={"Content-Length": "not-a-number"})
+        self.assertIsNone(_response_total_bytes(bad, resume_offset=0))
 
 
 class DownloadBaseTest(_DownloadTestCase):
