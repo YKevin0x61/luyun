@@ -1,5 +1,6 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue'
+import LuyunDatePicker from '../components/ui/LuyunDatePicker.vue'
 import { api } from '../api/client'
 import { workbenchDocumentTitle } from '../utils/workbenchCopy'
 
@@ -78,7 +79,14 @@ onMounted(load)
       </div>
       <label class="pr-date">
         <span>日期</span>
-        <input v-model="day" type="date" @change="load" />
+        <!-- 站内日期组件（2026-10-13 全站统一口径）：原生 `<input type=date>` 的显示
+             格式跟**浏览器界面语言**走（中文机 `yyyy/mm/dd`、英文机 `mm/dd/yyyy`）。 -->
+        <LuyunDatePicker
+          v-model="day"
+          placeholder="选择日期"
+          aria-label="复盘日期"
+          @update:model-value="load"
+        />
       </label>
     </header>
 
@@ -167,6 +175,15 @@ onMounted(load)
   border: 1px solid var(--line);
   border-radius: 6px;
   font: inherit;
+}
+
+/* 日期组件替掉原生 date（2026-10-13 全站统一口径）之后尺寸要自己补：上面那几条
+   `.pr-date input` 只作用于原生控件，组件渲染的是 `.dp--input`。宽度给死，别让它在
+   flex 行里把页头撑开；底色 / 边框 / 文字色由共享表给。 */
+.pr-date :deep(.luyun-date-picker .dp--input) {
+  width: 132px;
+  font: inherit;
+  font-size: 13px;
 }
 
 .pr-summary,

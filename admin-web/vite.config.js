@@ -94,5 +94,8 @@ export default defineConfig({
   test: {
     environment: 'node',
     include: ['src/**/__tests__/**/*.test.js'],
+    // Node 22+ 的全局 `localStorage` 是未启用的实验性访问器（取出来是 undefined），
+    // jsdom 那份搬不上 globalThis —— 垫片把 window 的 storage 显式装回去（见文件头）。
+    setupFiles: ['./src/test/setupDomStorage.js'],
   },
 })

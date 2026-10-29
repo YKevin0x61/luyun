@@ -1463,7 +1463,7 @@ class HygieneFixTicketTest(unittest.IsolatedAsyncioTestCase):
         passed = await self.work.accept_fix(other, later["id"])
         self.assertEqual(passed["status"], "已通过")
 
-    async def test_disabled_opener_still_blocks_others_until_deadline(self):
+    async def test_resigned_opener_still_blocks_others_until_deadline(self):
         from services.hygiene.accounts import EmployeeAccounts
 
         accounts = EmployeeAccounts(self.db, now=lambda: self.fixed_now)
@@ -1476,7 +1476,7 @@ class HygieneFixTicketTest(unittest.IsolatedAsyncioTestCase):
         await self.work.reshoot_fix(
             _staff(10, DAY_PHONE, "白班"), opened["id"], self._live(RESHOOT_A)
         )
-        await accounts.disable(opener_row["id"])
+        await accounts.resign(opener_row["id"], "2026-09-01")
 
         listed = await self.work.list_fix_tickets(other)
         still_open = next(ticket for ticket in listed if ticket["id"] == opened["id"])
@@ -1484,7 +1484,7 @@ class HygieneFixTicketTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(still_open["opener_id"], opener_row["id"])
         roster = await accounts.list_roster()
         self.assertEqual(len(roster), 1)
-        self.assertTrue(roster[0]["disabled"])
+        self.assertTrue(roster[0]["resigned"])
         self.assertEqual(roster[0]["phone"], ADMIN_PHONE)
 
         self.fixed_now = datetime(2026, 9, 13, 11, 0, tzinfo=CHINA_TZ)

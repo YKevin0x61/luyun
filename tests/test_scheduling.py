@@ -787,8 +787,14 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
 
         detail = await self.store.my_day(TODAY)
 
+        # `next_day_locked` / `leave_lead_days` 是 2026-10-29 的申请规矩（22:00 之后次日
+        # 提不了、2 天以上的假提前 7 天）：它们是「现在几点」这种状态，不是店长的管理字段。
         self.assertEqual(
-            set(detail), {"business_date", "today", "groups", "total", "off_count", "off_people"}
+            set(detail),
+            {
+                "business_date", "today", "groups", "total", "off_count", "off_people",
+                "next_day_locked", "leave_lead_days",
+            },
         )
         for group in detail["groups"]:
             self.assertEqual(set(group), {"shift_id", "shift_name", "count", "people"})
@@ -927,7 +933,8 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
         rester = await self._employee("13800138002", "王五")
         day = await self._shift_id("白班")
         await self.store.set_rule(leaver["id"], [day])
-        await self.store.set_rule(rester["id"], [day, None])  # 9/25 本来就休
+        # 第一天本来就休（周期 [白班, 休] 从今天起算，10/1 那天正好轮休）。
+        await self.store.set_rule(rester["id"], [day, None])
         request = await self.store.submit_leave(leaver["id"], "2026-09-25")
 
         await self.store.approve_request(request["id"])
@@ -1013,7 +1020,7 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
         pending = await self.accounts.register("13800138004", PASSWORD, "钱七")
         day = await self._shift_id("白班")
         await self.store.set_rule(configured["id"], [day])
-        await self.accounts.disable(gone["id"])
+        await self.accounts.resign(gone["id"], "2026-09-10")
 
         grid = await self.store.week_grid(TODAY)
 
@@ -1026,7 +1033,7 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
             {row["id"] for row in grid["employees"]},
             {configured["id"], ruleless["id"]},
         )
-        self.assertEqual(grid["excluded"], {"disabled": 1, "pending": 1})
+        self.assertEqual(grid["excluded"], {"resigned": 1, "pending": 1})
         self.assertEqual(pending["id"] not in {row["id"] for row in grid["employees"]}, True)
         # 没配规则的人整周都是「还没有你的班」，不是「休」。
         self.assertEqual(
@@ -1054,7 +1061,7 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
             [row["has_rule"] for row in grid["employees"]], [True, True]
         )
 
-    async def test_a_disabled_employee_leaves_every_read_side_at_once(self):
+    async def test_a_resigned_employee_leaves_every_read_side_at_once(self):
         """离职的人不该再算「上班」：月历人数、当日名单、员工看到的全店人数同一口径。
 
         停用只改花名册（`EmployeeAccounts.disable` 不删 `staff_assignments` 的行），
@@ -1069,7 +1076,7 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
         await self.store.set_rule(gone["id"], [day])
         await self.store.expand()
 
-        await self.accounts.disable(gone["id"])
+        await self.accounts.resign(gone["id"], "2026-09-10")
 
         calendar = await self.store.month_calendar("2026-09")
         cell = [item for item in calendar["days"] if item["business_date"] == TODAY][0]
@@ -1097,7 +1104,7 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
             [1],
         )
         # 停用不清行：重新启用之后他立刻回到名单与人数里（历史行一直还在）。
-        await self.accounts.enable(gone["id"])
+        await self.accounts.cancel_resignation(gone["id"])
         self.assertEqual((await self.store.day_detail(TODAY))["total"], 2)
         after_cells = {
             item["business_date"]: item
@@ -2330,8 +2337,9 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
         await self.store.set_rule(employee["id"], [day])
         before = await self._full_rows(employee["id"])
 
+        # 2 天以上的假要提前 7 天（2026-10-29 用户裁定）：从 10/1 起请，离 9/24 正好 7 天。
         request = await self.store.submit_leave(
-            employee["id"], "2026-09-28", "2026-09-29", "家里有事"
+            employee["id"], "2026-10-01", "2026-10-02", "家里有事"
         )
 
         self.assertEqual(request["kind"], "leave")
@@ -2343,7 +2351,7 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
                 request["note"],
                 request["decided_at"],
             ),
-            ("2026-09-28", "2026-09-29", "家里有事", None),
+            ("2026-10-01", "2026-10-02", "家里有事", None),
         )
         self.assertGreater(request["id"], 0)
         # 待批的申请不写排班：结果行快照（含 id）逐字节不变，也没有覆盖记录。
@@ -2362,6 +2370,73 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             (request["start_date"], request["end_date"]),
             ("2026-09-28", "2026-09-28"),
+        )
+
+    async def test_after_ten_pm_tomorrow_cannot_be_asked(self):
+        """22:00 之后不能再提次日的假或换班（2026-10-29 用户裁定）；当天的假照旧提得了。
+
+        截止是「那一天的前一晚 22:00」：21:59 仍能提明天，22:00 整就关闸；后天起不受影响。
+        同一天的假永远能提 —— 生病没法提前请，这条口子要留着。
+        """
+        employee = await self._employee()
+        peer = await self._employee("13800138001", "李四")
+        day = await self._shift_id("白班")
+        await self.store.set_rule(employee["id"], [day])
+        await self.store.set_rule(peer["id"], [day])
+
+        # 21:59：明天的假、明天的换班都还提得了。
+        self.fixed_now = datetime(2026, 9, 24, 21, 59, tzinfo=CHINA_TZ)
+        self.assertEqual(
+            (await self.store.submit_leave(employee["id"], "2026-09-25"))["start_date"],
+            "2026-09-25",
+        )
+        self.assertEqual(
+            (await self.store.submit_swap(employee["id"], peer["id"], "2026-09-25"))["status"],
+            "pending_peer",
+        )
+
+        # 22:00：次日的两件事一起关闸，报「现在最早能提的那一天」（后天）。
+        self.fixed_now = datetime(2026, 9, 24, 22, 0, tzinfo=CHINA_TZ)
+        with self.assertRaises(SchedulingError) as leave:
+            await self.store.submit_leave(employee["id"], "2026-09-25")
+        self.assertEqual(leave.exception.code, "next_day_locked")
+        self.assertEqual(leave.exception.args[0], "2026-09-26")
+        with self.assertRaises(SchedulingError) as swap:
+            await self.store.submit_swap(employee["id"], peer["id"], "2026-09-25")
+        self.assertEqual(swap.exception.code, "next_day_locked")
+
+        # 后天起照常；当天（临时生病）也照常。
+        self.assertEqual(
+            (await self.store.submit_leave(employee["id"], "2026-09-26"))["start_date"],
+            "2026-09-26",
+        )
+        self.assertEqual(
+            (await self.store.submit_leave(employee["id"], "2026-09-24"))["start_date"],
+            "2026-09-24",
+        )
+
+    async def test_a_multi_day_leave_must_be_asked_seven_days_ahead(self):
+        """2 天以上的假要提前 7 天（2026-10-29 用户裁定）：卡在边界上试一次。
+
+        单日的假不受这一条管（它只被 22:00 那条截止管）；正好提前 7 天是收的。
+        """
+        employee = await self._employee()
+
+        # 2 天，从 +6 天起请：拒，并报最早能起请的那一天（+7）。
+        with self.assertRaises(SchedulingError) as too_soon:
+            await self.store.submit_leave(employee["id"], "2026-09-30", "2026-10-01")
+        self.assertEqual(too_soon.exception.code, "leave_too_soon")
+        self.assertEqual(too_soon.exception.args[0], "2026-10-01")
+
+        # 正好 +7 的 2 天：收。
+        self.assertEqual(
+            (await self.store.submit_leave(employee["id"], "2026-10-01", "2026-10-02"))["end_date"],
+            "2026-10-02",
+        )
+        # 单日 +1：这条规矩不管它（22:00 之前照常提）。
+        self.assertEqual(
+            (await self.store.submit_leave(employee["id"], "2026-09-25"))["start_date"],
+            "2026-09-25",
         )
 
     async def test_a_leave_request_validates_its_dates_and_note(self):
@@ -2397,21 +2472,29 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
         blank = await self.store.submit_leave(employee["id"], "2026-09-29", note="   ")
         self.assertIsNone(blank["note"])
 
-    async def test_a_range_that_starts_in_the_past_can_still_be_submitted(self):
-        """「过去请不了假」的基准是**末日**：一段从昨天跨到今天的申请提得了。
+    async def test_a_range_that_starts_in_the_past_is_now_blocked_by_the_lead_time(self):
+        """从昨天跨到今天的一段：以前提得了（只按末日判），现在先被「2 天以上提前 7 天」挡住。
 
-        批的时候只把今天以后那几天写进去，已经过去的那天进 `skipped_days`（票 07 的
-        「过去不改」）。这条钉住 `submit_leave` 里那道闸的基准 —— 改成 `first < today`
-        时既有用例全绿（它们都是单日，first == last），这段行为就没人守着。
+        2026-10-29 用户的裁定把这条路走死了：2 天以上的假必须从现在往后 7 天起，过去
+        的日子再也掺不进来。**「过去请不了假」的基准没有变**（仍是末日 `last < today`）
+        —— 这里用「单日今天」把那条边从另一侧钉住：first == last == today 照样提得了，
+        更早的单日仍然是 `past_leave`。
         """
         employee = await self._employee()
         await self.store.set_rule(employee["id"], [await self._shift_id("白班")])
 
-        request = await self.store.submit_leave(employee["id"], "2026-09-23", "2026-09-25")
-        result = await self.store.approve_request(request["id"])
+        with self.assertRaises(SchedulingError) as too_soon:
+            await self.store.submit_leave(employee["id"], "2026-09-23", "2026-09-25")
+        self.assertEqual(too_soon.exception.code, "leave_too_soon")
+        self.assertEqual(too_soon.exception.args[0], "2026-10-01")
 
-        self.assertEqual(result["applied_days"], ["2026-09-24", "2026-09-25"])
-        self.assertEqual(result["skipped_days"], ["2026-09-23"])
+        # 今天那一天仍然提得了（当天的假是「临时生病」那条口子）。
+        today_leave = await self.store.submit_leave(employee["id"], TODAY)
+        self.assertEqual(today_leave["start_date"], TODAY)
+        # 更早的单日：还是 past_leave（基准是末日，不是「整段都在过去」）。
+        with self.assertRaises(SchedulingError) as past:
+            await self.store.submit_leave(employee["id"], "2026-09-23")
+        self.assertEqual(past.exception.code, "past_leave")
 
     async def test_the_owner_can_take_back_a_request_that_is_not_decided(self):
         """验收 1 的后半句：撤回自己还没被批的申请；别人的、批过的都撤不动。"""
@@ -2449,7 +2532,8 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
         night = await self._shift_id("夜班")
         await self.store.set_rule(leaver["id"], [day])
         await self.store.set_rule(stayer["id"], [day])
-        await self.store.submit_leave(leaver["id"], "2026-09-28", "2026-09-29", "家里有事")
+        # 2 天以上的假要提前 7 天（2026-10-29 用户裁定）：从 10/1 起请。
+        await self.store.submit_leave(leaver["id"], "2026-10-01", "2026-10-02", "家里有事")
 
         inbox = await self.store.inbox()
 
@@ -2459,11 +2543,11 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
         card = inbox["requests"][0]
         self.assertEqual(
             (card["employee_name"], card["note"], card["start_date"], card["end_date"]),
-            ("李四", "家里有事", "2026-09-28", "2026-09-29"),
+            ("李四", "家里有事", "2026-10-01", "2026-10-02"),
         )
         self.assertEqual(
             [item["business_date"] for item in card["days"]],
-            ["2026-09-28", "2026-09-29"],
+            ["2026-10-01", "2026-10-02"],
         )
         for item in card["days"]:
             with self.subTest(day=item["business_date"]):
@@ -2507,7 +2591,7 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
         await self.store.set_rule(rester["id"], [day, None])  # 9/25 本来就休
         await self.store.set_rule(stayer["id"], [day])
         request = await self.store.submit_leave(
-            leaver["id"], "2026-09-25", "2026-09-26", "家里有事"
+            leaver["id"], "2026-10-01", "2026-10-02", "家里有事"
         )
         rester_before = await self._full_rows(rester["id"])
 
@@ -2515,7 +2599,7 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             (approved["status"], approved["applied_days"], approved["skipped_days"]),
-            ("approved", ["2026-09-25", "2026-09-26"], []),
+            ("approved", ["2026-10-01", "2026-10-02"], []),
         )
         self.assertIsNotNone(approved["decided_at"])
         # 覆盖记录是「这天为什么没有班」的唯一判据：kind=leave、班次与区都是空。
@@ -2529,7 +2613,7 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
                     "zone_id": None,
                     "kind": "leave",
                 }
-                for day_key in ("2026-09-25", "2026-09-26")
+                for day_key in ("2026-10-01", "2026-10-02")
             ],
         )
         # 结果行照旧走票 07 那条路：没有班次，来源是覆盖。
@@ -2537,11 +2621,11 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
             [
                 (row["shift_id"], row["source"])
                 for row in await self._rows(leaver["id"])
-                if row["business_date"] in ("2026-09-25", "2026-09-26")
+                if row["business_date"] in ("2026-10-01", "2026-10-02")
             ],
             [(None, "override"), (None, "override")],
         )
-        first = await self.store.day_detail("2026-09-25")
+        first = await self.store.day_detail("2026-10-01")
         self.assertEqual([person["name"] for person in first["groups"][0]["people"]], ["赵六"])
         self.assertEqual((first["total"], first["off_count"]), (1, 2))
         # 两位「这天没有班」的人：请假的 leave=True，本来就休的 leave=False。
@@ -2550,7 +2634,7 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
             {"李四": (True, True), "王五": (False, False)},
         )
         # 第二天王五本来就上班：请假只盖住申请的那几天，不碰别人、也不碰别的日子。
-        second = await self.store.day_detail("2026-09-26")
+        second = await self.store.day_detail("2026-10-02")
         self.assertEqual(
             [person["name"] for person in second["groups"][0]["people"]], ["王五", "赵六"]
         )
@@ -2559,19 +2643,21 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(SchedulingError) as again:
             await self.store.approve_request(request["id"])
         self.assertEqual(again.exception.code, "request_not_pending")
-        # 员工页与员工月历上，那天是「请假」而不是「休」。
+        # 员工页与员工月历上，那天是「请假」而不是「休」。`my_days` 是从**今天**起往后
+        # 看的那几格：把钟挪到那一天，10/1 才在窗口里（批的时候还是 9/24）。
+        self.fixed_now = datetime(2026, 10, 1, 10, 0, tzinfo=CHINA_TZ)
         mine = await self.store.my_days(leaver["id"])
         by_date = {item["business_date"]: item for item in mine["days"]}
         self.assertEqual(
             (
-                by_date["2026-09-25"]["leave"],
-                by_date["2026-09-25"]["shift_id"],
-                by_date["2026-09-25"]["scheduled"],
+                by_date["2026-10-01"]["leave"],
+                by_date["2026-10-01"]["shift_id"],
+                by_date["2026-10-01"]["scheduled"],
             ),
             (True, None, True),
         )
-        month = await self.store.my_month(leaver["id"], "2026-09")
-        cell = {item["business_date"]: item for item in month["days"]}["2026-09-25"]
+        month = await self.store.my_month(leaver["id"], "2026-10")
+        cell = {item["business_date"]: item for item in month["days"]}["2026-10-01"]
         self.assertTrue(cell["leave"])
 
     async def test_rejecting_a_leave_leaves_every_row_untouched(self):
@@ -2580,7 +2666,8 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
         day = await self._shift_id("白班")
         await self.store.set_rule(employee["id"], [day])
         before = await self._full_rows(employee["id"])
-        request = await self.store.submit_leave(employee["id"], "2026-09-28", "2026-09-29")
+        # 2 天以上的假要提前 7 天（2026-10-29 用户裁定）：从 10/1 起请。
+        request = await self.store.submit_leave(employee["id"], "2026-10-01", "2026-10-02")
 
         rejected = await self.store.reject_request(request["id"])
 
@@ -2598,7 +2685,8 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
         owner = await self._employee("13800138001", "李四")
         other = await self._employee("13800138002", "王五")
         first = await self.store.submit_leave(owner["id"], "2026-09-28")
-        second = await self.store.submit_leave(owner["id"], "2026-09-29", "2026-09-30")
+        # 2 天的那条：要提前 7 天（2026-10-29 用户裁定），所以从 10/1 起。
+        second = await self.store.submit_leave(owner["id"], "2026-10-01", "2026-10-02")
         await self.store.reject_request(second["id"])
         self.fixed_now = datetime(2026, 9, 25, 10, 0, tzinfo=CHINA_TZ)
         await self.store.approve_request(first["id"])
@@ -2634,20 +2722,21 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
         employee = await self._employee()
         day = await self._shift_id("白班")
         await self.store.set_rule(employee["id"], [day])
-        request = await self.store.submit_leave(employee["id"], TODAY, "2026-09-25")
+        # 2 天以上的假要提前 7 天（2026-10-29 用户裁定）：从 10/1 起请，之后再让日子过去。
+        request = await self.store.submit_leave(employee["id"], "2026-10-01", "2026-10-02")
         before = await self._full_rows(employee["id"])
 
-        self.fixed_now = datetime(2026, 9, 26, 10, 0, tzinfo=CHINA_TZ)
+        self.fixed_now = datetime(2026, 10, 3, 10, 0, tzinfo=CHINA_TZ)
         approved = await self.store.approve_request(request["id"])
 
         self.assertEqual(
             (approved["status"], approved["applied_days"], approved["skipped_days"]),
-            ("approved", [], ["2026-09-24", "2026-09-25"]),
+            ("approved", [], ["2026-10-01", "2026-10-02"]),
         )
         self.assertEqual(await self._full_rows(employee["id"]), before)
         self.assertEqual(await self._overrides(), [])
         # 那两天他是上班的：「批了」只记在申请上，不假装改过历史。
-        detail = await self.store.day_detail("2026-09-25")
+        detail = await self.store.day_detail("2026-10-02")
         self.assertEqual(
             [person["name"] for person in detail["groups"][0]["people"]], ["张三"]
         )
@@ -2994,6 +3083,54 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
             "pending_peer",
         )
 
+    async def test_a_third_person_cannot_cut_in_on_a_pending_swap(self):
+        """A 与 B 那天还挂着一条换班（没批）时，C 来找 A 或 B 都不成立（2026-10-29 用户裁定）。
+
+        要挡住的是「一个人一天被卷进两件换班的事」：批下来 A 那天要同时对上两边的班，
+        店长那边也会收到两张交叉的卡。拒绝时还得说清「谁 和 谁、到哪一步了」——
+        前端拿这句话弹窗，光说一句「不行」等于没说。
+        """
+        first, second, day, _night = await self._two_people()
+        third = await self._employee(phone="13800138006", name="王五")
+        await self.store.set_rule(third["id"], [day])
+        request = await self.store.submit_swap(first["id"], second["id"], "2026-09-25")
+
+        for peer in (first, second):
+            with self.subTest(peer=peer["name"]):
+                with self.assertRaises(SchedulingError) as caught:
+                    await self.store.submit_swap(third["id"], peer["id"], "2026-09-25")
+                self.assertEqual(caught.exception.code, "peer_in_swap")
+                detail = caught.exception.args[0]
+                self.assertIn(first["name"], detail)
+                self.assertIn(second["name"], detail)
+                self.assertIn("还在等对方同意", detail)
+
+        # 对方点了同意、那条还挂在店长待办时，一样挡住；只是那句话换成「还在等店长批」。
+        await self.store.answer_swap(second["id"], request["id"], True)
+        with self.assertRaises(SchedulingError) as queued:
+            await self.store.submit_swap(third["id"], first["id"], "2026-09-25")
+        self.assertEqual(queued.exception.code, "peer_in_swap")
+        self.assertIn("还在等店长批", queued.exception.args[0])
+
+        # 换一天不受影响：挡的是「那天这个人」，不是「这个人」。
+        self.assertEqual(
+            (await self.store.submit_swap(third["id"], first["id"], "2026-09-26"))["status"],
+            "pending_peer",
+        )
+
+    async def test_a_pending_swap_stops_blocking_once_it_is_settled(self):
+        """拒绝了就放行：挡的是「还挂着」，不是「这天他们换过」。"""
+        first, second, day, _night = await self._two_people()
+        third = await self._employee(phone="13800138006", name="王五")
+        await self.store.set_rule(third["id"], [day])
+        request = await self.store.submit_swap(first["id"], second["id"], "2026-09-25")
+        await self.store.answer_swap(second["id"], request["id"], False)
+
+        self.assertEqual(
+            (await self.store.submit_swap(third["id"], first["id"], "2026-09-25"))["status"],
+            "pending_peer",
+        )
+
     async def test_asking_again_is_refused_while_the_first_one_is_still_queued(self):
         """对方点头之后那条还挂在店长那儿：再提一条同人同日，店长会看到两张同一天的卡。"""
         first, second, day, night = await self._two_people()
@@ -3105,8 +3242,8 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
     async def test_colleagues_lists_only_the_people_at_work(self):
         """换班名单：不给自己、不给停用的、不给还没批准的，也不给手机号。"""
         first, second, day, night = await self._two_people()
-        disabled = await self._employee(phone="13800138003", name="王五")
-        await self.accounts.disable(disabled["id"])
+        resigned = await self._employee(phone="13800138003", name="王五")
+        await self.accounts.resign(resigned["id"], "2026-09-10")
         await self.accounts.register("13800138004", PASSWORD, "钱七")
 
         people = await self.store.colleagues(first["id"])

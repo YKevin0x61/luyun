@@ -24,7 +24,7 @@ from pydantic import BaseModel, Field
 
 from api.security import require_session
 from config import settings
-from database import CHINA_TZ
+from database import CHINA_TZ, get_db
 from services.business_day import business_date_of
 from db_core.errors import is_integrity_violation
 from services import auth_service
@@ -34,7 +34,7 @@ from services.hygiene.accounts import (
     normalize_phone,
 )
 from services.identity.capabilities import CAPABILITY_LABELS, STAFF_SIDE_CAPABILITIES
-from services.identity.profile import approve_gate
+from services.identity.profile import ProfileError, approve_gate, normalize_date
 from services.hygiene.archive import (
     KIND_DAILY,
     KIND_DEEP,
@@ -57,6 +57,7 @@ from services.hygiene.work import (
     HygieneWorkError,
 )
 from services.realtime.hub import realtime_hub
+from services.scheduling.store import SchedulingStore
 
 logger = logging.getLogger(__name__)
 
@@ -897,7 +898,7 @@ async def staff_login(
     result = await accounts.login(body.phone, body.password, remember=body.remember)
     if result is None:
         _record_staff_login_failure(keys)
-        raise HTTPException(status_code=401, detail="手机号或密码错误，或账号未批准、已停用")
+        raise HTTPException(status_code=401, detail="手机号或密码错误，或账号未批准、已离职")
     _clear_staff_login_failures(keys)
     _set_staff_cookie(response, result["session_id"], remember=body.remember)
     return {"success": True, "employee": result["employee"]}
@@ -1097,7 +1098,7 @@ async def admin_hr_reminders(
 # 路径是**单段**的 `/admin/roster-export.csv`：写成 `/admin/roster/export.csv` 会正好
 # 落进 `/admin/roster/{employee_id}` 的形状里（本仓 AGENTS.md 点过名的 FastAPI 顺序坑）。
 #
-# 行集合跟页面走：`filter` = 当前分段（all | missing | disabled，与页面分段同一口径），
+# 行集合跟页面走：`filter` = 当前分段（all | missing | resigned，与页面分段同一口径），
 # `q` = 搜索框里的关键字（姓名或手机号，空 = 不筛）—— 所见即所得。
 ROSTER_EXPORT_COLUMNS = [
     "姓名",
@@ -1120,8 +1121,12 @@ _ROSTER_SEGMENTS = {
     "全部": "all",
     "missing": "missing",
     "待补": "missing",
-    "disabled": "disabled",
-    "已停用": "disabled",
+    # 2026-10-29：员工状态从「停用」改成「离职」。旧的英文 id 与中文名继续认，
+    # 免得旧书签 / 旧导出链接一夜之间 400 —— 它们映射到同一段。
+    "resigned": "resigned",
+    "已离职": "resigned",
+    "disabled": "resigned",
+    "已停用": "resigned",
 }
 
 
@@ -1133,7 +1138,7 @@ def _roster_segment(raw: Optional[str]) -> str:
     if segment is None:
         raise HTTPException(
             status_code=400,
-            detail="分组只能是 all、missing 或 disabled",
+            detail="分组只能是 all、missing 或 resigned",
         )
     return segment
 
@@ -1141,20 +1146,20 @@ def _roster_segment(raw: Optional[str]) -> str:
 def _roster_export_rows(employees: list, segment: str, keyword: Optional[str]) -> list:
     """分段 + 关键字 → 要导出的行（与页面两个筛选器同一口径）。
 
-    * `all`      = 待批准 + 在职（**不含已停用**，页面上已停用默认隐藏）；
-    * `missing`  = 未停用且 `profile_incomplete`；
-    * `disabled` = `disabled`。
+    * `all`      = 待批准 + 在职（**不含已离职**，页面上已离职默认隐藏）；
+    * `missing`  = 在职且 `profile_incomplete`；
+    * `resigned` = 已离职（含「离职日期待补」那一批）。
     """
-    if segment == "disabled":
-        rows = [row for row in employees if row.get("disabled")]
+    if segment == "resigned":
+        rows = [row for row in employees if row.get("resigned")]
     elif segment == "missing":
         rows = [
             row
             for row in employees
-            if not row.get("disabled") and row.get("profile_incomplete")
+            if not row.get("resigned") and row.get("profile_incomplete")
         ]
     else:
-        rows = [row for row in employees if not row.get("disabled")]
+        rows = [row for row in employees if not row.get("resigned")]
     needle = (keyword or "").strip().lower()
     if needle:
         rows = [
@@ -1167,8 +1172,8 @@ def _roster_export_rows(employees: list, segment: str, keyword: Optional[str]) -
 
 
 def _roster_export_status(row: dict) -> str:
-    if row.get("disabled"):
-        return "已停用"
+    if row.get("resigned"):
+        return "已离职"
     return "已批准" if row.get("approved") else "待批准"
 
 
@@ -1208,7 +1213,7 @@ async def admin_roster_export_csv(
 ) -> Response:
     """花名册 CSV（管理端）。
 
-    参数：`filter`（`all` / `missing` / `disabled`，与页面分段同一个 id；票面用
+    参数：`filter`（`all` / `missing` / `resigned`，与页面分段同一个 id；旧名 `disabled` 也认；票面用
     `status` 写同一件事，两个名字都收）+ `q`（姓名或手机号关键字，空 = 不筛）。
     UTF-8 **带 BOM** + CRLF + RFC4180 引号转义（Excel 双击直接看，中文不乱码），
     文件名 `roster-YYYY-MM-DD.csv`（北京时）。
@@ -1288,31 +1293,64 @@ async def admin_approve(
     return {"employee": employee}
 
 
-@router.post("/admin/roster/{employee_id}/disable")
-async def admin_disable(
+class ResignRequest(BaseModel):
+    """登记离职的请求体（2026-10-29 取代「停用」）。"""
+
+    resigned_at: str = Field(..., description="离职日期 YYYY-MM-DD；允许将来")
+    dry_run: bool = Field(False, description="true = 只数会删掉几天排班，不写任何东西")
+
+
+@router.post("/admin/roster/{employee_id}/resign")
+async def admin_resign(
+    employee_id: int,
+    payload: ResignRequest,
+    _session_id: str = Depends(require_session),
+    accounts: EmployeeAccounts = Depends(_get_accounts),
+    db=Depends(get_db),
+) -> Dict[str, Any]:
+    """登记离职（2026-10-29 取代「停用」）：写日期 + 删离职日之后的排班 + 停轮转规则。
+
+    **先删排班、再落日期**，顺序不是随手定的：日期一落库这个人就按离职算了（不能登录、
+    不能再排班），而删排班要按「离职日之后」挑行 —— 先删、删成功了再落日期，任何一步
+    失败都不会留下「已离职但排班还在」的半截状态。
+
+    `dry_run=true` 只回「会删掉几天排班」（抽屉里那句确认用它），**一个字节都不写**。
+    """
+    try:
+        value = normalize_date(payload.resigned_at)
+    except ProfileError as exc:
+        raise HTTPException(status_code=400, detail="离职日期要写成 YYYY-MM-DD") from exc
+    if not value:
+        raise HTTPException(status_code=400, detail="请填离职日期")
+    store = SchedulingStore(db)
+    plan = await store.clear_after_resignation(employee_id, value, dry_run=True)
+    if payload.dry_run:
+        return {"dry_run": True, **plan}
+    await store.clear_after_resignation(employee_id, value, dry_run=False)
+    try:
+        employee = await accounts.resign(employee_id, value)
+    except EmployeeAccountsError as exc:
+        raise _http_error(exc) from exc
+    await _hygiene_nudge("roster", "resigned", employee_id=employee_id)
+    return {"employee": employee, **plan}
+
+
+@router.post("/admin/roster/{employee_id}/cancel-resignation")
+async def admin_cancel_resignation(
     employee_id: int,
     _session_id: str = Depends(require_session),
     accounts: EmployeeAccounts = Depends(_get_accounts),
 ) -> Dict[str, Any]:
+    """取消离职（清空日期回到在职）。
+
+    **不恢复**当初删掉的排班与停掉的轮转规则：删掉的行回不来，重铺是另一件事 ——
+    界面上那句「排班已删，需要重铺」就是这一步的收尾。
+    """
     try:
-        employee = await accounts.disable(employee_id)
+        employee = await accounts.cancel_resignation(employee_id)
     except EmployeeAccountsError as exc:
         raise _http_error(exc) from exc
-    await _hygiene_nudge("roster", "disabled", employee_id=employee_id)
-    return {"employee": employee}
-
-
-@router.post("/admin/roster/{employee_id}/enable")
-async def admin_enable(
-    employee_id: int,
-    _session_id: str = Depends(require_session),
-    accounts: EmployeeAccounts = Depends(_get_accounts),
-) -> Dict[str, Any]:
-    try:
-        employee = await accounts.enable(employee_id)
-    except EmployeeAccountsError as exc:
-        raise _http_error(exc) from exc
-    await _hygiene_nudge("roster", "enabled", employee_id=employee_id)
+    await _hygiene_nudge("roster", "resignation_cancelled", employee_id=employee_id)
     return {"employee": employee}
 
 

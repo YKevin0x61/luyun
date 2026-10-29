@@ -169,6 +169,12 @@ class Settings(BaseSettings):
     # 见 services/runtime_settings.py，可在「配置 → 运行配置」页面在线修改并热生效。
     RESTAURANT_BASE_URL: str = "https://restaurant.sealosgzg.site"
 
+    # 采集数据源：``cy7mm``（Playwright + cy7mm 报表接口，默认）或
+    # ``yintai``（移动银台 Pro 门店服务器 HTTP 接口，无需浏览器）。
+    # 注意：yintai 依赖门店 App 登录后下发的 accesskey，该值随登录轮换，
+    # 失效时需重新抓取，见 docs/pos/YINTAI_API.md。
+    SCRAPER_POS_SOURCE: str = "cy7mm"
+
     # 已结账单 / 对账 API
     SETTLED_BILL_API_TIMEOUT_MS: int = 30000
     SETTLED_BILL_API_MAX_RETRIES: int = 3

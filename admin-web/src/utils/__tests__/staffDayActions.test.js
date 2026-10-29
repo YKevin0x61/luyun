@@ -6,6 +6,7 @@ import {
   dayActions,
   incomingOnDay,
   leaveAction,
+  leaveRangeAction,
   monthOfDate,
   requestsOnDay,
   swapAction,
@@ -166,6 +167,45 @@ describe('换班能点谁：先点那天在班的人', () => {
   })
 })
 
+describe('那天休的人也能点来换（2026-10-29 用户裁定）', () => {
+  const groups = [
+    { shift_name: '白班', count: 2, people: [{ id: 7, name: '余威威', zone: '案板' }, { id: 8, name: '王五', zone: '明档' }] },
+  ]
+  const offPeople = [
+    { id: 9, name: '卢伟龙', leave: false },
+    { id: 10, name: '陆柏豪', leave: true },
+    { id: 7, name: '余威威', leave: false },
+  ]
+
+  it('休的人跟在班的人一起进名单，带上 off 标记', () => {
+    expect(swapCandidates(groups, 7, offPeople)).toEqual([
+      { id: 8, name: '王五', zone: '明档', shift_name: '白班' },
+      { id: 9, name: '卢伟龙', zone: '', shift_name: '', off: true },
+    ])
+  })
+
+  it('请假的人不进名单：批了换班会把他批过的假盖掉', () => {
+    expect(swapCandidates(groups, 7, offPeople).some((p) => p.id === 10)).toBe(false)
+  })
+
+  it('自己那天休，也不该出现在候选里', () => {
+    expect(swapCandidates(groups, 7, offPeople).some((p) => p.id === 7)).toBe(false)
+  })
+
+  it('不传休假名单照样能点（老样子：只出在班的人）', () => {
+    expect(swapCandidates(groups, 7).map((p) => p.id)).toEqual([8])
+  })
+
+  it('休的那一位在候选行上写「那天休」，不是一行空白', () => {
+    expect(candidateLine({ name: '卢伟龙', shift_name: '', off: true })).toBe('那天休')
+  })
+
+  it('预览说准：他那天休 → 他接你的班', () => {
+    expect(swapPreview({ shift_name: '早班' }, { name: '卢伟龙', shift_name: '', off: true }))
+      .toBe('卢伟龙那天休：批了 卢伟龙 接你的早班，你那天没班')
+  })
+})
+
 describe('选中一位同事之后那句「批了会怎样」', () => {
   const me = { shift_name: '白班' }
 
@@ -189,6 +229,53 @@ describe('选中一位同事之后那句「批了会怎样」', () => {
   it('两个人都没班也照实说，不装作换了什么', () => {
     expect(swapPreview({ shift_name: '' }, { name: '王五', shift_name: '' }))
       .toBe('两个人那天都没有班：批了也不改什么')
+  })
+})
+
+describe('22:00 之后不能提次日（2026-10-29 用户裁定）', () => {
+  const locked = { ...CTX, nextDayLocked: true }
+
+  it('明天的假与班都提不了，各说各的一句', () => {
+    expect(leaveAction(day('2026-10-06'), locked).reason).toBe('晚上 10 点过了，明天的假提不了')
+    expect(swapAction(day('2026-10-06'), locked).reason).toBe('晚上 10 点过了，明天的班换不了')
+  })
+
+  it('后天起照常：锁的只是「次日」那一天', () => {
+    expect(leaveAction(day('2026-10-07'), locked).ok).toBe(true)
+    expect(swapAction(day('2026-10-07'), locked).ok).toBe(true)
+  })
+
+  it('还没到 22:00（服务端没锁）时明天照常', () => {
+    expect(leaveAction(day('2026-10-06'), CTX).ok).toBe(true)
+    expect(swapAction(day('2026-10-06'), CTX).ok).toBe(true)
+  })
+
+  it('当天不受影响：临时生病那条口子留着', () => {
+    expect(leaveAction(day('2026-10-05'), locked).ok).toBe(true)
+  })
+})
+
+describe('2 天以上的假要提前 7 天（2026-10-29 用户裁定）', () => {
+  const ctx = { today: '2026-10-05', leaveLeadDays: 7 }
+
+  it('2 天、从 +6 起：拒，并报最早能起请的那天', () => {
+    expect(leaveRangeAction('2026-10-11', '2026-10-12', ctx)).toEqual({
+      ok: false,
+      reason: '请 2 天的假要提前 7 天：最早从 2026-10-12 起请',
+    })
+  })
+
+  it('正好 +7 的 2 天：收', () => {
+    expect(leaveRangeAction('2026-10-12', '2026-10-13', ctx).ok).toBe(true)
+  })
+
+  it('单日不看这一条（它只被 22:00 那条截止管）', () => {
+    expect(leaveRangeAction('2026-10-06', '2026-10-06', ctx).ok).toBe(true)
+    expect(leaveRangeAction('2026-10-06', '', ctx).ok).toBe(true)
+  })
+
+  it('服务端没下发提前量（老接口 / 老缓存）时这条不生效', () => {
+    expect(leaveRangeAction('2026-10-06', '2026-10-07', { today: '2026-10-05' }).ok).toBe(true)
   })
 })
 

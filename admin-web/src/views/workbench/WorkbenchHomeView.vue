@@ -202,9 +202,6 @@ useNudgePull({
         <span class="wbh-pill"><i class="wbh-led ok"></i>上班 <b>{{ summary.duty.total }}</b></span>
         <span v-if="summary.leaves" class="wbh-pill is-warn"><i class="wbh-led warn"></i>待批 <b>{{ summary.leaves }}</b></span>
       </div>
-      <div v-else-if="summary.view" class="wbh-pills">
-        <span class="wbh-pill">{{ summary.me ? summary.me.shift.headline : '—' }}</span>
-      </div>
     </header>
 
     <p v-if="!summary.view" class="wbh-wait">{{ state === 'loading' ? '正在确认身份…' : '身份还没定，稍后再看' }}</p>
@@ -313,8 +310,11 @@ useNudgePull({
       <p v-if="state !== 'ready'" class="wbh-wait">正在读你的班…</p>
       <template v-else>
       <!-- 我的班：卡片本体仍然整块点进「今天」页（测试挂点 `.wbh-me` 保持是那个链接）；
-           副行下面多一行两个小入口，请假 / 换班一次点击直达「今天」页并带上动作与营业日 ——
-           那一页把 `?act=&date=` 转进月历当天的操作单（发起只有那一处表单）。 -->
+           副行下面多一行四个入口（2026-10-29 用户裁定加上「加班」与「损耗」）：请假 / 换班
+           一次点击直达「今天」页并带上动作与营业日 —— 那一页把 `?act=&date=` 转进月历当天的
+           操作单（发起只有那一处表单）；加班登记、损耗登记本来就在自己那一页
+           （`/workbench/staff/overtime`、`/workbench/staff/loss`），直接过去，不在这儿再
+           摆第二张表单。 -->
       <section class="wbh-me-card">
         <router-link class="wbh-me" :to="HOME_LINKS.myRequests">
           <div class="wbh-kh">
@@ -331,6 +331,8 @@ useNudgePull({
         <div class="wbh-me-acts">
           <router-link class="wbh-me-act" :to="staffDayLink('leave')">请假</router-link>
           <router-link class="wbh-me-act" :to="staffDayLink('swap')">换班</router-link>
+          <router-link class="wbh-me-act" :to="HOME_LINKS.myOvertime">加班</router-link>
+          <router-link class="wbh-me-act" :to="HOME_LINKS.myWastage">损耗</router-link>
         </div>
       </section>
 

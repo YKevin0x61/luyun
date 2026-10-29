@@ -18,8 +18,79 @@ from scraper.delivery_bill_tracker import DeliveryBillTracker
 from scraper.pos_session import PosSession
 from scraper.state_store import ScraperStateStore
 from scraper.table_change_detector import TableChangeDetector
+from scraper.yintai_session import YintaiSession
 
 logger = logging.getLogger(__name__)
+
+
+class _DisabledDelivery:
+    """移动银台模式下的外卖/已结账单占位实现。
+
+    第一步切换范围只包含「桌台 + 菜品明细」，外卖链路（``DeliveryBillTracker``）
+    仍绑定 cy7mm 的 ``session.http`` / ``session.page``，在移动银台下不可用。
+    这里给出与 ``DeliveryBillTracker`` 同形状的空实现，调用方无需分支判断：
+    所有取数方法返回空列表，取消计数恒为 0。
+    """
+
+    def __init__(self, logger):
+        self._logger = logger
+        self._warned = False
+
+    def _warn_once(self) -> None:
+        if not self._warned:
+            self._warned = True
+            self._logger.info(
+                "ℹ️ 移动银台模式：外卖/已结账单链路未接入（第一步只切桌台+菜品明细），本轮跳过"
+            )
+
+    @property
+    def last_delivery_cancel_count(self) -> int:
+        return 0
+
+    def biz_datetime_range(self, biz_date=None):
+        """与 DeliveryBillTracker 同形状：营业日 06:00 起止。"""
+        from datetime import datetime, timedelta
+
+        from scraper._common import CHINA_TZ
+
+        if biz_date:
+            year, month, day = (int(part) for part in biz_date.split("-"))
+            begin = datetime(year, month, day, 6, 0, 0, tzinfo=CHINA_TZ)
+        else:
+            now = datetime.now(CHINA_TZ)
+            begin = now.replace(hour=6, minute=0, second=0, microsecond=0)
+            if now.hour < 6:
+                begin -= timedelta(days=1)
+        return begin, begin + timedelta(days=1)
+
+    async def probe_settled_bill_apis(self) -> Dict[str, Any]:
+        return {
+            "supported": False,
+            "reason": "移动银台模式下外卖/已结账单链路未接入",
+        }
+
+    async def fetch_settled_bill_list(self, begin, end, delivery_only: bool = False):
+        self._warn_once()
+        return []
+
+    async def fetch_settled_bill_raw_dishes(self, bill, begin, end):
+        self._warn_once()
+        return []
+
+    async def fetch_settled_bills_for_biz_date(self, biz_date=None):
+        self._warn_once()
+        return []
+
+    async def fetch_delivery_order_lines(self, bill):
+        self._warn_once()
+        return []
+
+    async def maybe_sweep_previous_biz_date(self, db) -> None:
+        self._warn_once()
+
+    async def scrape_delivery_orders(self, db=None):
+        self._warn_once()
+        return []
 
 
 class RestaurantScraper:
@@ -30,11 +101,45 @@ class RestaurantScraper:
         self.dish_catalog = dish_catalog
 
         self.state = ScraperStateStore(logger_=self.logger)
-        self.session = PosSession(dish_catalog, logger_=self.logger)
+        self.pos_source = self._resolve_pos_source()
+        if self.pos_source == "yintai":
+            self.session = YintaiSession(dish_catalog, logger=self.logger)
+            # 外卖/已结账单仍绑定 cy7mm 会话，移动银台下用占位实现（第一步范围）
+            self.delivery = _DisabledDelivery(self.logger)
+            self.logger.info("🔌 采集数据源：移动银台 Pro（HTTP，无浏览器；外卖暂未接入）")
+        else:
+            self.session = PosSession(dish_catalog, logger_=self.logger)
+            self.delivery = DeliveryBillTracker(self.session, self.state, logger_=self.logger)
+            self.logger.info("🔌 采集数据源：cy7mm（Playwright）")
         self.tables = TableChangeDetector(self.session, self.state, logger_=self.logger)
-        self.delivery = DeliveryBillTracker(self.session, self.state, logger_=self.logger)
 
         self.logger.info("✅ 餐厅采集组合根初始化成功")
+
+    @staticmethod
+    def _resolve_pos_source() -> str:
+        """解析采集数据源；未知值退回 cy7mm，避免配置写错把采集打停。
+
+        优先级：凭据里保存的 ``extra.pos_source``（管理界面切换） > 环境变量
+        ``SCRAPER_POS_SOURCE``。前者让门店能不重启服务就切数据源。
+        """
+        try:
+            from services import credentials_store
+
+            bundle = credentials_store.get_credentials()
+            stored = str((getattr(bundle, "extra", None) or {}).get("pos_source") or "")
+            stored = stored.strip().lower()
+            if stored in ("cy7mm", "yintai"):
+                return stored
+        except Exception:  # noqa: BLE001 - 凭据读不到时退回环境变量
+            pass
+        try:
+            from config import settings
+
+            raw = str(getattr(settings, "SCRAPER_POS_SOURCE", "cy7mm") or "cy7mm")
+        except Exception:  # noqa: BLE001 - 配置读不到时用默认值
+            raw = "cy7mm"
+        value = raw.strip().lower()
+        return value if value in ("cy7mm", "yintai") else "cy7mm"
 
     # ---- lifecycle / config ----
 

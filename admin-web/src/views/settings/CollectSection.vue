@@ -334,12 +334,73 @@ watch(() => props.refreshKey, () => {
         </div>
       </fieldset>
 
+      <fieldset>
+        <legend>采集数据源</legend>
+        <div class="grid">
+          <div class="full">
+            <label for="posSource">数据源</label>
+            <select id="posSource" class="input" v-model="credForm.posSource">
+              <option value="cy7mm">浏览器采集（默认）</option>
+              <option value="yintai">移动银台 Pro</option>
+            </select>
+            <p class="hint">移动银台需门店已开班。</p>
+          </div>
+        </div>
+        <div v-if="credForm.posSource === 'yintai'" class="grid">
+          <div class="full">
+            <label for="yintaiBaseUrl">门店服务器地址</label>
+            <input
+              class="input"
+              id="yintaiBaseUrl"
+              v-model="credForm.yintaiBaseUrl"
+              type="url"
+              placeholder="https://xxx.nat.tcsl.com.cn"
+            >
+          </div>
+          <div>
+            <label for="yintaiUserName">移动银台账号</label>
+            <input
+              class="input"
+              id="yintaiUserName"
+              v-model="credForm.yintaiUserName"
+              type="text"
+              autocomplete="off"
+              placeholder="例如 0126"
+            >
+          </div>
+          <div>
+            <label for="yintaiPassword">密码</label>
+            <input
+              class="input"
+              id="yintaiPassword"
+              v-model="credForm.yintaiPassword"
+              type="password"
+              autocomplete="new-password"
+              placeholder="留空则沿用原密码"
+            >
+          </div>
+          <div>
+            <label for="yintaiPosId">POS ID（可选）</label>
+            <input
+              class="input"
+              id="yintaiPosId"
+              v-model="credForm.yintaiPosId"
+              type="text"
+              inputmode="numeric"
+              placeholder="绑定到哪台 POS，留空由服务端决定"
+            >
+          </div>
+        </div>
+      </fieldset>
+
       <details class="section-help">
         <summary>
           <SvgIcon name="chevron-right" :size="14" class="section-help__icon" />
           <span>凭据与门店字段说明</span>
         </summary>
         <ul class="section-help__list">
+          <li>移动银台走纯 HTTP 接口、不起浏览器，但要求门店收银台<strong>已开班</strong>。未开班时连 App 本机都登不进去，采集会在营业时段内跳过并等待下一轮。</li>
+          <li>外卖与已结账单目前仍走浏览器采集，移动银台暂未接入这两块。</li>
           <li>「验证登录」只做一次真实登录探测、不写入凭据；「保存并启用」才把当前填写内容落盘。</li>
           <li>手机号与密码是龙管家 <strong>2.0 App</strong> 账号（不是 cy7mm 网页 1.0 账号），Fernet 加密保存在本机 <code>data/credentials.enc</code>，编辑时不回显密码。</li>
           <li>「从账号拉取门店」自动获取 <code>shop_id</code> / <code>company_id</code> / 店名，无需浏览器登录 cy7mm。</li>

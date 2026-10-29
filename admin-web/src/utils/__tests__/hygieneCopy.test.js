@@ -36,9 +36,11 @@ describe('hygieneCopy', () => {
   })
 
   it('花名册状态：待批准、已批准、停用后仍能看见', () => {
-    expect(rosterStatusLabel({ approved: false, disabled: false })).toBe('待批准')
-    expect(rosterStatusLabel({ approved: true, disabled: false })).toBe('已批准')
-    expect(rosterStatusLabel({ approved: true, disabled: true })).toBe('已停用')
+    expect(rosterStatusLabel({ approved: false, resigned: false })).toBe('待批准')
+    expect(rosterStatusLabel({ approved: true, resigned: false })).toBe('已批准')
+    expect(rosterStatusLabel({ approved: true, resigned: true, resigned_at: '2026-09-01' })).toBe('已离职')
+    // 离职日期待补单独一个说法：他确实是离职的人，但哪天走的没人记得。
+    expect(rosterStatusLabel({ approved: true, resigned: true, resigned_at: '' })).toBe('离职日期待补')
   })
 
   it('班次只有白班或夜班，没选显示未选', () => {

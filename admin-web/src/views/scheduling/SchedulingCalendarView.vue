@@ -287,8 +287,11 @@ async function loadRoster() {
 
 async function openPanel(next) {
   panel.value = next
-  // 切走就把选区收掉：动作条只在周表这一栏有意义，它替换的是这一页的底部。
-  if (next !== 'week') clearPick()
+  // 切走就把选区与展开的笔栏收掉：动作条只在周表这一栏有意义。
+  if (next !== 'week') {
+    clearPick()
+    penOpen.value = false
+  }
   if (next === 'roster') await loadRoster()
   // 周表按需读：默认落在月历上，没切过去就不发这个请求。
   else if (next === 'week') {
@@ -305,7 +308,7 @@ async function openPanel(next) {
 function needsRule(employee) {
   // 「配了但读不出来」也要算进来：那种人在月历上同样不会有新班（`expand()` 会跳过他们），
   // 而名单上只写「还没配」的话，超级管理员会以为是没配过 —— 两拨都是要处理的人。
-  return (!employee.rule || employee.rule.invalid) && !employee.disabled && employee.approved
+  return (!employee.rule || employee.rule.invalid) && !employee.resigned && employee.approved
 }
 
 function countPending(employees) {
@@ -664,7 +667,7 @@ const weekExcludedNote = computed(() => {
   const data = week.value
   if (!data || !data.excluded) return ''
   const parts = []
-  if (data.excluded.disabled) parts.push(`${data.excluded.disabled} 人已停用`)
+  if (data.excluded.resigned) parts.push(`${data.excluded.resigned} 人已离职`)
   if (data.excluded.pending) parts.push(`${data.excluded.pending} 人还没批准`)
   return parts.length ? `另有 ${parts.join('、')}，不在表里（去「名单」看）。` : ''
 })
@@ -692,6 +695,9 @@ const penHalfRest = ref(false) // 笔是「休半天」：写下去的是 action
 const penClear = ref(false) // 笔是「清」：写下去的是 action=void（把这一格清成空白，不再是「退回规则」）
 const penZoneId = ref('') // '' = 跟这个班次的固定区
 const penZoneOpen = ref(false) // 工作区按钮点开才多展开一行
+// 悬浮球（2026-10-29 用户要求）：底部那条常驻笔栏收成右下角一颗球，点球才展开。
+// 收起时页面不再被 76px 的笔栏占掉；球面写着当前那支笔，省得展开才知道。
+const penOpen = ref(false)
 const pick = ref(null) // { anchor, target } | null；手柄只有日期列头与人名两种
 const pickBusy = ref(false)
 // 撤销只留**最近一批**、内存级（ADR 0107 决策 7）：刷新或换设备就没了。
@@ -723,17 +729,48 @@ const penZoneName = computed(() => {
   return zone ? zone.name : '跟固定区'
 })
 
+/** 悬浮球上写什么：当前那支笔。班次写名字（最多三个字，与格子里的缩写同一套口径），
+ *  休 / 休半天 / 清各写一个字 —— 收起状态下也要一眼看出下一笔会写什么。 */
+const penLabel = computed(() => {
+  if (penClear.value) return '清'
+  if (penHalfRest.value) return '休半天'
+  if (penRest.value) return '休'
+  const name = penShift.value ? String(penShift.value.name || '班') : '班'
+  return name.length > 3 ? name.slice(0, 3) : name
+})
+
+/** 球上那个小圆点的记号：班次 / 休 / 休半天 / 清。**只分这四档、不按班次配色**
+ *  （`designGuard` 的棘轮只减不增：球上再挂六个 `--hy-*` 就是给这个文件加 6 条存量债务，
+ *  而球面上的**文字**已经写着是哪个班次，颜色不必重复那个信息）。返回空串 = 还没拿到班次。 */
+const penDotClass = computed(() => {
+  if (penClear.value) return 'clear'
+  if (penHalfRest.value) return 'half'
+  if (penRest.value) return 'rest'
+  return penShift.value ? 'shift' : ''
+})
+
+/** 选一支班次笔 = **一笔从头配**：工作区跟着回到「跟固定区」。
+ *
+ *  每个班次有自己的固定区（`scheduling_zone_defaults`），早班配的是案板、夜班配的是灶台 ——
+ *  换班次却留着上一个班次点名过的区，刷下去就是「夜班挂在案板」，而店长根本没为夜班选过区
+ *  （2026-10-29 用户：「班次按钮，选择了班次后还要选工作区」——要选区就选完班次再点工作区，
+ *  不该继承上一次的）。「跟固定区」按钮本身仍是按每个人的规则刷（`zoneId: ''` → 服务端
+ *  回填这个人这个班次的固定区）。 */
 function pickPenShift(shift) {
   penShiftId.value = shift.id
   penRest.value = false
   penHalfRest.value = false
   penClear.value = false
+  penZoneId.value = ''
 }
 
+/** 休 / 休半天 / 清：这几笔不带班次，也就没有「这个人这个班次的固定区」可言 ——
+ *  同样把工作区拨回「跟固定区」，免得笔上挂着一个上一支班次留下的区名。 */
 function pickPenRest() {
   penRest.value = true
   penHalfRest.value = false
   penClear.value = false
+  penZoneId.value = ''
 }
 
 /** 「休半天」也是一支笔：点一格 = 把那一格标成半天休；**再点同一格 = 取消**（见 `penOptions`）。 */
@@ -741,6 +778,7 @@ function pickPenHalfRest() {
   penHalfRest.value = true
   penRest.value = false
   penClear.value = false
+  penZoneId.value = ''
 }
 
 /** 「清」也是一支笔：点一格 = 把这一格**清空**（写 action=void，空白 = 还没排到）；
@@ -749,6 +787,7 @@ function pickPenClear() {
   penClear.value = true
   penRest.value = false
   penHalfRest.value = false
+  penZoneId.value = ''
 }
 
 function penAction() {
@@ -844,10 +883,13 @@ function weekCellAt(employeeId, date) {
 function onColPick(day) {
   if (!day.in_window) return
   nextPick(colHandle(day.business_date))
+  // 选了整列 / 整行：笔栏要展开，不然「刷」「退回规则」藏在一颗收起的球后面，看不见。
+  penOpen.value = true
 }
 
 function onRowPick(employee) {
   nextPick(rowHandle(employee.id))
+  penOpen.value = true
 }
 
 /** 点一个手柄：已有的选区还在就以它锚点展开，否则从这一点重新开始。
@@ -873,14 +915,15 @@ watch(weekFind, () => {
   if (pick.value) clearPick()
 })
 
-/** 点表格外的空白 = 取消（ADR 0107 决策 3）：控件上的点击各有各的意思，不算「空白」。 */
+/** 点表格外的空白 = 取消（ADR 0107 决策 3）：控件上的点击各有各的意思，不算「空白」。
+ *  2026-10-29 起顺带收起悬浮球展开的笔栏 —— 点空白本来就是要「退出这一下」。 */
 function onPageClick(event) {
-  if (!pick.value) return
   const target = event.target
   const skip = target && typeof target.closest === 'function'
     && target.closest('.gW, .gPick, .gD, button, input, select, label, a')
   if (skip) return
-  clearPick()
+  if (pick.value) clearPick()
+  if (penOpen.value) penOpen.value = false
 }
 
 // ── 提示：一行，几秒后自己消失（票 14 修订口径 4）─────────────────────────────
@@ -1493,7 +1536,7 @@ useNudgePull({
 
 <template>
   <div class="hygiene-admin sched-page">
-    <div class="gB" :class="{ 'pen-open': panel === 'week', 'pen-tall': activeShifts.length > 3 }" @click="onPageClick">
+    <div class="gB" :class="{ 'pen-week': panel === 'week' }" @click="onPageClick">
       <div class="gB-body">
         <header class="gHead">
           <p class="gKicker">人事 · 排班</p>
@@ -1821,8 +1864,40 @@ useNudgePull({
                 <button class="gBtn" type="button" @click="loadWeek(shiftWeek(weekStart, 1))">下周 ›</button>
               </div>
             </div>
+          <!-- 悬浮球（2026-10-29 用户要求）：笔栏常驻太占地方，收成右下角一颗球，点球才展开。
+               球面写当前那支笔（班次名 / 休 / 休半天 / 清），收起也一眼知道下一笔会写什么。 -->
+          <button
+            class="gPick-fab"
+            type="button"
+            :class="{ open: penOpen }"
+            :aria-expanded="penOpen ? 'true' : 'false'"
+            aria-controls="gPick"
+            :aria-label="penOpen ? '收起排班笔' : `排班笔：${penLabel}，点一下展开`"
+            @click.stop="penOpen = !penOpen"
+          >
+            <i v-if="penDotClass" class="dt" :class="penDotClass"></i>
+            <span class="gPick-fabText">{{ penLabel }}</span>
+          </button>
+          <!-- 收起时的回执：落在球上方，不用为了看一眼「已清空 / 跳过几格」又把笔栏展开。 -->
           <div
-        v-if="panel === 'week'"
+            v-if="!penOpen && pickNotice"
+            class="gPick-toast"
+            :class="{ gErr: pickNotice.warn }"
+            role="status"
+            aria-live="polite"
+          >
+            <span class="gPick-note-text">{{ pickNotice.text }}</span>
+            <button
+              v-if="pickNotice.details.length"
+              class="gBtn ghost"
+              type="button"
+              @click.stop="penOpen = true; noticeOpen = true"
+            >看全部</button>
+          </div>
+          <Transition name="gPick">
+          <div
+        v-if="penOpen && panel === 'week'"
+        id="gPick"
         class="gPick"
         role="group"
         aria-label="落笔"
@@ -1959,6 +2034,7 @@ useNudgePull({
           >↺</button>
         </div>
       </div>
+          </Transition>
           <!-- 笔栏结束 -->
           <p v-if="weekError" class="gMsg">{{ weekError }}</p>
           <p v-if="!week" class="gB-empty">周表读取中……</p>
@@ -2108,7 +2184,7 @@ useNudgePull({
                 <div class="gR-main">
                   <b>{{ employee.name || employee.phone }}</b>
                   <span>{{ employee.job_title || '—' }}</span>
-                  <span v-if="employee.disabled" class="gR-off">已停用</span>
+                  <span v-if="employee.resigned" class="gR-off">已离职</span>
                   <span v-else-if="!employee.approved" class="gR-off">待批准</span>
                 </div>
                 <!-- 规则摘要：本周 7 格（一…日），与周表同一套读法。 -->
@@ -2271,7 +2347,7 @@ useNudgePull({
 .gNav { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .gNav--head { display: none; margin-left: auto; }
 .gNav--panel { margin-left: auto; }
-.gSeg { display: inline-flex; align-items: center; gap: 4px; }
+.gSeg { display: inline-flex; align-items: center; gap: 4px; margin-left: auto; }
 .gMsg { margin: 0; font-size: 12px; color: var(--danger-bright); }
 /* ── 面板（唯一卡片语言） ─────────────────────────────────────────────── */
 .gPanel {
@@ -2685,15 +2761,11 @@ useNudgePull({
 .gW-em { color: var(--ink); }
 .gB-legend i.off { background: var(--ink-faint); }
 .gB-legend i.leave { background: var(--hy-aqua); }
-/* 笔栏常驻在周表这一栏的底部，所以页面永远要让出它的高度：不留的话它压住的正是
-   下面几行员工（门店那套就是这个毛病，截图里能看到第 4、5 行被压掉一半）。
-   76px = 折叠态的笔栏（一行 44px 的控件 + 上下内边距 ≈ 66px）再留一点余量；手机档壳
-   还会另外让出工作台底栏那 57px（那份让位由壳算，见 `WorkbenchShell.vue` 的
-   `contentInsetStyle`），所以这里只管笔栏自己那一段。 */
-.gB.pen-open { padding-bottom: 76px; }
-/* 班次多于 3 张时笔栏的班次那排会换成两行（笔栏 ≈ 116px），让位跟着加 —— 否则最后一行
-   员工滚上来时正好被压在笔栏下面（`week-view.md:43` 记的就是门店那套的这个毛病）。 */
-.gB.pen-open.pen-tall { padding-bottom: 140px; }
+/* 周表这一栏右下角常驻一颗悬浮球（2026-10-29 用户要求）：页面只给它让出那一小圈，
+   不再为整条笔栏留 76px。桌面与手机同一套；手机档壳另外让出工作台底栏（见
+   `WorkbenchShell.vue` 的 `contentInsetStyle`），这里只管球自己那一段。 */
+.gB.pen-week { padding-bottom: 92px; }
+/* 班次多于 3 张时展开的面板会多占一行，但它是浮层、不参与页面排版，所以这一档不用再让位。 */
 
 /* 笔栏上的每一颗棋子（班次 / 休 / 工作区 / ↺ / 摘要行的「刷」「清」）：一套外观，
    不另起第二套视觉。这一族从票 12 的笔刷条就在，原样留着。 */
@@ -2717,45 +2789,78 @@ useNudgePull({
    其余棋子仍用 `.gChip.on` 的 `--action`，这一颗是半天休自己的记号。 */
 .gChip .dt.half { background: var(--info); }
 .gPen-half.on { box-shadow: 0 0 0 2px var(--info); }
-/* ── 笔栏（票 14 修订，2026-10-13 用户真机裁定）──────────────────────────────
-   **一行**：`刷` 标签 + 班次按钮组（横滑）+ 工作区 + ↺ 撤销；选区的摘要行、工作区的展开行
-   与那一行提示都只在需要时出现。目标高度 ~70px —— 上一版那条 6 行、把表格压掉半屏的动作条
-   是这一票要拆掉的东西（用户②）。
-   层级：`fixed` + `--z-queue`（200），**叠在底部导航之上**（底栏是 `--z-shell`=20）。它成立的前提是
-   `.sched-page` 不自建层叠上下文（见那一处的注释）—— 少了那一条，这一条就是个摆设。
-   控件一律 44px 触控下限（票 12 那次「太窄不好点」的账）；这一段的 `--hy-*` 引用一条都没
-   新增：颜色全部蹭既有的 `.gChip` / `.gErr` / `.gHint` / `.gB-legend` 那几族
-   （`designGuard` 的棘轮只减不增）。 */
-.gPick {
-  position: sticky; top: 0; z-index: var(--z-queue);
-  /* v4（2026-10-17 用户裁定「太占地方」）：从三行堆叠压成**一行 56px** ——
-     左：选中/选区摘要（auto，最长 240px 截断）；中：笔的棋子横向滚动；右：工作区与撤销。
-     选区摘要与「选中」互斥（同一列），两者都没有时那一列宽度是 0，笔吃满整行。 */
-  display: grid;
-  grid-template-columns: minmax(0, auto) minmax(0, 1fr);
-  align-items: center;
-  gap: 6px 10px;
-  padding: 6px 14px; margin: 0;
+/* ── 排班笔：悬浮球 + 展开面板（2026-10-29 用户要求，替换原来的常驻笔栏）──────────
+   原来是一条常驻在周表顶部的笔栏，太占地方；现在收成右下角一颗球、点球才展开。展开的是
+   **浮层**（不参与页面排版），落笔交互一个字没改，只是把这条栏从文档流搬到了 fixed 层。
+   层级：`fixed` + `--z-queue`（200），叠在底部导航之上（底栏是 `--z-shell`=20）。
+   控件一律 44px 触控下限；颜色全蹭既有的 `--hy-*` / `.gChip` 那几族（`designGuard` 的棘轮只减不增）。 */
+.gPick-fab {
+  position: fixed; right: 18px; bottom: calc(18px + var(--safe-b));
+  z-index: var(--z-queue);
+  width: 58px; height: 58px; padding: 0;
+  display: inline-flex; flex-direction: column; align-items: center; justify-content: center; gap: 5px;
+  border-radius: 50%;
+  border: 1px solid var(--line-strong);
   background: var(--surface-1);
-  border-top: 1px solid var(--line);
-  border-bottom: 1px solid var(--line-strong);
+  color: var(--ink);
+  box-shadow: 0 10px 28px var(--wb-scrim);
+  font: inherit; cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
 }
-/* 提示行 / 选区摘要 / 工作区展开行：通栏（第二行起）。 */
-.gPick-note, .gPick-detail, .gPick-zones { grid-column: 1 / -1; }
-.gPick-now, .gPick-region { grid-column: 1; }
-.gPick-row { grid-column: 2; }
+.gPick-fab:active { transform: scale(.96); }
+.gPick-fab.open { border-color: var(--action); }
+.gPick-fab .dt { width: 9px; height: 9px; border-radius: 50%; background: var(--accent); }
+.gPick-fab .dt.rest { background: var(--ink-faint); }
+.gPick-fab .dt.half { background: var(--info); }
+.gPick-fab .dt.clear { background: var(--ink); }
+.gPick-fabText {
+  max-width: 52px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: var(--font-sans); font-size: 10.5px; line-height: 1; color: var(--ink-dim);
+}
+.gPick-fab.open .gPick-fabText { color: var(--action); }
 
-/* 班次按钮组**换行**，不横滑。笔的场景要「一眼看全才能点」—— 5 个班次时横滑会把后两个藏起来
-   （2026-10-13 实测：容器 214px、内容 426px，而滚动条又刚被用户要求拿掉，界面上就没有任何
-   "还有更多"的提示了）。棋子直接由这一行换行：多于 3 张时排成两行，一行装得下就还是一行。
-   横向一律不画滚动条（展开的工作区仍是横滑：最多 9 个区名，换行会到三行）。 */
+/* 收起时的回执：球上方一条小气泡，几秒后自己消失（`sayNotice` 管计时）——不用为了看一眼
+   「已清空 / 跳过几格」又把笔栏展开。 */
+.gPick-toast {
+  position: fixed; right: 18px; bottom: calc(88px + var(--safe-b)); z-index: var(--z-queue);
+  display: flex; align-items: center; gap: 8px;
+  max-width: min(340px, calc(100vw - 36px));
+  padding: 10px 12px;
+  border: 1px solid var(--line-strong); border-radius: var(--r-2);
+  background: var(--surface-1);
+  box-shadow: 0 10px 28px var(--wb-scrim);
+  font-size: 10.5px; color: var(--ink-dim);
+}
+
+/* 展开面板：从球上方浮出。两列（左摘要 / 右笔），与旧版同构。 */
+.gPick {
+  position: fixed; right: 18px; bottom: calc(88px + var(--safe-b));
+  z-index: var(--z-queue);
+  width: min(880px, calc(100vw - 36px));
+  /* 面板是**单列堆叠**（2026-10-29 用户截图：两列时选区摘要把右边那列挤到一百来像素，
+     班次棋子被逼成一行一个竖排）。浮层高度不再是问题，通栏排下去最稳：
+     提示 / 选中 / 选区摘要 / 工作区 / 笔，各占一行，笔那一行自己换行。 */
+  display: flex; flex-direction: column; align-items: stretch;
+  gap: 6px;
+  padding: 8px 14px;
+  background: var(--surface-1);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-2);
+  box-shadow: 0 18px 46px var(--wb-scrim);
+}
+/* 展开 / 收起：从球的方向升起 8px，不缩放（缩放会让 44px 的棋子点起来抖）。 */
+.gPick-enter-active, .gPick-leave-active { transition: opacity .16s ease, transform .16s ease; }
+.gPick-enter-from, .gPick-leave-to { opacity: 0; transform: translateY(8px); }
+/* 选区摘要 / 工作区 / 提示：通栏一行；提示与工作区各自换行。 */
+.gPick-note, .gPick-detail, .gPick-zones { width: 100%; }
+
+/* 班次按钮组**换行**，不横滑：面板是浮层，多一行不挤表格；横滑会把后面的「清 / 工作区 /
+   ↺」藏起来，得滑一下才知道还有（2026-10-29 用户截图里那版更糟：两列时这一列被压到
+   一百来像素，棋子竖排成一行一个）。 */
 .gPick-row {
   display: flex; align-items: center; gap: 6px;
-  /* 笔的棋子**不换行**：一行横滑，窄屏也不会把笔栏撑成三行（用户裁定「太占地方」）。 */
-  flex-wrap: nowrap; overflow-x: auto;
-  scrollbar-width: none;
+  flex-wrap: wrap;
 }
-.gPick-row::-webkit-scrollbar { display: none; }
 /* `刷` 标签：不带颜色（继承正文色），只做个记号。 */
 .gPen-tag { flex: none; font-size: 11px; letter-spacing: .08em; color: var(--ink-faint); }
 /* 笔栏里所有控件（班次 / 休 / 工作区 / ↺ / 摘要行那两个）的触控下限；水平方向比通用 chip
@@ -2773,14 +2878,14 @@ useNudgePull({
 }
 .gPick-zones::-webkit-scrollbar { display: none; }
 /* 选区摘要行（只在选了整列 / 整行时出现）：摘要让位给「刷」「清」两个按钮，窄屏截断。 */
-.gPick-region { display: flex; align-items: center; gap: 8px; }
+.gPick-region { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .gPick-region .gW-tip {
   flex: 1 1 auto; min-width: 0;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .gPick-sum { flex: none; font-family: var(--font-sans); font-size: 13px; font-weight: 600; letter-spacing: .06em; }
 /* 一行提示：不加颜色（正文色），出错时蹭既有的 `.gErr`（朱砂）—— 那一族已经有了。 */
-.gPick-now { margin: 0; max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: 10px; color: var(--ink-dim); }
+.gPick-now { margin: 0; max-width: min(100%, 420px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: 10px; color: var(--ink-dim); }
 .gPick-note { margin: 0; display: flex; align-items: center; gap: 8px; font-size: 10.5px; color: var(--ink-dim); }
 .gPick-note-text { flex: 1 1 auto; min-width: 0; }
 .gPick-detail { display: flex; flex-direction: column; gap: 4px; }
@@ -2791,15 +2896,27 @@ useNudgePull({
   .gRosterGrid { grid-template-columns: 1fr; }
 }
 @media (max-width: 720px) {
+  /* 笔栏在手机上铺满一行：留 12px 边，别贴着屏幕缘。球要**抬到底栏之上**（底栏 57px，
+     见 `utils/workbenchInsets.js` 的 TAB_BAR_HEIGHT_PX），否则会压住「今天 / 人事 / 现场」；
+     面板与回执再往上让出球的高度。 */
+  .gPick { left: 12px; right: 12px; bottom: calc(57px + 84px + var(--safe-b)); width: auto; }
+  .gPick-fab { right: 14px; bottom: calc(57px + 14px + var(--safe-b)); }
+  .gPick-toast { left: 14px; right: 14px; bottom: calc(57px + 84px + var(--safe-b)); max-width: none; }
   .gHead {
     grid-template-columns: 1fr;
     grid-template-areas: "kick" "title" "meta";
   }
-  .gHeadActions { margin-left: 0; }
+  /* 窄屏页头别只挤在左边：班次表靠右（与标题同一行的两端），「今天」靠右（与日期 / 人数
+     同一行的两端），视角切换与翻周同一行、一左一右 —— 648 这种小窗宽度下右侧原来空出
+     四百多像素，白瞎。用 flex 而不是 grid：`gPeriod` 要独占一行，grid 的隐式列会把它的
+     宽度压到 421（第二行那两个按钮组各占一列）。 */
+  .gHeadActions { margin-left: auto; }
   .gTitle { font-size: 22px; }
-  .gMetaRow { display: grid; grid-template-columns: 1fr; gap: 7px; }
-  .gSeg { grid-row: 2; }
-  .gNav--head { display: flex; grid-row: 2; margin-left: 0; }
+  .gMetaRow { display: flex; flex-wrap: wrap; gap: 7px; }
+  .gPeriod { width: 100%; }
+  .gPeriod em { margin-left: auto; }
+  .gSeg { margin-left: 0; }
+  .gNav--head { display: flex; margin-left: auto; }
   .gNav--panel { display: none; }
   .gB-d { min-height: 56px; padding: 5px 4px 4px; }
   .gB-d .cItem { font-size: 9px; }

@@ -65,7 +65,7 @@ def test_print_view_embeds_station_content_html():
     assert "'light'" in src
     assert 'sop-print-preview-measure-host no-print' in src
     assert 'sop-print-preview-sheet-wrap no-print' not in src
-    assert 'class="sop-print-preview-sheet-wrap"' in src
+    assert 'class="sop-print-preview-sheet-wrap' in src
     assert "shouldRepackPrintPreview" in src
     assert "afterprint" in src
     assert "syncSelectedPages" in src

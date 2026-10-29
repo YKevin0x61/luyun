@@ -4,13 +4,17 @@
  * 能不能做、不能做时说什么，全是判据 —— 放到 util 里才有真单测（页面模板的 grep
  * 断言抓不住「过去的日子被写成了还没排」）。
  *
- * 三条口径跟服务端对齐（`services/scheduling/store.py` 的 `submit_leave` / `submit_swap`）：
+ * 口径跟服务端对齐（`services/scheduling/store.py` 的 `submit_leave` / `submit_swap`）：
  *   · 过去的日期两边都拒（`past_leave` / `past_swap`）—— 这里先说，别让人拨完日期才被打回；
  *   · 展开窗口（`window_end`）之后的日期两边都拒（那天本来就没排班可改）；
  *   · 换班**不要求那天有班次**，只要求那天有那一行（`_day_shift` 的 `scheduled`）——
  *     休的那天也换得（批了就是对方接走你那天、你那天没班），所以判据是 `scheduled`
  *     而不是「有没有班次」。请假反过来：已经批了假的那天不用再请。
+ *   · **22:00 之后不能再提次日**（2026-10-29 用户裁定，`next_day_locked` 由服务端下发）；
+ *   · **2 天以上的假要提前 7 天**（`leave_lead_days`，判据在 `leaveRangeAction`）。
  */
+import { shiftDate } from './schedulingWeekPick.js'
+import { dayDiff } from './dateRange.js'
 
 /** 弹层里现在看的是哪一屏。`day` 是那份名单；另两屏是两张表单。 */
 export const DAY_VIEW = { day: 'day', leave: 'leave', swap: 'swap' }
@@ -32,10 +36,24 @@ function sharedBlock(day, ctx) {
   return ''
 }
 
+/** 这一格是不是「次日」、而且已经过了 22:00 的截止（2026-10-29 用户裁定）。
+ *
+ *  `ctx.nextDayLocked` 由服务端算（店长那台机器的时间才是准的），这里只负责「哪天是明天」
+ *  —— 用营业日加一天，不拿手机上的今天加一天。
+ */
+function nextDayLocked(day, ctx) {
+  const date = day && day.business_date
+  const today = ctx && ctx.today
+  if (!date || !today || !ctx.nextDayLocked) return false
+  return date === shiftDate(today, 1)
+}
+
 /** 那天能不能提请假。已经批了假的那天不必再请（再提一条只会多一张一样的卡给店长）。 */
 export function leaveAction(day, ctx = {}) {
   const blocked = sharedBlock(day, ctx)
   if (blocked) return verdict(blocked)
+  // 22:00 之后明天的假提不了：店长那会儿已经把人排定，批下来等于半夜改明天的班。
+  if (nextDayLocked(day, ctx)) return verdict('晚上 10 点过了，明天的假提不了')
   if (day.leave) return verdict('这天已经是请假')
   return verdict('')
 }
@@ -49,8 +67,29 @@ export function leaveAction(day, ctx = {}) {
 export function swapAction(day, ctx = {}) {
   const blocked = sharedBlock(day, ctx)
   if (blocked) return verdict(blocked)
+  if (nextDayLocked(day, ctx)) return verdict('晚上 10 点过了，明天的班换不了')
   if (day.leave) return verdict('这天你请假，不用换班')
   if (!day.scheduled) return verdict('这天还没排到你，没法换')
+  return verdict('')
+}
+
+/** 一段日期的假能不能提：**2 天以上要提前 7 天**（2026-10-29 用户裁定）。
+ *
+ *  天数与提前量都跟服务端同一套（`MULTI_DAY_LEAVE_LEAD_DAYS` 由 `/me/month` 下发），
+ *  这里只是提前把那句话说出来，别让人填完事由才被打回。单日的假不看这一条。
+ */
+export function leaveRangeAction(start, end, ctx = {}) {
+  if (!start) return verdict('先选开始那天')
+  const last = end && end >= start ? end : start
+  const days = dayDiff(start, last)
+  const lead = Number((ctx && ctx.leaveLeadDays) || 0)
+  const today = ctx && ctx.today
+  if (days >= 2 && lead > 0 && today) {
+    const earliest = shiftDate(today, lead)
+    if (start < earliest) {
+      return verdict(`请 ${days} 天的假要提前 ${lead} 天：最早从 ${earliest} 起请`)
+    }
+  }
   return verdict('')
 }
 
@@ -99,13 +138,21 @@ export function incomingOnDay(incoming, businessDate) {
  *  直接点一个人就能换；`/me/colleagues`（全店名单）是兜底：那天没班的人也在服务端
  *  允许的范围内（他那天空着，批了就是他接走你的班），所以名单之外还留一条路。
  *
- *  `groups` 是 `/api/scheduling/me/day` 的 `groups`（空组服务端已经滤掉）。 */
-export function swapCandidates(groups, employeeId) {
+ *  2026-10-29 用户裁定：**名单里那天「休」的人也算候选人**（`offPeople`），不用再翻到
+ *  全店名单里去找。休的那位跟「那天没班」是同一件事的服务端口径（`submit_swap` 只要求
+ *  提的人那天手上真有班），批了就是他接走你的班。
+ *
+ *  **「请假」那位不进名单**：那不是空班，是批过的假 —— 换班批准会把那条假盖掉
+ *  （服务端只校验申请人自己的班，挡不住这一边），所以在挑人的时候就不给。
+ *
+ *  `groups` / `offPeople` 都是 `/api/scheduling/me/day` 的（空组服务端已经滤掉）。 */
+export function swapCandidates(groups, employeeId, offPeople = []) {
   const out = []
+  const isMe = (id) => employeeId != null && Number(id) === Number(employeeId)
   for (const group of groups || []) {
     for (const person of (group && group.people) || []) {
       if (!person) continue
-      if (employeeId != null && Number(person.id) === Number(employeeId)) continue
+      if (isMe(person.id)) continue
       out.push({
         id: person.id,
         name: person.name,
@@ -114,12 +161,26 @@ export function swapCandidates(groups, employeeId) {
       })
     }
   }
+  for (const person of offPeople || []) {
+    if (!person || person.leave) continue
+    if (isMe(person.id)) continue
+    out.push({
+      id: person.id,
+      name: person.name,
+      zone: '',
+      shift_name: '',
+      // 这一位那天休：候选行与预览都靠这个标记说话，别拿空的 shift_name 去猜。
+      off: true,
+    })
+  }
   return out
 }
 
-/** 候选行上的第二行小字：「白班 · 案板」。两个都能缺，缺了就不占那一格。 */
+/** 候选行上的第二行小字：「白班 · 案板」。两个都能缺，缺了就不占那一格。
+ *  那天休的人在 `shift_name` 上本来就是空的，这里给它一句「那天休」。 */
 export function candidateLine(person) {
   if (!person) return ''
+  if (person.off) return '那天休'
   return [person.shift_name, person.zone].filter(Boolean).join(' · ')
 }
 
@@ -138,6 +199,9 @@ export function swapPreview(me, peer) {
     return `你俩那天都是${mine}：批了换的是岗位（工作区）`
   }
   if (mine && theirs) return `批了你上${theirs}、${who}上${mine}`
+  // 休（`off`）与「那天没班」在服务端是同一档，但员工眼里是两句话：前者是他本来就休，
+  // 后者是这天还没铺到他 —— 2026-10-29 起休的人也能当候选人，这句得说准。
+  if (mine && peer && peer.off) return `${who}那天休：批了 ${who} 接你的${mine}，你那天没班`
   if (mine && !theirs) return `他那天本来没班：批了 ${who} 接你的${mine}`
   if (!mine && theirs) return `你那天休：批了你去上${theirs}`
   return '两个人那天都没有班：批了也不改什么'

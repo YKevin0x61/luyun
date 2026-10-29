@@ -35,6 +35,7 @@
 import { shiftText, todayHeadline, todaySubline, todayTone } from './todayShift.js'
 import { STATUS_FIX_TODO, STATUS_PENDING, openRows } from './hygieneWorkFlow.js'
 import { IDENTITY_ADMIN, IDENTITY_STAFF } from './workbenchIdentity.js'
+import { WASTAGE_REGISTER_PATH } from './wastagePaths.js'
 
 /** 首页每个数字点进去的地方 —— 一处定义，模板与测试都引它，不各写一遍字面量。 */
 export const HOME_LINKS = {
@@ -52,6 +53,10 @@ export const HOME_LINKS = {
   myItems: '/workbench/staff/clean',
   /** 我的申请待回应 → 「今天」页那张卡。 */
   myRequests: '/workbench/staff/today',
+  /** 员工档「我的班」卡下面那颗「加班」→ 加班与补钟（员工登记加班 / 补钟那一页）。 */
+  myOvertime: '/workbench/staff/overtime',
+  /** 员工档「我的班」卡下面那颗「损耗」→ 损耗登记（记一笔 + 看自己最近记的那几笔）。 */
+  myWastage: WASTAGE_REGISTER_PATH,
 }
 
 /** 工作台身份 → 清单里的身份词。与 `utils/workbenchNav.js` 同一张表的两档词，

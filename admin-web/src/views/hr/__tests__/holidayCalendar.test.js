@@ -27,25 +27,63 @@ describe('节假日日历（考勤表导出 票 02）', () => {
     vi.unstubAllGlobals()
   })
 
-  it('页面真的挂得起来（不白屏）：一年 12 张网格，已标记的那天写着节名', async () => {
-    // 打开就是今年，桩跟着今年给一天 —— 写死 2026 会在换年之后变成「一格都没标」。
-    const year = new Date().getFullYear()
+  it('页面真的挂得起来（不白屏）：一屏只画当月，已标记的那天写着节名', async () => {
+    // 打开就是今年这个月，桩跟着当月给一天 —— 写死 2026 会在换年之后变成「一格都没标」。
+    const now = new Date()
+    const year = now.getFullYear()
+    const month = now.getMonth() + 1
+    const day = `${year}-${String(month).padStart(2, '0')}-15`
     vi.stubGlobal(
       'fetch',
-      vi.fn(async () => jsonResponse({ year, days: [{ day: `${year}-10-01`, name: '国庆' }] })),
+      vi.fn(async () => jsonResponse({ year, days: [{ day, name: '国庆' }] })),
     )
 
     const View = (await import('../HolidayCalendarView.vue')).default
     const wrapper = mount(View)
     await flushPromises()
 
-    expect(wrapper.findAll('.hMonth')).toHaveLength(12)
+    // 面板头就是「今年 10 月」，格子里只有这一个月的日子（不是 12 个月）。
+    expect(wrapper.find('.hMonthNow').text()).toBe(`${year} 年 ${month} 月`)
+    expect(wrapper.findAll('button.hCell')).toHaveLength(
+      new Date(year, month, 0).getDate(),
+    )
     const marked = wrapper.findAll('.hCell.is-marked')
     expect(marked).toHaveLength(1)
     expect(marked[0].text()).toContain('国庆')
-    expect(marked[0].text()).toContain('1')
+    expect(marked[0].text()).toContain('15')
     wrapper.unmount()
   })
+
+  it('面板头左右箭头翻月，1 月往左回到上一年 12 月', async () => {
+    const now = new Date()
+    const year = now.getFullYear()
+    const month = now.getMonth() + 1
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ year, days: [] })))
+
+    const View = (await import('../HolidayCalendarView.vue')).default
+    const wrapper = mount(View)
+    await flushPromises()
+
+    expect(wrapper.findAll('.hNav')).toHaveLength(2)
+
+    const expected = (step) => {
+      const index = year * 12 + (month - 1) + step
+      return `${Math.floor(index / 12)} 年 ${(index % 12) + 1} 月`
+    }
+    const prev = () => wrapper.find('[aria-label="上个月"]')
+    const next = () => wrapper.find('[aria-label="下个月"]')
+
+    await prev().trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.hMonthNow').text()).toBe(expected(-1))
+
+    await next().trigger('click')
+    await next().trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.hMonthNow').text()).toBe(expected(1))
+    wrapper.unmount()
+  })
+
   it('三处页面清单都登记了这一页（人事组、管理端专属、直连不 404）', () => {
     const row = JSON.parse(pageRoutes).pages.find(
       (item) => item.path === '/workbench/hr/holidays',
@@ -83,8 +121,28 @@ describe('节假日日历（考勤表导出 票 02）', () => {
     expect(view).toContain('取消标记')
   })
 
-  it('一年一个网格，已标记的那天把节的名字写在格子里', () => {
-    expect(view).toMatch(/yearGrid\(year\.value\)/)
+  it('点一天后编辑带出现在日历下面（同一张面板、网格之后）', async () => {
+    const year = new Date().getFullYear()
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ year, days: [] })))
+
+    const View = (await import('../HolidayCalendarView.vue')).default
+    const wrapper = mount(View)
+    await flushPromises()
+
+    expect(wrapper.find('.hEditorBar').exists()).toBe(false)
+    await wrapper.find('button.hCell').trigger('click')
+    await flushPromises()
+
+    const panel = wrapper.find('.hPanel')
+    expect(panel.find('.hEditorBar').exists()).toBe(true)
+    // 顺序：网格在前、编辑带在后 —— 用户裁定编辑带挂在日历下面，不压在上面。
+    const html = panel.html()
+    expect(html.indexOf('hGrid')).toBeLessThan(html.indexOf('hEditorBar'))
+    wrapper.unmount()
+  })
+
+  it('一屏一个月：网格按 year/month 取当月，已标记的那天把节的名字写在格子里', () => {
+    expect(view).toMatch(/monthGrid\(year\.value, month\.value\)/)
     expect(view).toMatch(/holidayMap\(body\.days\)/)
     expect(view).toMatch(/\{\{ marked\[day\] \}\}/)
     // 一天一格、格子可点（点一天就标记 / 取消那一天的判据在 `pick`）。

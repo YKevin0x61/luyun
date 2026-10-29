@@ -229,7 +229,7 @@ onMounted(() => {
             <span class="hHint">{{ counts.incomplete }} 人</span>
           </div>
           <p class="hLead">
-            入职日期空着算不出工龄奖，身份证空着算不出生日 —— 他们不在上面的名单里，而是落在这儿。
+            入职日期空着算不出工龄奖，身份证空着算不出生日，离职日期空着对不上账 —— 他们不在上面的名单里，而是落在这儿。
           </p>
           <p v-if="!incomplete.length" class="hEmpty">档案都齐。</p>
           <ul v-else class="hPeople">

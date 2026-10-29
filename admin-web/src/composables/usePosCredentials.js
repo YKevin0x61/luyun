@@ -19,6 +19,12 @@ export function usePosCredentials({ showAlert, clearAlert }) {
     companyId: '',
     shopName: '',
     deliveryShopId: '',
+    // 采集数据源：cy7mm（Playwright，默认）/ yintai（移动银台，纯 HTTP）
+    posSource: 'cy7mm',
+    yintaiBaseUrl: '',
+    yintaiUserName: '',
+    yintaiPassword: '',
+    yintaiPosId: '',
   })
   const phonePlaceholder = ref('11 位手机号')
   const showPassword = ref(false)
@@ -55,6 +61,12 @@ export function usePosCredentials({ showAlert, clearAlert }) {
     credForm.companyId = data.company_id || ''
     credForm.deliveryShopId = data.delivery_shop_id || ''
     credForm.shopName = data.shop_name || ''
+    credForm.posSource = data.pos_source || 'cy7mm'
+    const yintai = data.yintai || {}
+    credForm.yintaiBaseUrl = yintai.base_url || ''
+    credForm.yintaiUserName = yintai.user_name || ''
+    credForm.yintaiPassword = ''
+    credForm.yintaiPosId = yintai.pos_id || ''
   }
 
   function resetCredForm() {
@@ -65,6 +77,11 @@ export function usePosCredentials({ showAlert, clearAlert }) {
     credForm.companyId = ''
     credForm.shopName = ''
     credForm.deliveryShopId = ''
+    credForm.posSource = 'cy7mm'
+    credForm.yintaiBaseUrl = ''
+    credForm.yintaiUserName = ''
+    credForm.yintaiPassword = ''
+    credForm.yintaiPosId = ''
   }
 
   async function fetchCredentialsMeta() {
@@ -263,6 +280,13 @@ export function usePosCredentials({ showAlert, clearAlert }) {
       company_id: credForm.companyId.trim(),
       shop_name: credForm.shopName.trim(),
       delivery_shop_id: credForm.deliveryShopId.trim() || null,
+      pos_source: credForm.posSource,
+      yintai: {
+        base_url: credForm.yintaiBaseUrl.trim() || null,
+        user_name: credForm.yintaiUserName.trim() || null,
+        password: credForm.yintaiPassword || null,
+        pos_id: credForm.yintaiPosId.trim() || null,
+      },
     }
 
     if (!body.phone || /\*/.test(body.phone)) {
@@ -272,6 +296,19 @@ export function usePosCredentials({ showAlert, clearAlert }) {
     if (!body.password && !credMeta.configured) {
       showAlert('error', '首次配置必须填写密码')
       return
+    }
+
+    const useYintai = credForm.posSource === 'yintai'
+    if (useYintai) {
+      // 移动银台的账号密码与 cy7mm 的 2.0 账号是两套，不能拿后者去验证前者
+      const missing = []
+      if (!body.yintai.base_url) missing.push('服务器地址')
+      if (!body.yintai.user_name) missing.push('账号')
+      if (!body.yintai.password && !credMeta?.yintai?.password_set) missing.push('密码')
+      if (missing.length) {
+        showAlert('error', '移动银台接入缺少：' + missing.join('、'))
+        return
+      }
     }
 
     const metaConfiguredSave = credMeta.configured === true
@@ -285,7 +322,7 @@ export function usePosCredentials({ showAlert, clearAlert }) {
       sigField(body.shop_name, metaConfiguredSave),
       sigField(deliveryForSig, metaConfiguredSave),
     )
-    if (loginVerifiedSignature.value !== loginSignature) {
+    if (!useYintai && loginVerifiedSignature.value !== loginSignature) {
       const verified = await verifyLoginBeforeSave()
       if (!verified) return
     }

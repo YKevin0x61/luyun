@@ -93,13 +93,17 @@ describe('店长端周表（员工 × 周）', () => {
     expect(view).toMatch(/@click="onRowPick\(employee\)"/)
     expect(view).toMatch(/nextPick\(colHandle\(day\.business_date\)\)/)
     expect(view).toMatch(/pickAt\(current, handle\)/)
-    // 笔栏**常驻**在周表这一栏的表格上方（v3 版式审查：动作要贴着作用对象，不再固定在
-    // 屏幕底部）。它仍是一条常驻工具条，选中的那一格会写在工具条上。
-    expect(view).toMatch(/v-if="panel === 'week'"/)
+    // 笔栏收成**悬浮球**（2026-10-29 用户要求）：默认收起在右下角，点球才展开成浮层；
+    // 页面只为球让出一小圈（92px），不再为整条笔栏留 76px。
+    expect(view).toMatch(/v-if="penOpen && panel === 'week'"/)
     expect(view).toMatch(/class="gPick"/)
-    expect(view).toMatch(/\.gPick \{[\s\S]{0,240}?position: sticky/)
-    expect(view).toMatch(/\.gB\.pen-open \{ padding-bottom: 76px; \}/)
-    expect(view).toMatch(/'pen-open': panel === 'week'/)
+    expect(view).toMatch(/\.gPick \{[\s\S]{0,240}?position: fixed/)
+    expect(view).toMatch(/class="gPick-fab"/)
+    expect(view).toMatch(/@click\.stop="penOpen = !penOpen"/)
+    expect(view).toMatch(/\.gB\.pen-week \{ padding-bottom: 92px; \}/)
+    expect(view).toMatch(/'pen-week': panel === 'week'/)
+    // 点空白同时收起笔栏与选区。
+    expect(view).toMatch(/if \(penOpen\.value\) penOpen\.value = false/)
     // 点回锚点 / 点表格外的空白 = 取消（ADR 0107 决策 3）：展开与取消的规则在纯逻辑模块里
     // （那边有单测），这一页负责把手柄接上去、把「点空白」翻成一次取消。
     expect(view).toMatch(/pickAt,/)
@@ -312,17 +316,19 @@ describe('选区手柄与笔栏（票 14 / ADR 0107，2026-10-13 方向修订）
     expect(view).toMatch(/const pickedRows = computed/)
   })
 
-  it('笔栏常驻并叠在底部导航之上：那套「底栏让位」整条退役', () => {
+  it('悬浮球叠在底部导航之上：那套「底栏让位」整条退役', () => {
     // 上一版是「选中那一刻动作条升起、**替换**底栏」（`body.sched-picking` + 文件末尾那条
-    // 无作用域规则）；用户裁定回到常驻笔栏、底栏照旧留在原位（那是他熟悉的旧形态）。
+    // 无作用域规则）；用户裁定回到常驻笔栏、底栏照旧留在原位。2026-10-29 再收成右下角
+    // 一颗球（`penOpen` 控制展开），底栏让位那条整条不复存在。
     expect(view).not.toMatch(/sched-picking/)
     expect(view).not.toMatch(/wb-tabbar/)
-    expect(view).toMatch(/v-if="panel === 'week'"/)
-    // 笔栏是 `fixed` + `--z-queue`（200，壳底栏是 `--z-shell` 20），所以它压在底栏上面。
+    expect(view).toMatch(/v-if="penOpen && panel === 'week'"/)
+    // 球与展开面板都是 `fixed` + `--z-queue`（200，壳底栏是 `--z-shell` 20），压在底栏上面。
     // 这条成立的前提是页面根**不自建层叠上下文** —— 给了 z-index 就会把 fixed 的笔栏锁在
     // 底栏下面（票 12 的笔刷条正是这么坏的：ADR 0107 记着「真机截图里那句提示语被压掉一半」）。
     // 票 05 起这里断**语义名**（数字不准再出现在源码里）：要动的只有档位，见 designGuard 的清单。
     expect(view).toMatch(/\.gPick \{[\s\S]{0,240}?z-index: var\(--z-queue\)/)
+    expect(view).toMatch(/\.gPick-fab \{[\s\S]{0,240}?z-index: var\(--z-queue\)/)
     const page = view.match(/\.sched-page \{[\s\S]*?\n\}/)[0]
     expect(page).not.toMatch(/\n\s*z-index:/)
     // 「6 行压掉半屏」不回来：笔栏本体是一行 —— 没有换行、也没有 64vh 那种滚动高度。
@@ -401,5 +407,112 @@ describe('周表笔栏：「休半天」笔与「清」真正清空（2026-10-29
     expect(view).toMatch(/undoPlan\(snapshot, result\.skipped, action\)/)
     expect(view).toMatch(/step\.kind === 'half_rest'/)
     expect(view).toMatch(/PICK_HALF_REST,\s*\{ halfRest: step\.payload\.half_rest \}/)
+  })
+})
+
+// 2026-10-29 用户要求：底部那条常驻笔栏改成右下角悬浮球，点球才展开。
+describe('排班笔：悬浮球（2026-10-29）', () => {
+  it('默认收起：球面写着当前那支笔，班次 / 休 / 半 / 清各有自己的圆点', () => {
+    expect(view).toMatch(/const penOpen = ref\(false\)/)
+    expect(view).toMatch(/const penLabel = computed/)
+    expect(view).toMatch(/const penDotClass = computed/)
+    expect(view).toMatch(/if \(penClear\.value\) return '清'/)
+    expect(view).toMatch(/<i v-if="penDotClass" class="dt" :class="penDotClass"><\/i>/)
+    expect(view).toMatch(/<span class="gPick-fabText">\{\{ penLabel \}\}<\/span>/)
+    // 圆点只分四档（班次 / 休 / 半 / 清），**不按班次配色**：`designGuard` 的棘轮只减不增，
+    // 给球再挂六个 `--hy-*` 就是给这个文件加 6 条存量债务；球面文字已经写着是哪个班次。
+    expect(view).toMatch(/\.gPick-fab \.dt \{ width: 9px; height: 9px; border-radius: 50%; background: var\(--accent\)/)
+    expect(view).toMatch(/\.gPick-fab \.dt\.rest \{ background: var\(--ink-faint\)/)
+    expect(view).toMatch(/\.gPick-fab \.dt\.half \{ background: var\(--info\)/)
+    expect(view).not.toMatch(/\.gPick-fab \.dt\.tone-/)
+    expect(view).toMatch(/return penShift\.value \? 'shift' : ''/)
+  })
+
+  it('点球展开 / 再点收起，带走页面的让位与无障碍状态', () => {
+    expect(view).toMatch(/class="gPick-fab"/)
+    expect(view).toMatch(/@click\.stop="penOpen = !penOpen"/)
+    expect(view).toMatch(/:aria-expanded="penOpen \? 'true' : 'false'"/)
+    expect(view).toMatch(/aria-controls="gPick"/)
+    expect(view).toMatch(/<Transition name="gPick">/)
+    expect(view).toMatch(/v-if="penOpen && panel === 'week'"/)
+    // 切走这一栏就收起（回来不该还挂着一条浮层）。
+    expect(view).toMatch(/penOpen\.value = false\s*\n\s*\}\s*\n\s*if \(next === 'roster'\)/)
+  })
+
+  it('选了整列 / 整行自动展开，否则「刷」藏在一颗收起的球后面', () => {
+    const col = view.slice(view.indexOf('function onColPick'), view.indexOf('function nextPick'))
+    expect(col).toMatch(/penOpen\.value = true/)
+    const row = view.slice(view.indexOf('function onRowPick'), view.indexOf('function nextPick'))
+    expect(row).toMatch(/penOpen\.value = true/)
+  })
+
+  it('收起时回执落在球上方，不用为了看「已清空 / 跳过几格」再展开', () => {
+    expect(view).toMatch(/v-if="!penOpen && pickNotice"/)
+    expect(view).toMatch(/class="gPick-toast"/)
+    expect(view).toMatch(/@click\.stop="penOpen = true; noticeOpen = true"/)
+    expect(view).toMatch(/\.gPick-toast \{[\s\S]{0,240}?position: fixed/)
+  })
+
+  it('展开的是浮层：不参与排版，页面不再为整条笔栏留 76px', () => {
+    expect(view).toMatch(/\.gPick \{[\s\S]{0,240}?position: fixed/)
+    expect(view).toMatch(/\.gB\.pen-week \{ padding-bottom: 92px; \}/)
+    expect(view).not.toMatch(/pen-open/)
+    expect(view).not.toMatch(/pen-tall/)
+  })
+})
+
+// 2026-10-29 用户指出「右边太多空位了，浪费」：页头在窄屏（648 之类的小窗）只挤在左边。
+describe('页头利用整行（2026-10-29）', () => {
+  it('标题行两端：排班在左、班次表在右', () => {
+    expect(view).toMatch(/\.gHeadActions \{ margin-left: auto; display: flex/)
+    expect(view).toMatch(/\.gHeadActions \{ margin-left: auto; \}/)
+  })
+
+  it('日期行两端：日期 / 人数在左、今天在右', () => {
+    expect(view).toMatch(/\.gPeriod \{ width: 100%; \}/)
+    expect(view).toMatch(/\.gPeriod em \{ margin-left: auto; \}/)
+  })
+
+  it('meta 行在窄屏换成 flex：视角切换左、翻周右，`gPeriod` 独占一行', () => {
+    expect(view).toMatch(/\.gMetaRow \{ display: flex; flex-wrap: wrap; gap: 7px; \}/)
+    expect(view).toMatch(/\.gSeg \{ margin-left: 0; \}/)
+    expect(view).toMatch(/\.gNav--head \{ display: flex; margin-left: auto; \}/)
+    // 宽屏：视角切换靠右，与标题行的班次表上下对齐（原来它停在中间，右边留一大片）。
+    expect(view).toMatch(/\.gSeg \{ display: inline-flex; align-items: center; gap: 4px; margin-left: auto; \}/)
+  })
+})
+
+// 2026-10-29 用户截图：两列面板里选区摘要把笔那一列挤到一百来像素，班次棋子竖排。
+describe('展开面板是单列、棋子换行（2026-10-29）', () => {
+  it('面板单列堆叠，不再按「摘要 | 笔」分两列', () => {
+    expect(view).toMatch(/\.gPick \{[\s\S]{0,400}?display: flex; flex-direction: column/)
+    // 两列模板（`grid-template-columns: minmax(0, auto) minmax(0, 1fr)`）不许回来。
+    expect(view).not.toMatch(/grid-template-columns: minmax\(0, auto\) minmax\(0, 1fr\)/)
+  })
+
+  it('笔那一行自己换行：一行放不下的棋子排到下一行，而不是竖排 / 横滑藏起来', () => {
+    expect(view).toMatch(/\.gPick-row \{[\s\S]{0,120}?flex-wrap: wrap/)
+    expect(view).not.toMatch(/\.gPick-row \{[\s\S]{0,120}?flex-wrap: nowrap/)
+  })
+
+  it('选区摘要行窄屏也能换行，长摘要不撑破面板', () => {
+    expect(view).toMatch(/\.gPick-region \{ display: flex; align-items: center; gap: 8px; flex-wrap: wrap; \}/)
+  })
+})
+
+// 2026-10-29 用户：「班次按钮，选择了班次后还要选工作区」—— 换班次不继承上一支笔点名过的区。
+describe('选笔时工作区回到「跟固定区」（2026-10-29）', () => {
+  it('选班次 / 休 / 休半天 / 清，都把 `penZoneId` 拨回空（= 跟固定区）', () => {
+    for (const fn of ['pickPenShift', 'pickPenRest', 'pickPenHalfRest', 'pickPenClear']) {
+      const start = view.indexOf(`function ${fn}`)
+      expect(start, fn).toBeGreaterThan(0)
+      const body = view.slice(start, view.indexOf('\n}', start))
+      expect(body, fn).toMatch(/penZoneId\.value = ''/)
+    }
+  })
+
+  it('「跟固定区」本身仍是 zoneId 空串：服务端按这个人这个班次的固定区回填', () => {
+    expect(view).toMatch(/if \(penZoneId\.value === ''\) return '跟固定区'/)
+    expect(view).toMatch(/zoneId: penZoneId\.value \}/)
   })
 })

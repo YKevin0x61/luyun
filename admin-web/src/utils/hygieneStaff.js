@@ -101,6 +101,10 @@ export async function staffRequest(
     const message = typeof data === 'string' ? data : parseApiDetail(data)
     const err = new Error(message)
     err.status = res.status
+    // 稳定的错误码（`X-Error-Code`，见 `api/scheduling.py` 的 `_bad_request`）。文案会改字，
+    // 码不会：少数几句要在页面上换一种呈现（换班撞车要弹一句说清是谁跟谁），按文案匹配
+    // 会随改字漂。没有这个头的老错误就是空串，调用方按「没有码」处理。
+    err.code = (res.headers.get('x-error-code') || '').trim()
     throw err
   }
   return data

@@ -35,11 +35,12 @@ html[data-workbench] {
   --z-shell:20; --z-scrim:40; --z-dialog:55; --z-toast:100; --z-queue:200;
   /* 页内底栏（`.wb-tabbar` / 共享表里的 `.hy-tabbar`）——**比 `--z-shell` 低一档**，不是另一档
      语义：它固定在视口底、属于**内容区**而不是壳 chrome，要排在壳的顶栏 / 手机页头之下。
-     为什么必须**严格更低**（实测踩过）：手机页头 `.wmh` 是 `position: relative` + `--z-shell`，
-     自己就是一个层叠上下文 —— 它的下拉遮罩 `.wmh-backdrop`（`--z-scrim`）再高也出不了那一层。
-     底栏一抬到同一档，就与 `.wmh` 同层，而底栏在 DOM 里排在后面 → 反过来盖住遮罩：菜单打开时
-     底栏那 57px 不被压暗、还能点穿（探针 `zones-390-menu` 的底栏中点从 `div.wmh-backdrop`
-     变成了 `a.wb-tab.is-on`）。这个值取自改动前写死的 `15`，换名字不改数。 */
+     为什么必须**严格更低**（实测踩过）：手机页头 `.wmh` 是 `position: relative` + 一个
+     z-index（2026-10-29 起是 `--z-dialog`），自己就是一个层叠上下文 —— 它的下拉遮罩
+     `.wmh-backdrop`（`--z-scrim`）再高也出不了那一层。底栏一抬到同一档，就与 `.wmh` 同层，
+     而底栏在 DOM 里排在后面 → 反过来盖住遮罩：菜单打开时底栏那 57px 不被压暗、还能点穿
+     （探针 `zones-390-menu` 的底栏中点从 `div.wmh-backdrop` 变成了 `a.wb-tab.is-on`）。
+     这个值取自改动前写死的 `15`，换名字不改数。 */
   --z-tabbar:15;
   --dur-1:120ms; --dur-2:200ms; --dur-3:320ms; --ease:cubic-bezier(.22,1,.36,1);
   --ls-1:.04em; --ls-2:.08em; --ls-3:.12em; --ls-4:.16em;

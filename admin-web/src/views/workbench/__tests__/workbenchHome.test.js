@@ -399,6 +399,20 @@ describe('工作台首页 · 员工视角', () => {
     expect(wrapper.findAll('.wbh-cell.leaves')).toHaveLength(0)
   })
 
+  it('我的班卡下面四个入口：请假 / 换班 / 加班 / 损耗（2026-10-29 用户裁定加上加班与损耗）', async () => {
+    // 请假与换班都落在「今天」页（`?act=&date=`），发起表单只有月历那一天那一处；
+    // 加班登记与损耗登记本来就在各自那一页，直接过去。
+    const { wrapper } = await mountHome({ identity: 'staff', table: staffData() })
+
+    const acts = wrapper.findAll('.wbh-me-act')
+    expect(acts.map((a) => a.text())).toEqual(['请假', '换班', '加班', '损耗'])
+    const [leave, swap, overtime, wastage] = acts.map((a) => a.attributes('href'))
+    expect(leave).toBe('/workbench/staff/today?act=leave&date=2026-10-05')
+    expect(swap).toBe('/workbench/staff/today?act=swap&date=2026-10-05')
+    expect(overtime).toBe('/workbench/staff/overtime')
+    expect(wastage).toBe('/workbench/staff/loss')
+  })
+
   it('我的待办条数是自己那三块的和，点进「卫生待办」', async () => {
     const { wrapper } = await mountHome({
       identity: 'staff',

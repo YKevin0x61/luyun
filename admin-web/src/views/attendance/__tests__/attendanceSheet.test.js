@@ -704,7 +704,7 @@ const SHEET_WITH_LEAVE = {
 }
 
 const LEAVE_LABELS = [
-  '实际出勤',
+  '出勤（含已排）',
   '月例休',
   '法定节假日补休',
   '生日假',
@@ -734,8 +734,8 @@ describe('考勤表页的假期台账（票 03）', () => {
     const { wrapper } = await mountSheet(attendanceServer({ sheet: SHEET_WITH_LEAVE }))
     expect(wrapper.find('.aFormula summary').text()).toBe('看算式')
     expect(wrapper.find('.aFormulaText').text()).toBe(
-      '实际出勤 12 天 + 月例休 2 天 + 法定节假日补休 1 天 + 生日假 1 天 + ' +
-        '年假 5 天 + 上月存假 5.5 天 = 可用 26.5 天；本月 30 天，存假 −3.5 天',
+      '出勤（含已排） 12 天 + 月例休 2 天 + 法定节假日补休 1 天 + 生日假 1 天 + ' +
+        '年假 5 天 + 上月存假 5.5 天 = 可用 26.5 天；本月在岗 30 天，存假 −3.5 天',
     )
   })
 
@@ -757,11 +757,12 @@ describe('考勤表页的假期台账（票 03）', () => {
 
 // ── 票 05：卡片上的四个手填列 ────────────────────────────────────────────────
 
-const MANUAL_LABELS = ['本月班次', '是否住宿', '借调门店', '是否离职']
-const MANUAL_FIELDS = ['shift_name', 'lodging', 'borrowed_store', 'resigned']
+// 2026-10-29：「是否离职」退役，手填列只剩三项。
+const MANUAL_LABELS = ['本月班次', '是否住宿', '借调门店']
+const MANUAL_FIELDS = ['shift_name', 'lodging', 'borrowed_store']
 
 describe('考勤表页的手填列（票 05）', () => {
-  it('四个输入口都在卡片上，标签按票面的四项来', async () => {
+  it('三个输入口都在卡片上（「是否离职」已退役）', async () => {
     const { wrapper } = await mountSheet()
     const rows = wrapper.findAll('.aCard')[0].findAll('.aManualRow .aManualLabel')
     expect(rows.map((label) => label.text())).toEqual(MANUAL_LABELS)
@@ -770,56 +771,50 @@ describe('考勤表页的手填列（票 05）', () => {
     // 固化成了他定的值（导出件的 A 列读的是 `shift_name`，那一位的含义没动）。
     const first = wrapper.findAll('.aCard')[0]
     expect(first.findAll('.aManualInput').map((input) => input.element.value)).toEqual([
-      '早班', '是', '调东莞', '',
+      '早班', '是', '调东莞',
     ])
     // 这一位一项都没填过：「本月班次」那一格是**空的**（空着有含义：用默认），
     // 提示语里说清那条默认是什么 —— 「这是默认」与「这是我定的」在页面上分得开。
     const second = wrapper.findAll('.aCard')[1]
     expect(second.findAll('.aManualInput').map((input) => input.element.value)).toEqual([
-      '', '', '', '',
+      '', '', '',
     ])
     expect(second.find('.aManualHint').text()).toBe('默认：当月最多 夜班')
     // 回显那一行念的也是**台账里存了什么**（没填过 = `—`），不是服务端回填的众数。
     const [shiftNow] = second.findAll('.aManualNowOne')
     expect(shiftNow.find('i').text()).toBe('本月班次')
     expect(shiftNow.find('b').text()).toBe('—')
-    // 另外三项的提示语说的是「怎么写」（不是默认值 —— 那三项没有默认）。
+    // 另外两项的提示语说的是「怎么写」（不是默认值 —— 那两项没有默认）。
     expect(second.findAll('.aManualHint').map((hint) => hint.text())).toEqual([
-      '默认：当月最多 夜班', '写「是」或「否」', '如「调东莞」', '写「是」或「否」',
+      '默认：当月最多 夜班', '写「是」或「否」', '如「调东莞」',
     ])
   })
 
-  it('改完点「存这四项」→ 一次 PUT 带上四项（空着的发 `null`）→ 卡片立刻变', async () => {
+  it('改完点「存这三项」→ 一次 PUT 带上四项（空着的发 `null`）→ 卡片立刻变', async () => {
     const server = attendanceServer()
     const { wrapper, puts } = await mountSheet(server)
     const card = wrapper.findAll('.aCard')[0]
     const inputs = card.findAll('.aManualInput')
     const button = wrapper.findAll('.aCard')[0].find('.aManual .aSave')
 
-    // 清空「借调门店」（文本输入清空之后 `value` 是 `''`）+ 改成「否」+ 填上班次与离职。
+    // 清空「借调门店」（文本输入清空之后 `value` 是 `''`）+ 改成「否」+ 填上班次。
     await inputs[2].setValue('')
     await inputs[1].setValue('否')
     await inputs[0].setValue('早班')
-    await inputs[3].setValue('是')
     await button.trigger('click')
     await flushPromises()
 
-    // **四项一起发**：空着的那几项发 `null`（清空存 NULL，与从没填过同义）。
+    // **三项一起发**：空着的那几项发 `null`（清空存 NULL，与从没填过同义）。
     expect(puts).toEqual([
       {
         employeeId: 1,
-        manual: {
-          shift_name: '早班',
-          lodging: '否',
-          borrowed_store: null,
-          resigned: '是',
-        },
+        manual: { shift_name: '早班', lodging: '否', borrowed_store: null },
       },
     ])
     // 重拉之后卡片上写的就是最新的那一份（页面不等 nudge）。
     const after = wrapper.findAll('.aCard')[0]
     expect(after.findAll('.aManualInput').map((input) => input.element.value)).toEqual([
-      '早班', '否', '', '是',
+      '早班', '否', '',
     ])
   })
 
@@ -839,7 +834,7 @@ describe('考勤表页的手填列（票 05）', () => {
     expect(puts).toEqual([
       {
         employeeId: 2,
-        manual: { shift_name: null, lodging: '是', borrowed_store: null, resigned: null },
+        manual: { shift_name: null, lodging: '是', borrowed_store: null },
       },
     ])
     // 重拉之后那一格**还是空的**（页面也没替服务端认下这条默认）。
@@ -867,6 +862,96 @@ describe('考勤表页的手填列（票 05）', () => {
     // 手填列**不进员工档案**：页面这一块只打考勤表那一扇门（请求集合那条用例钉着），
     // 这里再钉一次「没有第二个写档案的接口」。
     expect(view).not.toMatch(/employees\/\$\{person\.id\}\/profile/)
+  })
+})
+
+// ── 2026-10-29：手填区默认收成一行摘要、假期台账压成网格 ──────────────────────
+//
+// 用户截图反馈：「截图的地方太占地方」—— 390px 上手填四格 + 期初 / 期末实测 502px
+// （约一屏半）、假期台账 198px。这一块是**低频**的（填一次就进台账），所以默认收起，
+// 只留一行摘要（台账里存了什么 + 那一对结余），点「编辑」才摊开。
+
+describe('手填区默认收成一行摘要（2026-10-29 版式）', () => {
+  it('默认收起：摘要行常显，输入框与两颗保存按钮在 DOM 里但不占位', async () => {
+    const { wrapper } = await mountSheet(attendanceServer({ sheet: SHEET_WITH_OPENING }))
+    const manual = wrapper.findAll('.aCard')[0].find('.aManual')
+    const head = manual.find('.aManualHead')
+
+    expect(head.attributes('aria-expanded')).toBe('false')
+    expect(head.find('.aManualAct').text()).toBe('编辑')
+    // `v-show` 而不是 `v-if`：收起时输入框还在（没填的东西不会丢），只是这一块不占位。
+    const body = manual.find('.aManualBody')
+    expect(body.exists()).toBe(true)
+    expect(body.element.style.display).toBe('none')
+    // 摘要念的是**台账里存了什么**：四项 + 期初 / 期末，一共六项。
+    expect(head.findAll('.aManualSummaryOne').map((one) => one.find('i').text())).toEqual([
+      '本月班次', '是否住宿', '借调门店', '期初', '期末',
+    ])
+  })
+
+  it('摘要的五项值是台账里的那一份（没填过写 `—`，不预填众数）', async () => {
+    const { wrapper } = await mountSheet()
+    const shown = wrapper
+      .findAll('.aCard')[0]
+      .findAll('.aManualSummaryOne')
+      .map((one) => one.find('b').text())
+    // 「本月班次」读的是 `shift_name_stored`（填过的「早班」）；期初 / 期末没给过 = `—`。
+    expect(shown).toEqual(['早班', '是', '调东莞', '—', '—'])
+
+    // 一项都没填过的那张卡：六项全是 `—`，不是空白（也不是服务端回填的众数）。
+    const second = wrapper.findAll('.aCard')[1]
+    expect(second.findAll('.aManualSummaryOne').map((one) => one.find('b').text())).toEqual([
+      '—', '—', '—', '—', '—',
+    ])
+
+    // 台账里给了期初时，摘要念出来的是那一位（不是留空）。
+    const withOpening = await mountSheet(attendanceServer({ sheet: SHEET_WITH_OPENING }))
+    expect(
+      withOpening.wrapper.findAll('.aCard')[0].findAll('.aManualSummaryOne')[3].find('b').text(),
+    ).toBe('5.5')
+  })
+
+  it('点「编辑」摊开、再点「收起」收回，且只动这一张卡', async () => {
+    const { wrapper } = await mountSheet() // 票 01 那份 SHEET：两张卡
+    const first = wrapper.findAll('.aCard')[0]
+    const second = wrapper.findAll('.aCard')[1]
+
+    await first.find('.aManualHead').trigger('click')
+    expect(first.find('.aManualHead').attributes('aria-expanded')).toBe('true')
+    expect(first.find('.aManualHead .aManualAct').text()).toBe('收起')
+    expect(first.find('.aManualBody').element.style.display).not.toBe('none')
+    // 另一张卡不受影响（按「这个人」记，不是按页记）。
+    expect(second.find('.aManualHead').attributes('aria-expanded')).toBe('false')
+    expect(second.find('.aManualBody').element.style.display).toBe('none')
+
+    await first.find('.aManualHead').trigger('click')
+    expect(first.find('.aManualBody').element.style.display).toBe('none')
+  })
+
+  it('服务端拒绝时这一块自动摊开（理由不能埋在收起来的 body 里）', async () => {
+    const refused = attendanceServer({ refuse: '台账还没建好，请先做数据库迁移' })
+    const { wrapper } = await mountSheet(refused)
+    const card = wrapper.findAll('.aCard')[0]
+    expect(card.find('.aManualBody').element.style.display).toBe('none')
+
+    await card.find('.aManualInput').setValue('早班')
+    await card.find('.aManual .aSave').trigger('click')
+    await flushPromises()
+
+    const after = wrapper.findAll('.aCard')[0]
+    expect(after.find('.aManualHead').attributes('aria-expanded')).toBe('true')
+    expect(after.find('.aManualBody').element.style.display).not.toBe('none')
+    expect(after.find('.aManualErr').text()).toBe('台账还没建好，请先做数据库迁移')
+  })
+
+  it('假期台账不再有「假期台账」那行小标题，九项一项不少', async () => {
+    const { wrapper } = await mountSheet(attendanceServer({ sheet: SHEET_WITH_LEAVE }))
+    const leave = wrapper.findAll('.aCard')[0].find('.aLeave')
+
+    expect(leave.find('.aSectionHead').exists()).toBe(false)
+    expect(leave.findAll('.aLv')).toHaveLength(9)
+    // 版式在 CSS 里：九项是自适应网格（不再是原来那条 `flex-wrap` 落成 5 行）。
+    expect(view).toMatch(/\.aLvRow\s*\{[^}]*grid-template-columns:\s*repeat\(auto-fit/)
   })
 })
 
@@ -962,11 +1047,11 @@ describe('考勤表页的封账上月（票 04 / B 批返工 ⑦）', () => {
 
 // ── B 批返工 ⑦：五颗按钮的主次 ──────────────────────────────────────────────
 //
-// 「导出这个月」（这一页的主动作）与「存这四项」用主按钮样式；「封账上月」是不可逆的
+// 「导出这个月」（这一页的主动作）与「存这三项」用主按钮样式；「封账上月」是不可逆的
 // 那一颗，所以它点下去先确认一次（不是靠颜色挡人）。
 
 describe('按钮主次（B 批返工 ⑦）', () => {
-  it('「导出这个月」与「存这四项」是主按钮，其余三颗是次按钮', async () => {
+  it('「导出这个月」与「存这三项」是主按钮，其余三颗是次按钮', async () => {
     const { wrapper } = await mountSheet()
 
     expect(exportButton(wrapper).classes()).toContain('btn-primary')
@@ -1201,14 +1286,18 @@ describe('日格文案与导出件的常量逐字相同（收尾修复 ⑥）', 
 // 照本仓既有的写法读源码断它 —— 判定即结论，不是拿文本去断行为。
 
 describe('考勤表页的版式（B 批返工 ③②⑥⑧①）', () => {
-  it('③ 手填那一块的次序：四输入 → 回显 + 存这四项 → 期初块 + 存期初存假', async () => {
+  it('③ 手填那一块的次序：四输入 → 回显 + 存这三项（同一行）→ 期初块 + 存期初存假', async () => {
     const { wrapper } = await mountSheet(attendanceServer({ sheet: SHEET_WITH_OPENING }))
     const manual = wrapper.findAll('.aCard')[0].find('.aManual')
-    // 回显与它自己那颗「存这四项」必须挨着（中间不再岔进期初那一块）。
+    // 2026-10-29 排版：回显与「存这三项」并成一行（回显在 `.aManualFoot` 里、按钮贴右），
+    // 不再各占一行。次序仍是「四输入 → 回显 + 按钮 → 期初块」。
     const order = [...manual.element.querySelectorAll(
-      '.aManualRow, .aManualNow, .aManualFoot, .aOpening',
+      '.aManualRow, .aManualFoot, .aOpening',
     )].map((el) => el.className.split(' ')[0])
-    expect(order).toEqual(['aManualRow', 'aManualNow', 'aManualFoot', 'aOpening'])
+    expect(order).toEqual(['aManualRow', 'aManualFoot', 'aOpening'])
+    const foot = manual.find('.aManualFoot')
+    expect(foot.find('.aManualNow').exists()).toBe(true)
+    expect(foot.find('.aSave').exists()).toBe(true)
   })
 
   it('② 「今天」那一格用 `--accent` 描边（`--warn` 留给待补），格子里另有「今」字', async () => {
@@ -1266,7 +1355,7 @@ describe('考勤表页的版式（B 批返工 ③②⑥⑧①）', () => {
 
 // ── 票 09：期末存假（本月剩余）可人工定稿 ─────────────────────────────────────
 //
-// 期初与期末摆成**一对**（一个块、一颗按钮一起存），但仍然**不并进**「存这四项」那颗
+// 期初与期末摆成**一对**（一个块、一颗按钮一起存），但仍然**不并进**「存这三项」那颗
 // —— 那四项是随手会改的手填列，这两条是台账的结余（父级 05 的裁定：手填列与封账的
 // 结余各自一条路）。期末输入框绑的是 `closing_balance_stored`（台账里的**原始**值，
 // 没填过就是空的），公式算出来的那个数只出现在「系统建议」那句话里。
@@ -1503,7 +1592,7 @@ describe('考勤表页的期末存假（票 09）', () => {
     expect(card.find('.aClosingSealed').exists()).toBe(false)
   })
 
-  it('既有的「存这四项」不并进这两条结余（三期权的分界照旧）', async () => {
+  it('既有的「存这三项」不并进这两条结余（三期权的分界照旧）', async () => {
     const { wrapper, puts } = await mountSheet(attendanceServer({ sheet: SHEET_WITH_CLOSING }))
     const card = wrapper.findAll('.aCard')[0]
 
@@ -1514,7 +1603,6 @@ describe('考勤表页的期末存假（票 09）', () => {
     expect(Object.keys(puts[0].manual).sort()).toEqual([
       'borrowed_store',
       'lodging',
-      'resigned',
       'shift_name',
     ])
   })
@@ -1527,5 +1615,30 @@ describe('考勤表页的期末存假（票 09）', () => {
     // 服务端没给 `balance_computed` 时那句话压根不出现（老载荷照旧，不编数字）。
     expect(card.find('.aClosingNote').exists()).toBe(false)
     expect(card.find('.aClosingSealed').exists()).toBe(false)
+  })
+})
+
+// 2026-10-29 用户报「30/31 都排了班了，但没算上」：未来格原来一律留空，看不到已排的班。
+describe('今天之后、但已经排了班的格子（2026-10-29）', () => {
+  it('把班次写出来，但仍是「还没到」那一格：不能点、不进统计', async () => {
+    const sheet = JSON.parse(JSON.stringify(SHEET))
+    sheet.employees[0].days[3] = { business_date: '2026-09-04', state: null, shift_id: 1 }
+    const { wrapper } = await mountSheet(attendanceServer({ sheet }))
+    const cells = wrapper.findAll('.aCard')[0].findAll('.aDay')
+
+    expect(cells[3].find('.aDayText').text()).toBe('白班')
+    // 还是「未来」那一档（淡色、透明边），不是已经上班的绿色。
+    expect(cells[3].classes()).toContain('is-future')
+    expect(cells[3].classes()).not.toContain('is-work')
+    // 不能点：未来不可编辑这条不变。
+    expect(cells[3].find('button.aDayBtn').exists()).toBe(false)
+    // 也不进「待补」：未来之留空那条语义没被改写。
+    expect(wrapper.findAll('.aCard')[0].find('.aTodo').text()).toBe('待补 1 天')
+  })
+
+  it('未来那天没排班时仍然留空（不是「待补」）', async () => {
+    const { wrapper } = await mountSheet()
+    const cells = wrapper.findAll('.aCard')[0].findAll('.aDay')
+    expect(cells[3].find('.aDayText').text()).toBe('')
   })
 })

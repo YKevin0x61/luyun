@@ -70,7 +70,7 @@ const canBackfill = computed(
 )
 // 停用的人不进下拉（`/admin/employees` 把 `disabled` 带下来了）：历史登记还能补在他头上，
 // 但补录表单是给「现在还在上班的人」用的。已经提上来的那些不受影响。
-const pickable = computed(() => employees.value.filter((person) => !person.disabled))
+const pickable = computed(() => employees.value.filter((person) => !person.resigned))
 
 function employeeName(id) {
   const found = employees.value.find((person) => person.id === id)

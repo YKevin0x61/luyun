@@ -13,6 +13,7 @@ from playwright.async_api import TimeoutError as PlaywrightTimeoutError, async_p
 
 from config import settings
 from scraper._common import CHINA_TZ, ScraperSessionError, pos_response_indicates_auth_failure
+from scraper.order_parse import parse_api_order_response
 from scraper.pos_http_client import PosHttpClient
 from scraper.sly20_auth import build_cy7mm_biz_data, login_sly20
 from services import credentials_store
@@ -1130,114 +1131,7 @@ class PosSession:
     async def _parse_api_order_response(
         self, data: Dict, table_number: str
     ) -> Optional[List[Dict]]:
-        """解析桌情 API → RawOrderLine → OrderLineBuilder 入库行。"""
-        from scraper.order_line_builder import (
-            FLOW_MODE_COMBO,
-            FLOW_MODE_UNIT,
-            RawOrderLine,
-            notes_from_method_text,
+        """解析桌情 API → 入库行；实现见 ``scraper.order_parse``（与移动银台共用）。"""
+        return await parse_api_order_response(
+            data, table_number, order_lines=self.order_lines, logger=self.logger
         )
-        from scraper.order_source import classify_order_source
-
-        try:
-            if not data.get('success', False):
-                self.logger.error(f"❌ API响应失败: {data.get('errorMsg', '未知错误')}")
-                return []
-
-            response_data = data.get('data', {})
-            if not response_data:
-                self.logger.error("❌ API响应中没有数据")
-                return []
-
-            business_flow_id = response_data.get('bsCode', '')
-            sc_detail = response_data.get('scDetail', [])
-            if not sc_detail:
-                self.logger.error("❌ 没有找到菜品详情")
-                return []
-
-            current_year = datetime.now(CHINA_TZ).year
-            current_date = datetime.now(CHINA_TZ).strftime("%m-%d")
-            table_overlays = {
-                "status": "未结",
-                "source": classify_order_source(
-                    table_number=table_number or response_data.get("pointName") or "",
-                    people_qty=response_data.get("peopleQty"),
-                ),
-            }
-            raws: List[RawOrderLine] = []
-
-            for item in sc_detail:
-                try:
-                    dish_name = strip_trailing_dash_suffix(item.get('itemName', ''))
-                    quantity = int(float(item.get('lastQty', 0) or 0))
-                    price = float(item.get('lastPrice', 0) or 0)
-                    order_time_str = item.get('orderTime', '')
-                    if order_time_str:
-                        formatted_time = f"{current_year}-{current_date} {order_time_str}"
-                        try:
-                            order_time_dt = datetime.strptime(
-                                formatted_time, "%Y-%m-%d %H:%M"
-                            ).replace(tzinfo=CHINA_TZ)
-                        except Exception:
-                            order_time_dt = datetime.now(CHINA_TZ)
-                    else:
-                        order_time_dt = datetime.now(CHINA_TZ)
-
-                    if quantity > 0 and dish_name:
-                        parent_overlays = dict(table_overlays)
-                        parent_overlays["notes"] = notes_from_method_text(
-                            item.get("methodText")
-                        )
-                        raws.append(
-                            RawOrderLine(
-                                bs_code=business_flow_id,
-                                dish_name=dish_name,
-                                quantity=quantity,
-                                unit_price=price,
-                                table_number=table_number,
-                                order_time=order_time_dt,
-                                flow_mode=FLOW_MODE_UNIT,
-                                overlays=parent_overlays,
-                            )
-                        )
-                        if quantity > 1:
-                            self.logger.info(
-                                f"🔄 拆分菜品: {dish_name} x{quantity} → {quantity}条独立记录"
-                            )
-
-                    for child in item.get('children', []) or []:
-                        try:
-                            child_name = strip_trailing_dash_suffix(child.get('itemName', ''))
-                            child_qty = int(float(child.get('lastQty', 0) or 0))
-                            if child_qty <= 0 or not child_name:
-                                continue
-                            child_overlays = dict(table_overlays)
-                            child_overlays["notes"] = notes_from_method_text(
-                                child.get("methodText")
-                            )
-                            raws.append(
-                                RawOrderLine(
-                                    bs_code=business_flow_id,
-                                    dish_name=child_name,
-                                    quantity=child_qty,
-                                    unit_price=0.0,
-                                    table_number=table_number,
-                                    order_time=order_time_dt,
-                                    flow_mode=FLOW_MODE_COMBO,
-                                    overlays=child_overlays,
-                                )
-                            )
-                            if child_qty > 1:
-                                self.logger.info(
-                                    f"🔄 拆分套餐子项: {child_name} x{child_qty} → {child_qty}条独立记录"
-                                )
-                        except Exception as e:
-                            self.logger.error(f"❌ 解析套餐明细失败: {e}")
-                except Exception as e:
-                    self.logger.error(f"❌ 解析菜品数据失败: {e}")
-
-            return await self.order_lines.expand_many(raws)
-        except Exception as e:
-            # 解析期异常同样是「没拿到明细」，不能返回空列表冒充「这桌没菜」
-            self.logger.error(f"❌ 解析API响应失败: {e}")
-            return None

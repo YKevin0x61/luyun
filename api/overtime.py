@@ -304,7 +304,9 @@ async def admin_employees(
             {
                 "id": int(employee["id"]),
                 "name": employee.get("name") or "",
-                "disabled": bool(employee.get("disabled")),
+                # 离职（2026-10-29 取代「停用」）：到今天为止算不算已离职。
+                "resigned": bool(employee.get("resigned")),
+                "resigned_at": employee.get("resigned_at"),
             }
             for employee in roster
         ]
@@ -497,7 +499,9 @@ async def review_employees(
             {
                 "id": int(employee["id"]),
                 "name": employee.get("name") or "",
-                "disabled": bool(employee.get("disabled")),
+                # 离职（2026-10-29 取代「停用」）：到今天为止算不算已离职。
+                "resigned": bool(employee.get("resigned")),
+                "resigned_at": employee.get("resigned_at"),
             }
             for employee in roster
         ]

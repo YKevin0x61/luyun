@@ -54,7 +54,7 @@ export function formatNetHours(hours) {
 
 /** 天数（假期台账那一套，可带 .5、可为负）：`12 天` / `19.5 天` / `−10.5 天` / `0 天`。
  *
- *  正数不写 `+`（「实际出勤 12 天」不是一笔增减），负数写全角减号 —— 与
+ *  正数不写 `+`（「出勤（含已排）12 天」不是一笔增减），负数写全角减号 —— 与
  *  `formatNetHours` 同一个字符：**欠班**与攒下的假在纸面上必须分得开
  *  （`GLOSSARY.md` 的存假：负数是欠班，不是脏数据）。 */
 export function formatDays(days) {
@@ -72,7 +72,7 @@ export function formatDays(days) {
 export function leaveFormulaText(leave) {
   if (!leave) return ''
   const terms = [
-    ['实际出勤', leave.actual_days],
+    ['出勤（含已排）', leave.actual_days],
     ['月例休', leave.monthly_rest],
     ['法定节假日补休', leave.holiday_makeup],
     ['生日假', leave.birthday_leave],
@@ -80,7 +80,9 @@ export function leaveFormulaText(leave) {
     ['上月存假', leave.previous_balance],
   ]
   const sum = terms.map(([label, value]) => `${label} ${formatDays(value)}`).join(' + ')
-  return `${sum} = 可用 ${formatDays(leave.pool)}；本月 ${leave.month_days} 天，存假 ${formatDays(leave.balance)}`
+  // `month_days` 是**本月在岗天数**（2026-10-29）：老员工 = 整月，入职当月从他入职
+  // 那天算起 —— 只写「本月 17 天」读起来像笔误，所以明说是「在岗」。
+  return `${sum} = 可用 ${formatDays(leave.pool)}；本月在岗 ${leave.month_days} 天，存假 ${formatDays(leave.balance)}`
 }
 
 /** 未审批的加班 / 补钟（故事 14）：有单子等着批就把这一格标色，并说清待批几小时。
@@ -120,7 +122,7 @@ export function manualStats(person) {
     { label: '本月班次', value: person?.shift_name_stored },
     { label: '是否住宿', value: person?.lodging },
     { label: '借调门店', value: person?.borrowed_store },
-    { label: '是否离职', value: person?.resigned },
+    // 「是否离职」2026-10-29 退役（离职改成花名册状态 + 日期），这一块只剩三项。
   ]
 }
 

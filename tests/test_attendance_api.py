@@ -265,6 +265,37 @@ def test_every_day_is_work_rest_or_todo_and_the_future_stays_blank(attendance_ht
     assert cells["2026-09-30"] is None
 
 
+def test_days_before_the_hire_date_stay_blank_not_todo(attendance_http):
+    """2026-10-29 用户报：14 号才入职的人，1–13 号在卡片上是「待补」。
+
+    入职之前那几天这个人还不在店里 —— 与「今天之后」同一档留空，既不是要人工确认的
+    「待补」，也不该进页头的「待补排行」（那一行数的是 `state == 'todo'`）。
+    入职**当天**起照旧：没排班行 = 待补，该补的正是这一天以后的班。
+    """
+    client, db, accounts = attendance_http
+    admin = _admin_cookie(client)
+    # 夹具的「今天」是 2026-09-24（25 号起算未来）。
+    newcomer = _employee_id(accounts, "13800138121", "月中入职", hire_date="2026-09-14")
+
+    sheet = _sheet(client, admin)
+    cells = _cells(sheet, newcomer)
+
+    assert cells["2026-09-01"] is None  # 入职前的整段头部：留空
+    assert cells["2026-09-13"] is None  # 入职前一天：留空
+    assert cells["2026-09-14"] == "todo"  # 入职当天没有排班行 = 待补
+    assert cells["2026-09-24"] == "todo"  # 今天也一样
+    assert sum(1 for state in cells.values() if state == "todo") == 11  # 14–24 号，不含入职前
+    # 存假也按**在岗天数**算（2026-10-29）：14 号入职 = 14–30 号共 17 天，不是整月 30 天。
+    assert _card(sheet, newcomer)["leave"]["month_days"] == 17
+
+    # 早就入职的人不受影响：整月照旧（前面那条三态用例钉着 1 号 = 待补）。
+    # 这里只确认「没有入职日期」的人也不会被误伤 —— 判据是 `if hire_date`。
+    undated = _employee_id(accounts, "13800138122", "没填入职")
+    undated_sheet = _sheet(client, admin)
+    assert _cells(undated_sheet, undated)["2026-09-01"] == "todo"
+    assert _card(undated_sheet, undated)["leave"]["month_days"] == 30
+
+
 # ── 票 01 验收 5：名单 = 在职 + 当月有记录的人（含当月离职） ──────────────────
 
 
@@ -294,9 +325,9 @@ def test_the_roster_is_the_staff_plus_anyone_with_this_months_records(attendance
             "离职前那一晚",
         )
     )
-    _run(accounts.disable(shift_leaver))
-    _run(accounts.disable(overtime_leaver))
-    _run(accounts.disable(gone_long_ago))
+    _run(accounts.resign(shift_leaver, "2026-09-10"))
+    _run(accounts.resign(overtime_leaver, "2026-09-10"))
+    _run(accounts.resign(gone_long_ago, "2026-07-31"))
 
     listed = [row["id"] for row in _sheet(client, admin)["employees"]]
 
@@ -679,17 +710,19 @@ def _ledger_row(db, employee_id, month):
     return _run(_read())
 
 
-# ── 票 03 验收 1/2：实际出勤只数已过的日子，月例休按它折算 ──────────────────
+# ── 票 03 验收 1/2：出勤天数按排班数（含未来已排），月例休按它折算 ───────────────
 
 
-def test_actual_days_counts_only_the_days_that_have_already_passed(attendance_http):
-    """已过、排了班、又没标休的那几天各算一天；**今天之后排的班一天都不算**。"""
+def test_actual_days_counts_scheduled_days_including_the_future(attendance_http):
+    """已过、排了班、又没标休的那几天各算一天；**今天之后已经排了班的也各算一天**
+    （2026-10-29 用户裁定「按排班预结算」）。未来**没排班**的天不算。"""
     client, db, accounts = attendance_http
     admin = _admin_cookie(client)
     employee_id = _employee_id(accounts)
     shifts = _shift_ids(db)
     scheduler = _scheduler(db)
-    # 今天起按轮转规则铺：09-24（今天）到月末都排了白班 —— 其中 25 号之后还没发生。
+    # 今天起按轮转规则铺：09-24（今天）到月末都排了白班 —— 25 号之后虽然还没发生，
+    # 但已经排了班，按预结算要算进去。
     _run(scheduler.set_rule(employee_id, [shifts["白班"]]))
     # 过去补记：五天班 + 一天休（休的那天不算出勤）。
     for day in range(1, 6):
@@ -702,10 +735,24 @@ def test_actual_days_counts_only_the_days_that_have_already_passed(attendance_ht
 
     leave = _leave(_sheet(client, admin), employee_id)
 
-    # 补记的 5 天 + 今天 1 天 = 6；09-25..09-30 的班不算（还没到），
-    # 09-06 是休（有排班行但没上班）。算成 12 天的话这里会看到 2。
-    assert leave["actual_days"] == 6.0
-    assert leave["monthly_rest"] == 1
+    # 补记的 5 天 + 09-24..09-30 的 7 天 = 12；09-06 是休（有排班行但没上班）。
+    assert leave["actual_days"] == 12.0
+    assert leave["monthly_rest"] == 2
+
+
+def test_actual_days_ignores_future_days_without_a_schedule(attendance_http):
+    """未来**没排班**的日子不算出勤 —— 「按排班预结算」不是「按整月天数算」。"""
+    client, db, accounts = attendance_http
+    admin = _admin_cookie(client)
+    employee_id = _employee_id(accounts)
+    shifts = _shift_ids(db)
+    scheduler = _scheduler(db)
+    _run(scheduler.set_override(employee_id, "2026-09-01", shift_id=shifts["白班"]))
+
+    leave = _leave(_sheet(client, admin), employee_id)
+
+    # 只补记了 09-01 一天；09-24 之后没有任何排班行（没配规则）。
+    assert leave["actual_days"] == 1.0
 
 
 # 月末那一天的钟：12 月 31 天全过完，「出勤 30 天 → 上限 4」那一条才验得了。
@@ -843,8 +890,8 @@ def test_statutory_holiday_make_up_leave_needs_the_day_marked_and_worked(attenda
 def test_holiday_make_up_leave_covers_the_whole_month_not_only_past_days(attendance_http):
     """补休按**当月每个**法定节假日算（票面口径），不是只算已过的那些。
 
-    日历与轮转都已经知道那天他上班；「已过」那条限制只属于**实际出勤天数**
-    （票 03 验收 1），别把它顺手套到补休上。
+    日历与轮转都已经知道那天他上班；出勤天数现在同样按排班预结算（2026-10-29），
+    但那是**另一个口径** —— 这条用例只钉补休，别把两者混成一条。
     """
     client, db, accounts = attendance_http
     admin = _admin_cookie(client)
@@ -860,8 +907,8 @@ def test_holiday_make_up_leave_covers_the_whole_month_not_only_past_days(attenda
 
     assert _leave(sheet, worker)["holiday_makeup"] == 1
     assert _leave(sheet, idle)["holiday_makeup"] == 0
-    # 那天还没到：补休算得到，**出勤天数**一分都不加。
-    assert _leave(sheet, worker)["actual_days"] == 0.0
+    # 那天还没到：补休算得到；出勤天数按预结算也把这天算上（2026-10-29 起）。
+    assert _leave(sheet, worker)["actual_days"] == 1.0
 
 
 # ── 票 03 验收 4：生日假按身份证号派生的生日月份 ────────────────────────────
@@ -1135,6 +1182,30 @@ def test_sealing_the_last_month_writes_the_balance_the_card_then_reads(attendanc
     assert after["provisional"] is True
 
 
+def test_sealing_counts_the_hire_month_from_the_hire_day(attendance_http):
+    """封账与卡片用同一条分母（2026-10-29）：8 月 14 号入职的人封 8 月，按 18 天算。
+
+    封下去的数就是那个月卡片上那张账（`sheet()` 与 `seal()` 同一条算式）—— 卡片改成
+    「本月在岗天数」之后这里没跟着改，封下的就是一笔凭空多欠 13 天的假账，而且**永久
+    冻结**。出勤 7 + 例休 1 = 池 8；8/14–8/31 共 18 天 → 8 − 18 = −10。
+    """
+    client, db, accounts = attendance_http
+    admin = _admin_cookie(client)
+    newcomer = _employee_id(accounts, "13800138131", "八月十四入职", hire_date="2026-08-14")
+    shifts = _shift_ids(db)
+    for day in range(25, 32):
+        _run(
+            _scheduler(db).set_override(
+                newcomer, f"2026-08-{day:02d}", shift_id=shifts["白班"]
+            )
+        )
+
+    resp = _seal(client, admin)
+
+    assert resp.status_code == 200, resp.text
+    assert _ledger_row(db, newcomer, "2026-08")["closing_balance"] == -10.0
+
+
 def test_sealing_refuses_a_month_that_has_not_finished(attendance_http):
     """验收 2：当月（与未来）封不了，被拒且中文说得清；一个字都没写下去。"""
     client, db, accounts = attendance_http
@@ -1329,10 +1400,11 @@ def test_missing_holiday_and_ledger_tables_are_named_in_the_503(attendance_http)
 
 # ══ 票 05：手填列（下面这一整段都是票 05 加的） ═════════════════════════════════
 #
-# 那四项系统推不出来的值（本月班次 / 是否住宿 / 借调门店 / 是否离职）由超管在卡片上
+# 那三项系统推不出来的值（本月班次 / 是否住宿 / 借调门店）由超管在卡片上
 # 填一次、存在**月度考勤台账**（0027，`GLOSSARY.md` 的「月度考勤台账」）当月那一行上：
 #
-# * 读：卡片上四个键（`shift_name` / `lodging` / `borrowed_store` / `resigned`）。
+# * 读：卡片上三个键（`shift_name` / `lodging` / `borrowed_store`）。**「是否离职」2026-10-29
+#   退役** —— 离职改成花名册上的状态（`resigned_at`），导出件从那里派生，台账那列不读不写。
 #   台账里没填过 `shift_name` 时给**当月众数**（并列取 `staff_shifts.sort_order` 靠前）；
 #   当月一条排班都没有的人**留空**，不是报错。
 # * 写：`PUT /api/attendance/sheet/{员工}/manual` —— 台账那一行 upsert，
@@ -1341,11 +1413,11 @@ def test_missing_holiday_and_ledger_tables_are_named_in_the_503(attendance_http)
 # 「从没填过」与「清空」同义：清空存 NULL，读回来照旧退回上面那条默认。
 
 
-MANUAL_FIELDS = ("shift_name", "lodging", "borrowed_store", "resigned")
+MANUAL_FIELDS = ("shift_name", "lodging", "borrowed_store")
 
 
 def _manual(card):
-    """这个人卡片上那四个手填列。"""
+    """这个人卡片上那三个手填列。"""
     return {field: card[field] for field in MANUAL_FIELDS}
 
 
@@ -1358,7 +1430,7 @@ def _put_manual(client, admin, employee_id, body):
 # ── 票 05 验收 1：四列能填能改、刷新后还在（读侧先落库一行看它读不读得出来） ──
 
 
-def test_the_card_reads_the_four_manual_columns_back(attendance_http):
+def test_the_card_reads_the_manual_columns_back(attendance_http):
     """台账那一行上填过的值原样回到卡片上；没填过的人是「空」（不是报错）。"""
     client, db, accounts = attendance_http
     admin = _admin_cookie(client)
@@ -1372,7 +1444,6 @@ def test_the_card_reads_the_four_manual_columns_back(attendance_http):
         shift_name="早班",
         lodging="是",
         borrowed_store="调东莞",
-        resigned="是",
     )
 
     sheet = _sheet(client, admin)
@@ -1381,7 +1452,6 @@ def test_the_card_reads_the_four_manual_columns_back(attendance_http):
         "shift_name": "早班",
         "lodging": "是",
         "borrowed_store": "调东莞",
-        "resigned": "是",
     }
     # 没填过的人四项都是空：页面上显示为空，不是编一个值出来。
     assert _manual(_card(sheet, blank)) == {field: None for field in MANUAL_FIELDS}
@@ -1470,16 +1540,14 @@ def test_each_manual_column_is_written_on_its_own_without_clearing_the_others(at
         "shift_name": "早班",
         "lodging": "是",
         "borrowed_store": None,
-        "resigned": None,
         # 这一次是**手填**，回执里没有「默认」这一份（它不是台账上的值）。
         "default_shift_name": None,
     }
-    # 刚写下的那一行，卡片上立刻是这两个值；没填过的两项还是空。
+    # 刚写下的那一行，卡片上立刻是这两个值；没填过的那一项还是空。
     assert _manual(_card(_sheet(client, admin), employee_id)) == {
         "shift_name": "早班",
         "lodging": "是",
         "borrowed_store": None,
-        "resigned": None,
     }
 
     # 2) 再只填借调门店：上面那两项**不动**（只更新点名的那一列）。
@@ -1491,20 +1559,6 @@ def test_each_manual_column_is_written_on_its_own_without_clearing_the_others(at
         "shift_name": "早班",
         "lodging": "是",
         "borrowed_store": "调东莞",
-        "resigned": None,
-        "default_shift_name": None,
-    }
-
-    # 3) 最后只点离职：前三项一个都不动。
-    third = _put_manual(client, admin, employee_id, {"resigned": "是"})
-    assert third.status_code == 200, third.text
-    assert third.json() == {
-        "employee_id": employee_id,
-        "month": MONTH,
-        "shift_name": "早班",
-        "lodging": "是",
-        "borrowed_store": "调东莞",
-        "resigned": "是",
         "default_shift_name": None,
     }
     # 刷新之后还在（验收 1 的后半句）—— 而且是同一行，不是每写一次多一行。
@@ -1512,7 +1566,6 @@ def test_each_manual_column_is_written_on_its_own_without_clearing_the_others(at
         "shift_name": "早班",
         "lodging": "是",
         "borrowed_store": "调东莞",
-        "resigned": "是",
     }
     assert _ledger_values(db, employee_id, MONTH, ["shift_name", "lodging"]) == {
         "shift_name": "早班",
@@ -1575,22 +1628,17 @@ def test_clearing_a_manual_column_stores_null_and_falls_back_to_the_default(atte
         client,
         admin,
         employee_id,
-        {
-            "shift_name": "早班",
-            "lodging": "是",
-            "borrowed_store": "调东莞",
-            "resigned": "是",
-        },
+        {"shift_name": "早班", "lodging": "是", "borrowed_store": "调东莞"},
     )
     assert filled.status_code == 200, filled.text
     assert _manual(_card(_sheet(client, admin), employee_id))["shift_name"] == "早班"
 
-    # 四项一起清空（页面上的保存按钮就是这么发的：空着的项发 `null`）。
+    # 三项一起清空（页面上的保存按钮就是这么发的：空着的项发 `null`）。
     cleared = _put_manual(
         client,
         admin,
         employee_id,
-        {"shift_name": None, "lodging": None, "borrowed_store": None, "resigned": None},
+        {"shift_name": None, "lodging": None, "borrowed_store": None},
     )
 
     assert cleared.status_code == 200, cleared.text
@@ -1600,19 +1648,17 @@ def test_clearing_a_manual_column_stores_null_and_falls_back_to_the_default(atte
         "shift_name": None,  # 存的是 NULL：这一次写进去的没有值
         "lodging": None,
         "borrowed_store": None,
-        "resigned": None,
         "default_shift_name": None,
     }
     # 库里真的存的是 NULL（不是空串）：显式 `null` = 清空，与从没填过同义。
     assert _ledger_values(
-        db, employee_id, MONTH, ["shift_name", "lodging", "borrowed_store", "resigned"]
+        db, employee_id, MONTH, ["shift_name", "lodging", "borrowed_store"]
     ) == {field: None for field in MANUAL_FIELDS}
     # 读回来：三项留空，「本月班次」退回**当月众数**（这个人这个月只排了夜班）。
     assert _manual(_card(_sheet(client, admin), employee_id)) == {
         "shift_name": "夜班",
         "lodging": None,
         "borrowed_store": None,
-        "resigned": None,
     }
 
 
@@ -1631,7 +1677,7 @@ def test_the_manual_columns_stay_in_the_ledger_and_never_touch_the_roster(attend
             client,
             admin,
             employee_id,
-            {"lodging": "是", "borrowed_store": "调东莞", "resigned": "是", "shift_name": "夜班"},
+            {"lodging": "是", "borrowed_store": "调东莞", "shift_name": "夜班"},
         ).status_code
         == 200
     )
@@ -1640,12 +1686,13 @@ def test_the_manual_columns_stay_in_the_ledger_and_never_touch_the_roster(attend
     mine = [row for row in roster if int(row["id"]) == employee_id][0]
     for field in MANUAL_FIELDS:
         assert field not in mine, f"档案里不该有 {field}"
-    # 档案上那几个值一个都没被这次写入改动（离职不是「停用」：是否离职是人事口的手填，
-    # 与档案里的停用状态是两件事）。
-    assert mine["disabled"] in (False, 0)
+    # 档案上那几个值一个都没被这次写入改动：手填列是考勤口的事，与花名册的离职状态是
+    # 两件事（2026-10-29 之后后者才是唯一真相，所以这里只需确认仍是「在职」）。
+    assert mine["resigned"] is False
     # 卡片上照旧是填进去的那几个值。
     assert _manual(_card(_sheet(client, admin), employee_id))["borrowed_store"] == "调东莞"
-    assert _ledger_values(db, employee_id, MONTH, ["resigned"]) == {"resigned": "是"}
+    # 退役列「是否离职」一个字节都不写（2026-10-29）：它不在这条写口的字段表里。
+    assert _ledger_values(db, employee_id, MONTH, ["resigned"]) == {"resigned": None}
 
 
 def test_the_manual_columns_door_is_still_the_admin_door(attendance_http):
@@ -2198,16 +2245,15 @@ def test_the_day_cells_write_only_rest_half_rest_and_todo(attendance_http):
     """验收 4：出勤**留空**、休写「休」、半天写「休半天」、没有排班行写「待补」并标色。
 
     汇总列（验收 6/7 的另一半）也在同一行上核一遍：本月出勤天数 / 加班小时 / 年限 /
-    存休天数（票 03 的 `balance`，可为负）/ 是否新入职 / 是否离职（**台账里手填的那一项**）。
+    存休天数（票 03 的 `balance`，可为负）/ 是否新入职 / 是否离职（2026-10-29 起由花名册派生）。
     """
     client, db, accounts = attendance_http
     admin = _admin_cookie(client)
     ids = _export_employees(accounts, db)
     _mark_half_rest(db, ids["整月都在"], "2026-09-23")
-    # 手填「是否离职」（票 05 那一列）——导出件读的就是台账上这个值。
-    assert (
-        _put_manual(client, admin, ids["整月都在"], {"resigned": "是"}).status_code == 200
-    )
+    # 「是否离职」2026-10-29 起由花名册派生：给他登记 9/30 离职，9 月那张表就写「是」。
+    # （离职日之后没有排班，所以这一句不会删掉本用例要看的那几天。）
+    _run(accounts.resign(ids["整月都在"], "2026-09-30"))
 
     worksheet = _only_sheet(_workbook(_export(client, admin)))
     row = 6  # 第一个人在 R6
@@ -2227,8 +2273,9 @@ def test_the_day_cells_write_only_rest_half_rest_and_todo(attendance_http):
     # 存休天数 = 票 03 的 `balance`（池 − 本月自然天数）：21 号整天 + 23 号半天 = 池 1.5，
     # 减 30 天 = −28.5（**负值照写**，样表里存休本来就有负数）。
     assert worksheet.cell(row=row, column=9 + 30).value == 1.5 - 30
-    assert worksheet.cell(row=row, column=10 + 30).value == "否"  # 2024 年入职，不是新来的
-    assert worksheet.cell(row=row, column=11 + 30).value == "是"  # 台账里手填的「是否离职」
+    # 「是否新入职」只写「是」（2026-10-29 用户裁定）：不是新来的留空，不写「否」。
+    assert worksheet.cell(row=row, column=10 + 30).value is None
+    assert worksheet.cell(row=row, column=11 + 30).value == "是"  # 花名册：9/30 离职
     # 其余列跟着花名册与台账：姓名 / 职位 / 底薪 / 年限 / 本月出勤天数 / 加班小时。
     assert worksheet.cell(row=row, column=2).value == "整月都在"
     assert worksheet.cell(row=row, column=3).value == "炒锅"
@@ -2515,7 +2562,6 @@ def test_the_manual_door_writes_the_opening_balance_of_this_month(attendance_htt
         "shift_name",
         "lodging",
         "borrowed_store",
-        "resigned",
         "default_shift_name",
     }
     assert _ledger_values(db, employee_id, MONTH, ["opening_balance"]) == {
@@ -3012,7 +3058,6 @@ def test_the_manual_door_writes_the_closing_balance_of_this_month(attendance_htt
         "shift_name",
         "lodging",
         "borrowed_store",
-        "resigned",
         "default_shift_name",
     }
     # 库里：只有期末那一列动了，期初 / 三个手填列 / 封账时刻原样。
@@ -3082,8 +3127,9 @@ def test_writing_the_closing_balance_is_refused_on_a_sealed_month(attendance_htt
     # 那一行一个字没动：`SELECT *` 逐列比对（含 `updated_at`）。
     assert _ledger_row(db, employee_id, MONTH) == before
 
-    # 只点名别的字段（票 05 的四列）照旧可写 —— 封账锁的只是期末存假那一格。
-    allowed = _put_manual(client, admin, employee_id, {"lodging": "否", "resigned": "是"})
+    # 只点名别的字段（票 05 剩下的三列）照旧可写 —— 封账锁的只是期末存假那一格。
+    # （「是否离职」2026-10-29 退役，不再是这一行的可写字段。）
+    allowed = _put_manual(client, admin, employee_id, {"lodging": "否"})
     assert allowed.status_code == 200, allowed.text
     assert _ledger_values(
         db, employee_id, MONTH, ["closing_balance", "sealed_at", "lodging", "resigned"]
@@ -3091,7 +3137,8 @@ def test_writing_the_closing_balance_is_refused_on_a_sealed_month(attendance_htt
         "closing_balance": 8.0,
         "sealed_at": "2026-10-01T10:00:00+08:00",
         "lodging": "否",
-        "resigned": "是",
+        # 退役列一个字节都不写（保持原样：这个人从没填过）。
+        "resigned": None,
     }
 
 

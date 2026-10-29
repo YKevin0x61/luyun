@@ -349,7 +349,7 @@ useNudgePull({ id: 'me-overtime', topics: ['overtime'], pull: () => load(true) }
           <select v-model="backfillFor" class="oInput">
             <option value="">我自己</option>
             <option v-for="person in roster" :key="person.id" :value="String(person.id)">
-              {{ person.name }}{{ person.disabled ? '（已停用）' : '' }}
+              {{ person.name }}{{ person.resigned ? '（已离职）' : '' }}
             </option>
           </select>
         </div>

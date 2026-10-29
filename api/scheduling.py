@@ -35,6 +35,8 @@ _ERROR_DETAILS = {
     # `_bad_request` 里解释一次。
     "unknown_shift_in_cycle": "轮转周期第 {} 格引用的班次不存在或已停用：请重新选那一天的班次",
     "unknown_employee": "员工不存在",
+    # 离职（2026-10-29 取代「停用」）：离职日之后的日子不能再排班，也不再配轮转规则。
+    "resigned_employee": "这个人已经离职：离职日之后不再排班（当天仍是他最后一天）",
     "unknown_zone": "工作区不存在：请先在卫生的工作区页面新建，或刷新本页",
     # 单日覆盖「这天改不了」的原因，各说各的。票 14 起**过去 30 天内是可以补记的**
     # （ADR 0108）：这句话说的不再是「历史不重写」，而是「太旧了，超出可补记窗口」。
@@ -80,6 +82,12 @@ _ERROR_DETAILS = {
     "past_leave": "已经过去的日子请不了假：请从今天起选",
     # 带一个 `{}`：服务层把展开窗口的末日放在 `args[0]`（跟 `beyond_window` 同一条口径）。
     "beyond_leave": "排班还没铺到那么远：最多请到 {}",
+    # 申请的下班点（2026-10-29 用户裁定）。带一个 `{}`：服务层把**现在最早能提的那一天**
+    # 放在 `args[0]`（22:00 之后就是后天）；请假与换班共用这一句 —— 同一条规矩两处生效。
+    "next_day_locked": "晚上 10 点之后不能再提次日的请假或换班：最早只能提 {}",
+    # 2 天以上的假要提前 7 天（`MULTI_DAY_LEAVE_LEAD_DAYS`）。带一个 `{}`：最早能起请的
+    # 那一天。文案里那个「7」与常量是同一件事，改数字时两处一起改（模板只装得下一个值）。
+    "leave_too_soon": "请 2 天以上的假要提前 7 天：最早只能从 {} 起请",
     # 带一个 `{}`：服务层把上限（`MAX_REQUEST_NOTE`）放在 `args[0]`。
     "note_too_long": "事由最多 {} 个字：请缩短一点再提交",
     # 「不存在」也用在「这条是别人的」上：不告诉员工「它在，但不是你的」。
@@ -98,6 +106,10 @@ _ERROR_DETAILS = {
     "beyond_swap": "排班还没铺到那么远：最多换到 {}",
     "nothing_to_swap": "那天你手上没有班可换：先让店长给你配上轮转规则",
     "already_asked": "你刚跟这位同事提过这一天的换班：等对方回应，或先撤回那条",
+    # 换班撞车（2026-10-29 用户裁定）：对方那天已经跟别人挂着一条还没批的换班。
+    # 带一个 `{}`：服务层把「谁 和 谁（还在等对方同意 / 还在等店长批）」放在 `args[0]`
+    # —— 员工要知道的是「那天谁跟谁已经在换了」，光说「不行」等于没说。
+    "peer_in_swap": "那天{}已经在换班了，这次换不了：换个日子，或者等他们那边落定",
     # 班次表的编辑（票 11）：改名、调顺序、停用、删除各自的拦法，各说各的。
     "missing_shift_name": "请先给班次起个名字",
     # 带一个 `{}`：服务层把上限（`MAX_SHIFT_NAME`）放在 `args[0]`（同 `note_too_long`）。
@@ -286,7 +298,13 @@ def _bad_request(exc: SchedulingError) -> HTTPException:
             logger.warning("排班错误缺细节，用「？」占位: code=%s", exc.code)
         detail = detail.replace("{}", raw if raw and raw != exc.code else "？")
     logger.info("排班请求被拒: code=%s", exc.code)
-    return HTTPException(status_code=_ERROR_STATUS.get(exc.code, 400), detail=detail)
+    # 稳定的错误码跟着响应头一起出去（文案会改字，码不会）：少数几句在页面上要换一种
+    # 呈现（换班撞车要弹一句说清是谁跟谁），靠文案匹配会随改字漂。`detail` 一个字段没动。
+    return HTTPException(
+        status_code=_ERROR_STATUS.get(exc.code, 400),
+        detail=detail,
+        headers={"X-Error-Code": exc.code},
+    )
 
 
 async def _scheduling_nudge(reason: str, *employee_ids: Optional[int]) -> None:
@@ -383,6 +401,10 @@ async def my_month(
         "lead": data["lead"],
         "window_end": data["window_end"],
         "days": data["days"],
+        # 22:00 之后「次日」提不了假 / 换班、2 天以上的假要提前几天：前端拿这两项把控件
+        # 先挡上（2026-10-29 用户裁定）。判据仍在服务层，这里只是把口径端给界面。
+        "next_day_locked": data["next_day_locked"],
+        "leave_lead_days": data["leave_lead_days"],
     }
 
 

@@ -202,7 +202,8 @@ def test_storage_endpoint_reports_counts(data_http):
 
 def test_photo_endpoint_serves_variants_and_404s_unknown(data_http):
     client, _runtime = data_http
-    daily = next(item for item in _record(client)["items"] if item["kind"] == "daily")
+    listed = _record(client, "?date_from=2026-09-13&date_to=2026-09-13")
+    daily = next(item for item in listed["items"] if item["kind"] == "daily")
     capture_id = daily["photos"][0]["capture_id"]
     image = client.get(f"/api/hygiene/admin/data/photo/{capture_id}")
     assert image.status_code == 200, image.text
@@ -217,7 +218,8 @@ def test_photo_endpoint_serves_variants_and_404s_unknown(data_http):
 
 def test_delete_endpoint_removes_record_and_resets_todo(data_http):
     client, runtime = data_http
-    daily = next(item for item in _record(client)["items"] if item["kind"] == "daily")
+    listed = _record(client, "?date_from=2026-09-13&date_to=2026-09-13")
+    daily = next(item for item in listed["items"] if item["kind"] == "daily")
     path = f"/api/hygiene/admin/data/records/daily/{daily['record_id']}"
     response = client.delete(path)
     assert response.status_code == 200, response.text
@@ -243,7 +245,7 @@ def test_purge_endpoint_validates_and_clears_range(data_http):
     # 空类型是"没选"，不是"全部"：宁可报错也不能变成清空这一段。
     empty = client.post("/api/hygiene/admin/data/purge", json={"kinds": []})
     assert empty.status_code == 400
-    assert client.get(RECORDS).json()["total"] >= 2
+    assert client.get(f"{RECORDS}?date_from=2026-09-13&date_to=2026-09-13").json()["total"] >= 2
 
     cleared = client.post(
         "/api/hygiene/admin/data/purge",

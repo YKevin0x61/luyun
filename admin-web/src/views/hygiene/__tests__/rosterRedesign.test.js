@@ -10,7 +10,7 @@ import { ADMIN_CAP_STAFF_DEFS } from '../../../utils/adminCaps'
  * 批准门槛、导出参数。
  *
  * 数据前提照 design §11 那张表造：一个待批准且待补（陈晓）、一个待批准但不待补（李娜）、
- * 一个临期（王强）、一个空档案（赵敏）、一个过期（孙平）、一个已停用（周伟）。
+ * 一个临期（王强）、一个空档案（赵敏）、一个过期（孙平）、一个已离职（周伟）。
  */
 
 function person(overrides = {}) {
@@ -22,7 +22,8 @@ function person(overrides = {}) {
     permission: '普通员工',
     admin_caps: [],
     approved: true,
-    disabled: false,
+    resigned: false,
+    resigned_at: null,
     created_at: '2026-10-01T09:00:00+08:00',
     id_card_no: '110101199003077213',
     health_cert_date: '2025-12-01',
@@ -60,7 +61,7 @@ const 孙平 = person({
   health_cert_state: 'expired', health_cert_expires_on: '2026-09-01', health_cert_days_left: -40,
 })
 const 周伟 = person({
-  id: 6, name: '周伟', phone: '13800000006', disabled: true,
+  id: 6, name: '周伟', phone: '13800000006', resigned: true, resigned_at: '2026-09-01',
   id_card_no: '', health_cert_date: '', health_cert_expires_on: '', health_cert_state: 'none',
   base_salary: null, hire_date: null, profile_incomplete: true,
 })
@@ -135,30 +136,30 @@ async function openDrawer(wrapper, name) {
 }
 
 describe('花名册 · 列表分区与分段筛选', () => {
-  it('默认「全部」：待批准置顶独立分区，已停用默认隐藏', async () => {
+  it('默认「全部」：待批准置顶独立分区，已离职默认隐藏', async () => {
     const wrapper = await mountRoster()
 
     const headers = wrapper.findAll('.table-card-header h3').map((node) => node.text())
     expect(headers[0]).toContain('待批准')
     expect(headers[1]).toContain('在职')
-    expect(headers.join(' ')).not.toContain('已停用')
+    expect(headers.join(' ')).not.toContain('已离职')
 
     // 待批准那一段在最上面：前两行就是那两个人（注册时间升序）。
     const names = wrapper.findAll('.roster-row .roster-person-copy strong').map((node) => node.text())
     expect(names[0]).toBe('陈晓')
     expect(names[1]).toBe('李娜')
-    // 已停用的周伟一个都不在。
+    // 已离职的周伟一个都不在。
     expect(wrapper.text()).not.toContain('周伟')
   })
 
-  it('分段「待补 N」只数未停用且档案缺项的人，「已停用 N」是全部停用的人', async () => {
+  it('分段「待补 N」只数未停用且档案缺项的人，「已离职 N」是全部停用的人', async () => {
     const wrapper = await mountRoster()
 
     const segs = wrapper.findAll('.roster-seg-item').map((node) => node.text())
-    // 待补：陈晓 + 赵敏（周伟停用了，不算）；已停用：周伟 1 个；全部不显示数字。
+    // 待补：陈晓 + 赵敏（周伟停用了，不算）；已离职：周伟 1 个；全部不显示数字。
     expect(segs[0]).toBe('全部')
     expect(segs[1]).toBe('待补 2')
-    expect(segs[2]).toBe('已停用 1')
+    expect(segs[2]).toBe('已离职 1')
 
     await wrapper.findAll('.roster-seg-item')[1].trigger('click')
     await flushPromises()
@@ -426,40 +427,54 @@ describe('花名册 · 批准门槛与动作', () => {
     expect(wrapper.find('.roster-drawer').exists()).toBe(true)
   })
 
-  it('停用要先过确认框，确认后关抽屉、页顶报一行', async () => {
+  it('登记离职分两步：先只问数（dry_run），确认后才真写', async () => {
     const wrapper = await mountRoster()
     await openDrawer(wrapper, '王强')
+    // 先让第一次 POST（dry_run）回一个「会删掉 3 天」的计数。
+    writeReply = jsonResponse({ dry_run: true, assignments_to_remove: 3, rule_cleared: true })
 
-    await button(wrapper, '停用').trigger('click')
+    await button(wrapper, '登记离职').trigger('click')
     await flushPromises()
-    expect(wrapper.text()).toContain('停用员工')
-    expect(wrapper.text()).toContain('停用 王强 后不能登录，记录还在。')
+    expect(wrapper.text()).toContain('王强 离职后不能登录')
 
-    // 确认框里那颗「停用」是最后一颗。
-    const confirms = wrapper.findAll('button').filter((node) => node.text() === '停用')
-    await confirms[confirms.length - 1].trigger('click')
+    // 日期默认今天，点「下一步」只发 dry_run。
+    await button(wrapper, '下一步').trigger('click')
+    await flushPromises()
+    const plan = requests.filter((item) => item.method === 'POST').pop()
+    expect(plan.path).toBe('/api/hygiene/admin/roster/3/resign')
+    expect(plan.body.dry_run).toBe(true)
+
+    // 第二步才真写，并且弹层里已经写出会删几天。
+    expect(wrapper.text()).toContain('这次会删掉 3 天排班')
+    writeReply = jsonResponse({ employee: { ...王强 }, assignments_to_remove: 3, rule_cleared: true })
+    await button(wrapper, '确认登记离职').trigger('click')
     await flushPromises()
 
-    const post = requests.find((item) => item.method === 'POST')
-    expect(post.path).toBe('/api/hygiene/admin/roster/3/disable')
-    expect(wrapper.get('.roster-saved').text()).toBe('已停用 王强')
+    const post = requests.filter((item) => item.method === 'POST').pop()
+    expect(post.path).toBe('/api/hygiene/admin/roster/3/resign')
+    expect(post.body.dry_run).toBeUndefined()  // 正式那一次不带 dry_run
+    expect(wrapper.get('.roster-saved').text()).toContain('已登记 王强')
   })
 
-  it('已停用的人给「启用」，且不看批准门槛', async () => {
+  it('已离职的人给「取消离职」，且不看批准门槛', async () => {
     const wrapper = await mountRoster()
     await wrapper.findAll('.roster-seg-item')[2].trigger('click')
     await flushPromises()
     await openDrawer(wrapper, '周伟')
 
-    expect(button(wrapper, '停用')).toBeUndefined()
+    expect(button(wrapper, '登记离职')).toBeUndefined()
     expect(wrapper.find('.roster-drawer-foot .roster-field-note').exists()).toBe(false)
 
-    await button(wrapper, '启用').trigger('click')
+    await button(wrapper, '取消离职').trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('当初删掉的排班不会恢复')
+    const confirms = wrapper.findAll('button').filter((node) => node.text() === '取消离职')
+    await confirms[confirms.length - 1].trigger('click')
     await flushPromises()
 
     const post = requests.find((item) => item.method === 'POST')
-    expect(post.path).toBe('/api/hygiene/admin/roster/6/enable')
-    expect(wrapper.get('.roster-saved').text()).toBe('已启用 周伟')
+    expect(post.path).toBe('/api/hygiene/admin/roster/6/cancel-resignation')
+    expect(wrapper.get('.roster-saved').text()).toBe('已取消 周伟 的离职登记')
   })
 })
 

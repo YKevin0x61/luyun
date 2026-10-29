@@ -72,20 +72,38 @@ class EmployeeAccountsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["employee"]["name"], NAME)
         self.assertEqual(result["employee"]["permission"], "普通员工")
         self.assertTrue(result["employee"]["approved"])
-        self.assertFalse(result["employee"]["disabled"])
+        self.assertFalse(result["employee"]["resigned"])
+        self.assertIsNone(result["employee"]["resigned_at"])
         self.assertTrue(result["session_id"])
 
-    async def test_disable_blocks_login_and_keeps_roster_row(self):
+    async def test_resign_blocks_login_and_keeps_roster_row(self):
+        """离职（2026-10-29 取代「停用」）：日期落在过去 → 当场不能登录，行还在花名册里。"""
         employee = await self.accounts.register(PHONE, PASSWORD, NAME)
         await self.accounts.approve(employee["id"])
-        await self.accounts.disable(employee["id"])
+        await self.accounts.resign(employee["id"], "2026-09-01")
         self.assertIsNone(await self.accounts.login(PHONE, PASSWORD))
         roster = await self.accounts.list_roster()
         self.assertEqual(len(roster), 1)
         self.assertEqual(roster[0]["phone"], PHONE)
         self.assertEqual(roster[0]["name"], NAME)
-        self.assertTrue(roster[0]["disabled"])
+        self.assertTrue(roster[0]["resigned"])
+        self.assertEqual(roster[0]["resigned_at"], "2026-09-01")
         self.assertTrue(roster[0]["approved"])
+
+    async def test_a_future_resignation_leaves_today_untouched(self):
+        """「干到月底」：离职日期在未来，今天照常登录；取消离职后回到在职。"""
+        employee = await self.accounts.register(PHONE, PASSWORD, NAME)
+        await self.accounts.approve(employee["id"])
+        later = (self.accounts._today() + timedelta(days=5)).isoformat()
+        await self.accounts.resign(employee["id"], later)
+        self.assertIsNotNone(await self.accounts.login(PHONE, PASSWORD))
+        row = (await self.accounts.list_roster())[0]
+        self.assertFalse(row["resigned"])
+        self.assertEqual(row["resigned_at"], later)
+        await self.accounts.cancel_resignation(employee["id"])
+        row = (await self.accounts.list_roster())[0]
+        self.assertIsNone(row["resigned_at"])
+        self.assertFalse(row["resigned"])
 
     async def test_job_title_is_display_only_permission_is_staff_or_admin(self):
         employee = await self.accounts.register(PHONE, PASSWORD, NAME)

@@ -159,6 +159,14 @@ STATUS_CANCELLED = "cancelled"
 # 员工写的东西不该被系统改掉。
 MAX_REQUEST_NOTE = 50
 
+# 申请的下班点（2026-10-29 用户裁定）：
+#  · **22:00 之后不能再提「次日」的假或换班** —— 店长这个点已经把人排定了，批下来等于
+#    半夜改明天的班。截止时刻是「那一天的前一晚 22:00」，**当天的假不受限**（生病没法
+#    提前请，这条口子得留着；判据只看 `day > today`）。
+#  · **2 天以上的假要提前 7 天**（从营业日算：最早只能从那一天起请）。
+NEXT_DAY_CUTOFF_HOUR = 22
+MULTI_DAY_LEAVE_LEAD_DAYS = 7
+
 # 读申请时选的列：`_request_rows` 与 `_request_by_id` 共用一份，免得两处列名漂移。
 # `peer_employee_id`（0009）另有一份「没有它」的写法：半迁移（0008 应用了、0009 没应用）
 # 时申请要照常读得出来，见 `_select_request_rows`。
@@ -353,6 +361,25 @@ def _clean_note(note: Any) -> Optional[str]:
     return text
 
 
+def _swap_couple_text(row: dict, people: dict) -> str:
+    """「谁 和 谁（到哪一步了）」—— 换班撞车时端给员工的那半句。
+
+    名字从花名册里取（`people` 是 `{id: employee}`），取不到就退回手机号，再不行给个
+    「员工 12」：这句话的用处是让人看懂「这天谁跟谁已经在换了」，缺名字就不成立了，
+    但也不能为了一个名字把整条申请打成 500。
+    """
+    def name(employee_id: Any) -> str:
+        person = people.get(int(employee_id)) or {}
+        return person.get("name") or person.get("phone") or f"员工{employee_id}"
+
+    state = (
+        "还在等对方同意"
+        if row["status"] == STATUS_PENDING_PEER
+        else "还在等店长批"
+    )
+    return f"{name(row['employee_id'])} 和 {name(row['peer_employee_id'])}（{state}）"
+
+
 def _rule_anchor(rule: dict) -> date:
     """规则的周期起点。
 
@@ -463,6 +490,47 @@ class SchedulingStore:
         同一种算法；`BACKFILL_DAYS` 一改，两处一起跟着走。
         """
         return shift_business_date(today, -BACKFILL_DAYS)
+
+    # ── 申请的截止（2026-10-29 用户裁定）──────────────────────────────────
+    @staticmethod
+    def _apply_deadline(day: str) -> datetime:
+        """提「``day`` 那一天」的假 / 换班的截止时刻：**前一晚 22:00**（北京时）。
+
+        店长 22:00 之后就把第二天的人定下来了；过了这个点再提，批下来等于半夜改明天的班。
+        """
+        previous = date.fromisoformat(day) - timedelta(days=1)
+        return datetime(
+            previous.year, previous.month, previous.day,
+            NEXT_DAY_CUTOFF_HOUR, tzinfo=CHINA_TZ,
+        )
+
+    def next_day_locked(self, today: str, now: Optional[datetime] = None) -> bool:
+        """「次日」是不是已经过了截止（= 明天那一天的申请现在提不了）。
+
+        员工端拿它把明天的「请假 / 换班」在控件上先挡掉（`/me/month` 与 `/me/day`
+        响应里的 `next_day_locked`）—— 服务层这一头才是权威，前端只是别让人白填一次表。
+        """
+        moment = now or self._now_dt()
+        return moment >= self._apply_deadline(shift_business_date(today, 1))
+
+    def _check_apply_window(
+        self, first: str, last: str, today: str, now: datetime, *, days: int,
+    ) -> None:
+        """申请日期的两条新规矩（2026-10-29 用户裁定），**都在服务层判**：
+
+        1. 22:00 之后不能再提「次日」（`first > today` 且已过 `_apply_deadline(first)`）。
+           当天的假不受限：生病没法提前请，那条路得留着。
+        2. 2 天以上的假要提前 `MULTI_DAY_LEAVE_LEAD_DAYS` 天（从营业日算）。
+        """
+        if days >= 2:
+            earliest = shift_business_date(today, MULTI_DAY_LEAVE_LEAD_DAYS)
+            if first < earliest:
+                # 文案里那句「提前 7 天」与 `MULTI_DAY_LEAVE_LEAD_DAYS` 是一件事，
+                # 改数字时两处一起改（模板只能带一个 `{}`，装不下日期和天数两个值）。
+                raise SchedulingError("leave_too_soon", earliest)
+        if first > today and now >= self._apply_deadline(first):
+            # 报「现在最早能提的那一天」：今天 22:00 之后就是后天（次日被锁掉）。
+            raise SchedulingError("next_day_locked", shift_business_date(today, 2))
 
     # ── 班次 ────────────────────────────────────────────────────────────
 
@@ -1061,8 +1129,13 @@ class SchedulingStore:
         employee_id = int(employee_id)
         normalized = self._normalize_cycle(cycle)
         roster = await EmployeeAccounts(self._write_lock_owner).list_roster()
-        if employee_id not in {employee["id"] for employee in roster}:
+        person = next((row for row in roster if row["id"] == employee_id), None)
+        if person is None:
             raise SchedulingError("unknown_employee", "unknown_employee")
+        # 离职的人不再配轮转规则（2026-10-29）：登记离职时规则已经被停掉了，这里挡住
+        # 「又重新配一条」—— 否则下次铺排班又会长出离职日之后的行。
+        if person.get("resigned_at") is not None:
+            raise SchedulingError("resigned_employee", "")
         await self._require_shifts_usable(normalized)
         today = self.today()
         anchor = today if anchor_date in (None, "") else _require_business_date(anchor_date)
@@ -1156,6 +1229,47 @@ class SchedulingStore:
             (employee_id,),
         )
 
+    @serialized_write
+    async def clear_after_resignation(
+        self, employee_id: int, resigned_at: str, *, dry_run: bool = False
+    ) -> dict:
+        """登记离职时的排班清理（2026-10-29）：删离职日**之后**的行 + 停掉轮转规则。
+
+        * 离职日**当天保留** —— 那天他还上班（判据与花名册的 `resigned_today` 同一条：
+          「今天 < 离职日」算在职；「删日期之后」不是「删日期当天」）；
+        * 轮转规则一并停掉：规则还在的话下一次铺排班又会给他长出新行，删了白删；
+        * `dry_run=True` **只数不写** —— 抽屉里那句「会删掉 X 天排班」的确认框要这个数。
+
+        **不带 `_needs_migration`**：它删的是 0005 就有的两张表，缺表时由调用方的
+        路由报错；这里再包一层只会把「排班还没迁移」翻译成离职接口的一段怪话。
+
+        返回 ``{"assignments_to_remove": n, "rule_cleared": bool}``。
+        """
+        cur = await self._conn.execute(
+            """SELECT COUNT(*) AS n FROM staff_assignments
+               WHERE employee_id = ? AND business_date > ?""",
+            (employee_id, resigned_at),
+        )
+        row = await cur.fetchone()
+        removed = int((row["n"] if row else 0) or 0)
+        cur = await self._conn.execute(
+            "SELECT COUNT(*) AS n FROM scheduling_rules WHERE employee_id = ?",
+            (employee_id,),
+        )
+        row = await cur.fetchone()
+        has_rule = bool(int((row["n"] if row else 0) or 0))
+        if not dry_run:
+            if removed:
+                await self._conn.execute(
+                    """DELETE FROM staff_assignments
+                       WHERE employee_id = ? AND business_date > ?""",
+                    (employee_id, resigned_at),
+                )
+            if has_rule:
+                await self._delete_rule_row(employee_id)
+            await self._conn.commit()
+        return {"assignments_to_remove": removed, "rule_cleared": has_rule}
+
     # ── 单日覆盖 ────────────────────────────────────────────────────────
 
     @_needs_migration
@@ -1240,8 +1354,17 @@ class SchedulingStore:
             # 写死在文案里（那个数一改，店长看到的就是假话）。
             raise SchedulingError("beyond_window", last_day)
         roster = await EmployeeAccounts(self._write_lock_owner).list_roster()
-        if employee_id not in {employee["id"] for employee in roster}:
+        person = next((row for row in roster if row["id"] == employee_id), None)
+        if person is None:
             raise SchedulingError("unknown_employee", "unknown_employee")
+        # 离职的人不能再排班（2026-10-29）：离职日**之后**的日子一律拒 —— 那些行在登记
+        # 离职时已经删了，这里挡住的是「后来手滑又给他补一天」。空串（已离职、日期待补）
+        # 当场算离职：任何日子都拒。批量端点逐格走这条，所以也一起被拦。
+        resigned_at = person.get("resigned_at")
+        if resigned_at is not None:
+            left = str(resigned_at)[:10]
+            if left == "" or day > left:
+                raise SchedulingError("resigned_employee", left)
 
         shift: Optional[int] = None
         zone: Optional[int] = None
@@ -2104,6 +2227,10 @@ class SchedulingStore:
             "lead": start.weekday(),
             "window_end": self._window()[1],
             "days": days,
+            # 「次日」是不是已经过了 22:00 的截止、2 天以上的假要提前几天 —— 员工端拿这两项
+            # 把「请假 / 换班」在控件上先挡掉（2026-10-29 用户裁定；服务层仍是权威）。
+            "next_day_locked": self.next_day_locked(today),
+            "leave_lead_days": MULTI_DAY_LEAVE_LEAD_DAYS,
         }
 
     async def _on_roster_ids(self) -> set[int]:
@@ -2122,7 +2249,7 @@ class SchedulingStore:
         return {
             employee["id"]
             for employee in roster
-            if employee["approved"] and not employee["disabled"]
+            if employee["approved"] and not employee["resigned"]
         }
 
     @_needs_migration
@@ -2456,11 +2583,11 @@ class SchedulingStore:
 
         employees = []
         # 被过滤掉的人也要说一句（§3.7）：静默丢人正是「以为漏排」的来源。
-        excluded = {"disabled": 0, "pending": 0}
+        excluded = {"resigned": 0, "pending": 0}
         roster = await EmployeeAccounts(self._write_lock_owner).list_roster()
         for employee in sorted(roster, key=row_order):
-            if employee["disabled"]:
-                excluded["disabled"] += 1
+            if employee["resigned"]:
+                excluded["resigned"] += 1
                 continue
             if not employee["approved"]:
                 excluded["pending"] += 1
@@ -2717,6 +2844,10 @@ class SchedulingStore:
                 {"id": person["id"], "name": person["name"], "leave": person["leave"]}
                 for person in detail["off_people"]
             ],
+            # 22:00 之后「次日」的假 / 换班提不了（2026-10-29 用户裁定）：前端拿这两项把
+            # 控件先挡上（服务层才是权威，这里只是别让人白填一次表）。
+            "next_day_locked": self.next_day_locked(self.today()),
+            "leave_lead_days": MULTI_DAY_LEAVE_LEAD_DAYS,
         }
 
     @_needs_migration
@@ -2757,7 +2888,10 @@ class SchedulingStore:
             row.update({
                 "job_title": employee["job_title"],
                 "approved": employee["approved"],
-                "disabled": employee["disabled"],
+                # 离职（2026-10-29 取代「停用」）：到今天为止算不算已离职 + 原始日期
+                # （`''` = 已离职、日期待补）。前端拿它决定要不要提醒、标不标「已离职」。
+                "resigned": employee["resigned"],
+                "resigned_at": employee["resigned_at"],
                 # 没配过规则是 None；配过但读不出来是
                 # {"cycle": None, "anchor_date": None, "invalid": True}。
                 "rule": (
@@ -2821,7 +2955,8 @@ class SchedulingStore:
         last = first if end_date in (None, "") else _require_business_date(end_date)
         if last < first:
             raise SchedulingError("bad_range", "bad_range")
-        today = self.today()
+        now = self._now_dt()
+        today = current_business_date(now)
         last_day = self._window_from(today)[1]
         if last < today:
             # 跟票 07 的 `past_day` 是同一条口径，但错的是「给过去提申请」而不是
@@ -2831,6 +2966,10 @@ class SchedulingStore:
             # 第二参填进那句提示的 `{}`：报**真实的窗口末日**（跟票 07 同一条口径，
             # 别把 `EXPANSION_DAYS` 写死在文案里）。
             raise SchedulingError("beyond_leave", last_day)
+        # 22:00 之后不提次日、2 天以上提前 7 天（2026-10-29 用户裁定）。
+        self._check_apply_window(
+            first, last, today, now, days=len(_each_day_between(first, last)),
+        )
         return await self._insert_request(
             employee_id, KIND_LEAVE, first, last, _clean_note(note), STATUS_PENDING_MANAGER
         )
@@ -2994,8 +3133,8 @@ class SchedulingStore:
             "today": today,
             "requests": requests,
             # 「还没配规则的新人」：判据就是名单里没有规则的那几个（`rule is None`）。
-            # `approved` / `disabled` 一起给出去，由前端决定要不要提醒 —— 停用的人
-            # 不该天天挂在待办上，但「谁停用了」是名单的事，服务层不替它下结论。
+            # `approved` / `resigned` 一起给出去，由前端决定要不要提醒 —— 已离职的人
+            # 不该天天挂在待办上，但「谁离职了」是名单的事，服务层不替它下结论。
             "without_rule": [
                 {
                     "id": employee["id"],
@@ -3003,7 +3142,8 @@ class SchedulingStore:
                     "phone": employee["phone"],
                     "job_title": employee["job_title"],
                     "approved": employee["approved"],
-                    "disabled": employee["disabled"],
+                    "resigned": employee["resigned"],
+                    "resigned_at": employee["resigned_at"],
                 }
                 for employee in roster
                 if employee["id"] not in rules
@@ -3090,7 +3230,7 @@ class SchedulingStore:
         peer = people.get(peer_id)
         if peer is None:
             raise SchedulingError("unknown_peer", "unknown_peer")
-        if peer["disabled"] or not peer["approved"]:
+        if peer["resigned"] or not peer["approved"]:
             # 停用 / 还没批准的人不进排班名单，也不该被拉来换班：跟「找不到这个人」
             # 是两件事（一个是名字错了，一个是人现在不在），分两句说。
             raise SchedulingError("peer_unavailable", "peer_unavailable")
@@ -3098,13 +3238,17 @@ class SchedulingStore:
             # 字段整个没给：跟「格式不对」分开说（跟请假 `missing_day` 同一条口径）。
             raise SchedulingError("missing_swap_day", "missing_swap_day")
         day = _require_business_date(business_date)
-        today = self.today()
+        now = self._now_dt()
+        today = current_business_date(now)
         last_day = self._window_from(today)[1]
         if day < today:
             raise SchedulingError("past_swap", "past_swap")
         if day > last_day:
             # 第二参填进那句提示的 `{}`：报真实的窗口末日（跟票 07、请假同一条口径）。
             raise SchedulingError("beyond_swap", last_day)
+        # 22:00 之后不能再提次日（2026-10-29 用户裁定）。换班只有一天，`days=1`
+        # 就只走那条截止；提前量那一条是请假独有的（换班本来就是临时的事）。
+        self._check_apply_window(day, day, today, now, days=1)
         # 先把自己那天铺出来再问「有没有班」：规则配了但还没展开时不能误判成「没班」。
         await self.expand(employee_id)
         # 换的是「班」，不是「那天有没有一行」：那天休 / 那天请假 / 还没排到都只有一行
@@ -3129,6 +3273,13 @@ class SchedulingStore:
                 # 店长看到两张同一天的卡，两条都批等于又换了回去，而两次回执都写「对调了」。
                 # 挡在这里，而不是靠前端按钮灰着（手写的调用方也该读到一句话）。
                 raise SchedulingError("already_asked", "already_asked")
+        # 2026-10-29 用户裁定：**对方那天已经跟别人挂着一条换班**（还没批）时，这次不成立。
+        # 跟 `already_asked` 是同一条道理的另一种形状 —— 一个人一天只该被卷进一件换班的事：
+        # A⇄B 还挂着，C 再来问 A（或 B），批下来 A 那天就要同时对上两边的班，店长那边也会
+        # 收到两张交叉的卡。措辞带上「是谁跟谁、到哪一步了」，前端拿它弹一句说清状况。
+        busy = await self._pending_swap_of(peer_id, day)
+        if busy is not None:
+            raise SchedulingError("peer_in_swap", _swap_couple_text(busy, people))
         try:
             return await self._insert_request(
                 employee_id,
@@ -3186,7 +3337,7 @@ class SchedulingStore:
                 "job_title": employee["job_title"],
             }
             for employee in roster
-            if employee["id"] != me and employee["approved"] and not employee["disabled"]
+            if employee["id"] != me and employee["approved"] and not employee["resigned"]
         ]
 
     async def _incoming_swaps(self, employee_id: int) -> list[dict]:
@@ -3528,6 +3679,30 @@ class SchedulingStore:
         clause = f" WHERE {' AND '.join(where)}" if where else ""
         order = "created_at ASC, id ASC" if oldest_first else "created_at DESC, id DESC"
         return await self._select_request_rows(clause, tuple(params), order)
+
+    async def _pending_swap_of(self, employee_id: int, day: str) -> Optional[dict]:
+        """这天这个**人**挂着的那条换班（还没落定）：他提的、或别人问他的，都算。
+
+        两扇门各读一次：`employee_id` 那一列是他提的，`peer_employee_id` 那一列是问他的
+        —— 两条路各有自己的索引（0009 的 `idx_scheduling_requests_peer` 就是给后一条建的），
+        拼成一次 OR 查询会同时用不上。返回第一条（新的在前，就取最新的那条说给员工听）。
+        """
+        target = int(employee_id)
+        for rows in (
+            await self._request_rows(employee_id=target),
+            await self._request_rows(peer_id=target),
+        ):
+            for row in rows:
+                if row["kind"] != KIND_SWAP:
+                    continue
+                if row["status"] not in (STATUS_PENDING_PEER, STATUS_PENDING_MANAGER):
+                    # 批了 / 拒了 / 撤了都算落定：那天的班要么已经换过去、要么没动过，
+                    # 别人再来找这个人换是另一件事。
+                    continue
+                if row["start_date"] != day:
+                    continue
+                return row
+        return None
 
     async def _request_by_id(self, request_id: int) -> Optional[dict]:
         rows = await self._select_request_rows(" WHERE id = ?", (int(request_id),))

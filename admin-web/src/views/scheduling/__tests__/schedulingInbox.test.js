@@ -137,12 +137,12 @@ describe('店长端排班待办（票 08、09）', () => {
     expect(view).toMatch(/v-if="errorText"[\s\S]{0,40}role="alert"/)
   })
 
-  it('谁还没配规则分成两拨：在职的提醒，停用/没批准的不提醒', () => {
-    // 口径与月历底下那根条一致（`needsRule`）：在职 = 批准过、没停用。
+  it('谁还没配规则分成两拨：在职的提醒，已离职/没批准的不提醒', () => {
+    // 口径与月历底下那根条一致（`needsRule`）：在职 = 批准过、没离职。
     expect(view).toMatch(/splitRuleless\(withoutRule\.value\)/)
     expect(view).toMatch(/v-for="person in ruleless\.active"/)
     expect(view).toMatch(/ruleless\.muted\.length/)
-    expect(copy).toMatch(/person\.approved && !person\.disabled/)
+    expect(copy).toMatch(/person\.approved && !person\.resigned/)
   })
 
   it('用的每个令牌都在共享样式表里有定义', () => {

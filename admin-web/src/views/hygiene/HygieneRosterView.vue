@@ -3,7 +3,7 @@
  * 花名册（工作台 · 人事组的第四页）。
  *
  * 改版口径见 `.scratch/roster-redesign/design.md`：这一页只做三件事 —— 名单（待批准置顶 +
- * 在职 / 已停用两档）、编辑抽屉（11 项字段 + 底部四个动作）、邀请店员弹层。原来那些
+ * 在职 / 已离职两档）、编辑抽屉（11 项字段 + 底部四个动作）、邀请店员弹层。原来那些
  * 当天排班/工作区控件、只读七项、规则折叠块全部退出本页（排班那件事的唯一真相源是排班页）。
  *
  * 三条不能动的约束：
@@ -46,7 +46,7 @@ const segment = ref('all')
 const SEGMENTS = [
   { id: 'all', label: '全部', title: '待批准和在职的人' },
   { id: 'missing', label: '待补', title: '档案没补全的员工' },
-  { id: 'disabled', label: '已停用', title: '停用后不能登录的员工' },
+  { id: 'resigned', label: '已离职', title: '登记离职后不能登录的员工' },
 ]
 
 // 抽屉：`drawerRow` 是打开那一刻的那一行，`draft` 是它的草稿。实时到只更新列表，
@@ -56,7 +56,6 @@ const draft = ref(null)
 const drawerError = ref('')
 const busy = ref(false)
 const discardOpen = ref(false)
-const disableTarget = ref(null)
 
 const exporting = ref(false)
 
@@ -76,14 +75,14 @@ function flash(text) {
 }
 
 // ── 分组与排序 ────────────────────────────────────────────────────────────
-// 全部 = 待批准 + 在职（**不含已停用**，已停用默认隐藏）；待补 = 未停用且档案缺项；
-// 已停用 = disabled。计数看**整份名单**，不受搜索影响（搜索是"找人"的临时动作）。
+// 全部 = 待批准 + 在职（**不含已离职**，已离职默认隐藏）；待补 = 未停用且档案缺项；
+// 已离职 = `resigned`（含「离职日期待补」那一批）。计数看**整份名单**，不受搜索影响。
 function employeeCount(id) {
   if (id === 'missing') {
-    return employees.value.filter((row) => !row.disabled && row.profile_incomplete === true).length
+    return employees.value.filter((row) => !row.resigned && row.profile_incomplete === true).length
   }
-  if (id === 'disabled') {
-    return employees.value.filter((row) => row.disabled === true).length
+  if (id === 'resigned') {
+    return employees.value.filter((row) => row.resigned === true).length
   }
   return 0
 }
@@ -99,19 +98,19 @@ const searched = computed(() => {
 
 const segmentRows = computed(() => {
   if (segment.value === 'missing') {
-    return searched.value.filter((row) => !row.disabled && row.profile_incomplete === true)
+    return searched.value.filter((row) => !row.resigned && row.profile_incomplete === true)
   }
-  if (segment.value === 'disabled') {
-    return searched.value.filter((row) => row.disabled === true)
+  if (segment.value === 'resigned') {
+    return searched.value.filter((row) => row.resigned === true)
   }
-  return searched.value.filter((row) => !row.disabled)
+  return searched.value.filter((row) => !row.resigned)
 })
 
 function phoneOrder(a, b) {
   return String(a.phone || '').localeCompare(String(b.phone || ''))
 }
 
-/** 在职 / 已停用：姓名中文升序，同名按手机号；没有姓名的一律排最后。 */
+/** 在职 / 已离职：姓名中文升序，同名按手机号；没有姓名的一律排最后。 */
 function byName(a, b) {
   const nameA = String(a.name || '').trim()
   const nameB = String(b.name || '').trim()
@@ -132,18 +131,18 @@ function byCreatedAt(a, b) {
 }
 
 const pendingRows = computed(() => (
-  segment.value === 'disabled'
+  segment.value === 'resigned'
     ? []
-    : segmentRows.value.filter((row) => !row.approved && !row.disabled).sort(byCreatedAt)
+    : segmentRows.value.filter((row) => !row.approved && !row.resigned).sort(byCreatedAt)
 ))
 const activeRows = computed(() => (
-  segment.value === 'disabled'
+  segment.value === 'resigned'
     ? []
-    : segmentRows.value.filter((row) => row.approved && !row.disabled).sort(byName)
+    : segmentRows.value.filter((row) => row.approved && !row.resigned).sort(byName)
 ))
-const disabledRows = computed(() => (
-  segment.value === 'disabled'
-    ? segmentRows.value.filter((row) => row.disabled).sort(byName)
+const resignedRows = computed(() => (
+  segment.value === 'resigned'
+    ? segmentRows.value.filter((row) => row.resigned).sort(byName)
     : []
 ))
 
@@ -152,15 +151,15 @@ const rosterGroups = computed(() => {
   const groups = []
   if (pendingRows.value.length) groups.push({ key: 'pending', title: '待批准', rows: pendingRows.value })
   if (activeRows.value.length) groups.push({ key: 'active', title: '在职', rows: activeRows.value })
-  if (disabledRows.value.length) groups.push({ key: 'disabled', title: '已停用', rows: disabledRows.value })
+  if (resignedRows.value.length) groups.push({ key: 'resigned', title: '已离职', rows: resignedRows.value })
   return groups
 })
 
 const searchMissed = computed(() => Boolean(keyword.value.trim()) && searched.value.length === 0)
 // 「还没有人注册」只在真的一个人都没有时出现（搜索命不中走另一句）。
-const nobodyYet = computed(() => !employees.value.length && segment.value !== 'disabled')
+const nobodyYet = computed(() => !employees.value.length && segment.value !== 'resigned')
 
-/** 分段格上的文字：`全部` 不带数字，`待补 3` / `已停用 1` 带（数字是**整份名单**里的计数）。 */
+/** 分段格上的文字：`全部` 不带数字，`待补 3` / `已离职 1` 带（数字是**整份名单**里的计数）。 */
 function segmentText(item) {
   return item.id === 'all' ? item.label : `${item.label} ${employeeCount(item.id)}`
 }
@@ -183,7 +182,7 @@ function healthChip(row) {
   }
   // 未办理（2026-10-13 用户裁定）：注册页从这天起允许「暂时没有健康证」，于是
   // **在职而没证**成了一种合法状态 —— 必须让店长在名单上一眼看见。原先这里对
-  // `none` 是静默的（那时它只可能来自脏数据或已停用的存量行，标出来是噪音）。
+  // `none` 是静默的（那时它只可能来自脏数据或已离职的存量行，标出来是噪音）。
   if (row.health_cert_state === 'none') {
     return { text: '未办理健康证', title: '还没有健康证：尽快让他去办', kind: 'is-danger' }
   }
@@ -212,7 +211,7 @@ async function loadRoster(options = {}) {
 function onKeydown(event) {
   // 确认框自己处理 Esc（捕获阶段就吞掉了事件）；这里再兜一道：聚焦在确认框上时
   // 抽屉不该被同一次 Esc 关掉（那两个动作是两回事）。
-  if (discardOpen.value || disableTarget.value) return
+  if (discardOpen.value || resignOpen.value || cancelResignOpen.value) return
   if (event.key !== 'Escape' || !drawerRow.value) return
   requestClose()
 }
@@ -301,9 +300,9 @@ const seniorityNote = computed(() => {
 })
 const canApprove = computed(() => !missingSalary.value && !missingHireDate.value)
 /** 批准门槛那一行（常显，不藏在悬浮里 —— 手机没有 hover）。只有「待批准」的人才有这一行：
- *  已批准 / 已停用的人下面根本没有「批准」按钮，摆一句"还缺…"是在说一件不存在的事。 */
+ *  已批准 / 已离职的人下面根本没有「批准」按钮，摆一句"还缺…"是在说一件不存在的事。 */
 const gateNote = computed(() => {
-  if (!drawerRow.value || drawerRow.value.approved || drawerRow.value.disabled) return ''
+  if (!drawerRow.value || drawerRow.value.approved || drawerRow.value.resigned) return ''
   if (missingSalary.value && missingHireDate.value) return '还缺底薪和入职日期'
   if (missingSalary.value) return '还缺底薪'
   if (missingHireDate.value) return '还缺入职日期'
@@ -312,7 +311,7 @@ const gateNote = computed(() => {
 
 const primaryAction = computed(() => {
   if (!drawerRow.value) return 'save'
-  if (drawerRow.value.disabled) return 'enable'
+  if (drawerRow.value.resigned) return 'cancel-resignation'
   if (!drawerRow.value.approved) return 'approve'
   return 'save'
 })
@@ -418,46 +417,106 @@ async function approveRow() {
   }
 }
 
-function askDisable() {
-  if (busy.value || !drawerRow.value) return
-  disableTarget.value = drawerRow.value
+// ── 登记离职 / 取消离职（2026-10-29 取代「停用」） ────────────────────────────
+// 登记离职由两件事拼成：一个日期（默认今天，可改成将来 —— 「干到月底」），和一句
+// 「会删掉几天排班」的确认。排班删了回不来，所以先 dry_run 问一次数、再让店长按下去。
+const resignOpen = ref(false)
+const resignDate = ref('')
+const resignPlan = ref(null) // { assignments_to_remove, rule_cleared } | null
+const cancelResignOpen = ref(false)
+
+function todayText() {
+  const now = new Date()
+  const pad = (n) => String(n).padStart(2, '0')
+  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`
 }
 
-async function confirmDisable() {
-  const row = disableTarget.value
-  disableTarget.value = null
-  if (!row) return
-  const label = row.name || row.phone
+function askResign() {
+  if (busy.value || !drawerRow.value) return
+  resignDate.value = todayText()
+  resignPlan.value = null
+  resignOpen.value = true
+}
+
+function closeResign() {
+  resignOpen.value = false
+  resignPlan.value = null
+}
+
+/** 第一步：只问数（`dry_run`），把「会删掉几天排班」摆到店长眼前。 */
+async function planResign() {
+  const row = drawerRow.value
+  if (!row || busy.value) return
+  if (!resignDate.value) {
+    drawerError.value = '请选择离职日期'
+    return
+  }
   busy.value = true
   drawerError.value = ''
-  savedHint.value = ''
   try {
-    await api.post(`/api/hygiene/admin/roster/${row.id}/disable`)
-    closeDrawer()
-    await loadRoster({ quiet: true })
-    flash(`已停用 ${label}`)
+    resignPlan.value = await api.post(
+      `/api/hygiene/admin/roster/${row.id}/resign`,
+      { resigned_at: resignDate.value, dry_run: true },
+    )
   } catch (err) {
-    drawerError.value = err.message || '停用失败'
+    drawerError.value = err.message || '没能算出会删掉几天排班'
+    closeResign()
   } finally {
     busy.value = false
   }
 }
 
-async function enableRow() {
+/** 第二步：真写。删排班 + 停轮转规则 + 落日期，服务端一次做完。 */
+async function confirmResign() {
   const row = drawerRow.value
+  if (!row || busy.value) return
+  const label = row.name || row.phone
+  const date = resignDate.value
+  busy.value = true
+  drawerError.value = ''
+  savedHint.value = ''
+  try {
+    const result = await api.post(
+      `/api/hygiene/admin/roster/${row.id}/resign`,
+      { resigned_at: date },
+    )
+    closeResign()
+    closeDrawer()
+    await loadRoster({ quiet: true })
+    const removed = result && result.assignments_to_remove
+    flash(
+      removed
+        ? `已登记 ${label} ${date} 离职，删掉 ${removed} 天排班`
+        : `已登记 ${label} ${date} 离职`,
+    )
+  } catch (err) {
+    drawerError.value = err.message || '登记离职失败'
+  } finally {
+    busy.value = false
+  }
+}
+
+function askCancelResignation() {
+  if (busy.value || !drawerRow.value) return
+  cancelResignOpen.value = true
+}
+
+async function confirmCancelResignation() {
+  const row = drawerRow.value
+  cancelResignOpen.value = false
   if (!row || busy.value) return
   const label = row.name || row.phone
   busy.value = true
   drawerError.value = ''
   savedHint.value = ''
   try {
-    // 启用**不走**批准门槛（恢复不是新入职）。
-    await api.post(`/api/hygiene/admin/roster/${row.id}/enable`)
+    // 取消离职**不走**批准门槛（恢复不是新入职）。
+    await api.post(`/api/hygiene/admin/roster/${row.id}/cancel-resignation`)
     closeDrawer()
     await loadRoster({ quiet: true })
-    flash(`已启用 ${label}`)
+    flash(`已取消 ${label} 的离职登记`)
   } catch (err) {
-    drawerError.value = err.message || '启用失败'
+    drawerError.value = err.message || '取消离职失败'
   } finally {
     busy.value = false
   }
@@ -603,11 +662,11 @@ async function copyInvite() {
     </div>
 
     <template v-else>
-      <!-- 三个分区，各自一张卡：待批准**永远在最上面**，其下才是在职；已停用只在
-           「已停用」分段里出现（默认隐藏）。分区的行集合与标题在 `rosterGroups` 里算。 -->
+      <!-- 三个分区，各自一张卡：待批准**永远在最上面**，其下才是在职；已离职只在
+           「已离职」分段里出现（默认隐藏）。分区的行集合与标题在 `rosterGroups` 里算。 -->
       <section v-for="group in rosterGroups" :key="group.key" class="table-card">
         <div class="table-card-header">
-          <i class="roster-led" :class="group.key === 'pending' ? 'warn' : group.key === 'disabled' ? 'bad' : 'ok'"></i>
+          <i class="roster-led" :class="group.key === 'pending' ? 'warn' : group.key === 'resigned' ? 'bad' : 'ok'"></i>
           <h3>{{ group.title }} <span>{{ group.rows.length }}</span></h3>
         </div>
         <div class="hy-person-list">
@@ -634,7 +693,7 @@ async function copyInvite() {
               >{{ healthChip(row).text }}</span>
             </span>
             <span class="roster-row-tail">
-              <i class="roster-led" :class="row.disabled ? 'bad' : (row.approved ? 'ok' : 'warn')"></i>
+              <i class="roster-led" :class="row.resigned ? 'bad' : (row.approved ? 'ok' : 'warn')"></i>
               <span class="roster-status" :data-status="rosterStatusLabel(row)">{{ rosterStatusLabel(row) }}</span>
               <span class="roster-row-go" aria-hidden="true">›</span>
             </span>
@@ -816,12 +875,12 @@ async function copyInvite() {
           <p v-if="gateNote" class="roster-field-note">{{ gateNote }}</p>
           <div class="roster-foot-actions">
             <button
-              v-if="!drawerRow.disabled"
+              v-if="!drawerRow.resigned"
               type="button"
               class="btn btn-danger roster-danger"
               :disabled="busy"
-              @click="askDisable"
-            >停用</button>
+              @click="askResign"
+            >登记离职</button>
             <button
               type="button"
               class="btn roster-save"
@@ -831,7 +890,7 @@ async function copyInvite() {
               @click="saveDraft"
             >{{ busy ? '保存中…' : '保存' }}</button>
             <button
-              v-if="!drawerRow.approved && !drawerRow.disabled"
+              v-if="!drawerRow.approved && !drawerRow.resigned"
               type="button"
               class="btn roster-primary"
               :class="{ 'btn-primary': primaryAction === 'approve' }"
@@ -840,13 +899,13 @@ async function copyInvite() {
               @click="approveRow"
             >批准</button>
             <button
-              v-if="drawerRow.disabled"
+              v-if="drawerRow.resigned"
               type="button"
               class="btn roster-primary"
-              :class="{ 'btn-primary': primaryAction === 'enable' }"
+              :class="{ 'btn-primary': primaryAction === 'cancel-resignation' }"
               :disabled="busy"
-              @click="enableRow"
-            >启用</button>
+              @click="askCancelResignation"
+            >取消离职</button>
           </div>
         </div>
       </div>
@@ -875,15 +934,55 @@ async function copyInvite() {
       </div>
     </div>
 
+    <!-- 登记离职（2026-10-29 取代「停用」）：日期默认今天，点「下一步」先算出来会删掉
+         几天排班，第二步才真写 —— 删掉的排班行回不来。 -->
+    <div v-if="resignOpen" class="modal-overlay roster-resign-overlay" @click.self="closeResign">
+      <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="roster-resign-title">
+        <div class="modal-header">
+          <h3 id="roster-resign-title">登记离职</h3>
+          <button type="button" class="btn btn-sm" aria-label="关闭" @click="closeResign">关闭</button>
+        </div>
+        <p class="editor-lead">
+          {{ drawerRow.name || drawerRow.phone }} 离职后不能登录，记录还在花名册里。
+        </p>
+        <label class="roster-field">
+          <span>离职日期</span>
+          <input v-model="resignDate" type="date" class="input" :disabled="busy">
+        </label>
+        <p class="editor-note">
+          离职日<strong>当天照常上班</strong>；之后的排班会被删掉，轮转规则一并停用。
+        </p>
+        <p v-if="resignPlan" class="roster-resign-plan" role="status">
+          这次会删掉 <b>{{ resignPlan.assignments_to_remove }}</b> 天排班<template v-if="resignPlan.rule_cleared">，并停用他的轮转规则</template>。
+        </p>
+        <div class="roster-foot-actions">
+          <button type="button" class="btn" :disabled="busy" @click="closeResign">取消</button>
+          <button
+            v-if="!resignPlan"
+            type="button"
+            class="btn btn-primary"
+            :disabled="busy || !resignDate"
+            @click="planResign"
+          >下一步</button>
+          <button
+            v-else
+            type="button"
+            class="btn btn-danger"
+            :disabled="busy"
+            @click="confirmResign"
+          >确认登记离职</button>
+        </div>
+      </div>
+    </div>
+
     <ConfirmDialog
-      v-if="disableTarget"
+      v-if="cancelResignOpen"
       class="roster-dialog"
-      title="停用员工"
-      :message="`停用 ${disableTarget.name || disableTarget.phone} 后不能登录，记录还在。`"
-      confirm-label="停用"
-      danger
-      @confirm="confirmDisable"
-      @cancel="disableTarget = null"
+      title="取消离职"
+      message="取消之后他回到在职，可以重新登录。当初删掉的排班不会恢复，需要重新铺。"
+      confirm-label="取消离职"
+      @confirm="confirmCancelResignation"
+      @cancel="cancelResignOpen = false"
     />
 
     <ConfirmDialog
@@ -1069,6 +1168,14 @@ async function copyInvite() {
   padding: 0;
   z-index: var(--z-queue);
   touch-action: none;
+}
+/* 登记离职那个小弹层**盖在抽屉上面**（它是从抽屉里点出来的，抽屉还开着）——
+   不抬一档的话它会被抽屉的 z-index 压住，按钮点不到（实测：点「取消」被抽屉吃掉）。 */
+.roster-page > .roster-resign-overlay { z-index: calc(var(--z-queue) + 1); }
+.roster-resign-plan {
+  margin: 8px 0 0; padding: 7px 10px; border-radius: var(--r-1);
+  border: 1px solid var(--warn); background: var(--warn-soft, transparent);
+  font-size: 12px; line-height: 1.6; color: var(--ink);
 }
 .roster-page .roster-drawer {
   display: flex;

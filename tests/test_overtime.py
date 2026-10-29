@@ -1018,7 +1018,7 @@ def test_admin_lists_employees_for_backfill(overtime_http):
     assert listing.status_code == 200, listing.text
     people = {row["id"]: row for row in listing.json()["employees"]}
     assert people[employee]["name"] == NAME
-    assert set(people[employee]) == {"id", "name", "disabled"}
+    assert set(people[employee]) == {"id", "name", "resigned", "resigned_at"}
 
     client.cookies.clear()
     assert client.get("/api/overtime/admin/employees").status_code == 401

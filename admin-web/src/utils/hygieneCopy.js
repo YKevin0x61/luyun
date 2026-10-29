@@ -112,8 +112,15 @@ export function canAcceptFixTicket(actor, ticket, now = Date.now()) {
   return Number.isFinite(deadline) && now >= deadline
 }
 
+/** 花名册一行上的状态标签（2026-10-29：「停用」→「离职」）。
+ *
+ *  离职日期待补（`resigned_at === ''`）单独一个说法：他确实是离职的人，但哪天走的
+ *  没人记得 —— 与「已离职」分开写，店长才看得出这一行还要去补一样东西。
+ */
 export function rosterStatusLabel(employee) {
-  if (employee && employee.disabled) return '已停用'
+  if (employee && employee.resigned) {
+    return employee.resigned_at === '' ? '离职日期待补' : '已离职'
+  }
   if (employee && employee.approved) return '已批准'
   return '待批准'
 }

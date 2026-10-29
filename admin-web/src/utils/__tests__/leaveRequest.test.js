@@ -310,12 +310,12 @@ describe('批准回执（票 08 验收 3）', () => {
 })
 
 describe('还没配规则的人分两拨（票 08 验收 2）', () => {
-  const person = (extra) => ({ id: 1, name: '赵六', approved: true, disabled: false, ...extra })
+  const person = (extra) => ({ id: 1, name: '赵六', approved: true, resigned: false, ...extra })
 
   it('在职的要提醒，停用与没批准的不提醒', () => {
     const { active, muted } = splitRuleless([
       person({ id: 1, name: '赵六' }),
-      person({ id: 2, name: '钱七', disabled: true }),
+      person({ id: 2, name: '钱七', resigned: true, resigned_at: '2026-09-01' }),
       person({ id: 3, name: '孙八', approved: false }),
     ])
     expect(active.map((item) => item.name)).toEqual(['赵六'])

@@ -31,6 +31,7 @@ import {
   candidateLine,
   dayActions,
   incomingOnDay,
+  leaveRangeAction,
   requestsOnDay,
   swapCandidates,
   swapPreview,
@@ -43,6 +44,11 @@ const props = defineProps({
   /** 服务端的营业日与展开窗口末日（「过去」「还没铺到」两条判据拿它们比，不拿手机时间）。 */
   today: { type: String, default: '' },
   windowEnd: { type: String, default: '' },
+  /** 22:00 之后「次日」提不了（2026-10-29 用户裁定）：服务端的钟说了算，前端只照着挡。
+   *  没传就是「没锁」（老调用方 / 单测只关心别的判据时不必编一个时间）。 */
+  nextDayLocked: { type: Boolean, default: false },
+  /** 2 天以上的假要提前几天（服务端下发，同一份 `/me/month`）。`0` = 这条规矩不生效。 */
+  leaveLeadDays: { type: Number, default: 0 },
   /** 从今天页跳过来时直接进的那一屏（'leave' | 'swap' | ''）。 */
   initialAct: { type: String, default: '' },
 })
@@ -124,6 +130,8 @@ async function loadRequests() {
 const acts = computed(() => dayActions(props.day, {
   today: props.today,
   windowEnd: props.windowEnd,
+  nextDayLocked: props.nextDayLocked,
+  leaveLeadDays: props.leaveLeadDays,
 }))
 const whyNote = computed(() => actionsNote(acts.value))
 const mineText = computed(() => myDayText(props.day))
@@ -143,6 +151,12 @@ const leaveDays = computed(() => (
     ? dayDiff(leaveStart.value, leaveEnd.value)
     : 0
 ))
+// 这一段日期能不能提：2 天以上要提前 7 天（2026-10-29 用户裁定）。日期一改就重算，
+// 提交按钮跟着灰 —— 别让人填完事由才被服务端打回。
+const leaveRange = computed(() => leaveRangeAction(leaveStart.value, leaveEnd.value, {
+  today: props.today,
+  leaveLeadDays: props.leaveLeadDays,
+}))
 
 function startLeave() {
   leaveError.value = ''
@@ -166,6 +180,11 @@ watch(leaveStart, (next, prev) => {
 
 async function submitLeave() {
   if (leaveBusy.value) return
+  // 2 天以上要提前 7 天：按钮本来就是灰的，这里再挡一次（键盘回车也能触发提交）。
+  if (!leaveRange.value.ok) {
+    leaveError.value = leaveRange.value.reason
+    return
+  }
   leaveBusy.value = true
   leaveError.value = ''
   try {
@@ -199,13 +218,21 @@ async function submitLeave() {
 const picked = ref(null)
 const swapNote = ref('')
 const swapError = ref('')
+// 「对方那天已经在跟别人换」那句话（服务端 `peer_in_swap`）：不为空就弹出来，
+// 关掉它仍停在换班屏。见 `submitSwap`。
+const swapBlocked = ref('')
 const colleagues = ref([])
 const colleaguesState = ref('idle') // idle | loading | ready | error
 const showAll = ref(false)
 
 // 先给**那天在班的人**（点一下就换）；名单里没有的（那天没班 / 新人还没铺到）走下面
 // 那条「全部同事」的路 —— 服务端允许跟那天没班的人换（批了他接走你的班）。
-const candidates = computed(() => swapCandidates(groups.value, props.employee && props.employee.id))
+// 2026-10-29 用户裁定：那天**休**的人也算候选人（请假的不算，判据在 `swapCandidates`）。
+const candidates = computed(() => swapCandidates(
+  groups.value,
+  props.employee && props.employee.id,
+  offPeople.value,
+))
 const allPeople = computed(() => colleagues.value.map((person) => ({
   id: person.id,
   name: person.name,
@@ -226,7 +253,10 @@ function startSwap() {
 }
 
 /** 名单行尾的「换班」：日期就是这一天、人就是他 —— 进换班那一屏时对象已经点好。
- *  判据仍走 `acts.swap`（过去的日子 / 窗口外 / 我那天请假都不可换），这里不另写一份。 */
+ *  判据仍走 `acts.swap`（过去的日子 / 窗口外 / 我那天请假都不可换），这里不另写一份。
+ *
+ *  `group` 为 `null` 是「休假」那一栏的行（他那天休，没有班次可写）：照样进换班那一屏，
+ *  预览会说「他那天休：批了 X 接你的早班」。 */
 function swapWith(group, person) {
   if (!acts.value.swap.ok || !person) return
   startSwap()
@@ -235,6 +265,7 @@ function swapWith(group, person) {
     name: person.name,
     zone: person.zone || '',
     shift_name: (group && group.shift_name) || '',
+    off: !group,
   }
 }
 
@@ -286,6 +317,13 @@ async function submitSwap() {
   } catch (err) {
     if (err.status === 401) {
       toLogin()
+      return
+    }
+    // 换班撞车（2026-10-29 用户裁定）：对方那天已经跟别人挂着一条还没批的换班。
+    // 这不是「哪一格填错了」，而是一件得让人看清的事（谁跟谁、到哪一步），所以弹出来说，
+    // 不塞进表单底下那行小字。弹窗关掉仍停在换班屏：换个人 / 换个日子还能提。
+    if (err.code === 'peer_in_swap') {
+      swapBlocked.value = err.message
       return
     }
     swapError.value = err.message || '没提交成'
@@ -372,7 +410,13 @@ function back() {
 }
 
 function onKeydown(event) {
-  if (event.key === 'Escape') close()
+  if (event.key !== 'Escape') return
+  // 弹着「这天换不了」时，Esc 先收这一句，别把整个面板一起关掉（员工还想换个人试试）。
+  if (swapBlocked.value) {
+    swapBlocked.value = ''
+    return
+  }
+  close()
 }
 
 onMounted(async () => {
@@ -503,6 +547,16 @@ useNudgePull({
                 <span class="rWho">{{ person.name }}</span>
                 <!-- 休与请假分开写（票 08 的口径）：判据在 `offLabel` 一处。 -->
                 <span class="rWhere" :class="{ leave: person.leave }">{{ offLabel(person) }}</span>
+                <!-- 那天休的人也能点着换（2026-10-29 用户裁定）：批了就是他接走我这一班的。
+                     **请假那一行不给**：换班批准会把他批过的假盖掉（服务端挡不住这一边）。 -->
+                <button
+                  v-if="!isMe(person, employee && employee.id) && !person.leave"
+                  class="r-swap"
+                  type="button"
+                  :disabled="!acts.swap.ok"
+                  :aria-label="`换 ${person.name} 的班`"
+                  @click="swapWith(null, person)"
+                />
               </li>
             </ul>
           </div>
@@ -565,6 +619,8 @@ useNudgePull({
           />
         </div>
         <p v-if="leaveDays > 1" class="ds-days">共 {{ leaveDays }} 天</p>
+        <!-- 2 天以上要提前 7 天（2026-10-29 用户裁定）：日期一改就说清，不等人填完事由。 -->
+        <p v-if="leaveDays > 1 && !leaveRange.ok" class="ds-why">{{ leaveRange.reason }}</p>
         <div class="form-row">
           <label for="day-leave-note">{{ noteLabel }}</label>
           <input
@@ -582,7 +638,7 @@ useNudgePull({
           <button
             class="btn btn-primary"
             type="button"
-            :disabled="leaveBusy || !leaveStart"
+            :disabled="leaveBusy || !leaveStart || !leaveRange.ok"
             @click="submitLeave"
           >提交</button>
         </div>
@@ -602,7 +658,7 @@ useNudgePull({
         <p class="ds-h">点一个人换</p>
         <p v-if="rosterState === 'loading'" class="ds-sub">读名单…</p>
         <p v-else-if="!candidates.length" class="ds-sub">
-          这天没有别人在班，用下面那份全部同事的名单选。
+          这天没有别人在班，也没人休 —— 用下面那份全部同事的名单选。
         </p>
         <ul v-else class="ds-people">
           <li v-for="person in candidates" :key="person.id">
@@ -686,6 +742,28 @@ useNudgePull({
       @confirm="confirmAnswer"
       @cancel="answerTarget = null"
     />
+
+    <!-- 换班撞车（2026-10-29 用户裁定）：对方那天已经在跟别人换了（还没批）。
+         这一句要说清「谁 和 谁、到哪一步」，所以单独弹一层，不塞进表单底下那行小字。
+         挂在 body 上：这一屏本身也是 `.modal-overlay`，套在里面会被它的定位上下文吃掉。 -->
+    <Teleport to="body">
+      <div
+        v-if="swapBlocked"
+        class="modal-overlay"
+        role="alertdialog"
+        aria-modal="true"
+        aria-label="这天换不了"
+        @click.self="swapBlocked = ''"
+      >
+        <div class="modal-box ds-blocked">
+          <div class="modal-header"><h3>这天换不了</h3></div>
+          <p class="ds-blocked-text">{{ swapBlocked }}</p>
+          <div class="modal-footer">
+            <button class="btn btn-primary" type="button" @click="swapBlocked = ''">知道了</button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
   </div>
 </template>
 
@@ -757,6 +835,16 @@ useNudgePull({
   margin: 0;
   font-size: 11.5px;
   color: var(--danger-bright);
+}
+
+/* 「这天换不了」那一句（`Teleport` 出去的那层弹窗）：员工要整句读完才知道是谁跟谁在换，
+   所以按正文写，不用 `.ds-sub` 那种小字。scoped 样式对 Teleport 出去的节点照样生效
+   （作用域标记挂在元素本身上）。 */
+.ds-blocked-text {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--ink);
 }
 
 /* 这一屏的小标题（「这一天能办」「点一个人换」）。 */

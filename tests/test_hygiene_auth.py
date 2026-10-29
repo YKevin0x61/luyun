@@ -106,8 +106,8 @@ def test_unauthenticated_can_register_and_attempt_login_not_roster(hygiene_http)
     assert login.status_code == 401
     assert client.get("/api/hygiene/admin/roster").status_code == 401
     assert client.post("/api/hygiene/admin/roster/1/approve").status_code == 401
-    assert client.post("/api/hygiene/admin/roster/1/disable").status_code == 401
-    assert client.post("/api/hygiene/admin/roster/1/enable").status_code == 401
+    assert client.post("/api/hygiene/admin/roster/1/resign", json={"resigned_at": "2026-09-01"}).status_code == 401
+    assert client.post("/api/hygiene/admin/roster/1/cancel-resignation").status_code == 401
     assert client.patch(
         "/api/hygiene/admin/roster/1",
         json={"permission": "管理员"},
@@ -330,7 +330,7 @@ def test_admin_cookie_can_roster_but_is_not_staff_phone_identity(hygiene_http):
     assert client.get("/api/hygiene/staff/me").status_code == 401
 
 
-def test_admin_can_disable_and_enable_staff_login(hygiene_http):
+def test_admin_can_resign_and_cancel_resignation_for_staff_login(hygiene_http):
     client, _db, accounts, _work = hygiene_http
     employee = _run(accounts.register(PHONE, PASSWORD, NAME))
     _run(accounts.approve(employee["id"]))
@@ -341,17 +341,24 @@ def test_admin_can_disable_and_enable_staff_login(hygiene_http):
 
     client.cookies.clear()
     assert client.post("/api/auth/init", json=ADMIN_INIT).status_code == 200
-    disabled = client.post(f"/api/hygiene/admin/roster/{employee['id']}/disable")
-    assert disabled.status_code == 200
-    assert disabled.json()["employee"]["disabled"] is True
+    # 登记离职（2026-10-29 取代「停用」）：日期落在过去 → 当场不能登录。
+    resigned = client.post(
+        f"/api/hygiene/admin/roster/{employee['id']}/resign",
+        json={"resigned_at": "2026-09-01"},
+    )
+    assert resigned.status_code == 200
+    assert resigned.json()["employee"]["resigned"] is True
+    assert resigned.json()["employee"]["resigned_at"] == "2026-09-01"
     assert client.post(
         "/api/hygiene/staff/login",
         json={"phone": PHONE, "password": PASSWORD},
     ).status_code == 401
 
-    enabled = client.post(f"/api/hygiene/admin/roster/{employee['id']}/enable")
+    enabled = client.post(
+        f"/api/hygiene/admin/roster/{employee['id']}/cancel-resignation"
+    )
     assert enabled.status_code == 200
-    assert enabled.json()["employee"]["disabled"] is False
+    assert enabled.json()["employee"]["resigned"] is False
     assert enabled.json()["employee"]["approved"] is True
     assert client.post(
         "/api/hygiene/staff/login",

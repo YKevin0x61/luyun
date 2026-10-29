@@ -11,7 +11,8 @@
 
 * 一天三态：排了班 = `work`、有排班行但班次为空 = `rest`、**压根没有排班行** =
   `todo`（轮转规则没铺到，「待补」）。今天之后的日期 `state` 是 `None` —— 那是「还没
-  到」，不是「待补」。
+  到」，不是「待补」。**入职日期之前的那些天也是 `None`**（2026-10-29 用户裁定：14 号
+  入职的人，1–13 号不该是「待补」）—— 判据同 `_day_state`，只比到天。
 * 名单 = 在职员工（**已批准且未停用**，同排班周表的口径）+ 当月有排班或加班记录的
   人（含当月离职的）。没有当月记录的**历史**离职人员不进表。
  * 卡片列：职位 / 底薪 / 年限（工龄奖）/ 是否新入职 / 当月净时长（**只算已批准的单**）。
@@ -30,8 +31,9 @@
 
 假期台账（票 03，口径见 `GLOSSARY.md` 的「假期」那几节与 `docs/adr/0113`）：
 
-* **实际出勤天数**：本月**已过**的营业日里「排了班、又没标休」的天数；**标了「休半天」
-  的那天算 0.5 天**（票 07，ADR 0114）。今天之后排的班一天都不算 —— 那些日子还没发生。
+* **出勤天数**：按**排班**数 —— 本月「排了班、又没标休」的天数，**今天之后已经排了班
+  的日子也算**（2026-10-29 用户裁定「按排班预结算」；未来没排班的天没有排班行，不算）。
+  **标了「休半天」的那天算 0.5 天**（票 07，ADR 0114）。
 * **月例休** = `min(4, floor(实际出勤 ÷ 6))`；**法定节假日补休** = 当月每个法定节假日
   那天排了班 +1（休不给，没标日历就没有 —— 日历是唯一依据）；**生日假** = 身份证号
   派生的生日月份落在当月 +1（没填身份证号算不出来，不给）；**年假**只在工龄奖调整
@@ -585,6 +587,11 @@ class AttendanceStore:
                     "seniority_bonus": employee.get("seniority_bonus"),
                     # 入职日期落在当月 = 新入职；没填入职日期 = 留空（`None`），不是「不是新来的」。
                     "new_hire": None if not hire_date else str(hire_date)[:7] == month,
+                    # 离职（2026-10-29 取代「停用」）：`resigned` 是**到今天为止**算不算已离职
+                    # （判据在 `services/identity/accounts.py` 的 `resigned_today`），
+                    # `resigned_at` 是原始日期（`''` = 已离职、日期待补）。
+                    "resigned": bool(employee.get("resigned")),
+                    "resigned_at": employee.get("resigned_at"),
                     "net_hours": totals.get(employee_id, 0) / 2,
                     # 这一页的逐日改格（票 06）能挑的班次：**启用中的**那一份。
                     # 每个员工带一份，前端不用再打第二个接口，也就不会有两份会漂的名单。
@@ -604,7 +611,11 @@ class AttendanceStore:
                             half_rest_days=their_half_rests,
                             holidays=holidays,
                             employee=employee,
-                            month_days=len(days),
+                            # **本月在岗天数**（2026-10-29）：入职当月从他入职那天算起，
+                            # 不是整月自然天数 —— 见 `_on_duty_days`。
+                            month_days=_on_duty_days(
+                                start, len(days), hire_date, employee.get("resigned_at")
+                            ),
                             previous_balance=_previous_balance(
                                 ledger.get((employee_id, previous_month)),
                                 ledger.get((employee_id, month)),
@@ -615,7 +626,15 @@ class AttendanceStore:
                     "days": [
                         {
                             "business_date": day["business_date"],
-                            "state": _day_state(today, day["business_date"], theirs),
+                            # 入职之前的那些天与「今天之后」一样留空（2026-10-29）：
+                            # 不是待补 —— 那几天这个人还不在店里。
+                            "state": _day_state(
+                                today,
+                                day["business_date"],
+                                theirs,
+                                hire_date,
+                                employee.get("resigned_at"),
+                            ),
                             # 那天挂的是哪个班（`None` = 休 / 没排到 / 还没到）。
                             # 状态之外再给班次号：卡片上的下拉要标出「现在是哪个」。
                             "shift_id": theirs.get(day["business_date"]),
@@ -823,7 +842,14 @@ class AttendanceStore:
                     half_rest_days=half_rests.get(employee_id, set()),
                     holidays=holidays,
                     employee=employee,
-                    month_days=month_days,
+                    # 与 `sheet()` 同一条（2026-10-29）：入职当月按在岗天数算，不是整月 ——
+                    # 两边差一个分母，封下来的数就会和那个月卡片上的对不上。
+                    month_days=_on_duty_days(
+                        start,
+                        month_days,
+                        employee.get("hire_date"),
+                        employee.get("resigned_at"),
+                    ),
                     previous_balance=_previous_balance(
                         ledger.get((employee_id, before)),
                         ledger.get((employee_id, target)),
@@ -897,7 +923,9 @@ class AttendanceStore:
 # 卡片上那四个**手填**列（票 05），列名与 `0027_attendance_ledger.sql` 一一对应：
 # 系统里没有这几个字段（是否住宿 / 借调门店 / 是否离职在花名册里压根没有），所以由超管
 # 在卡片上填一次、存在**月度考勤台账**当月那一行上，只进导出件与卡片，**不写回员工档案**。
-MANUAL_FIELDS = ("shift_name", "lodging", "borrowed_store", "resigned")
+# 2026-10-29：**「是否离职」退役** —— 离职改成花名册上的状态（`resigned_at`），导出件
+# 直接从那里派生。台账上那一列还在（迁移只做加成性变更），但写口与读口都不再碰它。
+MANUAL_FIELDS = ("shift_name", "lodging", "borrowed_store")
 
 # 那条**月级写口**能点名的列（票 05 的四个手填列 + 修 ② 的 `opening_balance` +
 # 票 09 的 `closing_balance`）。
@@ -921,7 +949,7 @@ def _manual_columns(row: Optional[dict], *, default_shift_name: Optional[str]) -
     * **本月班次**：台账里填过就用填的；没填过（或清空了 —— 「从没填过」与「清空」同义）
       退回 ``default_shift_name`` —— 当月众数，并列取班次显示顺序；当月一条排班都没有的
       人两个都没有，留空（`None`），不是报错。
-    * **是否住宿 / 借调门店 / 是否离职**：台账里有什么给什么，没有就是 `None`（页面上
+    * **是否住宿 / 借调门店**：台账里有什么给什么，没有就是 `None`（页面上
       显示为空）。空串一律当没填（`None`）—— 一个「存进去的空串」不该在页面上与
       「没填过」长得不一样。
 
@@ -1005,16 +1033,80 @@ def _is_on_the_sheet(employee: dict, on_record: bool) -> bool:
     在职（已批准、未停用）的一律在；此外**当月有排班或加班记录**的也在 —— 当月离职的
     人那天还有班，漏掉他就漏结。反过来，一个早已停用、当月又一条记录都没有的人不在表上。
     """
-    return on_record or (bool(employee.get("approved")) and not employee.get("disabled"))
+    return on_record or (
+        bool(employee.get("approved")) and not employee.get("resigned")
+    )
 
 
-def _day_state(today: str, business_date: str, theirs: dict[str, Any]) -> Optional[str]:
-    """那天这个人是什么状态；今天之后是 `None`（留空，不是「待补」）。"""
+def _day_state(
+    today: str,
+    business_date: str,
+    theirs: dict[str, Any],
+    hire_date: Any = None,
+    resigned_at: Any = None,
+) -> Optional[str]:
+    """那天这个人是什么状态；今天之后、**入职之前**都是 `None`（留空，不是「待补」）。
+
+    2026-10-29 用户报：14 号才入职的人，1–13 号在卡片上全是「待补」—— 那几天他还没来，
+    不该让店长去补一排不存在的班，也不该进「待补排行」。入职日期只比到天（库里读出来
+    可能是 `date`，也可能是 `YYYY-MM-DD` 串，`str()[:10]` 两种都认）。
+    """
     if business_date > today:
         return None
+    if hire_date and business_date < str(hire_date)[:10]:
+        return None
+    # 离职日**之后**留空（离职日当天还算上班，与登录/排班同一条判据）。空串是「已离职、
+    # 日期待补」—— 不知道哪天走的，就不剪历史，照旧按三态显示。
+    if resigned_at:
+        left = str(resigned_at)[:10]
+        if left and business_date > left:
+            return None
     if business_date not in theirs:
         return STATE_TODO
     return STATE_REST if theirs[business_date] is None else STATE_WORK
+
+
+def _on_duty_days(
+    month_start: date, month_days: int, hire_date: Any, resigned_at: Any = None
+) -> int:
+    """这个人**本月应在岗**的自然天数（2026-10-29 用户裁定：入职当月从中入职那天算起）。
+
+    假期算式里的「本月自然天数」原来一律是整月天数。可入职当月的人前半段还没来，
+    减去整月就等于把他根本不用上的那些天当成了欠班 —— 14 号入职、还没排班的人
+    存假凭空是 `−31 天`。所以：
+
+    * 入职日期为空 / 早于月初（老员工）：整月天数，口径一个字不变；
+    * 入职日期落在本月：入职日到月底的天数（14 号入职 = 当月剩余天数）；
+    * 入职日期在月末之后（还没到）：0 —— 那时不该有欠班；
+    * **离职日期落在本月**（2026-10-29 一并）：截到离职日那天为止 —— 当月来又走的人，
+      分母是「入职日到离职日」，不是整月。
+
+    解析不了的坏值按「老员工」处理（不剪）：剪错了等于替他认账。
+    """
+    month_end = month_start + timedelta(days=month_days - 1)
+    first_day = month_start
+    last_day = month_end
+    if hire_date:
+        try:
+            hired = datetime.strptime(str(hire_date)[:10], "%Y-%m-%d").date()
+        except (TypeError, ValueError):
+            hired = None
+        if hired is not None and hired > first_day:
+            first_day = hired
+    # 离职（2026-10-29）：截到离职日为止 —— 离职日**当天仍算在岗**（那天他还上班），
+    # 与 `_day_state` 的「离职日之后留空」是同一条线。空串（日期待补）不剪：不知道哪天走。
+    if resigned_at:
+        left_text = str(resigned_at)[:10]
+        if left_text:
+            try:
+                left = datetime.strptime(left_text, "%Y-%m-%d").date()
+            except (TypeError, ValueError):
+                left = None
+            if left is not None and left < last_day:
+                last_day = left
+    if last_day < first_day:
+        return 0
+    return (last_day - first_day).days + 1
 
 
 def _leave_terms(
@@ -1033,11 +1125,15 @@ def _leave_terms(
     ``theirs`` 是这个人当月的排班行（``{营业日: 班次 id 或 None}``）；``half_rest_days``
     是其中**标了「休半天」**的那几天（票 07，只含班次非空的日子）；``holidays`` 是
     当月法定节假日（`HolidayCalendar.days_in_month`，日历是唯一依据）；``employee`` 是
-    花名册那一行（生日从身份证号派生、工龄奖与入职日期都在里面）。
+    花名册那一行（生日从身份证号派生、工龄奖与入职日期都在里面）。``month_days`` 是
+    **本月在岗天数**（见 `_on_duty_days`：老员工 = 整月，入职当月 = 入职日起算）。
 
-    * **实际出勤天数**只数**已过**的日子 —— 今天之后排了班也是「还没发生」。
-      **标了「休半天」的那天算 0.5 天**（`GLOSSARY.md` 的月例休：「出勤半天算 0.5 天
-      参与折算」）：月例休与存假都跟着这半个天走。
+    * **出勤天数**按**排班**数（2026-10-29 用户裁定「按排班预结算」）：已过的日子 + 今天
+      之后**已经排了班**的日子都算 —— 店长在周表给 30/31 排了早班，考勤表当月的出勤
+      天数与存假就该跟着变，不用等到 30 号。**没排班的未来日子不算**（没有排班行）。
+      封账算的是整月都过完的月份，两种口径同值。**标了「休半天」的那天算 0.5 天**
+      （`GLOSSARY.md` 的月例休：「出勤半天算 0.5 天参与折算」）：月例休与存假都跟着
+      这半个天走。未到日子的半天休也按 0.5 算（它是计划的一部分）。
     * **法定节假日补休**按**当月每个**法定节假日算：那天排了班（有排班行、班次非空）
       就 +1，休的不给，没标日历的没有。这条不跟「已过」：日历与轮转都已经知道那天他
       上班，池子又是整月的量（票 03 验收 3）。**半天休照给整天**：那天他确实上了班
@@ -1049,8 +1145,12 @@ def _leave_terms(
       哪一次调整带来的）就在当月，而且「当前」与「应为」确实已经对上（还没落账的、
       调过头的都不算）—— GLOSSARY 的原话是「由应为值与当前值什么时候对上说了算」。
       管理层 5 天、其他员工 3 天，**管理层按管理能力开关非空判，与职位名无关**。
-    * **可用天数池** = 上面五项 + 上月存假；**本月出勤天数** = `min(池, 本月自然天数)`；
-      **存假** = `池 − 本月自然天数`（可为负 = 欠班、可带 .5）。
+    * **可用天数池** = 上面五项 + 上月存假；**本月出勤天数** = `min(池, 本月在岗天数)`；
+      **存假** = `池 − 本月在岗天数`（可为负 = 欠班、可带 .5）。
+
+      「本月在岗天数」是 `month_days` 这一位（2026-10-29 用户裁定）：老员工就是整月
+      自然天数，**入职当月从他入职那天算起**（14 号入职 = 当月剩余的天数）—— 否则
+      新入职的人的存假会把他没入职的前半段当成欠班（`_on_duty_days`）。
 
     **加班与补钟不参与这一套**（`GLOSSARY.md` 的存假：净时长单独结算）。
 
@@ -1063,7 +1163,10 @@ def _leave_terms(
     half_rest_days = half_rest_days or set()
     actual_days = 0.0
     for business_date, shift_id in theirs.items():
-        if business_date <= today and shift_id is not None:
+        # 预结算（2026-10-29 用户裁定）：**未来已排的班也算**，不按「已过」截止 ——
+        # 店长按排班看数；封账时整月都过完了，两种口径同值。未来没排班的天不会进
+        # `theirs`（没有排班行），所以不用再判一次日期。
+        if shift_id is not None:
             actual_days += 0.5 if business_date in half_rest_days else 1.0
     holiday_makeup = sum(1 for day in holidays if theirs.get(day) is not None)
     birthday_leave = 0

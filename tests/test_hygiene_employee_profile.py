@@ -502,17 +502,23 @@ def test_approve_needs_base_salary_and_hire_date(profile_http):
     assert approved.json()["employee"]["approved"] is True
 
 
-def test_enable_is_not_gated_by_the_approval_threshold(profile_http):
-    """重新启用已停用的人不走批准门槛（恢复不是新入职）。"""
+def test_cancelling_a_resignation_is_not_gated_by_the_approval_threshold(profile_http):
+    """取消离职不走批准门槛（恢复不是新入职）。"""
     client, _db, accounts = profile_http
     _admin(client)
     employee_id = _seed_profile(client, accounts, serial=71, name="孙平")
     assert (
-        client.post(f"/api/hygiene/admin/roster/{employee_id}/disable").status_code == 200
+        client.post(
+            f"/api/hygiene/admin/roster/{employee_id}/resign",
+            json={"resigned_at": "2026-09-01"},
+        ).status_code
+        == 200
     )
-    enabled = client.post(f"/api/hygiene/admin/roster/{employee_id}/enable")
+    enabled = client.post(
+        f"/api/hygiene/admin/roster/{employee_id}/cancel-resignation"
+    )
     assert enabled.status_code == 200, enabled.text
-    assert enabled.json()["employee"]["disabled"] is False
+    assert enabled.json()["employee"]["resigned"] is False
 
 
 # ── 4. PATCH：四个字段各自可选、空 = 清空、admin_caps 仍是整组替换 ─────────────
@@ -734,7 +740,13 @@ def test_daily_queue_reports_health_cert_due(profile_http):
     _seed_profile(client, accounts, serial=162, name="孙平", cert_date=CERT_EXPIRED)
     _seed_profile(client, accounts, serial=163, name="李娜", cert_date=CERT_OK)
     stopped = _seed_profile(client, accounts, serial=164, name="周伟", cert_date=CERT_EXPIRED)
-    assert client.post(f"/api/hygiene/admin/roster/{stopped}/disable").status_code == 200
+    assert (
+        client.post(
+            f"/api/hygiene/admin/roster/{stopped}/resign",
+            json={"resigned_at": "2026-09-01"},
+        ).status_code
+        == 200
+    )
 
     queue = client.get("/api/hygiene/admin/daily-queue")
     assert queue.status_code == 200, queue.text
@@ -852,12 +864,18 @@ def test_roster_export_follows_segment_and_keyword(profile_http):
     )
     _seed_profile(client, accounts, serial=192, name="赵敏")
     stopped = _seed_profile(client, accounts, serial=193, name="周伟")
-    assert client.post(f"/api/hygiene/admin/roster/{stopped}/disable").status_code == 200
+    assert (
+        client.post(
+            f"/api/hygiene/admin/roster/{stopped}/resign",
+            json={"resigned_at": "2026-09-01"},
+        ).status_code
+        == 200
+    )
 
-    assert _export_names(client) == ["王强", "赵敏"], "默认 = 全部（不含已停用）"
+    assert _export_names(client) == ["王强", "赵敏"], "默认 = 全部（不含已离职）"
     assert _export_names(client, filter="all") == ["王强", "赵敏"]
     assert _export_names(client, filter="missing") == ["赵敏"]
-    assert _export_names(client, filter="disabled") == ["周伟"]
+    assert _export_names(client, filter="resigned") == ["周伟"]
     assert _export_names(client, status="missing") == ["赵敏"], "票面用 status 写同一件事"
     assert _export_names(client, filter="missing", q="赵") == ["赵敏"]
     assert _export_names(client, q=phone(191)) == ["王强"], "q 跟搜索框同一口径"

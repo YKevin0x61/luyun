@@ -51,11 +51,11 @@ const ROSTER = {
   off_people: [{ id: 9, name: '赵六', leave: true }],
 }
 
-function jsonResponse(data, status = 200) {
+function jsonResponse(data, status = 200, headers = {}) {
   return {
     ok: status >= 200 && status < 300,
     status,
-    headers: new Headers({ 'content-type': 'application/json' }),
+    headers: new Headers({ 'content-type': 'application/json', ...headers }),
     json: async () => data,
   }
 }
@@ -63,9 +63,12 @@ function jsonResponse(data, status = 200) {
 /**
  * 挂载那一天那一屏。`calls` 收下每一条真实请求（路径 + 方法 + body）——
  * 「提交上去的到底是哪一天、哪个人」是这一票最要紧的判据，只有真发一次才算数。
+ *
+ * `swapFail`：提换班时服务端回一句错误（`{detail, code}`），用来压「撞车要弹窗」那条路。
  */
 async function mountSheet({
   day = DAY,
+  roster = ROSTER,
   requests = [],
   incoming = [],
   colleagues = [],
@@ -73,6 +76,9 @@ async function mountSheet({
   windowEnd = WINDOW_END,
   today = TODAY,
   calls = [],
+  swapFail = null,
+  nextDayLocked = false,
+  leaveLeadDays = 0,
 } = {}) {
   const fetchMock = vi.fn(async (url, init = {}) => {
     const raw = String(url)
@@ -84,8 +90,17 @@ async function mountSheet({
       method,
       body: init.body ? JSON.parse(init.body) : null,
     })
-    if (method !== 'GET') return jsonResponse({ ok: true, request: { id: 1 } })
-    if (path === '/api/scheduling/me/day') return jsonResponse(ROSTER)
+    if (method !== 'GET') {
+      if (swapFail && path === '/api/scheduling/me/swaps') {
+        return jsonResponse(
+          { detail: swapFail.detail },
+          400,
+          { 'x-error-code': swapFail.code },
+        )
+      }
+      return jsonResponse({ ok: true, request: { id: 1 } })
+    }
+    if (path === '/api/scheduling/me/day') return jsonResponse(roster)
     if (path === '/api/scheduling/me/requests') {
       return jsonResponse({ requests, incoming, max_request_note: 50 })
     }
@@ -103,7 +118,9 @@ async function mountSheet({
   await router.isReady()
 
   const wrapper = mount(StaffDaySheet, {
-    props: { day, employee: EMPLOYEE, today, windowEnd, initialAct },
+    props: {
+      day, employee: EMPLOYEE, today, windowEnd, nextDayLocked, leaveLeadDays, initialAct,
+    },
     global: { plugins: [router] },
     attachTo: document.body,
   })
@@ -182,11 +199,121 @@ describe('某一天的操作单：点开一天就能把那天的事办掉（票 
     expect(wrapper.text()).toContain('换班提上去了，等 王五 同意')
   })
 
+  it('22:00 之后明天的两个动作都灰着，并各自说清为什么', async () => {
+    // 服务端 `next_day_locked` 说了算（店长那台机器的钟）：明天的格子锁上，后天的照常。
+    const tomorrow = { ...DAY, business_date: '2026-10-06', day: 6 }
+    const { wrapper } = await mountSheet({ day: tomorrow, nextDayLocked: true })
+
+    expect(buttonByText(wrapper, '请这天的假').attributes('disabled')).toBeDefined()
+    expect(buttonByText(wrapper, '换这天的班').attributes('disabled')).toBeDefined()
+    // 两句话不一样，所以两行都写出来（`actionsNote` 只合并同一句）。
+    expect(wrapper.text()).toContain('晚上 10 点过了，明天的假提不了')
+    expect(wrapper.text()).toContain('晚上 10 点过了，明天的班换不了')
+
+    // 没锁的那天照常。
+    const later = await mountSheet({ day: { ...DAY, business_date: '2026-10-07', day: 7 } })
+    expect(buttonByText(later.wrapper, '请这天的假').attributes('disabled')).toBeUndefined()
+    expect(later.wrapper.text()).not.toContain('晚上 10 点过了')
+  })
+
+  it('2 天以上的假：日期一改就说「要提前 7 天」，提交按钮同时灰掉', async () => {
+    // 2026-10-05 是今天，DAY 是 10-08（单日的假提得了）；把「到哪天」拨到 10-09 就成了 2 天，
+    // 而 +7 之后才是 10-12 —— 这一改就得当场说清，别等人填完事由才被打回。
+    const { wrapper } = await mountSheet({ leaveLeadDays: 7 })
+    await buttonByText(wrapper, '请这天的假').trigger('click')
+    await flushPromises()
+    expect(buttonByText(wrapper, '提交').attributes('disabled')).toBeUndefined()
+
+    const end = wrapper.get('#day-leave-end')
+    end.element.value = '2026-10-09'
+    await end.trigger('input')
+    await end.trigger('change')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('共 2 天')
+    expect(wrapper.text()).toContain('请 2 天的假要提前 7 天：最早从 2026-10-12 起请')
+    expect(buttonByText(wrapper, '提交').attributes('disabled')).toBeDefined()
+  })
+
   it('从今天页跳过来（?act=leave）直接落在那一张表上', async () => {
     // 今天页那两颗按钮带 `?date=&act=`；月历把 `act` 原样传进这一屏（见下面的落点断言）。
     const { wrapper } = await mountSheet({ initialAct: 'leave' })
     expect(wrapper.find('#day-leave-start').exists()).toBe(true)
     expect(wrapper.text()).toContain('请这天的假')
+  })
+
+  it('那天休的人也能点着换（2026-10-29 用户裁定）', async () => {
+    // 名单里那两位「休」的人原来只能看；现在行尾也有「换班」，点了直接进换班屏。
+    const roster = {
+      ...ROSTER,
+      off_people: [
+        { id: 9, name: '赵六', leave: true },
+        { id: 10, name: '卢伟龙', leave: false },
+      ],
+    }
+    const { wrapper, calls } = await mountSheet({ roster })
+
+    const offRows = wrapper.findAll('.rGroup').at(1).findAll('.rList li')
+    const byName = (name) => offRows.find((li) => li.text().includes(name))
+    // 休的那一行有入口；请假的那一行没有（批了换班会把他批过的假盖掉）。
+    expect(byName('卢伟龙').find('.r-swap').exists()).toBe(true)
+    expect(byName('赵六').find('.r-swap').exists()).toBe(false)
+
+    await byName('卢伟龙').find('.r-swap').trigger('click')
+    await flushPromises()
+    // 已经选中他：预览说清「批了他接你的班」，不用再点一次。
+    expect(wrapper.text()).toContain('卢伟龙那天休：批了 卢伟龙 接你的白班，你那天没班')
+    await buttonByText(wrapper, '就跟他换').trigger('click')
+    await flushPromises()
+    const posted = calls.find((c) => c.path === '/api/scheduling/me/swaps' && c.method === 'POST')
+    expect(posted.body).toEqual({
+      peer_employee_id: 10,
+      business_date: '2026-10-08',
+      note: null,
+    })
+  })
+
+  it('点「换这天的班」时，休的人也在这份候选名单里（写「那天休」）', async () => {
+    const roster = {
+      ...ROSTER,
+      off_people: [{ id: 9, name: '赵六', leave: true }, { id: 10, name: '卢伟龙', leave: false }],
+    }
+    const { wrapper } = await mountSheet({ roster })
+    await buttonByText(wrapper, '换这天的班').trigger('click')
+    await flushPromises()
+
+    const people = wrapper.findAll('.ds-people .ds-person')
+    // 在班的王五 + 那天休的卢伟龙；请假那一位不进名单。
+    expect(people.map((p) => p.get('.ds-person-name').text())).toEqual(['王五', '卢伟龙'])
+    expect(people[1].text()).toContain('那天休')
+  })
+
+  it('对方那天已经在跟别人换：弹一句说清是谁跟谁（2026-10-29 用户裁定）', async () => {
+    // 服务端回 `peer_in_swap`：这不是「哪一格填错了」，得弹出来让人看清是谁跟谁、到哪一步。
+    const detail = '那天张三 和 李四（还在等对方同意）已经在换班了，这次换不了：换个日子，或者等他们那边落定'
+    const { wrapper } = await mountSheet({ swapFail: { detail, code: 'peer_in_swap' } })
+
+    await buttonByText(wrapper, '换这天的班').trigger('click')
+    await flushPromises()
+    await wrapper.get('.ds-people .ds-person').trigger('click')
+    await flushPromises()
+    await buttonByText(wrapper, '就跟他换').trigger('click')
+    await flushPromises()
+
+    // 弹窗挂在 body 上（`Teleport`）：从 document 里找，不从 wrapper 里找。
+    const dialog = document.querySelector('[role="alertdialog"]')
+    expect(dialog).not.toBeNull()
+    expect(dialog.textContent).toContain('这天换不了')
+    expect(dialog.textContent).toContain('张三 和 李四（还在等对方同意）')
+    // 不写成「提上去了」，也不把这句话塞进表单底下那行小字。
+    expect(wrapper.text()).not.toContain('换班提上去了')
+    expect(wrapper.find('.ds-err').exists()).toBe(false)
+
+    // 关掉之后仍停在换班屏：换个人 / 换个日子还能提。
+    await dialog.querySelector('.modal-footer button').click()
+    await flushPromises()
+    expect(document.querySelector('[role="alertdialog"]')).toBeNull()
+    expect(buttonByText(wrapper, '就跟他换')).toBeTruthy()
   })
 
   it('过去的日子两个动作都是灰的，并说清为什么', async () => {
@@ -354,7 +481,9 @@ describe('这一屏的判据都在 util 里，页面不重写第二份', () => {
     expect(sheet).toMatch(/role="dialog"/)
     expect(sheet).toMatch(/aria-modal="true"/)
     expect(sheet).toMatch(/@click\.self="close"/)
-    expect(sheet).toMatch(/event\.key === 'Escape'/)
+    // Esc 先收「这天换不了」那一层（员工还想换个人试试），没有它才关整个面板。
+    expect(sheet).toMatch(/event\.key !== 'Escape'/)
+    expect(sheet).toMatch(/if \(swapBlocked\.value\) \{/)
   })
 })
 

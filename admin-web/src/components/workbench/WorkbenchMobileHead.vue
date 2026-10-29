@@ -243,9 +243,14 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
     align-items: center;
     gap: 8px;
     flex: 0 0 auto;
-    /* 浮层要相对这一条定位；层级与底栏同档（`--z-shell`），靠 DOM 次序压住它。 */
+    /* 浮层要相对这一条定位。层级取 `--z-dialog`（**不是**底栏那档 `--z-shell`）：
+       这一条自己就是一个层叠上下文（`position: relative` + z-index），下拉面板的
+       `--z-dialog` 出不了它 —— 与页面里的 `position: sticky` 表头（周表 `thead` 用的
+       就是 `--z-shell`）同档时，表头在 DOM 里排在后面，会把打开的下拉菜单盖穿
+       （2026-10-29 用户截图：「花名册 / 加班统计」两项之间透出周表表头）。
+       底栏 `--z-tabbar`=15 仍低于这一档，菜单遮罩照旧压得住它。 */
     position: relative;
-    z-index: var(--z-shell);
+    z-index: var(--z-dialog);
     min-height: 56px;
     padding: 6px max(12px, env(safe-area-inset-right)) 6px max(12px, env(safe-area-inset-left));
     background: var(--surface-1);

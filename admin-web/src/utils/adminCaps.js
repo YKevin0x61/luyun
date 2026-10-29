@@ -55,7 +55,7 @@ export const ADMIN_CAP_DEFS = [
   { key: 'attire', label: '仪容仪表', note: '看与判仪容打卡，维护仪容标准', staffSide: false },
   { key: 'standard', label: '标准图管理', note: '换标准图、改标注、导出整套标准', staffSide: false },
   { key: 'zone', label: '工作区与检查项', note: '加/改/删工作区与检查项', staffSide: false },
-  { key: 'roster', label: '花名册', note: '审批入职、停用、改权限', staffSide: false },
+  { key: 'roster', label: '花名册', note: '审批入职、登记离职、改权限', staffSide: false },
   { key: 'boards', label: '红黑榜与教材', note: '标记合格对照、发红黑榜、编教材', staffSide: false },
   { key: 'clock', label: '时限设置', note: '设日常与专项的时限', staffSide: false },
   { key: 'data', label: '数据与归档', note: '看历史记录、导出归档、清理数据', staffSide: false },

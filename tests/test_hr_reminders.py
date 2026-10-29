@@ -178,7 +178,7 @@ def _seed(
     name: str,
     hire_date=None,
     bonus=None,
-    disabled: bool = False,
+    resigned: bool = False,
     birth: str = "19900307",
     cert: str = CERT_OK,
 ) -> int:
@@ -203,8 +203,8 @@ def _seed(
     if payload:
         resp = client.patch(f"/api/hygiene/admin/roster/{employee['id']}", json=payload)
         assert resp.status_code == 200, resp.text
-    if disabled:
-        _run(accounts.disable(employee["id"]))
+    if resigned:
+        _run(accounts.resign(employee["id"], "2026-09-01"))
     return employee["id"]
 
 
@@ -383,11 +383,11 @@ def test_reminders_goes_quiet_once_the_bonus_reaches_the_cap(reminders_http):
     assert capped not in {item["id"] for item in data["seniority"]["items"]}, "到顶就不再催"
 
 
-def test_reminders_skips_disabled_employees(reminders_http):
+def test_reminders_skips_resigned_employees(reminders_http):
     client, _db, accounts = reminders_http
     _admin(client)
     gone = _seed(
-        client, accounts, serial=17, name="停用了", hire_date="2025-09-15", disabled=True
+        client, accounts, serial=17, name="离职了", hire_date="2025-09-15", resigned=True
     )
     data = _reminders(client)
     assert gone not in {item["id"] for item in data["seniority"]["items"]}
@@ -559,11 +559,11 @@ def test_leap_day_birthday_lands_on_february_28th_in_a_common_year(reminders_htt
     assert item["state"] == "today"
 
 
-def test_birthdays_skip_disabled_employees(reminders_http):
+def test_birthdays_skip_resigned_employees(reminders_http):
     client, _db, accounts = reminders_http
     _admin(client)
     _seed(client, accounts, serial=46, name="在职的", birth="19900920")
-    _seed(client, accounts, serial=47, name="停用的", birth="19900921", disabled=True)
+    _seed(client, accounts, serial=47, name="离职中", birth="19900921", resigned=True)
 
     names = [item["name"] for item in _reminders(client)["birthdays"]["items"]]
 
@@ -659,7 +659,7 @@ def test_reminders_carry_the_health_cert_block(reminders_http):
         name="停用且过期",
         hire_date="2020-09-15",
         cert="2024-01-10",
-        disabled=True,
+        resigned=True,
     )
 
     data = client.get(REMINDERS_PATH).json()

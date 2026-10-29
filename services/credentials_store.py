@@ -115,6 +115,8 @@ class CredentialBundle:
 
     def to_safe_dict(self) -> dict:
         """脱敏后的展示数据（用于 API 返回）。"""
+        extra = self.extra or {}
+        yintai = extra.get("yintai") or {}
         return {
             "phone": _mask_phone(self.phone),
             "phone_raw_length": len(self.phone or ""),
@@ -124,6 +126,14 @@ class CredentialBundle:
             "shop_name": self.shop_name,
             "delivery_shop_id": self.delivery_shop_id,
             "updated_at": self.updated_at,
+            # 采集数据源与移动银台接入配置（密码只回是否已设置）
+            "pos_source": str(extra.get("pos_source") or ""),
+            "yintai": {
+                "base_url": yintai.get("base_url") or "",
+                "user_name": yintai.get("user_name") or "",
+                "password_set": bool(yintai.get("password")),
+                "pos_id": yintai.get("pos_id") or "",
+            },
         }
 
 

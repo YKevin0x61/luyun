@@ -33,6 +33,24 @@ router = APIRouter(
 
 # ==================== Pydantic 模型 ====================
 
+class YintaiConfigIn(BaseModel):
+    """移动银台接入配置（采集数据源切到 yintai 时必填）。"""
+
+    model_config = ConfigDict(extra="ignore")
+
+    base_url: Optional[str] = Field(default=None, description="门店服务器地址，如 https://xxx")
+    user_name: Optional[str] = Field(default=None, description="移动银台登录账号（工号）")
+    password: Optional[str] = Field(default=None, description="密码；留空表示沿用已保存")
+    pos_id: Optional[str] = Field(default=None, description="绑定的 POS ID")
+
+    @field_validator("base_url", "user_name", "password", "pos_id", mode="before")
+    @classmethod
+    def _blank_to_none(cls, value: Any) -> Any:
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
+
 class CredentialIn(BaseModel):
     phone: str = Field(..., description="登录账号（手机号）")
     password: Optional[str] = Field(
@@ -43,6 +61,12 @@ class CredentialIn(BaseModel):
     shop_name: str = Field(..., description="门店名称，用于 URL 上的 shopName 参数")
     delivery_shop_id: Optional[str] = Field(
         None, description="已结账单接口使用的 shopId，缺省时与 company_id 相同"
+    )
+    pos_source: Optional[str] = Field(
+        default=None, description="采集数据源：cy7mm（默认）或 yintai（移动银台）"
+    )
+    yintai: Optional[YintaiConfigIn] = Field(
+        default=None, description="移动银台接入配置"
     )
 
     @field_validator("password", mode="before")
@@ -115,6 +139,32 @@ async def save_credentials_view(payload: CredentialIn) -> Dict[str, Any]:
                 data["delivery_shop_id"] = existing.delivery_shop_id
         elif not data.get("password"):
             raise HTTPException(status_code=400, detail="首次配置必须填写密码")
+
+        # 数据源与移动银台配置写进 extra：前者控制采集链路，后者的密码留空时沿用旧值
+        extra = dict(getattr(existing, "extra", None) or {}) if existing else {}
+        pos_source = (data.get("pos_source") or "").strip().lower()
+        if pos_source in ("cy7mm", "yintai"):
+            extra["pos_source"] = pos_source
+
+        yintai_in = data.get("yintai") or {}
+        if yintai_in or extra.get("yintai"):
+            previous_yintai = dict(extra.get("yintai") or {})
+            merged = {
+                "base_url": (yintai_in.get("base_url") or previous_yintai.get("base_url") or "").strip(),
+                "user_name": (yintai_in.get("user_name") or previous_yintai.get("user_name") or "").strip(),
+                "password": yintai_in.get("password") or previous_yintai.get("password") or "",
+                "pos_id": (yintai_in.get("pos_id") or previous_yintai.get("pos_id") or "").strip(),
+            }
+            # cy7mm 是默认源，此时不强制校验移动银台字段
+            if pos_source == "yintai" or extra.get("pos_source") == "yintai":
+                missing = [k for k in ("base_url", "user_name", "password") if not merged[k]]
+                if missing:
+                    raise ValueError("移动银台接入缺少字段: " + ", ".join(missing))
+                if not merged["base_url"].startswith("http"):
+                    raise ValueError("base_url 必须以 http:// 或 https:// 开头")
+            extra["yintai"] = merged
+        data["extra"] = extra
+
         bundle = credentials_store.save_credentials(data)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))

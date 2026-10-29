@@ -814,8 +814,11 @@ def test_staff_day_lists_the_whole_store_to_a_staff_cookie(scheduling_http, monk
     ] == [("白班", [NAME]), ("夜班", ["李四"])]
     assert [p["zone"] for group in body["groups"] for p in group["people"]] == ["案板", "蒸柜"]
     # 店长那几个字段一个都不出去（逐键比对，不是「看着像没给」）。
+    # 多两项是 2026-10-29 的申请规矩（22:00 之后次日提不了、2 天以上的假提前 7 天）：
+    # 它们是「现在几点」这种状态，不是店长的管理字段 —— 逐键比对，别多出别的。
     assert set(body) == {
         "employee", "business_date", "today", "groups", "total", "off_count", "off_people",
+        "next_day_locked", "leave_lead_days",
     }
     for group in body["groups"]:
         assert set(group) == {"shift_id", "shift_name", "count", "people"}
@@ -934,7 +937,7 @@ def test_manager_reads_the_week_grid(scheduling_http):
     assert [item["is_today"] for item in body["days"]] == [False] * 3 + [True] + [False] * 3
     # 启用的班次一个不少：抽屉拿这份当班次选择列表。
     assert [shift["name"] for shift in body["shifts"]] == ["白班", "夜班"]
-    assert body["excluded"] == {"disabled": 0, "pending": 0}
+    assert body["excluded"] == {"resigned": 0, "pending": 0}
     assert len(body["employees"]) == 1
     row = body["employees"][0]
     assert (row["id"], row["name"], row["job_title"], row["has_rule"]) == (
@@ -1355,7 +1358,7 @@ def test_batch_skips_what_it_cannot_paint_and_names_every_reason(scheduling_http
     # 王五 9/25 那天有**已批的假**（覆盖记录就是那条假，谁都不许动它）。
     request = _run(store.submit_leave(leaver, "2026-09-25"))
     _run(store.approve_request(request["id"]))
-    _run(accounts.disable(stopped))
+    _run(accounts.resign(stopped, "2026-09-10"))
 
     resp = _batch(
         client,
@@ -1431,15 +1434,16 @@ def test_batch_reminds_about_pending_requests_but_still_paints(scheduling_http):
     client, db, accounts = scheduling_http
     employee_id = _employee_id(accounts)
     ids = _shift_ids(client)
-    _run(SchedulingStore(db).submit_leave(employee_id, "2026-09-25", "2026-09-26"))
+    # 2 天以上的假要提前 7 天（2026-10-29 用户裁定）：从 10/1 起请，离 9/24 正好 7 天。
+    _run(SchedulingStore(db).submit_leave(employee_id, "2026-10-01", "2026-10-02"))
 
     resp = _batch(
         client,
         "shift",
         [
-            {"employee_id": employee_id, "business_date": "2026-09-25"},
-            {"employee_id": employee_id, "business_date": "2026-09-26"},
-            {"employee_id": employee_id, "business_date": "2026-09-27"},  # 没申请：不提醒
+            {"employee_id": employee_id, "business_date": "2026-10-01"},
+            {"employee_id": employee_id, "business_date": "2026-10-02"},
+            {"employee_id": employee_id, "business_date": "2026-10-03"},  # 没申请：不提醒
         ],
         shift_id=ids["夜班"],
     )
@@ -1449,12 +1453,12 @@ def test_batch_reminds_about_pending_requests_but_still_paints(scheduling_http):
     assert body["applied"] == 3  # 有待批的申请照样刷下去
     assert body["skipped"] == []
     assert body["reminders"] == [
-        {"employee_id": employee_id, "business_date": "2026-09-25", "kind": "pending_request"},
-        {"employee_id": employee_id, "business_date": "2026-09-26", "kind": "pending_request"},
+        {"employee_id": employee_id, "business_date": "2026-10-01", "kind": "pending_request"},
+        {"employee_id": employee_id, "business_date": "2026-10-02", "kind": "pending_request"},
     ]
     # 刷下去是真的：那两天现在是夜班（覆盖记录 kind=manual）。
-    cells = _week_cells(client)
-    assert cells[NAME]["2026-09-25"]["shift_id"] == ids["夜班"]
+    cells = _week_cells(client, "2026-09-28")
+    assert cells[NAME]["2026-10-01"]["shift_id"] == ids["夜班"]
 
 
 def test_batch_refuses_more_than_two_hundred_cells(scheduling_http):
@@ -1716,10 +1720,23 @@ def _leave_scene(client, accounts, monkeypatch, people=((PHONE, NAME),)):
     return admin, employee_ids, day_id
 
 
+def _skip_lead_time_rule(monkeypatch):
+    """让开「2 天以上的假要提前 7 天」这一道闸（2026-10-29 用户裁定）。
+
+    只给那些**日期写死在 9 月**的链路用例用：它们的观测量是「提了之后界面 / 待办长什么样」，
+    提前量那条规则有自己的专门用例（`test_a_multi_day_leave_must_be_asked_seven_days_ahead`）。
+    把钟往前拨一周来满足它，会把这几个用例里每一处 9 月日期一起挪走 —— 代价比让开这道闸大。
+    """
+    monkeypatch.setattr(SchedulingStore, "_check_apply_window", lambda *args, **kwargs: None)
+
+
 def test_staff_asks_for_leave_and_takes_it_back(scheduling_http, monkeypatch):
     """验收 1：提一天或一段、看得见状态、批之前能撤回；提的时候排班一个字不改。"""
     client, _db, accounts = scheduling_http
     _admin, (employee_id,), _day_id = _leave_scene(client, accounts, monkeypatch)
+    # 这一条测的是「提 → 看状态 → 撤回」整条链，日期全写死在 9 月；「2 天以上提前 7 天」
+    # （2026-10-29 用户裁定）另有专门用例，而把钟往前拨一周会让这一页的日期整片错位。
+    _skip_lead_time_rule(monkeypatch)
 
     submitted = client.post(
         "/api/scheduling/me/requests",
@@ -1784,7 +1801,7 @@ def test_manager_inbox_previews_the_headcount_after_approval(scheduling_http, mo
     assert inbox.status_code == 200, inbox.text
     body = inbox.json()
     assert body["today"] == TODAY
-    assert [(row["name"], row["approved"], row["disabled"]) for row in body["without_rule"]] == [
+    assert [(row["name"], row["approved"], row["resigned"]) for row in body["without_rule"]] == [
         ("赵六", True, False)
     ]
     card = body["requests"][0]
@@ -1807,6 +1824,8 @@ def test_approving_a_leave_turns_those_days_into_leave(scheduling_http, monkeypa
     admin, (leaver, stayer), day_id = _leave_scene(
         client, accounts, monkeypatch, people=((PHONE, NAME), ("13800138001", "李四"))
     )
+    # 同上：这一条测「批了之后那两天变成请假」，日期写死在 9 月；提前量那条另有专门用例。
+    _skip_lead_time_rule(monkeypatch)
 
     _as_manager(client, admin)
     before = client.get("/api/scheduling/day", params={"date": "2026-09-25"}).json()
@@ -2250,6 +2269,98 @@ def test_swap_errors_are_readable_400s(scheduling_http, monkeypatch):
     assert [row["status"] for row in client.get("/api/scheduling/me/requests").json()["requests"]] == [
         "pending_peer"
     ]
+
+
+def test_a_third_person_is_told_who_is_already_swapping(scheduling_http, monkeypatch):
+    """A 与 B 那天还挂着换班时，C 来插一脚要说清「谁 和 谁、到哪一步」（2026-10-29 用户裁定）。
+
+    前端拿 `detail` 那句话弹窗（页面上不是一行小字，是弹出来让人看清的一件事），
+    稳定的判据是响应头 `X-Error-Code`：文案会改字，码不会。
+    """
+    client, _db, accounts = scheduling_http
+    admin, me, peer, day_id, _night_id = _swap_scene(client, accounts, monkeypatch)
+    # 第三个人：跟张三同一个班，那天手上有班（不然先被 `nothing_to_swap` 挡住）。
+    third = _employee_id(accounts, phone="13800138006", name="王五")
+    client.cookies.clear()
+    client.cookies.set(settings.SESSION_COOKIE_NAME, admin)
+    assert client.put(f"/api/scheduling/rules/{third}", json={"cycle": [day_id]}).status_code == 200
+
+    # 张三 ⇄ 李四：一条还等着李四点头的换班。
+    _staff_cookie(client, accounts, phone=PHONE)
+    asked = client.post(
+        "/api/scheduling/me/swaps", json={"peer_employee_id": peer, "business_date": "2026-09-25"}
+    )
+    assert asked.status_code == 200, asked.text
+
+    # 王五去找张三 / 李四：都不成立，并且说清是张三和李四在换、还在等对方同意。
+    _staff_cookie(client, accounts, phone="13800138006")
+    for target in (me, peer):
+        refused = client.post(
+            "/api/scheduling/me/swaps",
+            json={"peer_employee_id": target, "business_date": "2026-09-25"},
+        )
+        assert refused.status_code == 400
+        assert refused.headers["x-error-code"] == "peer_in_swap"
+        detail = refused.json()["detail"]
+        assert "张三" in detail and "李四" in detail and "还在等对方同意" in detail
+
+    # 文案本身是给员工看的那一句（模板不是把 `{}` 端出去）。
+    assert detail == "那天张三 和 李四（还在等对方同意）已经在换班了，这次换不了：换个日子，或者等他们那边落定"
+    # 被挡下的没落库：库里只有张三那一条。
+    _staff_cookie(client, accounts, phone=PHONE)
+    assert [row["status"] for row in client.get("/api/scheduling/me/requests").json()["requests"]] == [
+        "pending_peer"
+    ]
+
+
+def test_after_ten_pm_tomorrow_is_closed_over_http(scheduling_http, monkeypatch):
+    """22:00 之后次日提不了（2026-10-29 用户裁定）：中文一句 + 稳定错误码，月历那侧也带状态。
+
+    钟推到 22:30 —— 同一个营业日（9/24），只换时刻，且**只推排班那个 store**：
+    员工会话那一侧照旧停在 10:00（登录与校验用同一个时刻，别自己给自己造一个 401）。
+    """
+    client, _db, accounts = scheduling_http
+    _admin, _me, peer, _day_id, _night_id = _swap_scene(client, accounts, monkeypatch)
+    # 只把**排班那个 store** 的钟推到 22:30（同一个营业日，只换时刻）：员工会话那侧不动，
+    # 免得把「登录发行」与「校验」放到两个时刻上。
+    _late_clock_for_scheduling(monkeypatch)
+
+    refused = client.post("/api/scheduling/me/requests", json={"start_date": "2026-09-25"})
+    assert refused.status_code == 400, refused.text
+    assert refused.headers["x-error-code"] == "next_day_locked"
+    assert refused.json()["detail"] == "晚上 10 点之后不能再提次日的请假或换班：最早只能提 2026-09-26"
+
+    swapped = client.post(
+        "/api/scheduling/me/swaps",
+        json={"peer_employee_id": peer, "business_date": "2026-09-25"},
+    )
+    assert swapped.status_code == 400
+    assert swapped.headers["x-error-code"] == "next_day_locked"
+
+    # 月历那条响应把「现在锁没锁」与「提前几天」一起带下去，前端才好把控件先挡上。
+    month = client.get("/api/scheduling/me/month").json()
+    assert month["next_day_locked"] is True
+    assert month["leave_lead_days"] == 7
+    # 后天起照常；2 天的假提前 7 天也照常（10/1 正好是 +7）。
+    assert client.post(
+        "/api/scheduling/me/requests", json={"start_date": "2026-09-26"}
+    ).status_code == 200
+    assert client.post(
+        "/api/scheduling/me/requests",
+        json={"start_date": "2026-10-01", "end_date": "2026-10-02"},
+    ).status_code == 200
+
+
+def _late_clock_for_scheduling(monkeypatch, moment=None):
+    """把路由里现造的 `SchedulingStore` 钉到 22:30（默认 9/24）。"""
+    at = moment or datetime(2026, 9, 24, 22, 30, tzinfo=CHINA_TZ)
+    real_init = SchedulingStore.__init__
+
+    def _init(self, *args, **kwargs):
+        kwargs["now"] = lambda: at
+        return real_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(SchedulingStore, "__init__", _init)
 
 
 # 撤掉 0009 那一列的用例，跑完必须原样补回来 —— **索引也要补**：`DROP COLUMN` 会把

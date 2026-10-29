@@ -21,7 +21,7 @@
  * 显示它）。它自己一颗按钮、不塞进那个班次下拉：下拉回答「那天上哪个班」，它回答
  * 「上不上满一整天」。
  *
- * 票 03 往卡片上加的是**假期台账**那一块：实际出勤 / 月例休 / 法定节假日补休 / 生日假 /
+ * 票 03 往卡片上加的是**假期台账**那一块：出勤（含已排）/ 月例休 / 法定节假日补休 / 生日假 /
  * 年假 / 上月存假，与由它们相加得到的可用天数池、本月出勤天数、存假；展开能看算式。
  * 当月**只算不落库**，所以顶部明写「暂算值（未封账）」—— 这一页的数还会随排班与加班变。
  * 还没批的加班 / 补钟只**标色**并给出待批小时数，一分都不进净时长（故事 14）。
@@ -110,7 +110,8 @@ const frame = computed(
 function employees() {
   return (sheet.value?.employees || []).map((person) => ({
     ...person,
-    // 四个**手填列**（票 05）原样带过来：它们是台账那一行上的值，页面只摆出来。
+    // 手填列（票 05；2026-10-29 起「是否离职」退役、只剩三项）原样带过来：它们是台账
+    // 那一行上的值，页面只摆出来。
     // 单独列一遍是为了让「这一页认哪几个键」看得见 —— 手滑写错一个键名，输入框会
     // 一直空着（`manualValue` 读不到就是空），看起来像「服务端没给」。
     // `shift_name` 是**读侧的回填值**（没填过时是当月众数，导出件 A 列用它）；
@@ -120,7 +121,6 @@ function employees() {
     default_shift_name: person.default_shift_name,
     lodging: person.lodging,
     borrowed_store: person.borrowed_store,
-    resigned: person.resigned,
     // 人工期初（收尾修复 ② / 故事 35）：台账**本月那一行**的 `opening_balance`，
     // 上线当月手工给一次。它与 `leave.previous_balance` 是两件事：后者只在上一月
     // 还没封账时才读它。
@@ -144,13 +144,20 @@ function shiftName(person, shiftId) {
   return shift ? shift.name : ''
 }
 
-/** 那一格上写什么：休 / 休半天 / 上班（跟班次）/ 待补；今天之后留空。 */
+/** 那一格上写什么：休 / 休半天 / 上班（跟班次）/ 待补；今天之后留空 —— **除非那天已经排了班**。
+ *
+ *  2026-10-29 用户报「30/31 都排了班了，但没算上」：未来格原来一律留空，店长在考勤表上
+ *  看不到自己刚在周表排的班。现在把 `shift_id` 写出来（计划），但它仍然只是一格计划：
+ *  不进任何统计、不能编辑，样式沿用 `.is-future` 的淡色，跟「已经上了班」看得出区别。 */
 function cellLabel(person, cell) {
   if (cell.state === 'work') {
     // 半天休（票 07）：那天仍然挂着班次，只是只上半天 —— 这一句必须排在班次名前面，
     // 否则卡片上写个「白班」，店长与员工都以为要上整天（ADR 0114）。
     if (cell.half_rest) return HALF_REST_TEXT
     return shiftName(person, cell.shift_id) || dayStateText(cell.state)
+  }
+  if (cell.is_future && cell.shift_id !== null && cell.shift_id !== undefined) {
+    return shiftName(person, cell.shift_id)
   }
   return dayStateText(cell.state)
 }
@@ -256,7 +263,7 @@ async function toggleHalf(person, cell) {
 function leaveStats(person) {
   const leave = person.leave || {}
   return [
-    { label: '实际出勤', value: formatDays(leave.actual_days) },
+    { label: '出勤（含已排）', value: formatDays(leave.actual_days) },
     { label: '月例休', value: formatDays(leave.monthly_rest) },
     { label: '法定节假日补休', value: formatDays(leave.holiday_makeup) },
     { label: '生日假', value: formatDays(leave.birthday_leave) },
@@ -290,7 +297,7 @@ const BORROWED_STORE_NOTE = '历史样表写在某一天的格子上；本版台
  *  `key` 是**发出去的那一位**（服务端只认这四个名字）；`stored` 是输入框**读**的那一位。
  *  两者只有「本月班次」不同：写的是 `shift_name`（台账列），读的是 `shift_name_stored`
  *  —— 台账里的原始值，没填过就是 `null`。**不能读 `shift_name`**：读侧没填过时会把它
- *  回填成当月众数，输入框显示的就是那条默认值，店长只改「是否住宿」点一下「存这四项」
+ *  回填成当月众数，输入框显示的就是那条默认值，店长只改「是否住宿」点一下「存这三项」
  *  就把这条默认**固化**成他定的值了（以后再改排班也不跟着变）。默认值只写在提示语里。
  *
  *  `hint` 说的就是那份**默认**（当月众数）：空着有含义，店长要看得见用的是哪条。 */
@@ -303,7 +310,8 @@ const MANUAL_INPUTS = [
   },
   { key: 'lodging', label: '是否住宿', hint: () => '写「是」或「否」' },
   { key: 'borrowed_store', label: '借调门店', hint: () => '如「调东莞」' },
-  { key: 'resigned', label: '是否离职', hint: () => '写「是」或「否」' },
+  // 「是否离职」2026-10-29 退役：离职改成花名册上的状态（带日期），导出件从那里派生。
+  // 台账那一列还在，但这一页不再读它，也不再写它。
 ]
 
 /** 输入框里现在是什么：服务端那一份，读出来是空就给空串（受控输入）。
@@ -331,6 +339,9 @@ async function saveManual(person, event) {
     // 写进去的那几项立刻在卡片上；**失败时不改页面上已经渲染的那一份**。
     sheet.value = await api.get('/api/attendance/sheet')
   } catch (err) {
+    // 被拒时这一块要**摊开**：理由写在 body 里，收着的话店长只看到按钮闪了一下，
+    // 不知道是没写上还是写上了。
+    openManualId.value = person.id
     manualError.value = { employee_id: person.id, text: err.message || '这四项没存进去' }
   } finally {
     savingManual.value = 0
@@ -343,14 +354,37 @@ function manualErrorOn(employeeId) {
     : ''
 }
 
+/** 手填那一块展没展开（按**这个人**记：一张卡开一次，不影响别的卡）。
+ *
+ *  2026-10-29 用户截图说这一块「太占地方」：390px 下手填四格 + 期初 / 期末实测 502px
+ *  （约一屏半），而它是**低频**的（填一次就进台账）—— 默认收成一行摘要，点「编辑」才
+ *  摊开输入框。摘要念的是台账里存了什么 + 那一对结余，所以收起来也看得见这张卡当前的账。 */
+const openManualId = ref(0)
+function toggleManual(person) {
+  openManualId.value = openManualId.value === person.id ? 0 : person.id
+}
+function manualOpen(person) {
+  return openManualId.value === person.id
+}
+
+/** 收起时那一行摘要：与 body 里那份 `aManualNow` 同一批值（`manualStats` + 期初 / 期末），
+ *  空值一律写 `—` —— 「收起来就什么都看不见」不是省地方，是丢信息。 */
+function manualSummary(person) {
+  return [
+    ...manualStats(person).map((stat) => ({ label: stat.label, value: manualText(stat.value) })),
+    { label: '期初', value: manualText(openingValue(person)) },
+    { label: '期末', value: manualText(closingValue(person)) },
+  ]
+}
+
 /** 人工期初（收尾修复 ② / 故事 35）与人工期末（票 09）那一格的输入口与它自己那一次写。
  *
- *  为什么它**不并进**上面那「存这四项」：那四列是每张卡随时会改的日常项，而期初 / 期末
+ *  为什么它**不并进**上面那「存这三项」：那三列是每张卡随时会改的日常项，而期初 / 期末
  *  是台账上的**结余**（上线当月手工给一次、当月随时可定稿），分开一颗按钮，误点
- *  「存这四项」不会把这两格顺手清掉 —— 写口那边的纪律是「点名谁才写谁」，空着就一个
+ *  「存这三项」不会把这两格顺手清掉 —— 写口那边的纪律是「点名谁才写谁」，空着就一个
  *  字节都不碰。
  *
- *  两条结余**一起存**（一颗按钮），但**只发真被改过的那几位** —— 与「存这四项」同一条
+ *  两条结余**一起存**（一颗按钮），但**只发真被改过的那几位** —— 与「存这三项」同一条
  *  纪律（写口那边「点名谁才写谁」）：期初那一格没动过时，请求里就没有 `opening_balance`，
  *  既有那两条断言（「只带这一位」）因此一字不用改；期末那一格没动过时同理不发
  *  `closing_balance` —— 免得一次只改期初的保存把台账里的期末顺手覆盖成空。
@@ -417,10 +451,10 @@ function closingNote(person) {
  *
  *  为什么不用「两位全发、没动过的回填原值」：那看起来更省事，却把「今天点了一下按钮」
  *  变成一次对另一位结余的**重写**（并发的另一张卡刚好改过它时会被盖回去）。只发改过的
- *  那几位，语义与「存这四项」逐字一致：点名谁才写谁。
+ *  那几位，语义与「存这三项」逐字一致：点名谁才写谁。
  *
  *  填了不是数字的东西**不发请求**：服务端那两位是数字，而 `Number('七点五')` 是 `NaN`，
- *  转成 JSON 会变成 `null` —— 那会把这一格悄悄清掉。前端先说人话（同「存这四项」：
+ *  转成 JSON 会变成 `null` —— 那会把这一格悄悄清掉。前端先说人话（同「存这三项」：
  *  失败时不动页面上已经渲染的那一份）。
  */
 async function saveOpening(person, event) {
@@ -438,6 +472,8 @@ async function saveOpening(person, event) {
   for (const field of fields) {
     if (field.read === '' || field.read === field.value) continue
     if (!Number.isFinite(Number(field.read))) {
+      // 拒绝的话写在 body 里，收着就看不见 —— 先把这一块摊开。
+      openManualId.value = person.id
       openingError.value = {
         employee_id: person.id,
         text: '期初 / 期末存假都要写数字（可以是负的、也可以带 .5）；要清空就把那一格留空',
@@ -457,6 +493,7 @@ async function saveOpening(person, event) {
     // 与手填那四列同一条路：自己重拉一次（nudge 不带数据，这一页也不等它）。
     sheet.value = await api.get('/api/attendance/sheet')
   } catch (err) {
+    openManualId.value = person.id
     openingError.value = {
       employee_id: person.id,
       text: err.message || '期初 / 期末存假没存进去',
@@ -781,9 +818,33 @@ onMounted(() => {
              众数放在提示语里 —— 默认值不能被预填，否则店长一存就把这条默认固化成他定的值，
              以后再改排班这一格也不跟着变了。 -->
         <div class="aManual">
-          <p class="aManualTitle">
-            手填列：这几项系统里没有，填一次就进台账，导出的表直接用它。
-          </p>
+          <!-- 2026-10-29 用户：「太占地方」。这一块在 390px 上是 502px（手填四格 + 期初 /
+               期末，约一屏半），而它是**低频**的（填一次就进台账），所以默认收成**一行摘要**，
+               点「编辑」才摊开输入框。摘要念的就是台账里存了什么 + 那一对结余 ——
+               收起来也看得见这张卡当前的账，不是什么都藏掉。 -->
+          <button
+            class="aManualHead"
+            type="button"
+            :aria-expanded="manualOpen(person) ? 'true' : 'false'"
+            :aria-controls="`manual-body-${person.id}`"
+            @click="toggleManual(person)"
+          >
+            <span class="aManualTitle">手填列</span>
+            <!-- 展开时把摘要收掉：同一批值在 body 里还有一份回显（`.aManualNow`，紧贴
+                 「存这三项」），两处都摆就是同一句话说两遍。 -->
+            <span v-if="!manualOpen(person)" class="aManualSummary">
+              <span v-for="item in manualSummary(person)" :key="item.label" class="aManualSummaryOne">
+                <i>{{ item.label }}</i><b>{{ item.value }}</b>
+              </span>
+            </span>
+            <span class="aManualAct">{{ manualOpen(person) ? '收起' : '编辑' }}</span>
+          </button>
+          <div
+            v-show="manualOpen(person)"
+            :id="`manual-body-${person.id}`"
+            class="aManualBody"
+          >
+          <p class="aManualHelp">这几项系统里没有，填一次就进台账，导出的表直接用它。</p>
           <div class="aManualRow">
             <label v-for="field in MANUAL_INPUTS" :key="field.key" class="aManualField">
               <span class="aManualLabel">{{ field.label }}</span>
@@ -801,26 +862,28 @@ onMounted(() => {
           <!-- 人工期初（收尾修复 ② / 故事 35）：**上线当月手工给一次**的「上月末余额」，
                写的是月度台账**本月那一行**的 `opening_balance`（票 03 的裁定）。与服务端
                那条月级写口同一扇门，但自己一颗按钮：它是一次性的账，不是日常那一格。
-               B 批返工 ③：它排在**回显与「存这四项」之后** —— 那两者是一对（存了什么、存
-               在下边那颗按钮上），中间岔进期初这一块，店长会以为这一格也归「存这四项」管。 -->
-          <!-- 「这一块现在是什么」由服务端那一份说了算（重拉之后写的就是最新的）。 -->
-          <p class="aManualNow">
-            <span v-for="stat in manualStats(person)" :key="stat.label" class="aManualNowOne">
-              <i>{{ stat.label }}</i><b>{{ manualText(stat.value) }}</b>
-            </span>
-          </p>
+               B 批返工 ③：它排在**回显与「存这三项」之后** —— 那两者是一对（存了什么、存
+               在下边那颗按钮上），中间岔进期初这一块，店长会以为这一格也归「存这三项」管。 -->
+          <!-- 「这一块现在是什么」由服务端那一份说了算（重拉之后写的就是最新的）。
+               2026-10-29 排版：回显与「存这三项」并成一行（回显在左、按钮贴右），
+               不再各占一行、按钮孤零零吊在左边。 -->
           <div class="aManualFoot">
+            <p class="aManualNow">
+              <span v-for="stat in manualStats(person)" :key="stat.label" class="aManualNowOne">
+                <i>{{ stat.label }}</i><b>{{ manualText(stat.value) }}</b>
+              </span>
+            </p>
+            <small v-if="manualErrorOn(person.id)" class="aManualErr" role="alert">
+              {{ manualErrorOn(person.id) }}
+            </small>
             <button
               class="btn btn-sm btn-primary aSave"
               type="button"
               :disabled="savingManual === person.id"
               @click="saveManual(person, $event)"
             >
-              存这四项
+              存这三项
             </button>
-            <small v-if="manualErrorOn(person.id)" class="aManualErr" role="alert">
-              {{ manualErrorOn(person.id) }}
-            </small>
           </div>
           <div class="aOpening">
             <label class="aOpeningField">
@@ -871,11 +934,13 @@ onMounted(() => {
               {{ openingErrorOn(person.id) }}
             </small>
           </div>
+          </div>
         </div>
         <!-- 假期台账（票 03）：每张卡把自己的账摊开；算式收在「看算式」后面，
-             摊开后能一格一格核（服务端下发的数，页面一个都不自己算）。 -->
+             摊开后能一格一格核（服务端下发的数，页面一个都不自己算）。
+             2026-10-29 排版：去掉「假期台账」那行小标题（它自己的 9px 行 + 9px 空隙
+             就是纯占位），九项改成自适应网格，390px 下 3 列 3 行、宽屏一行。 -->
         <div v-if="person.leave" class="aLeave">
-          <p class="aSectionHead">假期台账</p>
           <p class="aLvRow">
             <span v-for="stat in leaveStats(person)" :key="stat.label" class="aLv">
               <i>{{ stat.label }}</i><b>{{ stat.value }}</b>
@@ -1165,16 +1230,21 @@ onMounted(() => {
 .aPending::before {
   content: ""; width: 6px; height: 6px; flex: none; border-radius: 50%; background: var(--warn);
 }
-/* 假期台账那一块（票 03）：九项摊在卡片上，算式收在「看算式」后面。 */
-.aLeave { margin-top: 0; padding: 12px 14px 14px; border-top: 1px solid var(--line); }
-.aSectionHead {
-  margin: 0 0 9px; font-family: var(--font-sans); font-size: 9px;
-  font-weight: 500; letter-spacing: .18em; color: var(--ink-faint);
+/* 假期台账那一块（票 03）：九项摊在卡片上，算式收在「看算式」后面。
+   2026-10-29 排版：去掉「假期台账」那行小标题（它自己的 9px 行 + 9px 空隙纯占位），
+   九项改成**自适应网格**（390px 下 3 列 3 行、1440px 下一行九列），标签与值同一基线 ——
+   原来 `flex-wrap` 按内容排，窄屏上落成 5 行、198px 高。 */
+.aLeave { margin-top: 0; padding: 10px 14px 12px; border-top: 1px solid var(--line); }
+.aLvRow {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
+  gap: 4px var(--sp-2); margin: 0;
 }
-.aLvRow { display: flex; flex-wrap: wrap; gap: 5px var(--sp-4); margin: 0 0 var(--sp-2); }
-.aLv { display: inline-flex; align-items: baseline; gap: 5px; font-size: var(--fs-12); }
-.aLv i { font-style: normal; color: var(--ink-faint); }
-.aLv b { font-family: var(--font-mono); font-size: var(--fs-13); color: var(--ink); }
+.aLv { display: flex; align-items: baseline; gap: 4px; min-width: 0; font-size: var(--fs-11); }
+/* 标签压到 10px：390px 下三列各 115px，「本月出勤天数 31 天」在 11px 时会溢出到
+   下一行（实测：九项落成 4 行、168px）。10px 刚好一行放下，且与别处的 9px 小标签
+   同档可读。 */
+.aLv i { font-style: normal; white-space: nowrap; font-size: 10px; color: var(--ink-faint); }
+.aLv b { font-family: var(--font-mono); font-size: var(--fs-12); color: var(--ink); white-space: nowrap; }
 .aFormula summary {
   display: inline-flex; align-items: center; min-height: var(--tap);
   cursor: pointer; font-size: var(--fs-12); color: var(--ink-dim);
@@ -1183,46 +1253,91 @@ onMounted(() => {
   margin: var(--sp-2) 0 0; font-family: var(--font-mono); font-size: var(--fs-11);
   line-height: 1.9; color: var(--ink-dim);
 }
-/* 四个手填列（票 05）：系统里没有的那几项，填一次就进台账。 */
-.aManual { margin-top: 0; padding: 12px 14px 14px; border-top: 1px solid var(--line); }
-.aManualTitle { margin: 0 0 10px; font-size: 10.5px; line-height: 1.6; color: var(--ink-dim); }
-.aManualRow { display: flex; flex-wrap: wrap; gap: var(--sp-2) var(--sp-3); }
-.aManualField { display: flex; flex-direction: column; gap: 2px; }
+/* 四个手填列（票 05）：系统里没有的那几项，填一次就进台账。
+   2026-10-29 排版（第二版）：这一块**默认收成一行摘要**（用户：「太占地方」，390px 上
+   502px）。`head` 那一行常显（台账里存了什么 + 期初 / 期末），点「编辑」才出 body 里的
+   四格输入 + 两颗保存按钮。四格本身仍是等宽网格（宽屏一行四个、窄屏两行两个）。 */
+.aManual { margin-top: 0; border-top: 1px solid var(--line); }
+/* `head` 是**三列网格**：标签（9px 小字）/ 摘要（可换行，占满中间）/ 「编辑」贴右。
+   用 `grid` 而不是 `flex-wrap`：后者会让「编辑」那颗按钮被 `margin-left: auto`
+   单独挤到第三行（390px 实测：摘要折两行 + 按钮一行 = 102px）。 */
+.aManualHead {
+  display: grid; grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center; gap: 3px var(--sp-2);
+  width: 100%; min-height: var(--tap); padding: 9px 14px;
+  border: 0; background: transparent; color: inherit;
+  font: inherit; text-align: left; cursor: pointer;
+}
+.aManualHead:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+.aManualTitle {
+  flex: none; font-family: var(--font-sans); font-size: 9px; line-height: 1.6;
+  letter-spacing: .18em; color: var(--ink-faint);
+}
+.aManualSummary {
+  display: flex; flex-wrap: wrap; gap: 3px var(--sp-3);
+  min-width: 0;
+}
+.aManualSummaryOne { display: inline-flex; align-items: baseline; gap: 4px; font-size: var(--fs-11); }
+.aManualSummaryOne i { font-style: normal; color: var(--ink-faint); }
+.aManualSummaryOne b { font-family: var(--font-mono); font-size: var(--fs-12); color: var(--ink); }
+/* 「编辑 / 收起」贴在行尾，样子跟卡片头的「展开 / 收起」一致（同一页两颗开关不该长两样）。
+   `justify-self: end` 不能省：展开时摘要那一格（`v-if`）不在了，网格只剩两列，
+   这一颗会被丢进中间的 `1fr` 那条、被拉成整行宽。 */
+.aManualAct {
+  flex: none; justify-self: end; padding: 2px 8px;
+  border: 1px solid var(--line-strong); border-radius: var(--r-1);
+  font-size: 10px; line-height: 1.6; color: var(--ink-dim);
+}
+.aManualBody { padding: 2px 14px 14px; }
+/* 展开后那一句说明（收起时它不进占位；`title` 那样只挂悬停，触摸屏上读不到）。 */
+.aManualHelp { margin: 0 0 10px; font-size: 10.5px; line-height: 1.6; color: var(--ink-dim); }
+.aManualRow {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  gap: var(--sp-2) var(--sp-3);
+}
+.aManualField { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .aManualLabel { font-size: var(--fs-11); color: var(--ink-faint); }
 .aManualInput {
-  width: 110px; min-height: var(--tap); padding: 4px var(--sp-2); border: 1px solid var(--line);
+  width: 100%; min-height: var(--tap); padding: 4px var(--sp-2); border: 1px solid var(--line);
   border-radius: var(--r-1); background: var(--surface-2); color: var(--ink);
   font-size: var(--fs-12); font-family: inherit;
 }
 .aManualHint { margin: var(--sp-2) 0 0; font-size: var(--fs-11); color: var(--ink-faint); }
-.aManualNow { display: flex; flex-wrap: wrap; gap: 5px var(--sp-4); margin: var(--sp-2) 0 0; }
+.aManualNow { display: flex; flex-wrap: wrap; gap: 5px var(--sp-4); margin: 0; }
 .aManualNowOne { display: inline-flex; align-items: baseline; gap: 5px; font-size: var(--fs-12); }
 .aManualNowOne i { font-style: normal; color: var(--ink-faint); }
 .aManualNowOne b { font-family: var(--font-mono); font-size: var(--fs-13); color: var(--ink); }
-.aManualFoot { display: flex; align-items: center; gap: var(--sp-2); margin-top: var(--sp-2); }
-.aManualFoot .aSave { flex: none; }
+/* 回显与「存这三项」同一行：回显占满左边，按钮贴右（2026-10-29 排版）。窄屏回显先换行，
+   按钮仍在右下角，不再孤零零吊在左边。 */
+.aManualFoot {
+  display: flex; align-items: center; flex-wrap: wrap;
+  gap: var(--sp-2); margin-top: var(--sp-3);
+}
+.aManualFoot .aManualNow { flex: 1 1 auto; min-width: 0; }
+.aManualFoot .aSave { flex: none; margin-left: auto; }
 .aManualErr { font-size: var(--fs-11); color: var(--danger-bright); }
 /* 「借调门店」那处与历史表的偏差（收尾修复 ⑥）现在挂在输入框的 `title` 上（见
    `BORROWED_STORE_NOTE`）—— 悬停可见，不占三行可视小字把这一排输入口拽散。 */
 /* 人工期初（收尾修复 ②）与人工期末（票 09）：台账上的两条结余摆成**一对**、一颗按钮
    一起存（见 `saveOpening`）—— 期初是上线当月手工给一次的那一位，期末是当月随时能定稿的
    那一位。两条的版式一样（标签 / 输入口 / 提示语 / 建议那一句）。
-   **一格成一整块**（`flex: 1 1 118px` + `min-width: 0`）：窄屏上不许在标签与它的输入框
-   之间断行 —— 那会把「期末存假（本月剩余）」与下面那个空框拆到两行去（390px 上`flex: none`
-   实测：按钮挤在两条中间，读起来像是第三项）。
-   对齐用 `flex-start`（**不是** `flex-end`）：期末那一格多一句「系统建议」之后它就比期初
-   高了，`flex-end` 会把期初的两行整体往下推、两个输入框不再齐平。 */
+   2026-10-29 排版：两格**等宽两列**（`grid`，输入框填满列宽），「存期初 / 期末」跨两列
+   贴右下 —— 原来 `max-width: 420px` 把这一块框在左边，按钮挤在两条中间，596 宽下右边
+   空一大片。
+   对齐用 `align-items: start`（**不是** `end`）：期末那一格多一句「系统建议」之后比期初
+   高，`end` 会把期初整体下推、两个输入框不再齐平。 */
 .aOpening {
-  display: flex; align-items: flex-start; flex-wrap: wrap; gap: var(--sp-2);
-  margin-top: var(--sp-2); max-width: 420px;
+  display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  align-items: start; gap: var(--sp-2) var(--sp-3);
+  margin-top: var(--sp-3);
 }
 .aOpeningField,
-.aClosingField { display: flex; flex-direction: column; gap: 2px; flex: 1 1 118px; min-width: 0; }
+.aClosingField { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .aOpeningLabel,
 .aClosingLabel { font-size: var(--fs-11); color: var(--ink-faint); }
 .aOpeningInput,
 .aClosingInput {
-  width: 110px; max-width: 100%; min-height: var(--tap); padding: 4px var(--sp-2); border: 1px solid var(--line);
+  width: 100%; min-height: var(--tap); padding: 4px var(--sp-2); border: 1px solid var(--line);
   border-radius: var(--r-1); background: var(--surface-2); color: var(--ink);
   font-size: var(--fs-12); font-family: inherit;
 }
@@ -1235,9 +1350,11 @@ onMounted(() => {
 /* 「系统建议」那一句（票 09）：公式算出来的那个数只在这里出现 —— 与输入框里那个
    **人工值**用颜色分开（`--accent`：这是一句提示，不是可以照抄进框里的现值）。 */
 .aClosingNote { margin: 2px 0 0; font-size: var(--fs-11); color: var(--accent); }
-.aClosingSealed { font-size: var(--fs-11); color: var(--warn); }
-.aOpeningErr { font-size: var(--fs-11); color: var(--danger-bright); }
-/* 页内动作（封账 / 回到月历 / 导出 / 存这四项 / 存期初期末）：触控 44px、圆角 --r-1。 */
+.aClosingSealed { grid-column: 1 / -1; font-size: var(--fs-11); color: var(--warn); }
+.aOpeningErr { grid-column: 1 / -1; font-size: var(--fs-11); color: var(--danger-bright); }
+/* 按钮跨两列贴右下：与上面那排输入框分开，不会在两条结余中间显得像第三项。 */
+.aOpening .aOpeningSave { grid-column: 1 / -1; justify-self: end; }
+/* 页内动作（封账 / 回到月历 / 导出 / 存这三项 / 存期初期末）：触控 44px、圆角 --r-1。 */
 .aActions .btn,
 .aManualFoot .btn,
 .aOpening .btn { border-radius: var(--r-1); min-height: var(--tap); }

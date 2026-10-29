@@ -131,6 +131,27 @@ def _as_bool(value: Any) -> bool:
     return bool(int(value or 0))
 
 
+def resigned_today(resigned_at: Any, today: str) -> bool:
+    """到 `today` 为止，这个人算不算**已经离职** —— 员工离职的判据只有这一处（2026-10-29）。
+
+    `resigned_at` 是花名册上的那一列，三种态：
+
+    * ``None`` —— 在职（还没离职）；
+    * ``''``   —— **已离职、日期待补**（存量从「停用」迁过来的那些人）：不知道哪天走的，
+      当场算离职（保守：不能登录、不能再排班），但界面要标出来催着补日期；
+    * ``'YYYY-MM-DD'`` —— 离职日**当天仍然上班**（他还是那天的人），**次日**起才算离职。
+      所以判据是 `day < today`，不是 `<=`：「干到 10/31」的人 10/31 还能登录、还能被排班。
+
+    将来日期（`day > today`）自然落进「在职」那一档，不用另判。
+    """
+    if resigned_at is None:
+        return False
+    value = str(resigned_at)[:10]
+    if value == "":
+        return True
+    return value < today
+
+
 class EmployeeAccounts:
     def __init__(self, conn_or_db, now: Optional[Callable[[], datetime]] = None):
         conn = getattr(conn_or_db, "_conn", conn_or_db)
@@ -258,7 +279,13 @@ class EmployeeAccounts:
             "permission": PERMISSION_ADMIN if caps else PERMISSION_STAFF,
             "admin_caps": list(caps),
             "approved": _as_bool(mapping["approved"]),
-            "disabled": _as_bool(mapping["disabled"]),
+            # 离职（2026-10-29 取代「停用」）：原始日期 + 派生状态。
+            # `resigned_at` 三种态（`None` 在职 / `''` 待补 / `YYYY-MM-DD`），
+            # `resigned` 是「到今天为止算不算已离职」，判据只走 `resigned_today`。
+            "resigned_at": mapping.get("resigned_at"),
+            "resigned": resigned_today(
+                mapping.get("resigned_at"), self._today().isoformat()
+            ),
             # 员工端「我的」也显示的档案项（非敏感）。空值一律 `None`：
             # 前端那些 `!= null` 的判据（批准门槛、有效期至）靠它。
             "hire_date": mapping.get("hire_date") or None,
@@ -315,7 +342,7 @@ class EmployeeAccounts:
 
     async def _fetch_employee(self, employee_id: int):
         cur = await self._conn.execute(
-            """SELECT id, phone, name, job_title, permission, admin_caps, approved, disabled,
+            """SELECT id, phone, name, job_title, permission, admin_caps, approved, resigned_at,
                       created_at, id_card_no, base_salary, hire_date, health_cert_date,
                       seniority_bonus
                FROM hygiene_employees WHERE id = ?""",
@@ -326,7 +353,7 @@ class EmployeeAccounts:
     async def _fetch_employee_by_phone(self, phone: str):
         cur = await self._conn.execute(
             """SELECT id, phone, name, password_hash, job_title, permission, admin_caps,
-                      approved, disabled, created_at, id_card_no, base_salary, hire_date,
+                      approved, resigned_at, created_at, id_card_no, base_salary, hire_date,
                       health_cert_date, seniority_bonus
                FROM hygiene_employees WHERE phone = ?""",
             (phone,),
@@ -380,9 +407,9 @@ class EmployeeAccounts:
         try:
             cur = await self._conn.execute(
                 """INSERT INTO hygiene_employees
-                   (phone, name, password_hash, job_title, permission, approved, disabled,
+                   (phone, name, password_hash, job_title, permission, approved,
                     id_card_no, health_cert_date, hire_date, created_at, updated_at)
-                   VALUES (?, ?, ?, '', ?, 0, 0, ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, '', ?, 0, ?, ?, ?, ?, ?)""",
                 (
                     normalized,
                     employee_name,
@@ -423,7 +450,10 @@ class EmployeeAccounts:
         mapping = dict(row)
         if not await password_hash.verify_password_async(password, mapping["password_hash"]):
             return None
-        if not _as_bool(mapping["approved"]) or _as_bool(mapping["disabled"]):
+        # 离职（2026-10-29 取代「停用」）：判据是「到今天为止算不算已离职」。
+        if not _as_bool(mapping["approved"]) or resigned_today(
+            mapping.get("resigned_at"), self._today().isoformat()
+        ):
             return None
         if password_hash.needs_rehash(mapping["password_hash"]):
             # legacy 无前缀哈希：验证通过后按现行格式重写，下次登录只需一次
@@ -472,35 +502,54 @@ class EmployeeAccounts:
         row = await self._fetch_employee(employee_id)
         return self._employee_from_row(row)
 
-    async def disable(self, employee_id: int) -> dict:
+    async def resign(self, employee_id: int, resigned_at: str) -> dict:
+        """登记离职（2026-10-29 取代「停用」）：写下离职日期，按需清掉他的员工端会话。
+
+        日期**允许是将来**（「干到月底」）：那天之前他还得上班、还得拍照，所以会话不清 ——
+        到离职日**次日** `get_staff_session` 自己会返回 None（判据 `resigned_today`），
+        会话自然失效。日期是今天或更早时当场清会话：他今天就进不来了。
+
+        排班那边要做的清理（删离职日之后的排班行、停轮转规则）**不在这里做** ——
+        排班是另一个领域，这一层不认识它；编排在 `api/hygiene.py` 那条路由里。
+        日期本身的形状 / 日历合法性由 `normalize_date` 把着（`bad_date`）。
+        """
         row = await self._fetch_employee(employee_id)
         if row is None:
             raise EmployeeAccountsError("employee_not_found", "employee_not_found")
+        value = normalize_date(resigned_at)
+        if not value:
+            raise EmployeeAccountsError("bad_date", "bad_date")
         now = self._now_iso()
         await self._conn.execute(
-            "UPDATE hygiene_employees SET disabled = 1, updated_at = ? WHERE id = ?",
-            (now, employee_id),
+            "UPDATE hygiene_employees SET resigned_at = ?, updated_at = ? WHERE id = ?",
+            (value, now, employee_id),
         )
-        await self._conn.execute(
-            "DELETE FROM hygiene_staff_sessions WHERE employee_id = ?",
-            (employee_id,),
-        )
+        if resigned_today(value, self._today().isoformat()):
+            await self._conn.execute(
+                "DELETE FROM hygiene_staff_sessions WHERE employee_id = ?",
+                (employee_id,),
+            )
         await self._conn.commit()
-        logger.info("hygiene employee disabled id=%s", employee_id)
+        logger.info("hygiene employee resigned id=%s at=%s", employee_id, value)
         row = await self._fetch_employee(employee_id)
         return self._employee_from_row(row)
 
-    async def enable(self, employee_id: int) -> dict:
+    async def cancel_resignation(self, employee_id: int) -> dict:
+        """取消离职（回到在职）：清空日期。
+
+        **不恢复**当初删掉的排班与停掉的轮转规则 —— 删掉的行回不来，重铺是另一件事；
+        界面上那句提示（「排班已删，需要重铺」）就是这一步的收尾。
+        """
         row = await self._fetch_employee(employee_id)
         if row is None:
             raise EmployeeAccountsError("employee_not_found", "employee_not_found")
         now = self._now_iso()
         await self._conn.execute(
-            "UPDATE hygiene_employees SET disabled = 0, updated_at = ? WHERE id = ?",
+            "UPDATE hygiene_employees SET resigned_at = NULL, updated_at = ? WHERE id = ?",
             (now, employee_id),
         )
         await self._conn.commit()
-        logger.info("hygiene employee enabled id=%s", employee_id)
+        logger.info("hygiene employee resignation cancelled id=%s", employee_id)
         row = await self._fetch_employee(employee_id)
         return self._employee_from_row(row)
 
@@ -522,12 +571,19 @@ class EmployeeAccounts:
         排序仍是「未停用在前、待批准在前、按 id 升序」；页面自己按分段与姓名重排
         （票面 §2.2 的排序在前端），这里只保证集合与口径。
         """
+        # 排序：「已离职的沉底、待批准在前、按 id 升序」。**第一条要用派生判据**，不能
+        # 直接看 `resigned_at IS NOT NULL` —— 提前登记「干到月底」的人日期非空但**还在职**，
+        # 按原始列排会把他从在职那一档挪走（导出件的行序、卡片顺序都会跟着变）。
+        today = self._today().isoformat()
         cur = await self._conn.execute(
             """SELECT e.id, e.phone, e.name, e.job_title, e.permission, e.admin_caps,
-                      e.approved, e.disabled, e.created_at, e.id_card_no, e.base_salary,
+                      e.approved, e.resigned_at, e.created_at, e.id_card_no, e.base_salary,
                       e.hire_date, e.health_cert_date, e.seniority_bonus
                FROM hygiene_employees e
-               ORDER BY e.disabled ASC, e.approved ASC, e.id ASC""",
+               ORDER BY (e.resigned_at IS NOT NULL
+                         AND (e.resigned_at = '' OR e.resigned_at < ?)) ASC,
+                        e.approved ASC, e.id ASC""",
+            (today,),
         )
         rows = await cur.fetchall()
         employees = [self._roster_row(row) for row in rows]
@@ -553,14 +609,17 @@ class EmployeeAccounts:
         每人一行：`{id, name, phone, expires_on, state, days_left}`，按到期日升序
         （最急的在最上面）。
         """
+        # 「还在职」= 没有离职日期，或离职日期还没到（**当天仍算在职**）；
+        # 空串（已离职、日期待补）在字符串比较里小于任何日期，所以进不了这一档。
+        today = self._today().isoformat()
         cur = await self._conn.execute(
             """SELECT id, name, phone, health_cert_date
                FROM hygiene_employees
-               WHERE disabled = 0
+               WHERE resigned_at IS NULL OR resigned_at >= ?
                ORDER BY id ASC""",
+            (today,),
         )
         rows = await cur.fetchall()
-        today = self._today()
         due = []
         for row in rows:
             mapping = dict(row)
@@ -609,15 +668,16 @@ class EmployeeAccounts:
           收出来**、排在最前面：注册页从 2026-10-13 起允许「暂时没有健康证」，这种人在职
           而没证，是这一栏里最该被看见的一批。
         """
+        today = self._today()
         cur = await self._conn.execute(
             """SELECT id, name, phone, hire_date, seniority_bonus, id_card_no,
                       health_cert_date
                FROM hygiene_employees
-               WHERE disabled = 0
+               WHERE resigned_at IS NULL OR resigned_at >= ?
                ORDER BY id ASC""",
+            (today.isoformat(),),
         )
         rows = await cur.fetchall()
-        today = self._today()
         month_prefix = f"{today.month:02d}-"
         seniority_items: list[dict] = []
         birthday_items: list[dict] = []
@@ -714,6 +774,24 @@ class EmployeeAccounts:
         # 「未办理」排在「要换证」前面：没证比证要到期更急。两块合起来算一个数 ——
         # 首页那一格（`workbenchHome.countHrReminders`）只加总 `certs.count`。
         cert_items = no_cert_items + cert_items
+        # 离职日期待补（2026-10-29）：已离职、但迁移时没带日期的那些人 —— 档案缺一项，
+        # 与「缺入职日期」放进同一块提醒，不新开一格（用户裁定）。主查询只捞在职的人，
+        # 所以这里不会与上面那些行重复。
+        cur = await self._conn.execute(
+            """SELECT id, name, phone FROM hygiene_employees
+               WHERE resigned_at = ''
+               ORDER BY id ASC""",
+        )
+        for row in await cur.fetchall():
+            mapping = dict(row)
+            incomplete_items.append(
+                {
+                    "id": int(mapping["id"]),
+                    "name": mapping.get("name") or "",
+                    "phone": mapping.get("phone") or "",
+                    "missing": ["resigned_date"],
+                }
+            )
         return {
             "seniority": {
                 "items": seniority_items,
@@ -1028,7 +1106,7 @@ class EmployeeAccounts:
         cur = await self._conn.execute(
             """SELECT s.session_id, s.expires_at, s.last_seen_at,
                       e.id, e.phone, e.name, e.job_title, e.permission, e.admin_caps,
-                      e.approved, e.disabled, e.hire_date, e.health_cert_date,
+                      e.approved, e.resigned_at, e.hire_date, e.health_cert_date,
                       e.seniority_bonus, e.id_card_no
                FROM hygiene_staff_sessions s
                JOIN hygiene_employees e ON e.id = s.employee_id
@@ -1058,7 +1136,11 @@ class EmployeeAccounts:
             return None
         if (now_dt - last_seen).total_seconds() >= LAST_SEEN_REFRESH_SECONDS:
             await self._touch_staff_session(hash_session_id(session_id), now_dt.isoformat())
-        if not _as_bool(mapping["approved"]) or _as_bool(mapping["disabled"]):
+        # 离职（2026-10-29）：提前登记「干到月底」的人在那天之前照常持有会话，
+        # 到离职日**次日**起这里开始返回 None，会话自然失效（不用定点踢人）。
+        if not _as_bool(mapping["approved"]) or resigned_today(
+            mapping.get("resigned_at"), self._today().isoformat()
+        ):
             return None
         employee = self._employee_from_row(mapping)
         employee.update(await self._session_extras(employee))

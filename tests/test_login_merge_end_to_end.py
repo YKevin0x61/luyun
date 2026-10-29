@@ -203,7 +203,7 @@ def test_staff_entry_landing_is_a_served_page_behind_the_workbench_wall(app_clie
     assert match, f"{STAFF_PATHS_JS} 里找不到 STAFF_ENTRY_PATH"
     entry = match.group(1)
 
-    assert entry == "/workbench/staff/today"
+    assert entry == "/workbench"
     assert entry in main_module.SPA_PAGE_ROUTES, entry
 
     # 员工三页都可达（在页面注册清单里），但未登录不再放行 —— 工作台是「进去要登录」的。

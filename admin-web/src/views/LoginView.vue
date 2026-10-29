@@ -107,7 +107,7 @@ const subtitle = computed(() => {
   if (activeTab.value === 'admin') {
     return phase.value === 'init' ? '首次使用，请创建超级管理员账号。' : '请登录以访问数据中心。'
   }
-  return '用手机号和密码进入员工端。未批准或已停用的账号无法登录。'
+  return '用手机号和密码进入员工端。未批准或已离职的账号无法登录。'
 })
 
 function showAlert(message, type = 'error') {

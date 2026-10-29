@@ -227,14 +227,14 @@ export function approveReceipt(result) {
  *
  *  口径与排班页底下那根条一致（`SchedulingCalendarView.vue` 的 `needsRule`：在职 =
  *  批准过、没停用）。停用的人不该天天挂在待办上；没批准的人也登不进员工端、提不了假。
- *  两拨都返回，页面自己决定说不说 —— 服务层把 `approved` / `disabled` 一起给出来，
+ *  两拨都返回，页面自己决定说不说 —— 服务层把 `approved` / `resigned` 一起给出来，
  *  就是不替前端下这个结论。
  */
 export function splitRuleless(people) {
   const active = []
   const muted = []
   for (const person of people || []) {
-    if (person && person.approved && !person.disabled) active.push(person)
+    if (person && person.approved && !person.resigned) active.push(person)
     else muted.push(person)
   }
   return { active, muted }

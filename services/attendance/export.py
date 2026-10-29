@@ -258,7 +258,15 @@ def _write_employee(worksheet, row: int, employee: dict, day_count: int) -> None
         _body_cell(worksheet, row, 9 + offset, _day_text(day), todo=_is_todo(day))
 
     last_day_column = 8 + day_count
-    summary = (leave.get("balance"), _yes_no(employee.get("new_hire")), employee.get("resigned"))
+    summary = (
+        leave.get("balance"),
+        # 「是否新入职」**只写「是」**（2026-10-29 用户裁定）：不是新入职的留空。
+        # 这一列原来写「否」，一列「否」没有信息量，还把表体撑得比别处脏。
+        _new_hire_text(employee.get("new_hire")),
+        # 「是否离职」同口径（2026-10-29）：改由花名册的离职状态派生，只写「是」。
+        # 原来读的是考勤台账上**手填**的那一列，已退役（卡片上的手填项少了一项）。
+        _resigned_text(employee),
+    )
     for offset, value in enumerate(summary):
         _body_cell(worksheet, row, last_day_column + 1 + offset, value)
 
@@ -300,13 +308,32 @@ def _is_todo(day: dict) -> bool:
     return day.get("state") == "todo"
 
 
-def _yes_no(value: Any) -> str:
-    """已经是布尔的那几项写成 `是` / `否`；`None`（算不出来）留空。"""
-    if value is True:
+def _resigned_text(employee: dict) -> Optional[str]:
+    """「是否离职」那一格（2026-10-29）：**只写「是」**，其余留空。
+
+    判据按**这个月**看，不按今天：离职日期 ≤ 该月最后一天就算（"干到 10/31" 的人在
+    10 月表上写「是」，11 月才轮到他）；空串（已离职、日期待补）也写「是」。
+    """
+    value = employee.get("resigned_at")
+    if value is None:
+        return None
+    text = str(value)[:10]
+    if not text:
         return "是"
-    if value is False:
-        return "否"
-    return ""
+    days = employee.get("days") or []
+    month_last = str(days[-1].get("business_date") or "")[:10] if days else ""
+    return "是" if (not month_last or text <= month_last) else None
+
+
+def _new_hire_text(value: Any) -> Optional[str]:
+    """「是否新入职」那一格：**是**才写「是」，其余（不是新来的 / 算不出来）留空。
+
+    2026-10-29 用户裁定。原来不是新来的写「否」（`_yes_no`），可那一列九成格子都是
+    「否」—— 一列「否」既没有信息量，又把表体撑得比别处脏。`None`（入职日期为空、
+    这一项算不出来）本来就是留空，两种「不是」在纸面上因此长得一样，这也对：店长要
+    看的只有「这个月谁是新来的」。
+    """
+    return "是" if value is True else None
 
 
 # ── 底部三块 ────────────────────────────────────────────────────────────────

@@ -69,6 +69,8 @@ export function confirmPayload(item) {
 const MISSING_LABELS = {
   hire_date: '缺入职日期',
   id_card_no: '缺身份证',
+  // 2026-10-29：离职改成带日期的状态，存量那批「已离职但日期待补」的人也进这一块。
+  resigned_date: '离职日期待补',
 }
 
 export function missingText(missing) {

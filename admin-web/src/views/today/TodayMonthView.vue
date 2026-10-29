@@ -47,6 +47,9 @@ const employee = ref(null)
 const month = ref('') // 'YYYY-MM'；空着就让服务端按本营业月给
 const today = ref('')
 const windowEnd = ref('')
+// 晚上十点之后「次日」提不了、2 天以上的假要提前几天：服务端下发（同一条 month 响应）。
+const nextDayLocked = ref(false)
+const leaveLeadDays = ref(0)
 const lead = ref(0)
 const days = ref([])
 const errorText = ref('')
@@ -94,6 +97,10 @@ async function load(target, quiet = false) {
     windowEnd.value = data.window_end
     lead.value = data.lead || 0
     days.value = data.days || []
+    // 申请的下班点（2026-10-29 用户裁定）：两项都由服务端算好带下来 —— 「现在几点」得是
+    // 店长那台机器的钟，手机可能在别的时区。没给就当规矩不生效（老接口 / 老缓存）。
+    nextDayLocked.value = Boolean(data.next_day_locked)
+    leaveLeadDays.value = Number(data.leave_lead_days || 0)
     state.value = 'ready'
   } catch (err) {
     if (err.status === 401) {
@@ -363,6 +370,8 @@ useNudgePull({
       :employee="employee"
       :today="today"
       :window-end="windowEnd"
+      :next-day-locked="nextDayLocked"
+      :leave-lead-days="leaveLeadDays"
       :initial-act="openAct"
       @close="closeDay"
       @changed="loadRequestMarks"

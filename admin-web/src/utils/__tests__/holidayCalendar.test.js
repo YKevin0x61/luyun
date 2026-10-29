@@ -4,6 +4,7 @@ import {
   MAX_HOLIDAY_NAME,
   WEEKDAYS,
   holidayMap,
+  monthGrid,
   monthLabel,
   nameError,
   yearGrid,
@@ -80,6 +81,39 @@ describe('节假日日历的年份网格', () => {
       '7 月', '8 月', '9 月', '10 月', '11 月', '12 月',
     ])
     expect(monthLabel(10)).toBe('10 月')
+  })
+})
+
+describe('单月网格（页面一屏只画一个月）', () => {
+  const days = (month) => month.weeks.flat().filter(Boolean)
+
+  it('一个月 7 列，日子从 1 号到月末，与 yearGrid 里那一个月逐格相同', () => {
+    for (const month of [1, 2, 9, 10, 12]) {
+      const single = monthGrid(2026, month)
+      const same = yearGrid(2026).find((item) => item.month === month)
+
+      expect(single).toEqual(same)
+      for (const week of single.weeks) expect(week).toHaveLength(7)
+      expect(days(single)[0]).toBe(`2026-${String(month).padStart(2, '0')}-01`)
+    }
+  })
+
+  it('2026 年 9 月（1 日是周二）前面只空 1 格；2026 年 2 月是 28 天', () => {
+    expect(monthGrid(2026, 9).weeks[0]).toEqual([
+      null,
+      '2026-09-01',
+      '2026-09-02',
+      '2026-09-03',
+      '2026-09-04',
+      '2026-09-05',
+      '2026-09-06',
+    ])
+    expect(days(monthGrid(2026, 2))).toHaveLength(28)
+    expect(days(monthGrid(2024, 2))).toHaveLength(29)
+  })
+
+  it('首日正好是周一（2026 年 6 月）就不留空格，1 号落在第 1 格', () => {
+    expect(monthGrid(2026, 6).weeks[0][0]).toBe('2026-06-01')
   })
 })
 
