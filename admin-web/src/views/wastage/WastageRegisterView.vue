@@ -337,48 +337,6 @@ onMounted(async () => {
       <p v-if="formError" class="loss-error" role="alert">{{ formError }}</p>
       <p v-if="note" class="loss-note" role="status">{{ note }}</p>
 
-      <!-- 现场照片**排在最前**（2026-10-17 用户裁定）：损耗是当场发生的事 —— 先把眼前
-           这一堆拍下来，再慢慢填物料与数量。点「拍一张」**就地展开取景框**
-           （页内相机，不跳系统相机）：拍出来是 JPEG，也没有「从相册选」这条路 ——
-           登记的是此刻现场。一次一张、最多三张，拍满自动收起。 -->
-      <section class="loss-block">
-        <div class="loss-block-hd">
-          <span>现场照片</span>
-          <span class="loss-hint">最多 {{ maxImages }} 张，每张 {{ maxImageMb }} MB 以内</span>
-        </div>
-        <div class="loss-shots">
-          <figure v-for="(shot, index) in images" :key="shot.capture_id" class="loss-shot">
-            <img :src="shot.url" alt="现场照片" />
-            <button type="button" class="loss-shot-x" :aria-label="`删掉第 ${index + 1} 张`" @click="removeImage(index)">×</button>
-          </figure>
-          <button
-            v-if="images.length < maxImages && !cameraOpen"
-            type="button"
-            class="loss-shot-add loss-shot-camera"
-            @click="openCamera"
-          >
-            <span class="loss-shot-plus" aria-hidden="true">＋</span>
-            <span>{{ uploading ? '上传中…' : '拍一张' }}</span>
-          </button>
-        </div>
-
-        <!-- 页内相机：点「拍一张」**就地**展开取景框，拍完立刻上传 —— 不是跳系统相机，
-             所以拍出来是 JPEG（iPhone 系统相机给的 HEIC 后端认不出）。相机组件是卫生
-             那套（`components/hygiene/HygieneLiveCamera.vue`）：后置镜头、可切广角，
-             拍满 3 张自动收起。 -->
-        <div v-if="cameraOpen" class="loss-camera">
-          <HygieneLiveCamera @captured="onCaptured" />
-          <div class="loss-camera-actions">
-            <button type="button" class="btn" @click="closeCamera">收起相机</button>
-            <span class="loss-hint">
-              {{ uploading ? '正在上传…' : `拍完自动上传，最多 ${maxImages} 张` }}
-            </span>
-          </div>
-        </div>
-
-        <p class="loss-hint loss-photo-tip">点「拍一张」就地打开相机；拍完先搁着，接着填下面这一笔。</p>
-      </section>
-
       <!-- 常用模板：我存过的（可删）在前，我最近常这么记的在后。 -->
       <section class="loss-block">
         <div class="loss-block-hd">
@@ -407,6 +365,49 @@ onMounted(async () => {
 
       <form class="loss-block" @submit.prevent="submit">
         <div class="loss-block-hd"><span>这一笔损耗</span></div>
+
+        <!-- 现场照片是**这一笔损耗的一部分**（2026-10-30 用户裁定）：拍的就是眼前这一笔，
+             别让它浮在卡片外面自成一块。位置仍在表单第一项 —— 先把这一堆拍下来，再往下
+             填物料与数量。点「拍一张」**就地展开取景框**（页内相机，不跳系统相机）：
+             拍出来是 JPEG，也没有「从相册选」这条路 —— 登记的是此刻现场。一次一张、
+             最多三张，拍满自动收起。 -->
+        <div class="loss-photo">
+          <div class="loss-photo-hd">
+            <span class="loss-label">现场照片</span>
+            <span class="loss-hint">最多 {{ maxImages }} 张，每张 {{ maxImageMb }} MB 以内</span>
+          </div>
+          <div class="loss-shots">
+            <figure v-for="(shot, index) in images" :key="shot.capture_id" class="loss-shot">
+              <img :src="shot.url" alt="现场照片" />
+              <button type="button" class="loss-shot-x" :aria-label="`删掉第 ${index + 1} 张`" @click="removeImage(index)">×</button>
+            </figure>
+            <button
+              v-if="images.length < maxImages && !cameraOpen"
+              type="button"
+              class="loss-shot-add loss-shot-camera"
+              @click="openCamera"
+            >
+              <span class="loss-shot-plus" aria-hidden="true">＋</span>
+              <span>{{ uploading ? '上传中…' : '拍一张' }}</span>
+            </button>
+          </div>
+
+          <!-- 页内相机：点「拍一张」**就地**展开取景框，拍完立刻上传 —— 不是跳系统相机，
+               所以拍出来是 JPEG（iPhone 系统相机给的 HEIC 后端认不出）。相机组件是卫生
+               那套（`components/hygiene/HygieneLiveCamera.vue`）：后置镜头、可切广角，
+               拍满 3 张自动收起。 -->
+          <div v-if="cameraOpen" class="loss-camera">
+            <HygieneLiveCamera @captured="onCaptured" />
+            <div class="loss-camera-actions">
+              <button type="button" class="btn" @click="closeCamera">收起相机</button>
+              <span class="loss-hint">
+                {{ uploading ? '正在上传…' : `拍完自动上传，最多 ${maxImages} 张` }}
+              </span>
+            </div>
+          </div>
+
+          <p class="loss-hint loss-photo-tip">点「拍一张」就地打开相机；拍完先搁着，接着填物料与数量。</p>
+        </div>
 
         <label class="loss-field">
           <span class="loss-label">物料名称</span>
@@ -595,6 +596,17 @@ onMounted(async () => {
 }
 .loss-chip-x:hover { color: var(--danger-bright); }
 .loss-shots { display: flex; flex-wrap: wrap; gap: 8px; }
+/* 现场照片是「这一笔损耗」里的第一项（2026-10-30 用户裁定）：标题走字段字号（区别于
+   卡片标题），末尾一条淡分隔线把它与下面的物料 / 数量分开 —— 是表单里的一节，不是一张卡。 */
+.loss-photo {
+  margin-bottom: 14px; padding-bottom: 12px;
+  border-bottom: 1px solid var(--line);
+}
+.loss-photo-hd {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
+  margin-bottom: 8px;
+}
+.loss-photo-hd .loss-label { margin-bottom: 0; }
 .loss-shot { position: relative; margin: 0; width: 84px; height: 84px; border-radius: 8px; overflow: hidden; }
 .loss-shot img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .loss-shot-x {

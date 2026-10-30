@@ -368,7 +368,7 @@ useNudgePull({ id: 'workbench-hr-overtime', topics: ['overtime'], pull: load })
               class="oInput"
               type="text"
               :maxlength="maxReason"
-              placeholder="这笔是干什么的（必填）"
+              placeholder="加班原因（必填）"
             />
           </label>
           <p v-if="formError" class="oErr">{{ formError }}</p>

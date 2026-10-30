@@ -225,12 +225,18 @@ describe('损耗登记页（员工端）', () => {
     expect(wrapper.text()).toContain('选了「其他」要说明')
   })
 
-  it('现场照片排在登记页最前，点「拍一张」就地开相机（不跳系统相机）', async () => {
+  it('现场照片在「这一笔损耗」表单里面，点「拍一张」就地开相机（不跳系统相机）', async () => {
     const wrapper = await mountView(WastageRegisterView, '/workbench/staff/loss')
     await flushPromises()
 
-    // 第一块就是照片（2026-10-17 用户裁定：先拍现场、再填物料）。
-    expect(wrapper.findAll('.loss-block')[0].text()).toContain('现场照片')
+    // 照片是**这一笔损耗**表单里的第一项（2026-10-30 用户裁定：拍的是这一笔，别浮在
+    // 卡片外面自成一块）。卡片就三张：常用模板 / 这一笔损耗（含照片）/ 我最近的登记。
+    const blocks = wrapper.findAll('.loss-block')
+    expect(blocks).toHaveLength(3)
+    expect(blocks[0].text()).toContain('常用模板')
+    const form = wrapper.get('form.loss-block')
+    expect(form.get('.loss-photo').text()).toContain('现场照片')
+    expect(form.element.querySelector('.loss-photo, .loss-field').classList.contains('loss-photo')).toBe(true)
 
     // 没有 file input：这一版不走「系统相机 / 相册」那条路 —— 那条路在 iPhone 上拿到的是
     // HEIC，后端认不出格式（用户真机上撞过）。（相机组件内部那个降级入口不算这一页的）
@@ -240,7 +246,7 @@ describe('损耗登记页（员工端）', () => {
     await wrapper.get('.loss-shot-add').trigger('click')
     expect(wrapper.find('.stub-camera').exists()).toBe(true)
 
-    // 相机交回一张 JPEG → 立刻上传，缩略图落进首位那一块。
+    // 相机交回一张 JPEG → 立刻上传，缩略图落进表单首位那一块。
     upload.mockResolvedValue({
       image: { capture_id: 'abc', url: '/api/wastage/images/abc' },
     })

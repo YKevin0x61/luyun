@@ -145,12 +145,16 @@ describe('设计护栏 · 无未定义令牌', () => {
     expect(bad, '新引用的令牌必须在令牌层里定义（真名见 theme.workbench.css）').toEqual([])
   })
 
-  it('t1 那份最硬的证据仍在案（`--hy-mute` 是笔误，真名 `--hy-muted`）', () => {
-    // 这条**故意**把已知缺陷钉在明面上：它不是"通过了就没事"，而是"知道它有、且不许再多"。
-    // 修它要动 `src/views/overtime/MeOvertimeView.vue`（本票 out of scope），所以先记账。
+  it('t1 那份最硬的证据已收敛（`--hy-mute` 笔误修掉，真名 `--hy-muted` 仍在）', () => {
+    // 这条原先钉的是「`--hy-mute` 是笔误，且加班与补钟那页在引用它」的存量债务 ——
+    // 修它要动 `src/views/overtime/MeOvertimeView.vue`，当时（t36）那页 out of scope，
+    // 所以只记账。2026-10-30 的版式优化把那页的写法换成语义令牌，债务归零、快照里的
+    // undef 也清空了；这条现在守的是**收敛后的状态**：那页不再引用任何未定义令牌。
     const overtime = DEBT.files['src/views/overtime/MeOvertimeView.vue']
     expect(overtime, '快照里该记着这个文件').toBeTruthy()
-    expect(overtime.undef, 'MeOvertimeView 的未定义令牌清单').toContain('--hy-mute')
+    expect(overtime.undef || [], 'MeOvertimeView 不该再有未定义令牌').toEqual([])
+    const now = readFileSync('src/views/overtime/MeOvertimeView.vue', 'utf8')
+    expect(now, '笔误 `--hy-mute` 不该再出现在这一页').not.toContain('--hy-mute')
     expect(DEF.has('--hy-muted'), '真名 `--hy-muted` 必须在令牌层里定义').toBe(true)
   })
 })

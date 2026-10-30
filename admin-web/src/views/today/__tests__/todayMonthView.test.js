@@ -83,8 +83,10 @@ describe('员工端「整月」页（票 06）', () => {
     // 三态的判据读两遍就会漂：页面里不许再出现 scheduled / shift_id。
     expect(view).not.toMatch(/day\.scheduled/)
     expect(view).not.toMatch(/shift_id/)
-    // 每格只算一次四态（`:class` 与格子里的字共用同一份）。
-    expect(view).toMatch(/days\.value\.map\(\(day\) => \(\{ \.\.\.day, \.\.\.monthCell\(day\) \}\)\)/)
+    // 每格只算一次四态（`:class` 与格子里的字共用同一份）；工作区那行同样一次算好。
+    expect(view).toMatch(
+      /days\.value\.map\(\(day\) => \(\{ \.\.\.day, \.\.\.monthCell\(day\), zone: monthZoneLabel\(day\) \}\)\)/,
+    )
     expect(copy).toMatch(/day\.scheduled/)
     expect(copy).toMatch(/day\.shift_id == null/)
   })
@@ -270,5 +272,17 @@ describe('员工端「整月」页（票 06）', () => {
     expect(view).toMatch(/:disabled="dayBeyondWindow\(cell, windowEnd\)"/)
     // 页脚那句「只看得到你自己的班」作废（票 13 改的口径）：留着会跟页面自相矛盾。
     expect(view).not.toContain('只看得到你自己的班')
+  })
+
+  it('班次下面那行写那天的工作区（2026-10-30 用户要求）', () => {
+    // 区名来自 `/me/month` 的 `zone_name`；哪几态才接区名由 `monthZoneLabel` 一处判
+    // （上班 / 休半天才写，休与请假不写），页面不另写第二张表。
+    expect(view).toMatch(/zone:\s*monthZoneLabel\(day\)/)
+    expect(view).toMatch(/<span v-if="cell\.zone" class="z">\{\{ cell\.zone \}\}<\/span>/)
+    expect(view).toMatch(/\.mD \.z\s*\{/)
+    // 它说的是「在哪个区」，不参与六态配色：比班次弱一档（--ink-dim），不抢主行。
+    expect(view).toMatch(/\.mD \.z \{[\s\S]{0,200}?var\(--ink-dim\)/)
+    // 长区名截断，别把 7 列挤歪。
+    expect(view).toMatch(/\.mD \.z \{[\s\S]{0,260}?text-overflow: ellipsis/)
   })
 })

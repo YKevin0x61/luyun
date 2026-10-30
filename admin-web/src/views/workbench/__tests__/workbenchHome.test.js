@@ -387,13 +387,13 @@ describe('工作台首页 · 店长视角', () => {
 })
 
 describe('工作台首页 · 员工视角', () => {
-  it('我的班次与工作区用自己的接口，点进「今天」页那张卡', async () => {
+  it('我的班次与工作区用自己的接口，点进「整月」页那张卡（2026-10-30 用户裁定）', async () => {
     const { wrapper } = await mountHome({ identity: 'staff', table: staffData() })
 
     const me = wrapper.get('.wbh-me')
     expect(me.text()).toContain('白班')
     expect(me.text()).toContain('后厨')
-    expect(me.attributes('href')).toBe('/workbench/staff/today')
+    expect(me.attributes('href')).toBe('/workbench/staff/month')
     // 店长那三个数字与今天谁上班都不在。
     expect(wrapper.find('.wbh-duty').exists()).toBe(false)
     expect(wrapper.findAll('.wbh-cell.leaves')).toHaveLength(0)

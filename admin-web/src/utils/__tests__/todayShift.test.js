@@ -6,6 +6,7 @@ import {
   isMe,
   monthCell,
   monthLabel,
+  monthZoneLabel,
   myDayText,
   nextTwoLine,
   offLabel,
@@ -272,6 +273,24 @@ describe('员工端「整月」（票 06）', () => {
     // 五态只在 `shiftTone` 里判一次：这条钉住 `monthCell` 是它的翻译，不是第二张表。
     for (const day of [MORNING, REST, LEAVE, ORPHAN, NOT_ROSTERED, null]) {
       expect(monthCell(day).tone).toBe(shiftTone(day))
+    }
+  })
+
+  it('班次下面那行写那天的工作区，休 / 请假不许接区名（2026-10-30 用户要求）', () => {
+    expect(monthZoneLabel(MORNING)).toBe('案板')
+    // 上半天也是在那个区上：跟「今天」页副行「今天上半天班 · 案板」同一档。
+    expect(monthZoneLabel(HALF)).toBe('案板')
+    // 没有班的那几态都没有区 —— 「休 · 案板」「请假 · 案板」是瞎话。
+    for (const day of [REST, LEAVE, ORPHAN, NOT_ROSTERED, null]) {
+      expect(monthZoneLabel(day)).toBe('')
+    }
+    // 没配区就整行不写：不拿一个空串占掉格子里的位置。
+    expect(monthZoneLabel({ ...MORNING, zone_name: null })).toBe('')
+    expect(monthZoneLabel({ ...MORNING, zone_name: '' })).toBe('')
+    // 判据仍然只有 `shiftTone` 那张表：它说不是上班，就没有区名。
+    for (const day of [MORNING, HALF, REST, LEAVE, ORPHAN, NOT_ROSTERED]) {
+      const tone = shiftTone(day)
+      expect(monthZoneLabel(day)).toBe(tone === 'shift' || tone === 'half' ? day.zone_name || '' : '')
     }
   })
 

@@ -212,3 +212,16 @@ export function myDayText(day) {
   if (tone !== 'shift') return text
   return day.zone_name ? `${text} · ${day.zone_name}` : text
 }
+
+/** 整月格子里的第三行：那天在哪个工作区上班（2026-10-30 用户要求，挂在班次下面）。
+ *
+ *  只挂在「上班」与「休半天」两态上，判据仍是 `shiftTone` 那唯一一张表：上半天也是在
+ *  那个区上（跟 `todaySubline` 同一档，那儿也写「今天上半天班 · 案板」）。「休 · 案板」
+ *  「请假 · 案板」是瞎话 —— 那两天他不在任何一个区。没配区就整行不写，不拿空行占掉
+ *  格子里本就不多的位置。
+ */
+export function monthZoneLabel(day) {
+  if (!day || !day.zone_name) return ''
+  const tone = shiftTone(day)
+  return tone === 'shift' || tone === 'half' ? day.zone_name : ''
+}

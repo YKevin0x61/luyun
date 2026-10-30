@@ -7,7 +7,8 @@
  *
  * 数据两个来源，各管一件事：
  *   · `GET /api/scheduling/me/month`（员工那个 cookie，跟 `/me` 同一扇门，接口上同样
- *     没有 `employee_id` 可填）：格子里是我的班别，外加那天全店上班几个人（`staff_count`）。
+ *     没有 `employee_id` 可填）：格子里是我的班别 + 那天我在哪个工作区（2026-10-30 用户
+ *     要求挂在班次下面），外加那天全店上班几个人（`staff_count`，B 案 v3 起移到面板里看）。
  *   · `GET /api/scheduling/me/day?date=…`（票 13，点开某一天才拉）：那天各班是谁、
  *     在哪个区，以及谁休、谁请假。**同事的班次名一个字都不进月历** —— 人数是人数，
  *     我的班是我的班。
@@ -36,6 +37,7 @@ import {
   dayBeyondWindow,
   monthCell,
   monthLabel,
+  monthZoneLabel,
   staffCountLabel,
   stepMonth,
 } from '../../utils/todayShift'
@@ -56,7 +58,10 @@ const errorText = ref('')
 
 const title = computed(() => monthLabel(month.value, today.value))
 // 每格只算一次四态：`:class` 与格子里的字共用这份（判据仍在 util 里读一次）。
-const cells = computed(() => days.value.map((day) => ({ ...day, ...monthCell(day) })))
+// `zone` 是班次下面那行工作区（2026-10-30 用户要求）：哪几态才接区名同样在 util 里判。
+const cells = computed(() =>
+  days.value.map((day) => ({ ...day, ...monthCell(day), zone: monthZoneLabel(day) })),
+)
 // 顶部固定摘要（B 案 v3）：今天在哪、点格子看什么。数据全部来自这条 month 响应。
 const todayCell = computed(() => cells.value.find((cell) => cell.is_today) || null)
 const todayLine = computed(() => {
@@ -307,6 +312,9 @@ useNudgePull({
             >
               <span class="n">{{ cell.day }}</span>
               <span class="s">{{ cell.text }}</span>
+              <!-- 那天在哪个工作区（2026-10-30 用户要求）：班次下面那行小字。只有上班 /
+                   休半天才写（`monthZoneLabel` 判），没配区就整行不出现。 -->
+              <span v-if="cell.zone" class="z">{{ cell.zone }}</span>
               <!-- 那天全店上班几个人（票 13）：跟上面那行班别是两个字段 —— 这一行说的是
                    店里，上面那行说的是我。0 与窗口外都不写（`staffCountLabel` 判）。 -->
               <span class="h">{{ staffCountLabel(cell.staff_count) }}</span>
@@ -606,6 +614,20 @@ useNudgePull({
   text-align: center;
 }
 
+/* 那天在哪个工作区（2026-10-30 用户要求）：班次下面那行小字，比班次弱一档 ——
+   它是补充（在哪个区），主行仍是班别本身。只在上半天 / 上班两态出现；长区名截断，
+   不让一个字把 7 列挤歪。 */
+.mD .z {
+  font-family: var(--font-sans);
+  font-size: 9px;
+  line-height: 1;
+  color: var(--ink-dim);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* 那天全店上班的人数（票 13）：格子里的第三行，最小的字 —— 它说的是「店里」，
    上面那行班别说的是「我」，所以比班别弱一档，别抢了主行。 */
 .mD .h {
@@ -614,8 +636,8 @@ useNudgePull({
   line-height: 1;
   color: var(--ink-faint);
   white-space: nowrap;
-  /* B 案 v3：格子只留「日号 + 班次」两行；「N 人在班」只在点开那天的面板里看
-     （面板的名单头会写「N 人在班 · N 人休假」）。留着节点与类名，口径不变。 */
+  /* B 案 v3：格子里那行小字给了工作区（`.z`，2026-10-30）；「N 人在班」只在点开那天
+     的面板里看（面板的名单头会写「N 人在班 · N 人休假」）。留着节点与类名，口径不变。 */
   display: none;
 }
 

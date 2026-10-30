@@ -234,448 +234,600 @@ useNudgePull({ id: 'me-overtime', topics: ['overtime'], pull: () => load(true) }
 <template>
   <div class="overtime-page hygiene-staff">
     <header class="tTop">
-      <span class="tDay">加班与补钟</span>
-      <span class="tDate">{{ employee ? employee.name : '' }}</span>
+      <div class="tTop-main">
+        <p class="kicker">我的工时</p>
+        <h1 class="tDay">加班与补钟</h1>
+        <p class="tDate">{{ employee ? employee.name : '' }}</p>
+      </div>
     </header>
 
     <p v-if="state === 'loading'" class="mSub">正在读你的加班记录…</p>
 
     <template v-else-if="state === 'error'">
       <p class="mSub">{{ errorText }}</p>
-      <button class="btn btn-block" type="button" @click="load()">重试</button>
+      <div class="oBody">
+        <button class="btn btn-block" type="button" @click="load()">重试</button>
+      </div>
     </template>
 
-    <template v-else>
-      <div v-if="summary" class="oCard">
-        <div class="oCardHd">{{ summary.month }} 这个月</div>
-        <!-- 净时长 + 两枚状态徽章（t54 / ③-3c-3）：徽章替代原来那句解释性文案 ——
-             「已批准算数、待批不算数」由两枚徽章各自说清，不再用一句话解释。 -->
-        <div class="oCardRow">
-          <span class="badge ok">已批准</span>
-          <b>{{ formatHalfHours(summary.approved.net_half_hours) }} 小时</b>
+    <div v-else class="oBody">
+      <!-- 本月：两格读数。徽章各自说清算不算数，不再用一句话解释。 -->
+      <section v-if="summary" class="panel">
+        <div class="panel-hd">
+          <h2>这个月</h2>
+          <span class="hint">{{ summary.month }}</span>
         </div>
-        <div class="oCardRow">
-          <span class="badge warn">待批</span>
-          <b>{{ formatHalfHours(summary.pending.net_half_hours) }} 小时</b>
-        </div>
-      </div>
+        <dl class="stats">
+          <div class="stat">
+            <dt><span class="badge ok">已批准</span></dt>
+            <dd>{{ formatHalfHours(summary.approved.net_half_hours) }}<i>小时</i></dd>
+          </div>
+          <div class="stat">
+            <dt><span class="badge warn">待批</span></dt>
+            <dd>{{ formatHalfHours(summary.pending.net_half_hours) }}<i>小时</i></dd>
+          </div>
+        </dl>
+      </section>
 
       <!-- 店长那一面（票 04）：打开页面第一件事是「有什么等着我批」，所以它在登记
            表单前面。没有这个能力的人根本看不到这一块（服务端 403 兜底）。 -->
-      <div v-if="canReview" class="oList oReview">
-        <div class="oListHd">等着我批的（{{ pending.length }}）</div>
+      <section v-if="canReview" class="panel oReview">
+        <div class="panel-hd">
+          <h2>等着我批的</h2>
+          <span class="hint">{{ pending.length }} 笔</span>
+        </div>
         <p v-if="reviewError" class="oErr">{{ reviewError }}</p>
-        <div v-for="entry in pending" :key="entry.id" class="oItem">
-          <div class="oL1">
-            <span class="oDate">{{ entry.entry_date }}</span>
-            <span class="oH" :class="{ minus: entry.half_hours < 0 }">
-              {{ formatHalfHours(entry.half_hours) }} 小时
-            </span>
-            <span class="oSt wait">{{ entry.employee_name }}</span>
-          </div>
-          <p class="oReason">{{ entry.reason }}</p>
-          <p class="oWho">{{ submittedByText(entry) }}</p>
-          <div class="oBtns">
-            <button
-              class="oPill ok"
-              type="button"
-              :disabled="reviewBusyId === entry.id"
-              @click="decide(entry, 'approve')"
-            >
-              批准
-            </button>
-            <button
-              class="oPill bad"
-              type="button"
-              :disabled="reviewBusyId === entry.id"
-              @click="startReject(entry)"
-            >
-              驳回
-            </button>
-          </div>
-          <div v-if="rejectingId === entry.id" class="oRejectBox">
-            <input
-              v-model="rejectReason"
-              class="oInput"
-              type="text"
-              :maxlength="maxRejectReason"
-              placeholder="为什么不算（必填，员工看得到）"
+        <ul v-if="pending.length" class="oList">
+          <li v-for="entry in pending" :key="entry.id" class="oItem">
+            <div class="oItem-top">
+              <span class="oDate">{{ entry.entry_date }}</span>
+              <span class="oPill wait">{{ entry.employee_name }}</span>
+            </div>
+            <p class="oItem-mid">
+              <b class="oH" :class="{ minus: entry.half_hours < 0 }">
+                {{ formatHalfHours(entry.half_hours) }}<i>小时</i>
+              </b>
+              <span class="oReason">{{ entry.reason }}</span>
+            </p>
+            <p class="oWho">{{ submittedByText(entry) }}</p>
+            <div class="oActs">
+              <button
+                class="btn oAct ok"
+                type="button"
+                :disabled="reviewBusyId === entry.id"
+                @click="decide(entry, 'approve')"
+              >
+                批准
+              </button>
+              <button
+                class="btn oAct bad"
+                type="button"
+                :disabled="reviewBusyId === entry.id"
+                @click="startReject(entry)"
+              >
+                驳回
+              </button>
+            </div>
+            <div v-if="rejectingId === entry.id" class="oReject">
+              <input
+                v-model="rejectReason"
+                class="input"
+                type="text"
+                :maxlength="maxRejectReason"
+                placeholder="为什么不算（必填，员工看得到）"
+              />
+              <button
+                class="btn oAct bad"
+                type="button"
+                :disabled="!rejectReason.trim() || reviewBusyId === entry.id"
+                @click="decide(entry, 'reject', { reason: rejectReason.trim() })"
+              >
+                确认驳回
+              </button>
+            </div>
+          </li>
+        </ul>
+        <p v-else class="mSub oEmpty">没有等着你批的登记。</p>
+      </section>
+
+      <form class="panel oForm" @submit.prevent="submit">
+        <div class="panel-hd">
+          <h2>记一笔</h2>
+          <span class="hint">{{ canReview ? '可补录过去' : '今天 · 昨天' }}</span>
+        </div>
+        <div class="oPad">
+          <!-- 店长能补录任意过去日期，所以给他一个日期输入；员工只有今天 / 昨天两个
+               选项，那两个按钮本身就是「窗口」的可视化。 -->
+          <div v-if="canReview" class="row">
+            <span class="row-lb">哪一天</span>
+            <!-- 日期用站内组件（2026-10-13 用户裁定「日期格式要中国本土化」）：原生
+                 `<input type=date>` 的显示格式跟着**浏览器界面语言**走，页面控制不了。 -->
+            <LuyunDatePicker
+              v-model="day"
+              :max-date="today"
+              placeholder="选择日期"
+              aria-label="补录哪一天"
             />
-            <button
-              class="oPill bad"
-              type="button"
-              :disabled="!rejectReason.trim() || reviewBusyId === entry.id"
-              @click="decide(entry, 'reject', { reason: rejectReason.trim() })"
-            >
-              确认驳回
-            </button>
           </div>
-        </div>
-        <p v-if="!pending.length && !reviewError" class="mSub">没有等着你批的登记。</p>
-      </div>
-
-      <form class="oForm" @submit.prevent="submit">
-        <!-- 店长能补录任意过去日期，所以给他一个日期输入；员工只有今天 / 昨天两个
-             选项，那两个按钮本身就是「窗口」的可视化。 -->
-        <div v-if="canReview" class="oRow">
-          <span class="oLabel">哪一天</span>
-          <!-- 日期用站内组件（2026-10-13 用户裁定「日期格式要中国本土化」）：原生
-               `<input type=date>` 的显示格式跟着**浏览器界面语言**走，页面控制不了。 -->
-          <LuyunDatePicker
-            v-model="day"
-            :max-date="today"
-            placeholder="选择日期"
-            aria-label="补录哪一天"
-          />
-        </div>
-        <div v-else class="oRow">
-          <span class="oLabel">哪一天</span>
-          <div class="oDays">
-            <button
-              v-for="opt in dayOptions"
-              :key="opt.value"
-              class="oDay"
-              :class="{ on: day === opt.value }"
-              type="button"
-              @click="day = opt.value"
-            >
-              {{ opt.label }}
-            </button>
+          <div v-else class="row">
+            <span class="row-lb">哪一天</span>
+            <div class="days">
+              <button
+                v-for="opt in dayOptions"
+                :key="opt.value"
+                class="day"
+                :class="{ on: day === opt.value }"
+                type="button"
+                @click="day = opt.value"
+              >
+                {{ opt.label }}
+              </button>
+            </div>
           </div>
-        </div>
 
-        <div v-if="canReview && roster.length" class="oRow">
-          <span class="oLabel">替谁记</span>
-          <select v-model="backfillFor" class="oInput">
-            <option value="">我自己</option>
-            <option v-for="person in roster" :key="person.id" :value="String(person.id)">
-              {{ person.name }}{{ person.resigned ? '（已离职）' : '' }}
-            </option>
-          </select>
-        </div>
-
-        <div class="oRow">
-          <span class="oLabel">时长</span>
-          <div class="oStepper">
-            <button
-              class="oStep"
-              type="button"
-              aria-label="减半小时"
-              @click="halfHours = stepHalfHours(halfHours, -1, maxHalfHours)"
-            >
-              −
-            </button>
-            <span class="oHours" :class="{ minus: halfHours < 0 }">{{ hoursText }}</span>
-            <button
-              class="oStep"
-              type="button"
-              aria-label="加半小时"
-              @click="halfHours = stepHalfHours(halfHours, 1, maxHalfHours)"
-            >
-              +
-            </button>
-            <span class="oUnit">小时</span>
-            <!-- 读数后面补一句「加班 / 补钟」：这一页名字就叫「加班与补钟」，光看正负号
-                 不够直白。0 时既不是加班也不是补钟，写「—」。 -->
-            <span class="oKind" :class="{ 'is-overtime': halfHours > 0, 'is-clock': halfHours < 0 }">{{ halfHours > 0 ? '加班' : halfHours < 0 ? '补钟' : '—' }}</span>
+          <div v-if="canReview && roster.length" class="row">
+            <span class="row-lb">替谁记</span>
+            <select v-model="backfillFor" class="input select">
+              <option value="">我自己</option>
+              <option v-for="person in roster" :key="person.id" :value="String(person.id)">
+                {{ person.name }}{{ person.resigned ? '（已离职）' : '' }}
+              </option>
+            </select>
           </div>
-        </div>
 
-        <div class="oRow">
-          <span class="oLabel">事由</span>
-          <input
-            v-model="reason"
-            class="oInput"
-            type="text"
-            :maxlength="maxReason"
-            placeholder="这笔是干什么的（必填）"
-          />
-        </div>
+          <div class="row">
+            <span class="row-lb">时长</span>
+            <div class="stepper">
+              <button
+                class="step"
+                type="button"
+                aria-label="减半小时"
+                @click="halfHours = stepHalfHours(halfHours, -1, maxHalfHours)"
+              >
+                −
+              </button>
+              <p class="readout">
+                <b class="hours" :class="{ minus: halfHours < 0 }">{{ hoursText }}</b><i>小时</i>
+              </p>
+              <button
+                class="step"
+                type="button"
+                aria-label="加半小时"
+                @click="halfHours = stepHalfHours(halfHours, 1, maxHalfHours)"
+              >
+                +
+              </button>
+              <!-- 读数后面补一句「加班 / 补钟」：这一页名字就叫「加班与补钟」，光看正负号
+                   不够直白。0 时既不是加班也不是补钟，写「—」。 -->
+              <span
+                class="kind"
+                :class="{ 'is-overtime': halfHours > 0, 'is-clock': halfHours < 0 }"
+              >{{ halfHours > 0 ? '加班' : halfHours < 0 ? '补钟' : '—' }}</span>
+            </div>
+          </div>
 
-        <p v-if="formError" class="oErr">{{ formError }}</p>
-        <p v-else-if="note" class="oNote">{{ note }}</p>
-        <button class="btn btn-block" type="submit" :disabled="!canSubmit">
-          {{ busy ? '提交中…' : '提交登记' }}
-        </button>
-        <p class="oHint">
-          加班记正数、补钟记负数，1 格 = 0.5 小时，单笔最多 {{ maxHalfHours / 2 }} 小时。
-          只能登记今天与昨天，更早的请找店长补录。
-        </p>
+          <div class="row">
+            <span class="row-lb">事由</span>
+            <input
+              v-model="reason"
+              class="input"
+              type="text"
+              :maxlength="maxReason"
+              placeholder="加班原因（必填）"
+            />
+          </div>
+
+          <p v-if="formError" class="oErr">{{ formError }}</p>
+          <p v-else-if="note" class="oNote">{{ note }}</p>
+          <button class="btn btn-primary btn-block" type="submit" :disabled="!canSubmit">
+            {{ busy ? '提交中…' : '提交登记' }}
+          </button>
+          <p class="oRule">
+            加班记正数、补钟记负数，1 格 = 0.5 小时，单笔最多 {{ maxHalfHours / 2 }} 小时。
+            只能登记今天与昨天，更早的请找店长补录。
+          </p>
+        </div>
       </form>
 
-      <div class="oList">
-        <div class="oListHd">我的记录</div>
-        <div v-for="entry in entries" :key="entry.id" class="oItem">
-          <div class="oL1">
-            <span class="oDate">{{ entry.entry_date }}</span>
-            <span class="oH" :class="{ minus: entry.half_hours < 0 }">
-              {{ formatHalfHours(entry.half_hours) }} 小时
-            </span>
-            <span class="oSt" :class="entryStatusTone(entry.status)">
-              {{ entryStatusText(entry.status) }}
-            </span>
-          </div>
-          <p class="oReason">{{ entry.reason }}</p>
-          <p v-if="entry.reject_reason" class="oErr">驳回理由：{{ entry.reject_reason }}</p>
-          <!-- 驳回之后「重提一笔」并不总是可行：这笔要是前天以前的，员工自己已经登不了
-               （窗口只有今天与昨天）。不说这一句，员工会以为随时能补，然后卡在日期上。 -->
-          <p v-if="entry.status === 'rejected'" class="mSub">
-            这一笔不算数。重提一笔就行；日期已经过了窗口（只能登今天与昨天）的话，请店长补录。
-          </p>
-          <button
-            v-if="entry.status === 'pending'"
-            class="oCancel"
-            type="button"
-            :disabled="cancelBusyId === entry.id"
-            @click="cancelEntry(entry)"
-          >
-            {{ cancelBusyId === entry.id ? '撤回中…' : '撤回' }}
-          </button>
+      <section class="panel">
+        <div class="panel-hd">
+          <h2>我的记录</h2>
+          <span class="hint">{{ entries.length }} 笔</span>
         </div>
-        <p v-if="!entries.length" class="mSub">
+        <ul v-if="entries.length" class="oList">
+          <li v-for="entry in entries" :key="entry.id" class="oItem">
+            <div class="oItem-top">
+              <span class="oDate">{{ entry.entry_date }}</span>
+              <span class="oPill" :class="entryStatusTone(entry.status)">
+                {{ entryStatusText(entry.status) }}
+              </span>
+            </div>
+            <p class="oItem-mid">
+              <b class="oH" :class="{ minus: entry.half_hours < 0 }">
+                {{ formatHalfHours(entry.half_hours) }}<i>小时</i>
+              </b>
+              <span class="oReason">{{ entry.reason }}</span>
+            </p>
+            <p v-if="entry.reject_reason" class="oErr">驳回理由：{{ entry.reject_reason }}</p>
+            <!-- 驳回之后「重提一笔」并不总是可行：这笔要是前天以前的，员工自己已经登不了
+                 （窗口只有今天与昨天）。不说这一句，员工会以为随时能补，然后卡在日期上。 -->
+            <p v-if="entry.status === 'rejected'" class="mSub">
+              这一笔不算数。重提一笔就行；日期已经过了窗口（只能登今天与昨天）的话，请店长补录。
+            </p>
+            <button
+              v-if="entry.status === 'pending'"
+              class="oCancel"
+              type="button"
+              :disabled="cancelBusyId === entry.id"
+              @click="cancelEntry(entry)"
+            >
+              {{ cancelBusyId === entry.id ? '撤回中…' : '撤回' }}
+            </button>
+          </li>
+        </ul>
+        <p v-else class="mSub oEmpty">
           还没有登记过。加班记一笔、欠钟记一笔，都会出现在这里。
         </p>
-      </div>
-    </template>
+      </section>
+    </div>
   </div>
 </template>
 
 <style scoped>
+/* 加班与补钟（员工端）—— 版式对齐「我的今天 / 我的整月」（2026-10-30）。
+   元素语言与那两页同一套：页头（kicker + H1 + 姓名）、面板（.panel）、读数（mono 大字 +
+   小号单位）、列表行（上沿一条发丝线）。颜色只走语义令牌，深浅两套主题自动跟随。
+   原来这一页的页头与空态文字**没有任何样式**（`.tTop` / `.mSub` 只长在别的页的 scoped
+   作用域里），标题、姓名、空态说明全按浏览器默认 16px 渲染 —— 这是「布局散」的主要原因。 */
 .overtime-page {
-  padding: 12px 14px 28px;
+  min-height: 100%;
+  background: var(--surface-0);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  padding-bottom: 28px;
 }
-.oCard {
-  border: 1px solid var(--hy-line, #e3e3e3);
-  border-radius: 10px;
-  padding: 12px 14px;
-  margin-bottom: 14px;
-}
-.oCardHd {
-  font-size: 13px;
-  letter-spacing: 0.06em;
-  color: var(--hy-ink, #222);
-  margin-bottom: 8px;
-}
-.oCardRow {
+
+/* ── 页头（尺寸与整月页同一档）────────────────────────────────────────── */
+.tTop {
   display: flex;
+  align-items: flex-end;
   justify-content: space-between;
-  font-size: 14px;
-  padding: 3px 0;
+  gap: 12px;
+  padding: max(18px, var(--safe-t)) max(16px, var(--safe-r)) 14px max(16px, var(--safe-l));
 }
-.oForm {
-  border: 1px solid var(--hy-line, #e3e3e3);
-  border-radius: 10px;
-  padding: 12px 14px;
-  margin-bottom: 16px;
-}
-.oRow {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-bottom: 10px;
-}
-.oLabel {
-  width: 52px;
-  flex: none;
-  font-size: 13px;
-  color: var(--hy-mute, #888);
-}
-.oDays {
-  display: flex;
-  gap: 8px;
-}
-.oDay {
-  padding: 6px 16px;
-  border: 1px solid var(--hy-line, #e3e3e3);
-  border-radius: 999px;
-  background: transparent;
-  font-size: 14px;
-}
-.oDay.on {
-  border-color: var(--hy-mint, #2f9e7f);
-  color: var(--hy-mint, #2f9e7f);
-}
-.oStepper {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-.oStep {
-  width: 34px;
-  height: 34px;
-  border: 1px solid var(--hy-line, #e3e3e3);
-  border-radius: 50%;
-  background: transparent;
-  font-size: 18px;
-  line-height: 1;
-  min-height: var(--tap);
-}
-.oHours {
-  min-width: 66px;
-  text-align: center;
-  font-size: 19px;
-  font-variant-numeric: tabular-nums;
-}
-.oHours.minus {
-  color: #c0392b;
-}
-.oUnit {
-  font-size: 12px;
-  color: var(--hy-mute, #888);
-}
-/* 读数后面的「加班 / 补钟」：小标签，颜色跟正负号同一套语义（加班 action、补钟 info）。 */
-.oKind {
-  margin-left: 2px;
-  padding: 2px 7px;
-  font-size: 10.5px;
-  line-height: 1.6;
+.tTop-main { min-width: 0; }
+.kicker {
+  margin: 0 0 7px;
+  font: 500 9.5px/1 var(--font-sans);
+  letter-spacing: .26em;
   color: var(--ink-faint);
+}
+.tDay {
+  margin: 0;
+  font: 600 26px/1 var(--font-sans);
+  letter-spacing: .01em;
+  color: var(--ink);
+}
+.tDate { margin: 7px 0 0; font-size: 10.5px; color: var(--ink-dim); }
+
+/* ── 面板 ──────────────────────────────────────────────────────────────── */
+.oBody {
+  padding: 0 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.panel {
+  background: var(--surface-1);
+  border: 1px solid var(--line);
+  border-radius: var(--r-2);
+  box-shadow: var(--hy-shadow-sm);
+  overflow: hidden;
+}
+.panel-hd {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 11px 14px;
+  border-bottom: 1px solid var(--line);
+}
+.panel-hd h2 {
+  margin: 0;
+  font: 600 12.5px/1 var(--font-sans);
+  letter-spacing: .06em;
+  color: var(--ink);
+}
+.hint {
+  margin-left: auto;
+  font-family: var(--font-mono), var(--font-sans);
+  font-size: 9.5px;
+  line-height: 1;
+  color: var(--ink-faint);
+}
+
+/* ── 本月读数：两格 ───────────────────────────────────────────────────── */
+.stats {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin: 0;
+  padding: 12px 14px 14px;
+}
+.stat {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 11px;
   border: 1px solid var(--line);
   border-radius: var(--r-1);
+  background: var(--surface-2);
 }
-.oKind.is-overtime {
+.stat dt { margin: 0; }
+.stat dd {
+  display: flex;
+  align-items: baseline;
+  margin: 0;
+  font-family: var(--font-mono), var(--font-sans);
+  font-size: 19px;
+  font-weight: 500;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+}
+/* 徽章：全局 `.badge` 只有一种灰，`ok` / `warn` 两个后缀从没定义过 —— 原来「已批准」
+   与「待批」长得一模一样。这里把两种状态各自上色。 */
+.badge {
+  padding: 2px 7px;
+  font-size: 9.5px;
+  line-height: 1.6;
+  border-radius: var(--r-full);
+}
+.badge.ok { color: var(--ok); border-color: var(--ok); background: var(--ok-soft); }
+.badge.warn { color: var(--warn); border-color: var(--warn); background: var(--warn-soft); }
+
+/* 单位：读数后面的小号「小时」，与读数同一基线。 */
+.stat dd i,
+.oItem-mid .oH i,
+.readout i {
+  margin-left: 3px;
+  font-family: var(--font-sans);
+  font-style: normal;
+  font-weight: 400;
+  font-size: 10px;
+  color: var(--ink-faint);
+}
+
+/* ── 表单 ──────────────────────────────────────────────────────────────── */
+.oPad {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px 14px;
+}
+.row { display: flex; align-items: center; gap: 10px; }
+.row-lb {
+  flex: none;
+  width: 48px;
+  font-size: 11.5px;
+  color: var(--ink-dim);
+}
+.row > .input { flex: 1; min-width: 0; }
+.days { display: flex; gap: 8px; }
+.day {
+  min-height: 48px;
+  padding: 0 18px;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--ink);
+  background: transparent;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-1);
+  cursor: pointer;
+  transition: border-color .16s var(--ease), color .16s var(--ease), background .16s var(--ease);
+}
+.day.on {
   color: var(--action);
   border-color: var(--action);
+  background: var(--action-soft);
+  font-weight: 600;
 }
-.oKind.is-clock {
-  color: var(--info);
-  border-color: var(--info);
+
+/* 时长：两侧是**正方形**加减键（原来 34×34 的圆 + 共享表给的 44px 下限，实测渲染成
+   34×44 的竖椭圆）。按下限 48 的方角按钮重做，读数夹在中间。 */
+.stepper {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
 }
-.oInput {
-  flex: 1;
-  padding: 8px 10px;
-  border: 1px solid var(--hy-line, #e3e3e3);
-  border-radius: 8px;
-  font-size: 14px;
+.step {
+  flex: none;
+  width: 48px;
+  height: 48px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-family: inherit;
+  font-size: 19px;
+  line-height: 1;
+  color: var(--ink);
+  background: var(--surface-2);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-1);
+  cursor: pointer;
+  transition: border-color .16s var(--ease), color .16s var(--ease), background .16s var(--ease);
 }
-/* 日期组件替掉原生 date（2026-10-13）：尺寸照 `.oInput` 那几条补（组件渲染的是
-   `.dp--input`，`.oInput` 那组选择器对它不生效）。**别覆盖 `padding`** —— 组件默认
-   那条给左边的日历图标留了位，压掉之后文字会被图标盖住。 */
-.oRow :deep(.luyun-date-picker) { flex: 1; }
-.oRow :deep(.luyun-date-picker .dp--input) { width: 100%; font-size: 14px; }
-.oErr {
-  font-size: 13px;
-  color: #c0392b;
-  margin: 4px 0 8px;
+.step:hover:not(:disabled) {
+  color: var(--action);
+  border-color: var(--action);
+  background: var(--action-soft);
 }
-.oNote {
-  font-size: 13px;
-  color: var(--hy-mint, #2f9e7f);
-  margin: 4px 0 8px;
+.step:active:not(:disabled) { transform: translateY(1px); }
+.readout {
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  min-width: 74px;
+  margin: 0;
 }
-.oHint {
-  font-size: 12px;
-  color: var(--hy-mute, #888);
+.hours {
+  font-family: var(--font-mono), var(--font-sans);
+  font-size: 24px;
+  font-weight: 500;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+}
+.hours.minus { color: var(--danger-bright); }
+.kind {
+  margin-left: 2px;
+  padding: 3px 8px;
+  font-size: 9.5px;
+  letter-spacing: .06em;
+  white-space: nowrap;
+  color: var(--ink-faint);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-full);
+}
+.kind.is-overtime { color: var(--ok); border-color: var(--ok); background: var(--ok-soft); }
+.kind.is-clock { color: var(--warn); border-color: var(--warn); background: var(--warn-soft); }
+
+/* 日期组件（店长补录那一档）：尺寸照 `.input` 补，组件渲染的是 `.dp--input`。 */
+.row :deep(.luyun-date-picker) { flex: 1; min-width: 0; }
+.row :deep(.luyun-date-picker .dp--input) { width: 100%; font-size: 13px; }
+
+.oErr { margin: 0; font-size: 11.5px; line-height: 1.6; color: var(--danger-bright); }
+.oNote { margin: 0; font-size: 11.5px; line-height: 1.6; color: var(--ok); }
+/* 提交按钮：主按钮、48px 方角。禁用时**不压透明度** —— 压到 0.45 之后整块糊成一格
+   灰影子，看不出是个按钮（原版就是这样）；改成一格浅底 + 次级字色，仍读得出「待填完」。 */
+.overtime-page.hygiene-staff .btn {
+  min-height: 48px !important;
+  border-radius: var(--r-1);
+}
+.overtime-page.hygiene-staff .btn-primary {
+  background: var(--action);
+  border-color: var(--action);
+  color: var(--action-ink);
+}
+.overtime-page.hygiene-staff .btn-primary:disabled {
+  opacity: 1;
+  background: var(--surface-3);
+  border-color: var(--line);
+  color: var(--ink-dim);
+}
+.oRule {
+  margin: 2px 0 0;
+  font-size: 11px;
+  line-height: 1.7;
+  color: var(--ink-faint);
+}
+
+/* ── 列表（我的记录 / 等批）──────────────────────────────────────────── */
+.oList { list-style: none; margin: 0; padding: 0; }
+.oItem { padding: 12px 14px; border-top: 1px solid var(--line); }
+.oItem:first-child { border-top: 0; }
+.oItem-top { display: flex; align-items: center; gap: 8px; }
+.oDate {
+  font-family: var(--font-mono), var(--font-sans);
+  font-size: 10.5px;
+  letter-spacing: .02em;
+  color: var(--ink-dim);
+}
+.oPill {
+  margin-left: auto;
+  padding: 2px 8px;
+  font-size: 9.5px;
   line-height: 1.6;
-  margin-top: 8px;
+  white-space: nowrap;
+  color: var(--ink-faint);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-full);
 }
-.oListHd {
-  font-size: 13px;
-  letter-spacing: 0.06em;
-  color: var(--hy-ink, #222);
-  margin-bottom: 8px;
+.oPill.wait { color: var(--warn); border-color: var(--warn); background: var(--warn-soft); }
+.oPill.ok { color: var(--ok); border-color: var(--ok); background: var(--ok-soft); }
+.oPill.bad {
+  color: var(--danger-bright);
+  border-color: var(--danger-bright);
+  background: var(--danger-soft);
 }
-.oItem {
-  border-top: 1px solid var(--hy-line, #eee);
-  padding: 10px 0;
-}
-.oL1 {
+.oItem-mid {
   display: flex;
   align-items: baseline;
   gap: 10px;
-}
-.oDate {
-  font-size: 13px;
-  color: var(--hy-mute, #888);
-  font-variant-numeric: tabular-nums;
+  margin: 7px 0 0;
 }
 .oH {
-  font-size: 16px;
+  flex: none;
+  font-family: var(--font-mono), var(--font-sans);
+  font-size: 17px;
+  font-weight: 500;
+  line-height: 1.2;
   font-variant-numeric: tabular-nums;
+  color: var(--ink);
 }
-.oH.minus {
-  color: #c0392b;
-}
-.oSt {
-  margin-left: auto;
-  font-size: 12px;
-}
-.oSt.wait {
-  color: #b8860b;
-}
-.oSt.ok {
-  color: var(--hy-mint, #2f9e7f);
-}
-.oSt.bad {
-  color: #c0392b;
-}
-.oSt.mute {
-  color: var(--hy-mute, #999);
-}
+.oH.minus { color: var(--danger-bright); }
 .oReason {
-  font-size: 14px;
-  margin: 4px 0 0;
-}
-.oCancel {
-  margin-top: 6px;
-  padding: 4px 12px;
-  border: 1px solid var(--hy-line, #e3e3e3);
-  border-radius: 999px;
-  background: transparent;
-  font-size: 13px;
-  min-height: var(--tap);
-}
-
-/* 店长那一面（票 04）：待审批队列、批 / 驳、代录选人。同一页多一块，所以给它自己的
-   边框 —— 两件事（我提的 / 我判的）在视觉上不能混成一串。 */
-.oReview {
-  border: 1px solid var(--hy-line, #e3e3e3);
-  border-radius: 10px;
-  padding: 12px 14px;
-  margin-bottom: 16px;
-}
-.oWho {
-  font-size: 12px;
-  color: var(--hy-mute, #888);
-  margin: 2px 0 0;
-}
-.oBtns {
-  display: flex;
-  gap: 8px;
-  margin-top: 8px;
-}
-.oPill {
-  padding: 5px 14px;
-  border: 1px solid var(--hy-line, #e3e3e3);
-  border-radius: 999px;
-  background: transparent;
-  font-size: 13px;
-  min-height: var(--tap);
-}
-.oPill.ok {
-  border-color: var(--hy-mint, #2f9e7f);
-  color: var(--hy-mint, #2f9e7f);
-}
-.oPill.bad {
-  border-color: #c0392b;
-  color: #c0392b;
-}
-.oPill:disabled {
-  opacity: 0.5;
-}
-.oRejectBox {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-  margin-top: 8px;
-}
-.oRejectBox .oInput {
   min-width: 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--ink-dim);
+  overflow-wrap: anywhere;
 }
+.oWho { margin: 4px 0 0; font-size: 10.5px; color: var(--ink-faint); }
+.oCancel {
+  margin-top: 9px;
+  min-height: 44px;
+  padding: 0 16px;
+  font-family: inherit;
+  font-size: 12px;
+  color: var(--ink);
+  background: transparent;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-1);
+  cursor: pointer;
+}
+.oCancel:hover:not(:disabled) {
+  color: var(--danger-bright);
+  border-color: var(--danger-bright);
+}
+/* 面板里的空态：不带 `.mSub` 那份页级左右外边距（面板自己有 14px 内距）。 */
+.panel .oEmpty { margin: 0; padding: 14px; }
+/* 条目内的说明（驳回后的窗口提示）跟事由左对齐；`.mSub` 那份页级外边距在面板里会多缩进一道。 */
+.oItem .mSub { margin: 6px 0 0; }
 
-/* 手机安全区（t52）：这页的 `.tTop` 来自共享样式表、顶槽写死 —— 页内补一条 scoped 覆盖，
-   只让位刘海，不动共享规则（它同时服务别的页）。判据看计算值。 */
-.overtime-page .tTop {
-  padding-top: max(18px, var(--safe-t));
+/* ── 店长那一面：批 / 驳 ──────────────────────────────────────────────── */
+.oActs { display: flex; gap: 8px; margin-top: 10px; }
+.oAct { flex: 1; }
+.overtime-page.hygiene-staff .oAct.ok {
+  color: var(--ok);
+  border-color: var(--ok);
+  background: transparent;
+}
+.overtime-page.hygiene-staff .oAct.ok:hover:not(:disabled) {
+  color: var(--ok);
+  border-color: var(--ok);
+  background: var(--ok-soft);
+}
+.overtime-page.hygiene-staff .oAct.bad {
+  color: var(--danger-bright);
+  border-color: var(--danger-bright);
+  background: transparent;
+}
+.overtime-page.hygiene-staff .oAct.bad:hover:not(:disabled) {
+  color: var(--danger-bright);
+  border-color: var(--danger-bright);
+  background: var(--danger-soft);
+}
+.oReject { display: flex; gap: 8px; align-items: center; margin-top: 9px; }
+.oReject .input { flex: 1; min-width: 0; }
+.oReject .oAct { flex: none; }
+
+/* 空态 / 加载 / 错误那一句话：原来这页没有 `.mSub` 样式，16px 黑字比标题还抢眼。 */
+.mSub {
+  margin: 0 16px 10px;
+  font-size: 11.5px;
+  line-height: 1.7;
+  color: var(--ink-dim);
 }
 </style>

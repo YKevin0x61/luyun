@@ -53,6 +53,9 @@ export const HOME_LINKS = {
   myItems: '/workbench/staff/clean',
   /** 我的申请待回应 → 「今天」页那张卡。 */
   myRequests: '/workbench/staff/today',
+  /** 员工档「我的班」卡片本体 → 整月（2026-10-30 用户裁定：原来整块点进「今天」页，
+   *  现在直接看这个月哪几天上班、上什么班）。 */
+  myMonth: '/workbench/staff/month',
   /** 员工档「我的班」卡下面那颗「加班」→ 加班与补钟（员工登记加班 / 补钟那一页）。 */
   myOvertime: '/workbench/staff/overtime',
   /** 员工档「我的班」卡下面那颗「损耗」→ 损耗登记（记一笔 + 看自己最近记的那几笔）。 */

@@ -309,14 +309,15 @@ useNudgePull({
            这句。身份探针先回、`/me` 后回，从别的页点回「今天」时每次都会闪一下。 -->
       <p v-if="state !== 'ready'" class="wbh-wait">正在读你的班…</p>
       <template v-else>
-      <!-- 我的班：卡片本体仍然整块点进「今天」页（测试挂点 `.wbh-me` 保持是那个链接）；
+      <!-- 我的班：卡片本体整块点进「整月」页（2026-10-30 用户裁定，原来进的是「今天」页；
+           测试挂点 `.wbh-me` 保持是那个链接）；
            副行下面多一行四个入口（2026-10-29 用户裁定加上「加班」与「损耗」）：请假 / 换班
            一次点击直达「今天」页并带上动作与营业日 —— 那一页把 `?act=&date=` 转进月历当天的
            操作单（发起只有那一处表单）；加班登记、损耗登记本来就在自己那一页
            （`/workbench/staff/overtime`、`/workbench/staff/loss`），直接过去，不在这儿再
            摆第二张表单。 -->
       <section class="wbh-me-card">
-        <router-link class="wbh-me" :to="HOME_LINKS.myRequests">
+        <router-link class="wbh-me" :to="HOME_LINKS.myMonth">
           <div class="wbh-kh">
             <span>我的班</span>
             <!-- 状态不能再写死「在岗」：休 / 请假 / 未排的那天大字写「休」、右上角却亮绿灯，
