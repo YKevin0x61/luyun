@@ -261,8 +261,10 @@ def test_admin_can_pin_a_fixed_zone_per_shift(scheduling_http):
     zone_id = _zone(db, "案板")
 
     roster = client.get("/api/scheduling/roster").json()
-    # 名单只有一份，是卫生那条线建的（排班经公共层读出来）。
-    assert {"id": zone_id, "name": "案板"} in roster["zones"]
+    # 名单只有一份，是卫生那条线建的（排班经公共层读出来）；两个班次开关跟着一起出。
+    assert roster["zones"] == [
+        {"id": zone_id, "name": "案板", "day_shift": 1, "night_shift": 1}
+    ]
     assert roster["employees"][0]["zone_defaults"] == {}
 
     saved = client.put(
@@ -939,8 +941,11 @@ def test_manager_reads_the_week_grid(scheduling_http):
     # 启用的班次一个不少：抽屉拿这份当班次选择列表。
     assert [shift["name"] for shift in body["shifts"]] == ["白班", "夜班"]
     assert body["excluded"] == {"resigned": 0, "pending": 0}
+    # 票 01：周表自己的回应带区名单与每人每班次的固定区（这里都还没配 → 空）。
+    assert body["zones"] == []
     assert len(body["employees"]) == 1
     row = body["employees"][0]
+    assert row["zone_defaults"] == []
     assert (row["id"], row["name"], row["job_title"], row["has_rule"]) == (
         employee_id,
         NAME,
