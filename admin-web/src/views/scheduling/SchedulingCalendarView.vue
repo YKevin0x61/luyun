@@ -317,10 +317,15 @@ async function openPanel(next) {
   if (next === 'roster') {
     await loadRoster()
     // 名单顶部那一节（票 04）算的是「今天要顶的档」，吃的是 `/week` 那份数据（`week.today`
-    // 与 `week.employees`）。直接落在 `?view=roster`（刷新 / 书签）时周表还没读过 —— 不补
-    // 这一次，那一节会静默消失，看起来比「今天没人休」更糟（像是功能坏了）。只补数据，
-    // 不渲染周表。
-    if (!week.value) await loadWeek(weekStart.value || mondayOf(today.value))
+    // 与 `week.employees`）。这一节说的**永远是今天**，可 `/week` 只回打开那一周的 7 天：
+    // 直接落在 `?view=roster`（刷新 / 书签）时周表还没读过，翻过周 / 用 `?start=` 深链到
+    // 旧周时手上那份又不含今天 —— 两种情况下 `rosterCoverRows` 都拿不到今天的格子，整节
+    // 静默消失，看起来像「今天没人休」。所以只要已加载的那一周不含 `week.today` 就补拉
+    // 今天那一周；拿到别的周的数据只会得出「今天没人休」这种假话。只补数据，不渲染周表。
+    const loadedWeek = week.value
+    const coversToday = !!loadedWeek
+      && (loadedWeek.days || []).some((day) => day.business_date === loadedWeek.today)
+    if (!coversToday) await loadWeek(mondayOf(today.value))
   }
   // 周表按需读：默认落在月历上，没切过去就不发这个请求。
   else if (next === 'week') {
@@ -760,14 +765,30 @@ const penZoneName = computed(() => {
   return zone ? zone.name : '跟固定区'
 })
 
-/** 悬浮球上写什么：当前那支笔。班次写名字（最多三个字，与格子里的缩写同一套口径），
- *  休 / 休半天 / 清各写一个字 —— 收起状态下也要一眼看出下一笔会写什么。 */
+/** 球面文字最多三个字（与格子里的班次缩写同一套口径）。球本身还受 `.gPick-fabText`
+ *  的 `max-width: 52px` + ellipsis 兜底，所以「早班·明档2」真放不下时会被截成省略号 ——
+ *  能看见「班次·区」的前半截，比只写班次名强。 */
+function shortPenText(value) {
+  const text = String(value || '')
+  return text.length > 3 ? text.slice(0, 3) : text
+}
+
+/** 悬浮球上写什么：当前那支笔。班次写名字（最多三个字），休 / 休半天 / 清各写一个字 ——
+ *  收起状态下也要一眼看出下一笔会写什么。
+ *
+ *  装过区（`penZoneId !== ''`）时把区名接在班次后面：这一笔写下去带着区，而「哪个区」
+ *  正是这个功能的意义（真机截图：点一行装笔后球面只剩「早班」，装载的区看不见）。
+ *  「跟固定区」（`penZoneId === ''`）不接 —— 它不需要挤进球面，写班次名就够；区查不到
+ *  （名单还没读到 / 区刚被删）也退回只写班次，拼一句「跟固定区」是假话。 */
 const penLabel = computed(() => {
   if (penClear.value) return '清'
   if (penHalfRest.value) return '休半天'
   if (penRest.value) return '休'
-  const name = penShift.value ? String(penShift.value.name || '班') : '班'
-  return name.length > 3 ? name.slice(0, 3) : name
+  const name = shortPenText(penShift.value ? penShift.value.name : '班') || '班'
+  const zone = penZoneId.value === ''
+    ? null
+    : zones.value.find((item) => String(item.id) === penZoneId.value)
+  return zone ? `${name}·${shortPenText(zone.name)}` : name
 })
 
 /** 球上那个小圆点的记号：班次 / 休 / 休半天 / 清。**只分这四档、不按班次配色**
@@ -2097,7 +2118,11 @@ useNudgePull({
             </div>
           <!-- 悬浮球（2026-10-29 用户要求）：笔栏常驻太占地方，收成右下角一颗球，点球才展开。
                球面写当前那支笔（班次名 / 休 / 休半天 / 清），收起也一眼知道下一笔会写什么。 -->
+          <!-- 弹层开着时不渲染笔球：球是 `--z-queue`（200），会压在弹层（`--z-dialog`）
+               某一行上（真机截图）。层级令牌那套语义不动，这里只是让它不在没用的时刻出现 ——
+               弹层里点一行本来就是「装笔」，装完回周表，球才重新有意义。 -->
           <button
+            v-if="!coverSheet"
             class="gPick-fab"
             type="button"
             :class="{ open: penOpen }"

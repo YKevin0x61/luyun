@@ -989,6 +989,43 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
             {"白班": ("day", False), "夜班": ("night", True)},
         )
 
+    async def test_week_grid_lists_an_inactive_shift_a_fixed_zone_points_to(self):
+        """固定区指向的停用班次，即使这一周一行都没有，也要进 `shifts[]`。
+
+        前端 `weekCoverSlots` 靠 `shiftById` 认班次：查不到只能当成「班次被硬删」，
+        那条「停用 → 照列、`can_pen=false`、原因 `shift_inactive`」的行就整行静默消失。
+        所以 `/week` 的 `shifts[]` 不能只看「这一周真有行」。
+        """
+        employee = await self._employee()
+        day = await self._shift_id("白班")
+        zone = await self._zone("案板")
+        # 顺序反了配不上：`set_zone_default` 只认还在用的班次。配完再停用 ——
+        # 这条路径正是 spec 要覆盖的状态（固定区还指着、班次已经停用、本周没有行）。
+        await self.store.set_zone_default(employee["id"], day, zone)
+        await self.store.update_shift(day, is_active=False)
+
+        grid = await self.store.week_grid(TODAY)
+
+        self.assertEqual(
+            [
+                (shift["name"], shift["is_active"], shift["duty_slot"])
+                for shift in grid["shifts"]
+                if shift["id"] == day
+            ],
+            [("白班", False, "day")],
+        )
+        # 固定区那一行照旧带着它（前端 `weekCoverSlots` 要用它算出那一行）。
+        self.assertEqual(
+            grid["employees"][0]["zone_defaults"],
+            [{"shift_id": day, "zone_id": zone, "zone_name": "案板"}],
+        )
+        # 这一周确实一行都没有 —— 否则这条用例只是重复「有行所以出」。
+        self.assertFalse(any(
+            cell["shift_id"] == day
+            for row in grid["employees"]
+            for cell in row["cells"].values()
+        ))
+
     async def test_week_grid_carries_shift_zone_and_the_override_flag(self):
         """验收 3 + 契约：格子里是班次、工作区与「这天跟规则不一样」；撤掉覆盖回规则。"""
         employee = await self._employee()

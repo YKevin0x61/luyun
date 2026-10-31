@@ -9,10 +9,14 @@
 
 这里出 `id` / `name`，以及 `day_shift` / `night_shift` 两个开关（「这个区跑不跑
 白班 / 夜班」）。排班做「要顶的档」需要知道这个区跑不跑这一档：馅档只跑夜市，把
-一个人配到「馅档 × 早班」时那一行不该出现（见 `.scratch/week-cover/spec.md`）。开关
-本身仍然是卫生那两段固定班次的说法（卫生自己读，`HygieneWork.list_zones`），排班
-只读、不解释 —— 排班的班次是数据（`staff_shifts`），跟卫生的「白 / 夜」两个字不是
-一回事。
+一个人配到「馅档 × 早班」时那一行不该出现（见 `.scratch/week-cover/spec.md`）。
+
+两个开关的**语义由卫生定义**（卫生自己读，`HygieneWork.list_zones`）：排班不解释、
+也不另立一套「这个区跑哪几档」的说法，只是把这两个开关**原样下发**给前端，当前端判断
+「这个区跑不跑这一档」的判据。对应关系就是排班班次的 `duty_slot` 那两个词：`day` ↔
+`day_shift`、`night` ↔ `night_shift`（`admin-web/src/utils/weekCoverSlots.js` 的
+`ZONE_SLOT_FLAG`）。排班自己的班次是数据（`staff_shifts`），跟卫生的「白 / 夜」两个字
+不是一回事；开关本身不搬进排班，也不在排班这边重命名。
 """
 
 from __future__ import annotations
