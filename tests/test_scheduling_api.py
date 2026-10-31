@@ -20,7 +20,7 @@ import api.scheduling as scheduling_module
 from config import settings
 from database import CHINA_TZ, DatabaseManager
 from services.app_runtime import AppRuntime, set_runtime
-from services.business_day import current_business_date
+from services.business_day import current_workbench_date
 from services.hygiene.accounts import EmployeeAccounts
 from services.scheduling.store import (
     BACKFILL_DAYS,
@@ -106,7 +106,7 @@ def test_the_default_clock_is_still_the_wall_clock():
     传 `now=`）—— 哪天默认值被写死、或者传参漏了，日期相关的用例会一起安静地测同一件事。
     """
     store = SchedulingStore(_FakeConnection())
-    assert store.today() == current_business_date(datetime.now(CHINA_TZ))
+    assert store.today() == current_workbench_date(datetime.now(CHINA_TZ))
 
 
 def _employee_id(accounts, phone=PHONE, name=NAME):

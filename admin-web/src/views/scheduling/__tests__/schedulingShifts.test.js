@@ -73,7 +73,8 @@ describe('店长端班次表（票 11）', () => {
     // （停用、调顺序、删除、改档位）—— 加一条和改名没这道重读，照旧自己写 `errorText`。
     expect(view).toMatch(/async function reportFailure/)
     expect(view).toMatch(/await load\(\)\n  errorText\.value = message/)
-    expect((view.match(/await reportFailure\(err, /g) || []).length).toBe(4)
+    // 五个会挨服务端拦的动作：停用 / 调顺序 / 删除 / 改档位 / 改颜色（0043 那一条）。
+    expect((view.match(/await reportFailure\(err, /g) || []).length).toBe(5)
     expect(view).not.toMatch(/errorText\.value = err\.message[\s\S]{0,80}await load\(\)/)
     expect(view).toMatch(/v-if="errorText"[\s\S]{0,40}role="alert"/)
   })
@@ -87,12 +88,13 @@ describe('店长端班次表（票 11）', () => {
     expect(view).toMatch(/const busy = computed\(\(\) => busyId\.value !== 0\)/)
     expect(view).not.toMatch(/:disabled="[^"]*busyId === /)
     // 行里每一个写动作的控件都按「有动作在飞」灰：改名保存 / 档位 / ↑ / ↓ / 改名 / 启停 / 删除。
-    expect((view.match(/:disabled="[^"]*\bbusy\b[^"]*"/g) || []).length).toBe(7)
+    // 改名保存 / 档位 / ↑ / ↓ / 改名 / 启停 / 删除 + 两排色块（8 档与中性各一颗）。
+    expect((view.match(/:disabled="[^"]*\bbusy\b[^"]*"/g) || []).length).toBe(9)
     // 每个动作开头都留着同一道 guard（按钮已经灰了，这一道是给键盘/脚本兜底的）。
-    expect((view.match(/if \([^)]*busy\.value\) return/g) || []).length).toBe(5)
+    expect((view.match(/if \([^)]*busy\.value\) return/g) || []).length).toBe(6)
     expect(view).toMatch(/async function toggleActive\(shift\) \{[\s\S]{0,80}?if \(busy\.value\) return/)
     // 只有自己还占着槽才清零。
-    expect((view.match(/if \(busyId\.value === (?:shift|target)\.id\) busyId\.value = 0/g) || []).length).toBe(5)
+    expect((view.match(/if \(busyId\.value === (?:shift|target)\.id\) busyId\.value = 0/g) || []).length).toBe(6)
     expect(view).not.toMatch(/finally \{\s*busyId\.value = 0\s*\}/)
   })
 

@@ -377,13 +377,14 @@ def test_each_capture_stays_in_the_zone_it_was_shot_in(hygiene_http):
 
 
 def test_the_override_only_covers_its_own_business_day(hygiene_http):
-    """单日覆盖只属于那一天：跨过 06:00 切日点之后回到规则给的区。
+    """单日覆盖只属于那一天：跨过零点切日点之后回到规则给的区。
 
     票 10 之前这条测的是「新营业日重新选区不算换区」。同一件事在排班侧就是：
-    覆盖是**按营业日**的快照，卫生跟着营业日切（9/14 05:59 还在 9/13）。
+    覆盖是**按工作台日**的快照，卫生跟着工作台日切（9/13 23:59 还在 9/13）；
+    切点从营业日的 06:00 挪到自然日 00:00，见 ADR 0125。
     """
     env = hygiene_http
-    # 跨营业日要过 20 小时，班次级会话会先过期，所以用「记住登录」的 30 天会话。
+    # 跨日要过 14 小时，班次级会话会先过期，所以用「记住登录」的 30 天会话。
     _login(env.client, remember=True)
     _run(
         env.store.set_override(
@@ -395,12 +396,12 @@ def test_the_override_only_covers_its_own_business_day(hygiene_http):
     )
     assert env.client.get("/api/hygiene/staff/me").json()["employee"]["zone_id"] == env.second
 
-    # 06:00 之前还是营业日 9/13：覆盖仍然算数。
-    env.clock.now = datetime(2026, 9, 14, 5, 59, tzinfo=CHINA_TZ)
+    # 零点之前还是工作台日 9/13：覆盖仍然算数。
+    env.clock.now = datetime(2026, 9, 13, 23, 59, tzinfo=CHINA_TZ)
     assert _run(env.accounts.current_assignment(env.employee["id"]))["zone_id"] == env.second
 
-    # 06:00 起是新的营业日：回到规则给的固定区。
-    env.clock.now = datetime(2026, 9, 14, 6, 0, tzinfo=CHINA_TZ)
+    # 零点起是新的工作台日：回到规则给的固定区。
+    env.clock.now = datetime(2026, 9, 14, 0, 0, tzinfo=CHINA_TZ)
     after = _run(env.accounts.current_assignment(env.employee["id"]))
     assert (after["shift"], after["zone_id"]) == ("白班", env.first)
     me = env.client.get("/api/hygiene/staff/me")

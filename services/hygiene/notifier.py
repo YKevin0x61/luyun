@@ -18,7 +18,7 @@ from datetime import datetime
 from typing import Protocol
 
 from db_core.utils import CHINA_TZ
-from services.business_day import business_date_of
+from services.business_day import workbench_date_of
 from services.wecom_outbox import wecom_outbox
 from services.wecom_push_topics import TOPIC_HYGIENE_REMINDER, PushTrigger
 
@@ -81,4 +81,6 @@ class WeComGroupTextNotifier:
         相同，群里多发一遍也只是刷屏——合并掉是有意的。
         """
         digest = hashlib.sha1(content.encode("utf-8")).hexdigest()[:16]
-        return f"{business_date_of(self._now())}:{digest}"
+        # 日期那一半跟卫生的「今天」同一把尺子（工作台日 00:00 切，ADR 0125）：
+        # 用营业日会在 0–6 点把同一天的两次触发算成两天（或反过来），去重窗跟着错。
+        return f"{workbench_date_of(self._now())}:{digest}"

@@ -332,6 +332,30 @@ describe('resolveLoginTab（面板默认开在哪一栏）', () => {
   })
 })
 
+// 2026-11-01 用户裁定：`/login?next=/` 打开默认员工栏。`/` 是门店首页（页面清单里
+// `audience: admin` 的「运营仪表盘」），但员工在手机浏览器里打开门店根地址时，守卫与
+// 401 兜底给出的 `?next=` 正是这一条 —— 默认开管理员栏会让员工先看到用户名+密码表单。
+describe('resolveLoginTab：`?next=/`（门店首页）打开默认员工栏', () => {
+  it('没记住值时是员工栏，不是管理员栏', () => {
+    expect(resolveLoginTab('/', null)).toBe('staff')
+    expect(resolveLoginTab('/', undefined)).toBe('staff')
+    // 记住值是脏数据时同样落员工栏（首页这条优先于记住值）。
+    expect(resolveLoginTab('/', 'boss')).toBe('staff')
+  })
+
+  it('优先于「记住的是管理员栏」：从首页被踢回来就是员工栏', () => {
+    expect(resolveLoginTab('/', 'admin')).toBe('staff')
+    // 带 query 的首页同样认（`?next=/?tab=orders`）。
+    expect(resolveLoginTab('/?tab=orders', 'admin')).toBe('staff')
+  })
+
+  it('只放首页这一条：其它管理端专属页仍强制管理员栏（D13 判据不变）', () => {
+    expect(resolveLoginTab('/admin', null)).toBe('admin')
+    expect(resolveLoginTab('/workbench/hr/roster', null)).toBe('admin')
+    expect(resolveLoginTab('/sales-report', 'staff')).toBe('admin')
+  })
+})
+
 // D13：`?next=` 指向**管理端专属页**时开管理员栏。
 // 原来只按「是不是员工落点 / 配方阅读面」判，其余一律跟记住值走、没记住值就落员工栏 ——
 // 于是 `/login?next=/workbench/hr/roster` 这种只认管理端 cookie 的目标，开出来是手机号
@@ -342,7 +366,6 @@ describe('resolveLoginTab（D13）：?next 是管理端专属页时强制管理�
     expect(resolveLoginTab('/sales-report', null)).toBe('admin')
     expect(resolveLoginTab('/workbench/floor/daily', null)).toBe('admin')
     expect(resolveLoginTab('/workbench/kitchen/recipe/manage', null)).toBe('admin')
-    expect(resolveLoginTab('/', null)).toBe('admin')
   })
 
   it('优先于「记住的是员工栏」：目标进不去就不该开员工栏让人白填', () => {

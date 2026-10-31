@@ -197,6 +197,7 @@ export const COLUMN_LABELS = {
   'prep_items.min_batch_qty': '最小起批量', 'prep_items.safety_stock_ratio': '安全库存系数',
   'prep_plan_entries.produced_by': '产量登记人', 'prep_plan_entries.produced_at': '产量登记时间',
   'staff_shifts.name': '班次名称', 'staff_shifts.duty_slot': '卫生档位',
+  'staff_shifts.color_key': '班次颜色',
   'staff_assignments.source': '来源', 'staff_assignments.half_rest': '休半天',
   'scheduling_overrides.kind': '覆盖来源', 'scheduling_overrides.voided': '已作废',
   'scheduling_requests.kind': '申请类型',

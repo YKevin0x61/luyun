@@ -158,12 +158,15 @@ export function dayBeyondWindow(day, windowEnd) {
  */
 export function monthCell(day) {
   const tone = shiftTone(day)
-  if (tone === 'none') return { text: '', tone }
-  if (tone === 'rest') return { text: '休', tone }
-  if (tone === 'half') return { text: '休半天', tone }
-  if (tone === 'leave') return { text: '请假', tone }
-  if (tone === 'moved') return { text: '已调整', tone }
-  return { text: day.shift_name, tone }
+  // 上班那一天带上班次色键（0043）：格子里写的是班别名，颜色是辅助 —— 认不出颜色的人
+  // 照样读得懂。`shift_color` 缺（迁移没应用）时就是 null，格子退回中性。
+  const color = tone === 'shift' ? day.shift_color || null : null
+  if (tone === 'none') return { text: '', tone, color }
+  if (tone === 'rest') return { text: '休', tone, color }
+  if (tone === 'half') return { text: '休半天', tone, color }
+  if (tone === 'leave') return { text: '请假', tone, color }
+  if (tone === 'moved') return { text: '已调整', tone, color }
+  return { text: day.shift_name, tone, color }
 }
 
 // ── 全店视角（票 13）：格子上的「N人在班」与点开某天那份名单 ─────────────

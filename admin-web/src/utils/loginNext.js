@@ -240,6 +240,10 @@ export function resolveStaffNext(raw, fallback = STAFF_ENTRY_PATH) {
 
 /** 面板默认开在哪一栏。判据按优先级从上到下，第一条命中即用：
  *
+ *  0. `?next=` 是**门店首页 `/`** → 强制员工栏（2026-11-01 用户裁定）。员工在手机浏览器
+ *     里打开门店根地址时，守卫/401 兜底给出的 `?next=` 就是这一条；这里原先按「管理端
+ *     专属页」强制管理员栏，员工打开登录页先看到的是用户名+密码表单。代价是管理端从
+ *     首页被踢回来时要自己切一次栏 —— 用户明确选了这个方向。
  *  1. `?next=` 是**两种身份都能开的店长页**（`audience: admin` 且带 `staffCap`：排班三页、
  *     损耗分析，2026-10-14）→ **不强制**，按记住值走。这类页管理端与「勾了那项能力的员工」
  *     都进得去，写死任何一侧都会让另一侧白填一次。
@@ -257,12 +261,18 @@ export function resolveStaffNext(raw, fallback = STAFF_ENTRY_PATH) {
  *  这里再写一份前缀正则；清单里没有的路径（老地址、手改的）一律不强制，交回记住值。
  */
 export function resolveLoginTab(raw, remembered) {
-  // 带 `staffCap` 的页（排班三页 / 损耗分析）**两种身份都可能开**：既不强制员工栏、
-  // 也不强制管理员栏，交回记住值（没记住过就落员工栏，手机为主）。写死任何一侧都会
-  // 让另一侧在登录面板上白填一次 —— 员工不许看管理员栏，管理端也不该被塞进手机号表单。
   const next = sanitizeNext(raw)
   if (next) {
-    const row = pageRow(pathnameOf(next))
+    const pathname = pathnameOf(next)
+    // 首页例外（2026-11-01 用户裁定）：`/login?next=/` 打开默认员工栏，优先于记住值。
+    // 只放首页这一条 —— 花名册、数据管理等其它管理端专属页仍按下面 D13 那条强制管理员栏；
+    // 首页那个 `admin` 身份判定也就此绕开（这是唯一一处刻意不按页面清单判的地方，理由
+    // 是「员工打开门店根地址」的入口体验，不是这一页的身份）。
+    if (pathname === '/') return 'staff'
+    // 带 `staffCap` 的页（排班三页 / 损耗分析）**两种身份都可能开**：既不强制员工栏、
+    // 也不强制管理员栏，交回记住值（没记住过就落员工栏，手机为主）。写死任何一侧都会
+    // 让另一侧在登录面板上白填一次 —— 员工不许看管理员栏，管理端也不该被塞进手机号表单。
+    const row = pageRow(pathname)
     if (row && row.audience === 'admin' && row.staffCap) {
       return remembered === 'admin' ? 'admin' : 'staff'
     }

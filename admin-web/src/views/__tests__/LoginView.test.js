@@ -197,6 +197,19 @@ describe('/login 面板：两个 Tab 与默认栏', () => {
     expect(window.localStorage.getItem('luyun.login.panel.tab')).toBe('admin')
   })
 
+  // 2026-11-01 用户裁定：`/login?next=/`（员工在手机浏览器打开门店根地址时被守卫踢回来的
+  // 落点）打开默认员工栏，不再因为 `/` 在页面清单里是管理端专属页而开超级管理员栏。
+  it('?next=/（门店首页）打开默认员工栏，优先于记住的管理员栏', async () => {
+    rememberTab('admin')
+    fetchMock.mockResolvedValueOnce(STAFF_LOGGED_OUT())
+
+    const { wrapper } = await mountLogin('/login?next=%2F')
+
+    expect(activeTab(wrapper)).toBe('员工')
+    expect(findCall(fetchMock, '/api/hygiene/staff/session')).toBeTruthy()
+    expect(findCall(fetchMock, '/api/auth/status')).toBeFalsy()
+  })
+
   // D13：`?next=` 指向管理端专属页时开超级管理员栏。这类目标只认管理端 cookie，开员工栏
   // 等于让人在手机号表单上白填一次（审查实测：`/login?next=/workbench/hr/roster` 开的是
   // 员工栏）。没记住过偏好也一样 —— 那正是审查里撞到的那一档。

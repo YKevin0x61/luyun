@@ -152,7 +152,9 @@ describe('员工端「整月」页（票 06）', () => {
     expect(view).toMatch(/class="dot shift"[^<]*\/>上班/)
     expect(view).toMatch(/class="dot rest"[^<]*\/>休/)
     expect(view).toMatch(/class="dot leave"[^<]*\/>请假/)
-    expect(copy).toContain("if (tone === 'leave') return { text: '请假', tone }")
+    // util 那份翻译层（0043 起多带一个 color 字段：班次色只挂在「上班」那态，
+    // 请假/休/休半天/已调整都是 null —— 颜色不替状态说话）。
+    expect(copy).toContain("if (tone === 'leave') return { text: '请假', tone, color }")
   })
 
   it('半天休那格有自己的颜色与图例，不跟「休」「上班」混（票 07）', () => {
@@ -162,7 +164,7 @@ describe('员工端「整月」页（票 06）', () => {
     expect(view).toMatch(/\.mD\.half \.s\s*\{[^}]*var\(--accent-alt\)/)
     expect(view).toMatch(/\.dot\.half\s*\{[^}]*var\(--accent-alt\)/)
     expect(view).toMatch(/class="dot half"[^<]*\/>休半天/)
-    expect(copy).toContain("if (tone === 'half') return { text: '休半天', tone }")
+    expect(copy).toContain("if (tone === 'half') return { text: '休半天', tone, color }")
     // 四态各自的名字都在图例上（少一条员工就猜「这格子什么意思」）。
     for (const word of ['上班', '休', '休半天', '还没排']) {
       expect(view).toContain(word)

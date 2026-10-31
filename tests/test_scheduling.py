@@ -3,7 +3,8 @@
 """排班服务层（票 02）：配固定班次 → 展开 90 天 → 月历数得出来。
 
 主缝 = 服务层 + 真库 + 注入时钟（见 `.scratch/scheduling/spec.md` 的「测试缝」）：
-排班的窗口、相位、可补记窗口（票 14）都由**营业日**决定，所以时钟必须能拨。
+排班的窗口、相位、可补记窗口（票 14）都由**工作台日**（自然日 00:00 切，ADR 0125）决定，
+所以时钟必须能拨。
 """
 
 import ast
@@ -17,7 +18,7 @@ from unittest import mock
 from config import settings
 from database import CHINA_TZ, DatabaseManager
 from db_core.schema import ADMIN_READ_ONLY_TABLES, SCHEDULING_TABLES
-from services.business_day import current_business_date
+from services.business_day import current_workbench_date
 from services.hygiene.accounts import EmployeeAccounts
 from services.scheduling.store import (
     EXPANSION_DAYS,
@@ -30,7 +31,7 @@ from services.scheduling.store import (
 PASSWORD = "password123"
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
-# 2026-09-24 是周四，10:00 已经过了 06:00 的切日点 → 营业日就是 9/24。
+# 2026-09-24 是周四；工作台日按自然日 00:00 切，10:00 当然就是 9/24。
 TODAY = "2026-09-24"
 LAST_DAY = "2026-12-22"  # 今天 + 89 天
 
@@ -38,8 +39,8 @@ LAST_DAY = "2026-12-22"  # 今天 + 89 天
 class AdvancingClock:
     """一个会推进的假时钟：前 `early_reads` 次读数是切日**之前**的时刻，之后是之后的。
 
-    06:00 是营业日的切日点（`services/business_day.py`）：同一个写请求里前几次读钟
-    算出来的营业日是 9/23、后面的变成 9/24 —— 正好复现「删的时候还是 9/23、铺的时候
+    00:00 是工作台日的切日点（`services/business_day.py`，ADR 0125）：同一个写请求里前几次
+    读钟算出来的日子是 9/23、后面的变成 9/24 —— 正好复现「删的时候还是 9/23、铺的时候
     已经是 9/24」那个竞态（见 `test_a_write_request_reads_the_clock_once_across_the_cut`）。
     """
 
@@ -594,8 +595,8 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
             [item["scheduled"] for item in month["days"][:today_index]], [False] * today_index
         )
 
-    async def test_my_month_defaults_to_this_business_month(self):
-        """不填月份就是本营业月（凌晨一点看到的和店长看到的是同一个月）。"""
+    async def test_my_month_defaults_to_this_workbench_month(self):
+        """不填月份就是本工作台月（自然日所在那个月，和店长看到的是同一个月）。"""
         employee = await self._employee()
         day = await self._shift_id("白班")
         await self.store.set_rule(employee["id"], [day])
@@ -1274,27 +1275,50 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
             await self.store._conn.execute("ALTER TABLE staff_shifts_tmp RENAME TO staff_shifts")
             await self.store._conn.commit()
 
-    async def test_window_follows_the_business_day_cut(self):
-        """06:00 才切日：凌晨 5:30 还算是前一天的营业日，窗口也跟着往前一天。"""
+    async def test_window_follows_the_workbench_day_cut(self):
+        """自然日零点才切日：前一天 23:30 还算前一天，窗口也跟着往前一天。"""
         employee = await self._employee()
         day = await self._shift_id("白班")
-        before_cut = SchedulingStore(
-            self.db, now=lambda: datetime(2026, 9, 24, 5, 30, tzinfo=CHINA_TZ)
+        before_midnight = SchedulingStore(
+            self.db, now=lambda: datetime(2026, 9, 23, 23, 30, tzinfo=CHINA_TZ)
         )
 
-        await before_cut.set_rule(employee["id"], [day])
+        await before_midnight.set_rule(employee["id"], [day])
 
-        self.assertEqual(before_cut.today(), "2026-09-23")
+        self.assertEqual(before_midnight.today(), "2026-09-23")
         rows = await self._rows(employee["id"])
         self.assertEqual(rows[0]["business_date"], "2026-09-23")
         self.assertEqual(rows[-1]["business_date"], "2026-12-21")  # 9/23 + 89
 
-    async def test_a_write_request_reads_the_clock_once_across_the_cut(self):
-        """写请求正好跨过 06:00：删与铺必须是**同一个营业日**。
+    async def test_today_flips_at_midnight_not_at_six(self):
+        """「今天」在**零点**翻，不在 06:00 —— ADR 0125 的回归锁。
 
-        钟在同一个请求里从 9/24 05:59:59.999（还属于营业日 9/23）推进到 9/24 06:00:00.001
-        （营业日已经是 9/24）。修之前 `_delete_future_rule_rows` 与 `_expand_rows` 各读
-        一次钟 —— 删的是 ≥ 9/23 的行、铺的是 [9/24, …]，刚结束的那个营业日（9/23）被删掉
+        症状：11/1 00:19 打开员工端整月页，页面写「今天 10/31」、手机写 11/1，同屏两个
+        「今天」指两天，用户只能当它坏了。现在 23:59 还是 10/31、00:01 就是 11/1，
+        「本营业月」也跟着从 10 月翻到 11 月。
+        """
+        employee = await self._employee()
+        day = await self._shift_id("白班")
+        late = SchedulingStore(
+            self.db, now=lambda: datetime(2026, 10, 31, 23, 59, tzinfo=CHINA_TZ)
+        )
+        early = SchedulingStore(
+            self.db, now=lambda: datetime(2026, 11, 1, 0, 1, tzinfo=CHINA_TZ)
+        )
+
+        self.assertEqual(late.today(), "2026-10-31")
+        self.assertEqual(early.today(), "2026-11-01")
+
+        await late.set_rule(employee["id"], [day])
+        self.assertEqual((await late.my_month(employee["id"]))["month"], "2026-10")
+        self.assertEqual((await early.my_month(employee["id"]))["month"], "2026-11")
+
+    async def test_a_write_request_reads_the_clock_once_across_the_cut(self):
+        """写请求正好跨过零点：删与铺必须是**同一个工作台日**。
+
+        钟在同一个请求里从 9/23 23:59:59.999（还是 9/23）推进到 9/24 00:00:00.001
+        （已经是 9/24）。修之前 `_delete_future_rule_rows` 与 `_expand_rows` 各读
+        一次钟 —— 删的是 ≥ 9/23 的行、铺的是 [9/24, …]，刚结束的那一天（9/23）被删掉
         而且**没人补**：月历和员工页上那天从「有班」变成「还没排到」。修之后 `set_rule`
         在开头取一次 today 往下传。
 
@@ -1304,22 +1328,22 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
         employee = await self._employee()
         day = await self._shift_id("白班")
         night = await self._shift_id("夜班")
-        # 先在营业日 9/23 把规则配好（凌晨 5:30 还算是 9/23 的营业日）：
-        # 那个营业日本来就有一行（窗口从 9/23 起）。
+        # 先在 9/23 把规则配好（23:30 还没过零点，工作台日仍是 9/23）：
+        # 那一天本来就有一行（窗口从 9/23 起）。
         before_cut = SchedulingStore(
-            self.db, now=lambda: datetime(2026, 9, 24, 5, 30, tzinfo=CHINA_TZ)
+            self.db, now=lambda: datetime(2026, 9, 23, 23, 30, tzinfo=CHINA_TZ)
         )
         await before_cut.set_rule(employee["id"], [day])
         self.assertEqual(before_cut.today(), "2026-09-23")
         self.assertEqual((await self._rows(employee["id"]))[0]["business_date"], "2026-09-23")
 
         clock = AdvancingClock(
-            datetime(2026, 9, 24, 5, 59, 59, 999000, tzinfo=CHINA_TZ),
-            datetime(2026, 9, 24, 6, 0, 0, 1000, tzinfo=CHINA_TZ),
+            datetime(2026, 9, 23, 23, 59, 59, 999000, tzinfo=CHINA_TZ),
+            datetime(2026, 9, 24, 0, 0, 0, 1000, tzinfo=CHINA_TZ),
         )
-        # 前提：这两个读数算出来的营业日不一样（05:59 还是 9/23、06:00 已是 9/24）。
-        self.assertEqual(current_business_date(clock.early), "2026-09-23")
-        self.assertEqual(current_business_date(clock.late), "2026-09-24")
+        # 前提：这两个读数算出来的工作台日不一样（23:59 还是 9/23、零点已是 9/24）。
+        self.assertEqual(current_workbench_date(clock.early), "2026-09-23")
+        self.assertEqual(current_workbench_date(clock.late), "2026-09-24")
 
         await SchedulingStore(self.db, now=clock).set_rule(employee["id"], [night])
         self.assertGreater(clock.reads, 1)  # 假钟真的被读了不止一次

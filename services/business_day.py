@@ -1,12 +1,24 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""营业日：唯一的切日规则与唯一的实现。
+"""切日规则：营业日（06:00 切）与工作台日（00:00 切），各自唯一的实现。
 
-门店的「今天」不是日历日：06:00 之前算前一天（凌晨的订单属于前一晚的营业）。
-这条规则原先在四五个模块里各写了一遍（`scraper/state_store.py`、`services/scraper_health.py`、
-`services/reconcile_job.py`、`services/hygiene/accounts.py`、`services/wecom_push_service.py`
-的派生用法），各处的边界写法略有差异；报表与企微推送更干脆按**日历日**切，于是同一个
-「今天」在系统里有两套含义（CORR-05）。
+**这里装的是两把尺子，不是一把。** 用哪把由「这个日期是给谁看的」决定：
+
+- **营业日（06:00 切）**：采集、对账、报表、企微推送的「当天」。凌晨的订单属于前一晚的
+  营业——这条由 POS 的 `bsCode` 决定，不是我们的开关。入口是 `business_date_of` /
+  `current_business_date` / `business_date_range`。
+- **工作台日（自然日，00:00 切）**：员工端与店长端的排班、卫生、考勤，以及加班与损耗。
+  这些页面回答的是「我哪一天上班 / 哪一天该交检查 / 哪一天加的班」，日历日才是员工嘴里
+  的那天；06:00 切会让手机时钟（11/1 00:19）与页面（「今天 10/31」）在一屏里打架。
+  入口是 `workbench_date_of` / `current_workbench_date` / `workbench_day_range`。
+  2026-11-01 用户裁定，见 ADR 0125。
+
+两把尺子必须同时在场：报表那边不能改（POS 的营业日），工作台那边不该留 06:00（店里
+没有跨零点的班次，06:00 在这里没有任何业务依据）。切点分派的完整理由见 ADR 0125。
+
+历史上这条规则原先在四五个模块里各写了一遍（`scraper/state_store.py`、
+`services/scraper_health.py`、`services/reconcile_job.py`、`services/hygiene/accounts.py`、
+`services/wecom_push_service.py` 的派生用法），各处的边界写法略有差异（CORR-05）。
 
 放在这里而不是放进任何业务包：调用方横跨 `scraper/`、`services/`、`db_core/`，
 放在任何一侧都会造出反向依赖。代价是本模块要从 `db_core.utils` 取 `CHINA_TZ`
@@ -15,13 +27,15 @@
 
 用法：
 
-    from services.business_day import BUSINESS_DAY_CUT_HOUR, business_date_of, current_business_date
+    from services.business_day import business_date_of, current_business_date, current_workbench_date
 
-    business_date_of(datetime(2026, 9, 22, 5, 0, tzinfo=CHINA_TZ))  # '2026-09-21'
-    current_business_date()                                        # 现在所属的营业日
+    business_date_of(datetime(2026, 9, 22, 5, 0, tzinfo=CHINA_TZ))    # '2026-09-21'（营业日）
+    current_workbench_date()                                         # 现在所属的自然日
+    current_business_date()                                          # 现在所属的营业日
 
-切点是 **[cut, 次日 cut)** 的半开区间，与 `compute_sales_report` 的区间参数一一对应：
-把 `business_date` 交给 `to_business_day_range()` 就能拿到两端的时间戳，无需各处再算一次。
+营业日的切点是 **[cut, 次日 cut)** 的半开区间，与 `compute_sales_report` 的区间参数一一对应：
+把 `business_date` 交给 `business_date_range()` 就能拿到两端的时间戳，无需各处再算一次。
+工作台日的切点是 **[当日 00:00, 次日 00:00)**，没有可配的 cut 小时。
 """
 
 from __future__ import annotations
@@ -65,6 +79,29 @@ def business_date_range(business_date: str) -> tuple[datetime, datetime]:
     start = datetime(
         day.year, day.month, day.day, BUSINESS_DAY_CUT_HOUR, tzinfo=CHINA_TZ
     )
+    return start, start + timedelta(days=1)
+
+
+# ── 工作台日（自然日，00:00 切）────────────────────────────────────────────
+# 三个函数跟上面三个一一对应，只是切点固定为 00:00。**故意不合并成一个带
+# `cut_hour` 参数的函数**：切点由「这个日期给谁看」决定，参数化等于把这个判断
+# 推给每个调用方，正是 CORR-05 要收掉的那种散落（见模块 docstring / ADR 0125）。
+
+
+def workbench_date_of(moment: datetime) -> str:
+    """``moment`` 所属的工作台日（``YYYY-MM-DD``，自然日）。"""
+    return to_china_tz(moment).date().isoformat()
+
+
+def current_workbench_date(now: Optional[datetime] = None) -> str:
+    """当前工作台日；``now`` 可注入以便测试。"""
+    return workbench_date_of(now or datetime.now(CHINA_TZ))
+
+
+def workbench_day_range(work_date: str) -> tuple[datetime, datetime]:
+    """工作台日 ``YYYY-MM-DD`` → ``[当日 00:00, 次日 00:00)``，两个都带北京时。"""
+    day = date.fromisoformat(work_date)
+    start = datetime(day.year, day.month, day.day, tzinfo=CHINA_TZ)
     return start, start + timedelta(days=1)
 
 

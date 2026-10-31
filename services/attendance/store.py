@@ -75,7 +75,7 @@ from typing import Any, Callable, Optional
 import asyncpg
 
 from db_core.utils import CHINA_TZ
-from services.business_day import current_business_date
+from services.business_day import current_workbench_date
 from services.holiday_calendar import HolidayCalendar, HolidayError
 from services.identity import EmployeeAccounts, EmployeeAccountsError, serialized_write
 from services.identity.profile import (
@@ -223,8 +223,13 @@ class AttendanceStore:
         return value
 
     def today(self) -> str:
-        """当前营业日（06:00 切，北京时）—— 与 `staff_assignments.business_date` 同一个词。"""
-        return current_business_date(self._now_dt())
+        """当前工作台日（**自然日，00:00 切**，北京时）—— 与 `staff_assignments.business_date` 同一个词。
+
+        2026-11-01 之前这里是 06:00 的营业日，于是「每月 1 日 06:00 之前考勤表停在上一月」
+        （GLOSSARY 与 ADR 0112 都按那条写的）。改成自然日后，每月 1 号 00:00 就翻月。
+        字段名 `business_date` 不变，口径见 ADR 0125。
+        """
+        return current_workbench_date(self._now_dt())
 
     def _now_iso(self) -> str:
         """写库的时间戳（ISO 字符串，带 +08:00）—— 与排班那边 `_now_iso()` 同一条口径。"""

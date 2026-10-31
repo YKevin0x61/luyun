@@ -129,6 +129,10 @@ _ERROR_DETAILS = {
     "invalid_shift_order": "显示顺序得是个整数",
     # 卫生档位（票 10）：只能是不出日常 / 白班档 / 夜班档 三种。
     "invalid_duty_slot": "卫生档位只能选白班档、夜班档，或者不出日常：请重新选一次",
+    # 班次颜色（0043）：只能从 8 个色键里挑，或者选中性。
+    "invalid_shift_color": "颜色只能从这 8 档里选（苔绿、薄荷、潮青、天蓝、松墨、玫、草绿、藕荷），或者选中性",
+    # 带一个 `{}`：服务层把占着这档色的班次名放在 `args[0]`（能照做的那种说法）。
+    "shift_color_taken": "这个颜色已经给「{}」用了：换一个，或者先把那个班次改成别的颜色",
     # 编辑班次表用的「没有这一行」：跟 `unknown_shift`（只能挑在用的班次）分开 ——
     # 停用的班次照样要能改名、能重新启用。
     "unknown_shift_id": "找不到这个班次：可能已经被删了，刷新看看",
@@ -145,8 +149,9 @@ _ERROR_DETAILS = {
         "migrations/pg/0005_scheduling.sql、0006_scheduling_zone_defaults.sql、"
         "0007_scheduling_overrides.sql、0008_scheduling_requests.sql、"
         "0009_scheduling_swap.sql、0010_shift_duty_slot.sql、"
-        "0028_staff_assignments_half_rest.sql 与 "
-        "0040_scheduling_overrides_voided.sql，然后刷新本页"
+        "0028_staff_assignments_half_rest.sql、"
+        "0040_scheduling_overrides_voided.sql 与 "
+        "0043_shift_color.sql，然后刷新本页"
     ),
 }
 
@@ -180,6 +185,8 @@ class CreateShiftRequest(BaseModel):
 
     name: Optional[str] = None
     sort_order: Optional[int] = None
+    # 班次颜色（0043）：不给 = 服务层自动挑一个空闲主色；`neutral` = 中性。
+    color_key: Optional[str] = None
     duty_slot: Optional[str] = None
 
 
@@ -198,6 +205,8 @@ class UpdateShiftRequest(BaseModel):
     is_active: Optional[bool] = None
     # 卫生档位（票 10）：见上面的例外说明 —— `None` 不动、空串清空、day/night 是设置。
     duty_slot: Optional[str] = None
+    # 班次颜色（0043）：`null` = 不动，空串 / `neutral` = 回中性，其余按白名单校验。
+    color_key: Optional[str] = None
 
 
 class ShiftOrderRequest(BaseModel):
@@ -646,7 +655,11 @@ async def create_shift(
     的卡片都按 N 个班次渲染，不需要改代码（验收项）。"""
     store = SchedulingStore(db)
     try:
-        return {"shift": await store.create_shift(payload.name, payload.sort_order, payload.duty_slot)}
+        return {
+            "shift": await store.create_shift(
+                payload.name, payload.sort_order, payload.duty_slot, payload.color_key
+            )
+        }
     except SchedulingError as exc:
         raise _bad_request(exc) from exc
 
@@ -679,7 +692,12 @@ async def update_shift(
     try:
         return {
             "shift": await store.update_shift(
-                shift_id, payload.name, payload.sort_order, payload.is_active, payload.duty_slot
+                shift_id,
+                payload.name,
+                payload.sort_order,
+                payload.is_active,
+                payload.duty_slot,
+                payload.color_key,
             )
         }
     except SchedulingError as exc:

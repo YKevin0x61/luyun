@@ -28,7 +28,7 @@
 管理端入口补验本来就是通的 —— 缺的只是 staff 那两个入口，不是服务层能力。
 
 时钟全部注入（``_Clock``）：2026-09-08 周二（上周）、09-13 周日（上周）、09-14 周一
-（本周第一天）、09-15 周二（今天）；卫生周从周一 06:00 起。
+（本周第一天）、09-15 周二（今天）；卫生周从周一 **00:00** 起（ADR 0125，之前是 06:00）。
 """
 
 import asyncio
@@ -303,7 +303,7 @@ def test_backfilled_accept_belongs_to_the_photo_business_week(env):
     _run(work.accept_daily(SUPER, item["id"], "白班", business_date=LAST_SUNDAY))
 
     boards = _run(work.list_boards())
-    assert boards["week_start"] == "2026-09-14T06:00:00+08:00"
+    assert boards["week_start"] == "2026-09-14T00:00:00+08:00"
     assert all(row["一次通过"] == 0 for row in boards["people"])
 
     trend = _run(work.hygiene_trend(days=30))

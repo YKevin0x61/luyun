@@ -51,18 +51,24 @@ describe('店长端周表（员工 × 周）', () => {
     // 「他请假了」和「他今天本来就休」画成一个颜色。
     expect(view).toMatch(/cell\.leave \? '假' : '休'/)
     expect(view).toMatch(/leave: off && !!cell\.leave/)
-    expect(view).toMatch(/\.gW-cell\.leave \{ color: var\(--hy-aqua\)/)
+    // 请假不再借班次色（0043）：以前它用的是 aqua 那档班次色，于是「请假」看着像
+    // 某个班次。现在退回中性底 + 信息蓝文字，跟「休」的灰、跟班次的彩色都分得开。
+    expect(view).toMatch(/\.gW-cell\.leave \{ color: var\(--info\); background: var\(--wb-ink-a04\)/)
   })
 
   it('格子里一定留字，而且缩写要能彼此分开', () => {
-    // 颜色只有 6 个 tone，班次是数据、可以配到第 6 个 —— 所以「靠颜色认班次」不成立，
-    // 格子里必须有字。而且不能死取第一个字：「主管A两头班」与「主管B两头班」都是「主」。
+    // 颜色是班次自带的（0043），班次是数据、可以配到第 9 个 —— 所以「靠颜色认班次」
+    // 永远不成立：格子里必须有字。而且不能死取第一个字：「主管A两头班」与「主管B两头班」
+    // 都是「主」。
     expect(view).toMatch(/const weekShortNames = computed/)
     expect(view).toMatch(/weekShortNames\.value\[cell\.shift_id\]/)
-    expect(view).toMatch(/const SHIFT_TONES = \['mint', 'aqua', 'amber', 'seal', 'violet', 'rose'\]/)
-    // 五个班次至少要有五个不重样的 tone（门店那种 A/B/C + 两个主管班）。
-    for (const tone of ['mint', 'aqua', 'amber', 'seal', 'violet']) {
-      expect(view).toContain(`.gW-cell.tone-${tone} {`)
+    // 颜色**不再**由前端按序号推断：没有 SHIFT_TONES，色键从班次数据里读。
+    expect(view).not.toMatch(/const SHIFT_TONES/)
+    expect(view).toMatch(/const colorByShift = computed/)
+    expect(view).toMatch(/shift\.color_key \|\| SHIFT_COLOR_NEUTRAL/)
+    // 8 档 + 中性各自的格子样式都在（色值本身在 theme.workbench.css，这里只认 class 名）。
+    for (const tone of ['moss', 'mint', 'tide', 'sky', 'pine', 'rose', 'grass', 'lilac', 'neutral']) {
+      expect(view).toContain(`.gW-cell.tone-${tone}`)
     }
   })
 

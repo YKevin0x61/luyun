@@ -17,7 +17,7 @@ import logging
 from datetime import datetime
 from typing import Optional
 
-from services.business_day import business_date_of
+from services.business_day import workbench_date_of
 from services.identity.accounts import (  # noqa: F401  转发给卫生端既有调用方
     ALLOWED_PERMISSIONS,
     FORBIDDEN_SUPER_PERMISSION,
@@ -37,8 +37,15 @@ logger = logging.getLogger(__name__)
 
 
 def hygiene_business_date(now: datetime) -> str:
-    """营业日 YYYY-MM-DD，06:00 切（与 POS 同一规则）——卫生端的名字。"""
-    return business_date_of(now)
+    """工作台日 YYYY-MM-DD，**00:00 切**（自然日）——卫生端的名字。
+
+    2026-11-01 之前这里是 06:00 的营业日（与 POS 同一规则）。改成自然日是因为这一页
+    回答的是「我哪天该交检查」，而店里没有跨零点的班次：06:00 切只会在 0–6 点把页面
+    说成昨天，跟手机时钟打架。采信/报表仍是 06:00，见 `services.business_day` 与 ADR 0125。
+    名字（和 `business_date` 这个字段名）没跟着改：它已经是 `staff_assignments` /
+    `hygiene_*` 的列名与 API 字段，改名要动 schema 与前端契约，换不来任何行为。
+    """
+    return workbench_date_of(now)
 
 
 # 卫生自己的班次：员工当天能交哪份日常检查由它决定。排班系统有它自己的一套。

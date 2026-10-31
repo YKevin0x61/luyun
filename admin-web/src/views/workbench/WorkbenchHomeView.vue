@@ -547,7 +547,8 @@ useNudgePull({
   align-items: center;
   justify-content: center;
   min-height: 48px;
-  font-size: 11.5px;
+  font-size: 13px;
+  font-weight: 600;
   color: var(--action);
   text-decoration: none;
 }

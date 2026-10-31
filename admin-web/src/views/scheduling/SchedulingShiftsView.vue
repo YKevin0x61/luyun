@@ -33,7 +33,12 @@ import {
   dutySlotPayload,
   dutySlotText,
   dutySlotValue,
+  SHIFT_COLOR_CHOICES,
+  SHIFT_COLOR_NEUTRAL,
+  colorOwner,
   moveShift as moveShiftOrder,
+  shiftColorClass,
+  shiftColorLabel,
   statusText,
   toggleLabel,
   usageLine,
@@ -192,6 +197,40 @@ async function setDutySlot(shift, value) {
   }
 }
 
+/** 改班次颜色（0043）：点了哪个色块就发哪个键，**已被人占用的那一档不可点**。
+ *
+ *  不可点的判据跟服务端的部分唯一索引同一口径（只数启用中的班次），但真正兜底的是
+ *  服务端：它会把占着这档色的班次名回在原话里（`shift_color_taken`）。
+ */
+async function setColor(shift, key) {
+  if (busy.value) return
+  // 点的就是现状：不发请求（不发也就不会把回执刷成一条没变化的话）。
+  if (key === (shift.color_key || SHIFT_COLOR_NEUTRAL)) return
+  busyId.value = shift.id
+  errorText.value = ''
+  receipt.value = ''
+  try {
+    const data = await api.put(`/api/scheduling/shifts/${shift.id}`, { color_key: key })
+    receipt.value = `改好了：${data.shift.name} 的班次色 → ${shiftColorLabel(data.shift.color_key)}`
+    await load()
+  } catch (err) {
+    await reportFailure(err, '没改成')
+  } finally {
+    if (busyId.value === shift.id) busyId.value = 0
+  }
+}
+
+/** 色块的 title / aria-label：被别人占着就说清是谁（同「停用前先看人数」那条口径）。 */
+function colorTitle(shift, key) {
+  const owner = colorOwner(shifts.value, key, shift.id)
+  const label = shiftColorLabel(key)
+  return owner ? `${label}：${owner.name} 在用` : label
+}
+
+// 色块的底色只从 token 来：`.tone-<键>`（`theme.workbench.css`）把 `--shift-fill` 定成那一档，
+// `.sSw-dot` 取它当底色。**不再在模板里动态拼令牌名（`--shift-` + 色键）** —— 那种写法既走
+// 内联 style，designGuard 的静态分析也看不见它（会被判成「引用了未定义的令牌」）。
+
 async function moveShift(shift, delta) {
   const index = shifts.value.findIndex((item) => item.id === shift.id)
   // 重排要一次给全（服务端 `reorder_shifts` 的口径）：整表的新顺序由 util 算。
@@ -313,6 +352,30 @@ onMounted(() => {
                 <span class="sMain">
                   <b class="sName">{{ shift.name }}</b>
                   <span class="sUsage">{{ usageLine(shift) }}</span>
+                  <!-- 班次色（0043）：8 档 + 中性。被别人占着的那档不可点，title 里点名谁在用；
+                       停用的班次保留自己的色，所以它的色块也照常显示选中态。 -->
+                  <span class="sSw" role="group" :aria-label="`「${shift.name}」的班次颜色`">
+                    <button
+                      v-for="choice in SHIFT_COLOR_CHOICES"
+                      :key="choice.key"
+                      type="button"
+                      class="sSw-dot"
+                      :class="[`tone-${choice.key}`, { on: (shift.color_key || SHIFT_COLOR_NEUTRAL) === choice.key }]"
+                      :title="colorTitle(shift, choice.key)"
+                      :aria-label="colorTitle(shift, choice.key)"
+                      :disabled="busy || !!colorOwner(shifts, choice.key, shift.id)"
+                      @click="setColor(shift, choice.key)"
+                    />
+                    <button
+                      type="button"
+                      class="sSw-dot sSw-neutral tone-neutral"
+                      :class="{ on: (shift.color_key || SHIFT_COLOR_NEUTRAL) === SHIFT_COLOR_NEUTRAL }"
+                      :title="colorTitle(shift, SHIFT_COLOR_NEUTRAL)"
+                      aria-label="中性"
+                      :disabled="busy"
+                      @click="setColor(shift, SHIFT_COLOR_NEUTRAL)"
+                    />
+                  </span>
                 </span>
                 <span class="sTag" :class="{ off: !shift.is_active }">{{ statusText(shift) }}</span>
                 <!-- 读和写是同一个控件：选中的那一条就是这条班次现在的档位（停用的也能改 ——
@@ -467,6 +530,18 @@ onMounted(() => {
   border-top: 1px solid var(--wb-ink-a08);
 }
 .sRow:first-child { border-top: 0; }
+/* 班次色块（0043）：18px 方点，选中的那档套一圈 --ink 外环；被人占着的淡出且不可点。
+   底色只从 token 来：`.tone-<键>` 把 `--shift-fill` 定成那一档，这里取它（中性档也走
+   `.tone-neutral`，所以兜底值与它一致）。这里不写任何具体色值。 */
+.sSw { display: flex; align-items: center; gap: 4px; margin-top: 5px; flex-wrap: wrap; }
+.sSw-dot {
+  width: 18px; height: 18px; padding: 0; border-radius: 5px;
+  border: 1px solid var(--shift-edge); cursor: pointer; flex: none;
+  background: var(--shift-fill, var(--shift-neutral));
+}
+.sSw-dot.on { box-shadow: 0 0 0 2px var(--ink); }
+.sSw-dot:disabled { opacity: .3; cursor: not-allowed; }
+.sSw-neutral { border-style: dashed; border-color: var(--line-strong); }
 .sRow:hover { background: var(--surface-2); }
 .sRow.off .sName { color: var(--ink-dim); }
 .sOrd { text-align: center; font-family: var(--font-mono); font-size: 10px; color: var(--ink-faint); }

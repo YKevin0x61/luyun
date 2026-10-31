@@ -43,7 +43,7 @@ from typing import Any, Callable, Optional
 import asyncpg
 
 from db_core.utils import CHINA_TZ
-from services.business_day import current_business_date, shift_business_date
+from services.business_day import current_workbench_date, shift_business_date
 from services.identity import EmployeeAccounts, ZoneDirectory, serialized_write
 
 logger = logging.getLogger(__name__)
@@ -81,6 +81,9 @@ __all__ = [
     "MAX_REQUEST_NOTE",
     "MAX_SHIFT_NAME",
     "REST",
+    "SHIFT_COLORS",
+    "SHIFT_COLOR_KEYS",
+    "SHIFT_COLOR_NEUTRAL",
     "SOURCE_OVERRIDE",
     "SOURCE_RULE",
     "STATUS_APPROVED",
@@ -204,6 +207,19 @@ MAX_SHIFT_NAME = 12
 # 按 10、20、30… 重新铺一遍 —— 留出空档，手工插一行不用把后面全改。
 SHIFT_ORDER_STEP = 10
 
+# 班次颜色（0043，契约 `.scratch/scheduling-shift-color/spec.md`）：8 个**语义色键**，
+# 具体色值在 `theme.workbench.css` 的 `--shift-<key>-*` 里，深浅两主题共用同一套。
+# 前 6 个是主色，后 2 个只在前 6 个都被占用时才启用 —— 排除红与琥珀（那是 danger / warn
+# 的地盘）之后，8 个色相拉不开足够的色差，所以分了两档优先级。
+# `neutral` 是哨兵：可重复、不占唯一额，「第 9 个启用班次」与读取端兜底都用它。
+SHIFT_COLORS = ("moss", "mint", "tide", "sky", "pine", "rose", "grass", "lilac")
+SHIFT_COLOR_NEUTRAL = "neutral"
+SHIFT_COLOR_KEYS = SHIFT_COLORS + (SHIFT_COLOR_NEUTRAL,)
+
+# 读班次行时用的列。`_query_shifts` 会在 `color_key` 这一列还不存在时退回不带它的那份。
+_SHIFT_COLUMNS = "id, name, sort_order, is_active, duty_slot"
+_SHIFT_COLUMNS_COLOR = _SHIFT_COLUMNS + ", color_key"
+
 # 「休」这一族写法留给「那天休息」：月历的周期编辑页**先认班次名、认不出才当休息**
 # （`SchedulingCalendarView.vue` 的 `REST_WORDS`），所以店里真有个班次叫「休」的话，
 # 那家店就再也没法用这些词写休息了。票 04 审查把这件事转出给票 11，这里收口：
@@ -234,6 +250,31 @@ class SchedulingError(ValueError):
     def __init__(self, code: str, message: str = ""):
         self.code = code
         super().__init__(message or code)
+
+
+def _unique_shift_error(exc: Exception) -> SchedulingError:
+    """班次表的唯一冲突分两种：重名（0005 的 UNIQUE）与撞色（0043 的部分唯一索引）。
+
+    按约束名分辨，不按错误文本 —— 文本随 PostgreSQL 语言设置变。
+    """
+    if getattr(exc, "constraint_name", "") == "uq_staff_shifts_active_color":
+        return SchedulingError("shift_color_taken", "")
+    return SchedulingError("shift_name_taken", "shift_name_taken")
+
+
+def _shift_payload(mapping: dict, color_ready: bool = True) -> dict:
+    """一行班次 → 接口形状。`color_key` 为 `None` 表示「库里还没有这一列」，
+    前端据此降级成中性色 + 提示条（跟「显式选了 neutral」是两件事）。"""
+    return {
+        "id": int(mapping["id"]),
+        "name": mapping["name"],
+        "sort_order": int(mapping["sort_order"]),
+        "is_active": bool(int(mapping["is_active"] or 0)),
+        # 卫生档位（票 10）：'day' / 'night' / None（这条班次不出日常检查）。
+        "duty_slot": mapping.get("duty_slot"),
+        # 班次颜色（0043）：色键见 SHIFT_COLORS；None = 迁移还没应用。
+        "color_key": (mapping.get("color_key") if color_ready else None) or None,
+    }
 
 
 def _require_business_date(value: Any) -> str:
@@ -304,6 +345,23 @@ def _clean_duty_slot(value: Any) -> Optional[str]:
     text = str(value).strip()
     if text not in DUTY_SLOTS:
         raise SchedulingError("invalid_duty_slot", "invalid_duty_slot")
+    return text
+
+
+def _clean_color_key(value: Any) -> Optional[str]:
+    """班次颜色键（0043）：`moss` / `mint` / … / `neutral`。
+
+    `None` = **这一项不动**（跟班次名、顺序、档位一个口径）；空串与 `neutral` 都是
+    「中性色」（超出调色板时的兜底值）；不在白名单里报 `invalid_shift_color`。
+    新建班次时 `None` 另有含义：交给 `_next_free_color()` 自动挑一个空闲主色。
+    """
+    if value is None:
+        return None
+    text = str(value).strip()
+    if text in ("", SHIFT_COLOR_NEUTRAL):
+        return SHIFT_COLOR_NEUTRAL
+    if text not in SHIFT_COLOR_KEYS:
+        raise SchedulingError("invalid_shift_color", "invalid_shift_color")
     return text
 
 
@@ -466,8 +524,13 @@ class SchedulingStore:
         return self._now_dt().isoformat()
 
     def today(self) -> str:
-        """当前营业日（06:00 切，北京时）。"""
-        return current_business_date(self._now_dt())
+        """当前工作台日（**自然日，00:00 切**，北京时）。
+
+        2026-11-01 之前这里是 06:00 的营业日（ADR 0125）。店里没有跨零点的班次，06:00
+        切在排班这边没有任何业务依据，只会在 0–6 点把「今天」说成昨天：11/1 00:19 打开
+        整月页，页面写「今天 10/31」、手机写 11/1，同一个词指两天。
+        """
+        return current_workbench_date(self._now_dt())
 
     def _window(self) -> tuple[str, str]:
         """展开窗口：``[今天, 今天 + EXPANSION_DAYS - 1]``，两端都含。"""
@@ -574,12 +637,25 @@ class SchedulingStore:
         if row is not None and int(dict(row)["n"] or 0) > 0:
             return True
         stamp = self._now_iso()
-        for name, sort_order, duty_slot in DEFAULT_SHIFTS:
-            await self._conn.execute(
-                """INSERT INTO staff_shifts (name, sort_order, is_active, duty_slot, created_at, updated_at)
-                   VALUES (?, ?, 1, ?, ?, ?)""",
-                (name, sort_order, duty_slot, stamp, stamp),
-            )
+        for index, (name, sort_order, duty_slot) in enumerate(DEFAULT_SHIFTS):
+            # 默认班次也带色（0043）：不带的话新装的门店两条默认班次都是中性灰，
+            # 「按班次分色」这件事在第一次打开周表时就看不到。
+            color = SHIFT_COLORS[index % len(SHIFT_COLORS)]
+            try:
+                await self._conn.execute(
+                    """INSERT INTO staff_shifts
+                           (name, sort_order, is_active, duty_slot, color_key, created_at, updated_at)
+                       VALUES (?, ?, 1, ?, ?, ?, ?)""",
+                    (name, sort_order, duty_slot, color, stamp, stamp),
+                )
+            except asyncpg.UndefinedColumnError:
+                # 0043 还没应用的窗口里启动：默认班次照旧铺，颜色等迁移跑完由回填补上。
+                await self._rollback_quietly()
+                await self._conn.execute(
+                    """INSERT INTO staff_shifts (name, sort_order, is_active, duty_slot, created_at, updated_at)
+                       VALUES (?, ?, 1, ?, ?, ?)""",
+                    (name, sort_order, duty_slot, stamp, stamp),
+                )
         await self._conn.commit()
         logger.info("排班班次表为空，已放入默认班次 %s", "、".join(name for name, _, _ in DEFAULT_SHIFTS))
         return True
@@ -599,23 +675,9 @@ class SchedulingStore:
         一起出：月历和「这天是谁」要用它，否则停用一个班次会让**已经写下的历史行**
         在界面上凭空消失（票 11 的验收项）。
         """
-        sql = """SELECT id, name, sort_order, is_active, duty_slot FROM staff_shifts"""
-        if not include_inactive:
-            sql += " WHERE is_active = 1"
-        sql += " ORDER BY sort_order ASC, id ASC"
-        cur = await self._conn.execute(sql)
-        shifts = []
-        for row in await cur.fetchall():
-            mapping = dict(row)
-            shifts.append({
-                "id": int(mapping["id"]),
-                "name": mapping["name"],
-                "sort_order": int(mapping["sort_order"]),
-                "is_active": bool(int(mapping["is_active"] or 0)),
-                # 卫生档位（票 10）：'day' / 'night' / None（这条班次不出日常检查）。
-                "duty_slot": mapping.get("duty_slot"),
-            })
-        return shifts
+        where = "" if include_inactive else " WHERE is_active = 1"
+        rows, color_ready = await self._query_shifts(where, " ORDER BY sort_order ASC, id ASC")
+        return [_shift_payload(row, color_ready) for row in rows]
 
     # ── 班次表的编辑（票 11）─────────────────────────────────────────────
     #
@@ -628,27 +690,59 @@ class SchedulingStore:
     #   （例如 `set_rule` 正好把要停用的班次排进某个人的轮转）。
     # - 报错给人话：能照做的那种（「还有 3 个人的轮转里排着它」），不是「参数不合法」。
 
+    async def _query_shifts(self, where: str = "", order: str = "", params: tuple = ()) -> tuple[list[dict], bool]:
+        """读班次行，顺带回答「`color_key` 这一列在不在」。
+
+        读路径对缺列**降级**而不是整页 503：代码可能先于迁移生效（发行包里
+        `applying_migrations` 阶段失败、或者有人手工换了代码树），这时周表还得能看能改，
+        只是格子退回中性色、页面顶部说一句去应用 0043。写 `color_key` 的那条路不降级 ——
+        没有列就直说是 `not_migrated`（`_needs_migration` 管的正是这件事）。
+        """
+        sql = f"SELECT {_SHIFT_COLUMNS_COLOR} FROM staff_shifts{where}{order}"
+        try:
+            cur = await self._conn.execute(sql, params)
+            return [dict(row) for row in await cur.fetchall()], True
+        except asyncpg.UndefinedColumnError:
+            await self._rollback_quietly()
+        cur = await self._conn.execute(
+            f"SELECT {_SHIFT_COLUMNS} FROM staff_shifts{where}{order}", params
+        )
+        return [dict(row) for row in await cur.fetchall()], False
+
+    async def _next_free_color(self) -> str:
+        """新建班次的默认色：按 `SHIFT_COLORS` 顺序取第一个「启用班次里没人用」的键。
+
+        都用完了就 `neutral`（可重复）：宁可不给色，也不让两个班次撞成一样 —— 那正是
+        这次要修的毛病。第 9 个班次建出来就是中性灰，页面在班次表上说明这一点。
+        """
+        used = {
+            shift["color_key"]
+            for shift in await self.list_shifts()
+            if shift.get("color_key")
+        }
+        for key in SHIFT_COLORS:
+            if key not in used:
+                return key
+        return SHIFT_COLOR_NEUTRAL
+
+    async def _require_color_free(self, color_key: str, exclude_id: Optional[int] = None) -> None:
+        """撞色先在这里挡一道，为的是给一句人话；最后一道是库里的部分唯一索引。"""
+        if color_key == SHIFT_COLOR_NEUTRAL:
+            return
+        for shift in await self.list_shifts():
+            if shift["color_key"] == color_key and shift["id"] != exclude_id:
+                raise SchedulingError("shift_color_taken", shift["name"])
+
     async def _shift_row(self, shift_id: int) -> dict:
         """按 id 取一行班次（**含停用的**）；没有就报 `unknown_shift_id`。
 
         跟 `unknown_shift`（工作区那条路：只能挑在用的班次）分开：编辑班次表必须
         能改到停用的那一条（给它改个名、重新启用），不能因为停用就「不存在」。
         """
-        cur = await self._conn.execute(
-            "SELECT id, name, sort_order, is_active, duty_slot FROM staff_shifts WHERE id = ?",
-            (int(shift_id),),
-        )
-        row = await cur.fetchone()
-        if row is None:
+        rows, color_ready = await self._query_shifts(" WHERE id = ?", "", (int(shift_id),))
+        if not rows:
             raise SchedulingError("unknown_shift_id", "unknown_shift_id")
-        mapping = dict(row)
-        return {
-            "id": int(mapping["id"]),
-            "name": mapping["name"],
-            "sort_order": int(mapping["sort_order"]),
-            "is_active": bool(int(mapping["is_active"] or 0)),
-            "duty_slot": mapping.get("duty_slot"),
-        }
+        return _shift_payload(rows[0], color_ready)
 
     async def _require_shift_name_free(self, name: str, exclude_id: Optional[int] = None) -> None:
         """重名先在这里挡一道，为的是给一句人话；最后一道是库里的 UNIQUE。"""
@@ -688,36 +782,58 @@ class SchedulingStore:
         }
 
     @_needs_migration
-    async def create_shift(self, name: Any, sort_order: Any = None, duty_slot: Any = None) -> dict:
+    async def create_shift(
+        self,
+        name: Any,
+        sort_order: Any = None,
+        duty_slot: Any = None,
+        color_key: Any = None,
+    ) -> dict:
         """加一个班次（票 11）。不给顺序就排在最后（当前最大 + `SHIFT_ORDER_STEP`）。
 
         新班次一律**启用**：店长刚建它就是要用它，建完再停用是没有意义的绕路。
         卫生档位（票 10）不给就是「不出日常检查」：加一个「中班」时还没有对应的
         日常检查项，等店长想清楚它是白班档还是夜班档再在这一页上标。
+
+        颜色（0043）不给就**自动挑一个空闲主色**（`_next_free_color`）：店长建班次时
+        最不关心的就是色号，但拿到一个跟别人相同的颜色等于没上色。给了就按给定的存，
+        撞色报 `shift_color_taken`。
         """
         text = _clean_shift_name(name)
         order = _shift_order(sort_order)
         slot = _clean_duty_slot(duty_slot)
+        wanted = _clean_color_key(color_key)
         await self._require_shift_name_free(text)
-        return await self._insert_shift(text, order, slot)
+        color = await self._next_free_color() if wanted is None else wanted
+        return await self._insert_shift(text, order, slot, color)
 
     @serialized_write
-    async def _insert_shift(self, name: str, sort_order: Optional[int], duty_slot: Optional[str]) -> dict:
+    async def _insert_shift(
+        self,
+        name: str,
+        sort_order: Optional[int],
+        duty_slot: Optional[str],
+        color_key: str,
+    ) -> dict:
         stamp = self._now_iso()
         if sort_order is None:
             cur = await self._conn.execute("SELECT COALESCE(MAX(sort_order), 0) AS top FROM staff_shifts")
             row = await cur.fetchone()
             sort_order = int(dict(row)["top"] or 0) + SHIFT_ORDER_STEP
+        # 自动挑色是锁外读的（`_next_free_color` 在 `create_shift` 里），同一瞬间两条
+        # 新建会挑到同一个键 —— 这里补一道锁内查重，最后一道是库里的部分唯一索引。
+        await self._require_color_free(color_key)
         try:
             cur = await self._conn.execute(
-                """INSERT INTO staff_shifts (name, sort_order, is_active, duty_slot, created_at, updated_at)
-                   VALUES (?, ?, 1, ?, ?, ?) RETURNING id""",
-                (name, sort_order, duty_slot, stamp, stamp),
+                """INSERT INTO staff_shifts
+                       (name, sort_order, is_active, duty_slot, color_key, created_at, updated_at)
+                   VALUES (?, ?, 1, ?, ?, ?, ?) RETURNING id""",
+                (name, sort_order, duty_slot, color_key, stamp, stamp),
             )
             new_id = int(dict(await cur.fetchone())["id"])
-        except asyncpg.UniqueViolationError:
+        except asyncpg.UniqueViolationError as exc:
             # 上面那次查重在写锁外，挡不住同一瞬间进来的第二条：库里的 UNIQUE 兜底。
-            raise SchedulingError("shift_name_taken", "shift_name_taken") from None
+            raise _unique_shift_error(exc) from None
         await self._conn.commit()
         return {
             "id": new_id,
@@ -725,6 +841,7 @@ class SchedulingStore:
             "sort_order": sort_order,
             "is_active": True,
             "duty_slot": duty_slot,
+            "color_key": color_key,
         }
 
     @_needs_migration
@@ -735,6 +852,7 @@ class SchedulingStore:
         sort_order: Any = None,
         is_active: Any = None,
         duty_slot: Any = None,
+        color_key: Any = None,
     ) -> dict:
         """改一个班次：名字 / 显示顺序 / 启用停用 / 卫生档位（票 11、票 10）。
 
@@ -755,9 +873,16 @@ class SchedulingStore:
         order = current["sort_order"] if sort_order is None else _shift_order(sort_order)
         wanted = current["is_active"] if is_active is None else bool(is_active)
         slot = current["duty_slot"] if duty_slot is None else _clean_duty_slot(duty_slot)
+        # 颜色：`None` 不动、空串/`neutral` = 回中性；给了别的键就按给定的存。
+        cleaned_color = _clean_color_key(color_key)
+        color = current.get("color_key") if cleaned_color is None else cleaned_color
+        if color is None:
+            # 读路径降级过（`color_key` 为 None = 库里还没这一列）：写它必然缺列，
+            # 交给下面的 UPDATE 报 `not_migrated`，这里先把值占住别让它变成 SQL NULL。
+            color = SHIFT_COLOR_NEUTRAL
         if text != current["name"]:
             await self._require_shift_name_free(text, exclude_id=current["id"])
-        return await self._update_shift_row(current["id"], text, order, wanted, slot)
+        return await self._update_shift_row(current["id"], text, order, wanted, slot, color)
 
     @serialized_write
     async def _update_shift_row(
@@ -767,6 +892,7 @@ class SchedulingStore:
         sort_order: int,
         is_active: bool,
         duty_slot: Optional[str],
+        color_key: str,
     ) -> dict:
         # 停用那两道闸在锁里读、锁里判（同 `_delete_shift_row`）：不然
         # `gather(update_shift, set_rule)` 能稳定造出「班次已停用、规则还排着它」
@@ -779,16 +905,21 @@ class SchedulingStore:
                 raise SchedulingError("shift_in_use", str(in_use))
             if not [shift for shift in await self.list_shifts() if shift["id"] != shift_id]:
                 raise SchedulingError("last_active_shift", "last_active_shift")
+        # 撞色也在锁里判：单独查一次，给的是「这档已经给 X 班用了」这类能照做的说法；
+        # 库里那条部分唯一索引兜底（并发两条各改各的，或停用/启用恰好同时发生）。
+        if color_key != SHIFT_COLOR_NEUTRAL:
+            await self._require_color_free(color_key, exclude_id=shift_id)
         stamp = self._now_iso()
         try:
             await self._conn.execute(
                 """UPDATE staff_shifts
-                   SET name = ?, sort_order = ?, is_active = ?, duty_slot = ?, updated_at = ?
+                   SET name = ?, sort_order = ?, is_active = ?, duty_slot = ?,
+                       color_key = ?, updated_at = ?
                    WHERE id = ?""",
-                (name, sort_order, 1 if is_active else 0, duty_slot, stamp, shift_id),
+                (name, sort_order, 1 if is_active else 0, duty_slot, color_key, stamp, shift_id),
             )
-        except asyncpg.UniqueViolationError:
-            raise SchedulingError("shift_name_taken", "shift_name_taken") from None
+        except asyncpg.UniqueViolationError as exc:
+            raise _unique_shift_error(exc) from None
         await self._conn.commit()
         return {
             "id": shift_id,
@@ -796,6 +927,7 @@ class SchedulingStore:
             "sort_order": sort_order,
             "is_active": is_active,
             "duty_slot": duty_slot,
+            "color_key": color_key,
         }
 
     @_needs_migration
@@ -2692,6 +2824,9 @@ class SchedulingStore:
                 "scheduled": row is not None,
                 "shift_id": shift_id,
                 "shift_name": None if shift is None else shift["name"],
+                # 班次色键（0043）：员工端整月页按它给「上班」那格上色。跟店长那一面同
+                # 一份班次表（`_shifts_for_display`），所以两边不会是两种颜色。
+                "shift_color": None if shift is None else shift.get("color_key"),
                 "zone_id": zone_id,
                 # 区名来自结果行上的 zone_id：那天写在行上的是哪个区就是哪个区，
                 # 事后改固定区不改写过去（跟 `day_detail` 同一条口径）。
@@ -2765,6 +2900,8 @@ class SchedulingStore:
                 "scheduled": row is not None,
                 "shift_id": shift_id,
                 "shift_name": None if shift is None else shift["name"],
+                # 班次色键（0043）：整月格子里「上班」那格的颜色，跟店长那一面同一份班次表。
+                "shift_color": None if shift is None else shift.get("color_key"),
                 # 我那天在哪个区（格子里不写，点开那天的名单里写）：跟 `my_days` 同一条
                 # 口径 —— 区名来自那天结果行上的 `zone_id`，事后改固定区不改写过去。
                 "zone_name": None if zone_id is None else zone_names.get(zone_id),
@@ -2956,7 +3093,7 @@ class SchedulingStore:
         if last < first:
             raise SchedulingError("bad_range", "bad_range")
         now = self._now_dt()
-        today = current_business_date(now)
+        today = current_workbench_date(now)
         last_day = self._window_from(today)[1]
         if last < today:
             # 跟票 07 的 `past_day` 是同一条口径，但错的是「给过去提申请」而不是
@@ -3239,7 +3376,7 @@ class SchedulingStore:
             raise SchedulingError("missing_swap_day", "missing_swap_day")
         day = _require_business_date(business_date)
         now = self._now_dt()
-        today = current_business_date(now)
+        today = current_workbench_date(now)
         last_day = self._window_from(today)[1]
         if day < today:
             raise SchedulingError("past_swap", "past_swap")

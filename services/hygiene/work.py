@@ -19,7 +19,7 @@ from typing import Callable, Optional
 
 from database import CHINA_TZ
 from db_core.errors import is_integrity_violation
-from services.business_day import business_date_range, shift_business_date
+from services.business_day import shift_business_date, workbench_day_range
 from services.hygiene.accounts import (
     PERMISSION_ADMIN,
     SHIFT_DAY,
@@ -154,10 +154,11 @@ def serialized_write(method):
 
 
 def hygiene_week_start(now: datetime) -> datetime:
-    """Monday 06:00 China of the hygiene week containing `now`."""
-    # 先落到「现在所属营业日」（06:00 切的唯一实现在 services.business_day），
-    # 再回退到那天所在周的周一 06:00 —— 这里不再自己比 `hour < 6`（CORR-05）。
-    day_start, _ = business_date_range(hygiene_business_date(now))
+    """Monday 00:00 China of the hygiene week containing `now`."""
+    # 先落到「现在所属的工作台日」（00:00 切的唯一实现在 services.business_day），
+    # 再回退到那天所在周的周一 00:00 —— 这里不再自己比 `hour < 6`（CORR-05）。
+    # 2026-11-01 起卫生跟工作台同一把尺子（ADR 0125），不再是 06:00 的营业日。
+    day_start, _ = workbench_day_range(hygiene_business_date(now))
     return day_start - timedelta(days=day_start.weekday())
 
 
@@ -2501,15 +2502,17 @@ class HygieneWork:
         return {"hhmm": cleaned}
 
     def _clock_reached(self, now: datetime, hhmm: str) -> bool:
+        """``hhmm`` 这个截止钟点到没到（工作台日，00:00 切）。
+
+        2026-11-01 之前起点是营业日的 06:00，于是早于 06:00 的钟点要落到**次日**凌晨
+        （「02:00 的截止」= 次日 2 点）。切点改成自然日零点后不再有这个回绕：任何
+        ``HH:MM`` 都是**今天**的钟点，``00:00`` 就是当天起点。起点交给
+        `workbench_day_range` 算，这里不自己截时分秒（CORR-05 / ADR 0125）。
+        """
         local = now.astimezone(CHINA_TZ) if now.tzinfo else now.replace(tzinfo=CHINA_TZ)
         hour, minute = (int(part) for part in hhmm.split(":"))
-        # 截止钟点用营业日区间归位：早于营业日起点（06:00）的钟点落在**次日**凌晨。
-        # 起点的算法交给 `business_date_range`，这里不再自己比 `hour < 6`（CORR-05）。
-        business_start, _ = business_date_range(hygiene_business_date(local))
-        deadline = business_start.replace(hour=hour, minute=minute)
-        if deadline < business_start:
-            deadline += timedelta(days=1)
-        return local >= deadline
+        day_start, _ = workbench_day_range(hygiene_business_date(local))
+        return local >= day_start.replace(hour=hour, minute=minute)
 
     async def _catalog_daily_items(self) -> list:
         cur = await self._conn.execute(

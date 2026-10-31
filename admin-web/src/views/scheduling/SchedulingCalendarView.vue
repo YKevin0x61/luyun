@@ -16,7 +16,7 @@ import { api } from '../../api/client'
 // 共享样式表由壳加载（`SchedulingLayout.vue`）：三个子页各加载一份会挂出重复的
 // <link>，壳一层管住就跟卫生管理端一个做法。
 import { useNudgePull } from '../../composables/useNudgePull'
-import { mergeShiftList } from '../../utils/shiftTable'
+import { SHIFT_COLOR_NEUTRAL, mergeShiftList, shiftColorClass } from '../../utils/shiftTable'
 import { eachDayInRange } from '../../utils/dateRange'
 // 周表的落笔与选区（票 14 / ADR 0107，2026-10-13 方向修订）：纯逻辑在
 // `utils/schedulingWeekPick.js` 里 —— 这一页只负责把手柄接上去、把笔与回执接上去。
@@ -89,11 +89,14 @@ function syncQuery() {
 // 员工端月历的 `MONTH_HEADS` 是同一套，三个地方必须一起动，否则同一页两个周框。
 const WEEKDAYS = ['一', '二', '三', '四', '五', '六', '日']
 const WEEK_HEADS = ['一', '二', '三', '四', '五', '六', '日'] // 周表：表头就是这个顺序
-// 每个班次一个颜色，按排序位循环取（原型里白班薄荷、夜班水青）。
-// 六个 tone 覆盖到 6 个班次：门店那种「A/B/C + 主管A两头班 + 主管B两头班」是 5 个，
-// 只有四个色时第 5 个会与第 1 个撞色（A班 与 主管B两头班 长得一模一样）。
-// 撞色这件事**永远只能算辅助**：格子里一定留字，图例写全名。
-const SHIFT_TONES = ['mint', 'aqua', 'amber', 'seal', 'violet', 'rose']
+// 班次颜色（0043）：**颜色存在班次表里**，前端不再按序号推断。
+//
+// 以前这里是 `SHIFT_TONES = ['mint','aqua',…]`，按班次在列表里的位置取色：停用或新增
+// 一个班次，全店格子的颜色整体错位；`mint`/`aqua` 还共用同一个底色、浅色主题下两个
+// 色值是同一个蓝 —— 店长分不出「早班」和「夜班」，这正是 0043 要修的事。
+// 现在班次自带 `color_key`（moss/mint/tide/sky/pine/rose/grass/lilac/neutral），
+// 色值在 `theme.workbench.css` 的 `--shift-<key>` 里，深浅主题共用同一套。
+// 撞色仍然只算辅助：格子里一定留班次缩写，图例写全名。
 
 const loading = ref(true)
 const errorText = ref('')
@@ -180,13 +183,28 @@ function monthTitle(value) {
   return `${year} 年 ${month} 月`
 }
 
+/** `shiftId → 色键`。认不出这个班次（列表还没读回来、或历史行指向已删的班次）走中性。 */
+const colorByShift = computed(() => {
+  const index = {}
+  for (const shift of shifts.value) index[shift.id] = shift.color_key || SHIFT_COLOR_NEUTRAL
+  return index
+})
+
+/** 颜色这一列在不在（0043 还没应用时服务端回 `color_key: null`）。
+
+ * 单独露出来是给页顶那条提示条用的：读路径降级成中性灰，但「为什么全是灰」得说一句，
+ * 不然店长以为是配色坏了。写颜色的那条路不降级（服务端会报 not_migrated）。
+ */
+const colorReady = computed(() => shifts.value.every((shift) => !!shift.color_key))
+
 function toneOf(shiftId) {
-  const index = shifts.value.findIndex((item) => item.id === shiftId)
-  return SHIFT_TONES[(index < 0 ? 0 : index) % SHIFT_TONES.length]
+  return colorByShift.value[shiftId] || SHIFT_COLOR_NEUTRAL
 }
 
 function toneClass(shiftId) {
-  return `tone-${toneOf(shiftId)}`
+  // class 名从 util 里取（`tone-<键>`）：班次表页与员工端用的是同一个函数，
+  // 三处不能各拼一遍字符串。
+  return shiftColorClass(toneOf(shiftId))
 }
 
 function formatDayLabel(businessDate) {
@@ -210,7 +228,8 @@ function formatTodayLabel() {
 function cellCounts(day) {
   return shifts.value.map((shift) => ({
     id: shift.id,
-    tone: toneOf(shift.id),
+    // 月历色条用完整的 class（`tone-moss`），跟周表格子同一套 token。
+    tone: toneClass(shift.id),
     count: day.counts[String(shift.id)] || 0,
   }))
 }
@@ -1583,6 +1602,11 @@ useNudgePull({
         </header>
 
         <p v-if="errorText" class="gMsg">{{ errorText }}</p>
+        <!-- 0043 还没应用（服务端把 `color_key` 回成 null）：读路径降级成中性灰，
+             但得说清原因 —— 不然店长以为配色坏了。写颜色的那条路仍然硬失败。 -->
+        <p v-if="!colorReady && shifts.length" class="gNote">
+          班次颜色还没启用（数据库迁移 0043 未应用）：格子暂时都是中性灰。到「系统更新 → 数据库迁移」应用 0043 后刷新本页。
+        </p>
 
         <template v-if="panel === 'month'">
           <div class="gDash" :class="{ 'gDash--drawer': mobileDayOpen }">
@@ -1703,7 +1727,7 @@ useNudgePull({
             <div class="gB-dayBody">
             <template v-if="dayDetail">
               <div v-for="group in dayDetail.groups" :key="group.shift.id" class="gB-grp">
-                <div class="gB-grp-t" :class="toneOf(group.shift.id)">
+                <div class="gB-grp-t" :class="toneClass(group.shift.id)">
                   <span class="d"></span><b>{{ group.shift.name }}</b><i>{{ group.count }}</i>
                 </div>
                 <div v-if="group.people.length" class="gB-names">
@@ -2349,6 +2373,11 @@ useNudgePull({
 .gNav--panel { margin-left: auto; }
 .gSeg { display: inline-flex; align-items: center; gap: 4px; margin-left: auto; }
 .gMsg { margin: 0; font-size: 12px; color: var(--danger-bright); }
+.gNote {
+  margin: 0; padding: 8px 11px; border-radius: var(--r-1);
+  border: 1px solid var(--wb-warn-a45, var(--line-strong)); background: var(--wb-warn-a10);
+  font-size: 11.5px; line-height: 1.5; color: var(--ink-dim);
+}
 /* ── 面板（唯一卡片语言） ─────────────────────────────────────────────── */
 .gPanel {
   background: var(--surface-1); border: 1px solid var(--line);
@@ -2424,7 +2453,10 @@ useNudgePull({
 .gB-d .c { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 7px; }
 .gB-d .cItem {
   display: inline-flex; align-items: center; gap: 3px;
-  font-family: var(--font-mono); font-size: 10px; line-height: 1; color: inherit;
+  font-family: var(--font-mono); font-size: 10px; line-height: 1;
+  /* 人数与色条都用这个班次的色（0043）：`.tone-<键>` 给的是 `--fill`，没有 tone
+     类时退回继承色（`.gB-d .cItem` 特异度比 `.tone-*` 高，必须在这里取变量）。 */
+  color: var(--shift-fill, inherit);
 }
 .gB-d .cBar { width: 3px; height: 10px; border-radius: 1px; background: currentColor; flex: none; }
 /* 0 人的班次段：灰条 + 淡字（不是「有一个 0」那么醒目的数字）。 */
@@ -2455,12 +2487,11 @@ useNudgePull({
   content: ""; position: absolute; bottom: 5px; right: 5px; width: 6px; height: 6px;
   border-radius: 50%; background: var(--info);
 }
-.tone-mint { color: var(--hy-mint); }
-.tone-aqua { color: var(--hy-aqua); }
-.tone-amber { color: var(--hy-amber); }
-.tone-seal { color: var(--hy-seal-bright); }
-.tone-violet { color: var(--hy-violet); }
-.tone-rose { color: var(--hy-rose); }
+/* 班次色（0043）：`tone-<色键>` 的两个变量声明已上移到 `theme.workbench.css`（班次表与
+   员工整月也用同一套名字，各写一份会漂）。这里只留**本页的用法**：图例圆点与月历色条
+   取 `--fill` 当文字色（周表格子那套实底在下面的 `.gW-cell.tone-*` 里另声明）。 */
+.tone-moss, .tone-mint, .tone-tide, .tone-sky,
+.tone-pine, .tone-rose, .tone-grass, .tone-lilac, .tone-neutral { color: var(--shift-fill); }
 .gB-legend {
   display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
   padding: 10px 14px 0; font-size: 10px; color: var(--ink-faint);
@@ -2730,16 +2761,23 @@ useNudgePull({
   font-size: 9px; line-height: 1.1; letter-spacing: -.02em; opacity: .75;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.gW-cell.tone-mint { color: var(--hy-mint); background: var(--wb-tint-14); border-color: var(--wb-tint-22); }
-.gW-cell.tone-aqua { color: var(--hy-aqua); background: var(--wb-tint-14); border-color: var(--wb-tint-22); }
-.gW-cell.tone-amber { color: var(--hy-amber); background: var(--wb-warn-a16); border-color: var(--wb-warn-a45); }
-.gW-cell.tone-seal { color: var(--hy-seal-bright); background: var(--wb-danger-a16); border-color: var(--wb-danger-a45); }
-/* 第 5、6 个班次的色（violet / rose）没有同色相的 --wb-* 档：底色退回中性淡层，
-   靠文字色区分 —— 不写裸 rgba（设计护栏只减不增）。 */
-.gW-cell.tone-violet { color: var(--hy-violet); background: var(--wb-ink-a04); border-color: var(--line-strong); }
-.gW-cell.tone-rose { color: var(--hy-rose); background: var(--wb-ink-a04); border-color: var(--line-strong); }
+/* 班次格子（0043）：实底 + 深字 + 一根深发丝。8 档都是亮底，所以边界统一走
+   `--shift-edge`，不再按档重复定义；文字色是每档自带的近黑，实测最低 4.80:1。 */
+.gW-cell.tone-moss, .gW-cell.tone-mint, .gW-cell.tone-tide, .gW-cell.tone-sky,
+.gW-cell.tone-pine, .gW-cell.tone-rose, .gW-cell.tone-grass, .gW-cell.tone-lilac {
+  color: var(--shift-ink);
+  background: var(--shift-fill);
+  border-color: var(--shift-edge);
+}
+/* 中性档：超出调色板的第 9 个班次、以及「迁移还没应用」时的降级。 */
+.gW-cell.tone-neutral {
+  color: var(--ink-dim); background: var(--shift-neutral); border-color: var(--line);
+}
 .gW-cell.off { color: var(--ink-faint); background: var(--wb-ink-a08); border-color: var(--line); }
-.gW-cell.leave { color: var(--hy-aqua); background: var(--wb-tint-14); border-color: var(--wb-tint-22); }
+/* 请假（0043）：以前借的是 aqua 那档班次色，于是「请假」看着像某个班次。
+   现在退回中性底 + 信息蓝文字（`--info` 是语义令牌，「这天有改动/待批」也在用），
+   跟「休」的灰、跟班次的彩色都分得开。 */
+.gW-cell.leave { color: var(--info); background: var(--wb-ink-a04); border-color: var(--line-strong); }
 /* 两种「空」分开：整列没有数据 / 还没铺到 = 虚线淡掉；这天有数据但这个人没排到 = 淡框。 */
 .gW-cell.mute { background: transparent; border: 1px dashed var(--line); opacity: .5; }
 .gW-cell.none { background: transparent; border: 1px dashed var(--line-strong); }
@@ -2777,12 +2815,13 @@ useNudgePull({
 }
 .gChip:disabled { opacity: .45; cursor: default; }
 .gChip.on { box-shadow: 0 0 0 2px var(--action); }
-.gChip.tone-mint { color: var(--hy-mint); background: var(--wb-tint-14); border-color: var(--wb-tint-22); }
-.gChip.tone-aqua { color: var(--hy-aqua); background: var(--wb-tint-14); border-color: var(--wb-tint-22); }
-.gChip.tone-amber { color: var(--hy-amber); background: var(--wb-warn-a16); border-color: var(--wb-warn-a45); }
-.gChip.tone-seal { color: var(--hy-seal-bright); background: var(--wb-danger-a16); border-color: var(--wb-danger-a45); }
-.gChip.tone-violet { color: var(--hy-violet); background: var(--wb-ink-a04); border-color: var(--line-strong); }
-.gChip.tone-rose { color: var(--hy-rose); background: var(--wb-ink-a04); border-color: var(--line-strong); }
+.gChip.tone-moss, .gChip.tone-mint, .gChip.tone-tide, .gChip.tone-sky,
+.gChip.tone-pine, .gChip.tone-rose, .gChip.tone-grass, .gChip.tone-lilac {
+  color: var(--shift-ink); background: var(--shift-fill); border-color: var(--shift-edge);
+}
+.gChip.tone-neutral {
+  color: var(--ink-dim); background: var(--shift-neutral); border-color: var(--line);
+}
 .gChip .dt { width: 9px; height: 9px; flex: none; margin-right: 7px; border-radius: 50%; background: currentColor; }
 .gChip .dt.rest { background: var(--ink-faint); }
 /* 休半天：圆点用 info（与图例里那个「半 = 休半天」同色），选中外环也走 info ——

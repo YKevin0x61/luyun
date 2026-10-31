@@ -835,21 +835,22 @@ class HygieneDailyOverdueTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("白班", self.notifier.texts[0])
         self.assertNotIn("夜班", self.notifier.texts[0])
 
-    async def test_pre_six_clock_waits_until_next_calendar_morning(self):
+    async def test_clock_before_six_is_same_day_not_next_morning(self):
+        """工作台日 00:00 切之后，早于 06:00 的钟点不再滚到次日（ADR 0125）。
+
+        2026-11-01 之前区间起点是营业日 06:00，于是「05:00 的截止」= **次日** 5 点；
+        现在它就是**当天** 5 点。同一个白班在 04:58 还没到点、05:00 到点，夜班 21:30 仍在等。
+        """
         await self._anban_item()
         await self.work.set_daily_overdue_clocks(SUPER, "05:00", "21:30")
-        self.fixed_now = datetime(2026, 9, 13, 6, 0, tzinfo=CHINA_TZ)
+        self.fixed_now = datetime(2026, 9, 13, 4, 58, tzinfo=CHINA_TZ)
         await self.work.sweep_overdue()
         self.assertEqual(self.notifier.texts, [])
-        self.fixed_now = datetime(2026, 9, 14, 4, 59, tzinfo=CHINA_TZ)
+        self.fixed_now = datetime(2026, 9, 13, 5, 0, tzinfo=CHINA_TZ)
         await self.work.sweep_overdue()
         self.assertEqual(len(self.notifier.texts), 1)
-        self.assertIn("夜班", self.notifier.texts[0])
-        self.assertNotIn("白班", self.notifier.texts[0])
-        self.fixed_now = datetime(2026, 9, 14, 5, 0, tzinfo=CHINA_TZ)
-        await self.work.sweep_overdue()
-        self.assertEqual(len(self.notifier.texts), 2)
         self.assertTrue(any("白班" in text for text in self.notifier.texts))
+        self.assertFalse(any("夜班" in text for text in self.notifier.texts))
 
     async def test_pending_accept_before_clock_is_not_overdue(self):
         item = await self._anban_item()
@@ -1617,22 +1618,27 @@ class HygieneFixTicketTest(unittest.IsolatedAsyncioTestCase):
 
 
 class HygieneWeekStartTest(unittest.TestCase):
-    def test_monday_0600_opens_new_week_0559_stays_previous(self):
+    def test_monday_midnight_opens_new_week_2359_stays_previous(self):
+        """工作台周从**周一 00:00** 起（ADR 0125）—— 2026-11-01 之前是周一 06:00。
+
+        第一条是回归锁：周一 05:59 以前被算成上周，于是周一凌晨的红黑榜/趋势把上周日的
+        活算进上一周；现在 0–6 点归新的一周。
+        """
         self.assertEqual(
             hygiene_week_start(datetime(2026, 9, 14, 5, 59, tzinfo=CHINA_TZ)),
-            datetime(2026, 9, 7, 6, 0, tzinfo=CHINA_TZ),
+            datetime(2026, 9, 14, 0, 0, tzinfo=CHINA_TZ),
         )
         self.assertEqual(
-            hygiene_week_start(datetime(2026, 9, 14, 6, 0, tzinfo=CHINA_TZ)),
-            datetime(2026, 9, 14, 6, 0, tzinfo=CHINA_TZ),
+            hygiene_week_start(datetime(2026, 9, 14, 0, 0, tzinfo=CHINA_TZ)),
+            datetime(2026, 9, 14, 0, 0, tzinfo=CHINA_TZ),
         )
         self.assertEqual(
-            hygiene_week_start(datetime(2026, 9, 13, 5, 59, tzinfo=CHINA_TZ)),
-            datetime(2026, 9, 7, 6, 0, tzinfo=CHINA_TZ),
+            hygiene_week_start(datetime(2026, 9, 13, 23, 59, tzinfo=CHINA_TZ)),
+            datetime(2026, 9, 7, 0, 0, tzinfo=CHINA_TZ),
         )
         self.assertEqual(
             hygiene_week_start(datetime(2026, 9, 13, 10, 0, tzinfo=CHINA_TZ)),
-            datetime(2026, 9, 7, 6, 0, tzinfo=CHINA_TZ),
+            datetime(2026, 9, 7, 0, 0, tzinfo=CHINA_TZ),
         )
 
 
@@ -1694,25 +1700,27 @@ class HygieneBoardsAndTeachingTest(unittest.IsolatedAsyncioTestCase):
             SUPER, self._zone(zones, zone_name)["id"], item_name, self._capture(photo)
         )
 
-    async def test_events_at_monday_0559_and_0600_land_in_different_weeks(self):
+    async def test_events_at_sunday_2359_and_monday_0000_land_in_different_weeks(self):
+        """周起点是**周一 00:00**（ADR 0125）：周日 23:59 与周一零点归两周。"""
+
         anban = await self._item("案板", "案板表面")
         xian = await self._item("馅档", "馅档台面", ZONE_A_BYTES)
         day = _staff(10, DAY_PHONE, "白班")
 
-        self.fixed_now = datetime(2026, 9, 14, 5, 59, tzinfo=CHINA_TZ)
+        self.fixed_now = datetime(2026, 9, 13, 23, 59, tzinfo=CHINA_TZ)
         await self.work.submit_daily(day, anban["id"], self._live(SHOT_A))
         before_cut = await self.work.list_boards(self.fixed_now)
-        self.assertEqual(before_cut["week_start"], "2026-09-07T06:00:00+08:00")
+        self.assertEqual(before_cut["week_start"], "2026-09-07T00:00:00+08:00")
         self.assertEqual(_person_row(before_cut, 10)["实拍"], 1)
         _no_score_keys(before_cut)
 
-        self.fixed_now = datetime(2026, 9, 14, 6, 0, tzinfo=CHINA_TZ)
+        self.fixed_now = datetime(2026, 9, 14, 0, 0, tzinfo=CHINA_TZ)
         await self.work.submit_daily(day, xian["id"], self._live(SHOT_B))
         after_cut = await self.work.list_boards(self.fixed_now)
-        self.assertEqual(after_cut["week_start"], "2026-09-14T06:00:00+08:00")
+        self.assertEqual(after_cut["week_start"], "2026-09-14T00:00:00+08:00")
         self.assertEqual(_person_row(after_cut, 10)["实拍"], 1)
-        prior = await self.work.list_boards(datetime(2026, 9, 14, 5, 59, tzinfo=CHINA_TZ))
-        self.assertEqual(prior["week_start"], "2026-09-07T06:00:00+08:00")
+        prior = await self.work.list_boards(datetime(2026, 9, 13, 23, 59, tzinfo=CHINA_TZ))
+        self.assertEqual(prior["week_start"], "2026-09-07T00:00:00+08:00")
         self.assertEqual(_person_row(prior, 10)["实拍"], 1)
         self.assertEqual(_person_row(prior, 10)["驳回"], 0)
         _no_score_keys(after_cut)

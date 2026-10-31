@@ -1085,7 +1085,7 @@ def test_unauthenticated_boards_401_regular_staff_gets_both(hygiene_http):
     payload = boards.json()
     assert "people" in payload
     assert "zones" in payload
-    assert payload["week_start"] == "2026-09-07T06:00:00+08:00"
+    assert payload["week_start"] == "2026-09-07T00:00:00+08:00"  # 工作台周从周一 00:00 起（ADR 0125）
     _assert_no_score_keys(payload)
     teaching = client.get("/api/hygiene/staff/teaching")
     assert teaching.status_code == 200

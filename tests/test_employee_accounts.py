@@ -139,14 +139,23 @@ class EmployeeAccountsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(roster[0]["permission"], "普通员工")
         self.assertNotIn("超级管理员", [row["permission"] for row in roster])
 
-    def test_hygiene_business_date_cuts_at_six(self):
+    def test_hygiene_business_date_cuts_at_midnight(self):
+        """工作台日按自然日 00:00 切（ADR 0125）—— 2026-11-01 之前是 06:00 的营业日。
+
+        最后一条是回归锁：05:59 以前会算成前一天，于是 11/1 00:19 打开员工端，页面写
+        「今天 10/31」、手机写 11/1。现在 0–6 点跟其余时段一样归当天。
+        """
         self.assertEqual(
-            hygiene_business_date(datetime(2026, 9, 13, 5, 59, tzinfo=CHINA_TZ)),
-            "2026-09-12",
+            hygiene_business_date(datetime(2026, 9, 13, 23, 59, tzinfo=CHINA_TZ)),
+            "2026-09-13",
         )
         self.assertEqual(
-            hygiene_business_date(datetime(2026, 9, 13, 6, 0, tzinfo=CHINA_TZ)),
-            "2026-09-13",
+            hygiene_business_date(datetime(2026, 9, 14, 0, 0, tzinfo=CHINA_TZ)),
+            "2026-09-14",
+        )
+        self.assertEqual(
+            hygiene_business_date(datetime(2026, 9, 14, 5, 59, tzinfo=CHINA_TZ)),
+            "2026-09-14",
         )
 
     async def _approved_employee(self, phone=PHONE):
@@ -213,12 +222,15 @@ class EmployeeAccountsTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(await self.accounts.login(PHONE, PASSWORD))
         self.assertIsNotNone(await self.accounts.login(PHONE, "new-password123"))
 
-    async def test_the_business_day_cut_decides_which_schedule_row_is_today(self):
-        """06:00 切日：卫生认的「今天」跟排班展开用的是同一个切法（票 10）。
+    async def test_the_workbench_day_cut_decides_which_schedule_row_is_today(self):
+        """零点切日：卫生认的「今天」跟排班展开用的是同一个切法（票 10 / ADR 0125）。
 
         票 10 之前这里测的是「05:59 自己选白班算前一天、06:00 选夜班算今天」。自选入口
         撤了之后，同一件事的另一面要守住：9/12 那天排的是白班、9/13 起改成夜班，那么
-        9/13 05:59（营业日还是 9/12）读到白班，06:00 之后读到夜班。
+        9/12 23:59 读到白班，9/13 零点之后读到夜班。
+
+        切点从 06:00 挪到 00:00 时这条的第一段从「9/13 5:59」改成「9/12 23:59」：切点变了，
+        受测的承诺没变 —— 卫生与排班认的是同一个日子。
         """
         employee = await self._approved_employee()
         await assign_duty(
@@ -230,10 +242,10 @@ class EmployeeAccountsTest(unittest.IsolatedAsyncioTestCase):
             now=datetime(2026, 9, 13, 10, 0, tzinfo=CHINA_TZ),
         )
 
-        self.fixed_now = datetime(2026, 9, 13, 5, 59, tzinfo=CHINA_TZ)
+        self.fixed_now = datetime(2026, 9, 12, 23, 59, tzinfo=CHINA_TZ)
         self.assertEqual(await self.accounts.current_shift(employee["id"]), "白班")
 
-        self.fixed_now = datetime(2026, 9, 13, 6, 0, tzinfo=CHINA_TZ)
+        self.fixed_now = datetime(2026, 9, 13, 0, 0, tzinfo=CHINA_TZ)
         self.assertEqual(await self.accounts.current_shift(employee["id"]), "夜班")
 
     async def test_staff_cannot_pick_their_own_assignment_any_more(self):

@@ -339,7 +339,7 @@ useNudgePull({
               :key="cell.business_date"
               type="button"
               class="mD"
-              :class="[cell.tone, { today: cell.is_today, mute: dayBeyondWindow(cell, windowEnd) }]"
+              :class="[cell.tone, cell.color ? `tone-${cell.color}` : '', { today: cell.is_today, mute: dayBeyondWindow(cell, windowEnd) }]"
               :disabled="dayBeyondWindow(cell, windowEnd)"
               aria-haspopup="dialog"
               @click="openDay(cell)"
@@ -637,6 +637,24 @@ useNudgePull({
 
 .mD:disabled {
   cursor: default;
+}
+
+/* 上班那格（0043）：左缘 3px 用当天班次的色，班别名照旧写在格里 —— 颜色是辅助，
+   认不出颜色的人读字，认得出的人一眼扫到。`--shift-fill` 由模板挂的 `tone-<色键>`
+   类（`theme.workbench.css`）定出来；没有它（迁移没应用 / 那天不是班）
+   就什么都不加，格子退回原样。 */
+.mD.shift {
+  position: relative;
+}
+.mD.shift::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 6px;
+  bottom: 6px;
+  width: 3px;
+  border-radius: 2px;
+  background: var(--shift-fill, transparent);
 }
 
 /* 申请中（票 06 那条角标）：跟格子里那个班别是两件事，所以做成右上角的小点，

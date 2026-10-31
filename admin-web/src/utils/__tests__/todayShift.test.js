@@ -149,7 +149,7 @@ describe('半天休是第四态（票 07）', () => {
   })
 
   it('整月格子里写「休半天」，跟「休」「请假」「已调整」都不同字不同色', () => {
-    expect(monthCell(HALF)).toEqual({ text: '休半天', tone: 'half' })
+    expect(monthCell(HALF)).toEqual({ text: '休半天', tone: 'half', color: null })
     for (const other of [REST, LEAVE, ORPHAN]) {
       expect(monthCell(HALF).text).not.toBe(monthCell(other).text)
       expect(monthCell(HALF).tone).not.toBe(monthCell(other).tone)
@@ -186,7 +186,7 @@ describe('请假跟「休」是两件事（票 08）', () => {
   })
 
   it('整月格子里写「请假」，跟「休」不同字不同色', () => {
-    expect(monthCell(LEAVE)).toEqual({ text: '请假', tone: 'leave' })
+    expect(monthCell(LEAVE)).toEqual({ text: '请假', tone: 'leave', color: null })
     expect(monthCell(LEAVE).text).not.toBe(monthCell(REST).text)
     expect(monthCell(LEAVE).tone).not.toBe(monthCell(REST).tone)
   })
@@ -259,11 +259,11 @@ describe('员工端「整月」（票 06）', () => {
   })
 
   it('格子里四态各写各的，休不被写成空、已调整不跟休同色', () => {
-    expect(monthCell(MORNING)).toEqual({ text: '白班', tone: 'shift' })
-    expect(monthCell(REST)).toEqual({ text: '休', tone: 'rest' })
-    expect(monthCell(ORPHAN)).toEqual({ text: '已调整', tone: 'moved' })
-    expect(monthCell(NOT_ROSTERED)).toEqual({ text: '', tone: 'none' })
-    expect(monthCell(null)).toEqual({ text: '', tone: 'none' })
+    expect(monthCell(MORNING)).toEqual({ text: '白班', tone: 'shift', color: null })
+    expect(monthCell(REST)).toEqual({ text: '休', tone: 'rest', color: null })
+    expect(monthCell(ORPHAN)).toEqual({ text: '已调整', tone: 'moved', color: null })
+    expect(monthCell(NOT_ROSTERED)).toEqual({ text: '', tone: 'none', color: null })
+    expect(monthCell(null)).toEqual({ text: '', tone: 'none', color: null })
     // 空格子（还没排）跟「休」不许长得一样。
     expect(monthCell(NOT_ROSTERED).tone).not.toBe(monthCell(REST).tone)
     expect(monthCell(NOT_ROSTERED).text).not.toBe(monthCell(REST).text)

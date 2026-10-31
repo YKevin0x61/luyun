@@ -150,3 +150,49 @@ export function mergeShiftList(displayed, extra) {
   }
   return merged
 }
+
+// ── 班次颜色（0043）──────────────────────────────────────────────────────
+//
+// 色键是**数据**（存在 `staff_shifts.color_key`），具体色值在
+// `styles/theme.workbench.css` 的 `--shift-<key>` 里，深浅两主题共用同一套。
+// 这一层只提供「有哪几档、叫什么、怎么翻成 class」—— 前端不推断颜色，也不按序号取色。
+// 服务端 `SHIFT_COLORS` 必须与这里一致（`migrations/pg/0043_shift_color.sql` 的注释里
+// 写了为什么是这 8 档：排除红与琥珀之后 8 个色相拉不开，所以前 6 个是主色）。
+export const SHIFT_COLOR_NEUTRAL = 'neutral'
+
+/** 8 档：前 6 个是主色，后 2 个只在前 6 个都被占用时才给新班次。 */
+export const SHIFT_COLOR_CHOICES = [
+  { key: 'moss', label: '苔绿', main: true },
+  { key: 'mint', label: '薄荷', main: true },
+  { key: 'tide', label: '潮青', main: true },
+  { key: 'sky', label: '天蓝', main: true },
+  { key: 'pine', label: '松墨', main: true },
+  { key: 'rose', label: '玫', main: true },
+  { key: 'grass', label: '草绿', main: false },
+  { key: 'lilac', label: '藕荷', main: false },
+]
+
+/** 档位的中文名（中性档也叫「中性」）。认不出的键——比如以后加了新色而前端还没更新——
+ *  原样回键本身，不猜一个相近的意思。 */
+export function shiftColorLabel(key) {
+  if (!key || key === SHIFT_COLOR_NEUTRAL) return '中性'
+  const found = SHIFT_COLOR_CHOICES.find((choice) => choice.key === key)
+  return found ? found.label : String(key)
+}
+
+/** `moss` → `tone-moss`：周表/月历/班次表三处共用这一套 class 名。 */
+export function shiftColorClass(key) {
+  return `tone-${key || SHIFT_COLOR_NEUTRAL}`
+}
+
+/** 这一档现在被谁占着（只数启用的班次，跟服务端部分唯一索引同一口径）。
+ *
+ *  `excludingId` 传自己：正在改色的那条班次不算「占着」—— 否则它自己那一档会变成
+ *  不可点，页面上看不出「现在选的是哪个」。
+ */
+export function colorOwner(shifts, key, excludingId) {
+  if (!key || key === SHIFT_COLOR_NEUTRAL) return null
+  return (shifts || []).find(
+    (shift) => shift.is_active && shift.color_key === key && shift.id !== excludingId,
+  ) || null
+}

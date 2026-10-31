@@ -22,6 +22,33 @@ html[data-workbench] {
   --chrome:#0c1d20;
   --ink:#e4f0ee; --ink-dim:#85aaa7; --ink-faint:#739d98;
   --line:rgba(133,205,198,.13); --line-strong:rgba(133,205,198,.28);
+
+  /* ── 班次色（0043，`migrations/pg/0043_shift_color.sql`）──────────────────
+     店长在班次表页给每个班次选一档，周表/月历的格子按它上色。8 档 = 6 主色 +
+     2 辅色（辅色只在主色用完时才给新班次），另有 `neutral` 兜底。
+     **色值深浅两主题共用同一套**：同一个班次换个主题还是同一个颜色，否则员工会
+     以为班次变了；主题只影响页面底色与 `neutral` 那一档。
+     判据（`.scratch/scheduling-shift-color/palette.py` 可复算）：任意两档底色 CIE76
+     ΔE ≥ 26.7、每档文字对底色对比度 ≥ 4.80:1。改任何一档都要重跑那份脚本。
+     色相避开红（0°–20°）与琥珀（30°–50°）：那两段是 danger / warn 的地盘，
+     红色格子会被读成「出事了」。 */
+  --shift-moss:#bad04e;   --shift-moss-ink:#0a1014;
+  --shift-mint:#6cd096;   --shift-mint-ink:#0a1014;
+  --shift-tide:#4ebad0;   --shift-tide-ink:#0a1014;
+  --shift-sky:#7c7cda;    --shift-sky-ink:#0a1014;
+  --shift-pine:#4b8b78;   --shift-pine-ink:#0a1014;
+  --shift-rose:#cc5c94;   --shift-rose-ink:#0a1014;
+  --shift-grass:#4aa43d;  --shift-grass-ink:#0a1014;
+  --shift-lilac:#b2a1d9;  --shift-lilac-ink:#0a1014;
+  /* 中性档：不参与调色板（可重复），第 9 个启用班次与「迁移还没应用」都走它。 */
+  --shift-neutral:var(--surface-2); --shift-neutral-ink:var(--ink-dim);
+  /* 8 档都是亮底，所以边界统一用一根深发丝，不按档重复定义。 */
+  --shift-edge:rgba(10,16,20,.18);
+  /* 这两个是**局部钩子**：`.tone-<色键>` 在元素上把它们覆盖成那一档的底色/字色，
+     页面样式统一引用它们（周表格子、月历色条、当天名单分组头都在用）。声明在这里
+     是为了让「引用了未定义的自定义属性」那道检查能看见 —— 它们不是全局主题值。 */
+  --shift-fill:var(--shift-neutral);
+  --shift-ink:var(--ink-dim);
   --line-control:rgba(133,205,198,.55);
   --action:#3fe0b0; --action-ink:#052018; --action-soft:rgba(63,224,176,.12);
   --ok:#79e9c4; --warn:#e3a44a; --danger:#d9482f; --danger-bright:#ef6a4f; --info:#5fd6e6;
@@ -155,6 +182,22 @@ html[data-workbench] {
   --blue: var(--hy-mint);
   --pink: var(--hy-seal-bright);
 }
+
+/* 班次色（0043）的 `tone-<色键>` 工具类：**只声明两个局部变量**，怎么用由各处自己决定
+   （周表格子取实底、月历色条取左缘、班次表色块取底色、员工整月取左缘竖条）。
+   8 档 + 中性，色值全在上面那组 `--shift-*` 里，这里一个具体色值都不写。
+   2026-11-01 从 `SchedulingCalendarView.vue` 的 scoped 样式上移到这里：班次表与员工
+   整月也要用同一套名字，各写一份会漂；而且模板里动态拼令牌名（`--shift-` + 色键）
+   会被 designGuard 的「引用未定义令牌」拦下来（它只做静态分析）。 */
+.tone-moss { --shift-fill: var(--shift-moss); --shift-ink: var(--shift-moss-ink); }
+.tone-mint { --shift-fill: var(--shift-mint); --shift-ink: var(--shift-mint-ink); }
+.tone-tide { --shift-fill: var(--shift-tide); --shift-ink: var(--shift-tide-ink); }
+.tone-sky { --shift-fill: var(--shift-sky); --shift-ink: var(--shift-sky-ink); }
+.tone-pine { --shift-fill: var(--shift-pine); --shift-ink: var(--shift-pine-ink); }
+.tone-rose { --shift-fill: var(--shift-rose); --shift-ink: var(--shift-rose-ink); }
+.tone-grass { --shift-fill: var(--shift-grass); --shift-ink: var(--shift-grass-ink); }
+.tone-lilac { --shift-fill: var(--shift-lilac); --shift-ink: var(--shift-lilac-ink); }
+.tone-neutral { --shift-fill: var(--shift-neutral); --shift-ink: var(--shift-neutral-ink); }
 
 /* ════════════════════════════════════════════════════════════════════════════
    浅色主题（B 案「钢面 · 仪」· 日间档）—— 2026-10-17 新增，深色仍是默认
