@@ -263,7 +263,11 @@ describe('店长端排班月历（原型 B）', () => {
     // 工作区下拉、月历当天卡里的班次选择。同一条决策退役了抽屉里的班次按钮与笔刷条的班次
     // 下拉（两处），换上周表底部那条选区动作条的班次色卡（一处）—— 5 → 4，是有意的改动，
     // 所以这个数字继续钉住。
-    expect((view.match(/v-for="shift in activeShifts"/g) || []).length).toBe(4)
+    // 2026-11-01 名单重排：固定工作区那处从「全部启用班次」改成「这个人实际排到的班次」
+    // （`v-for="item in zoneShiftsOf(employee)"`）—— 19 人里绝大多数只有一格班次，三个下拉
+    // 有俩恒为「未配区」，是纯噪音。于是 `activeShifts` 只剩三处，数字跟着降到 3。
+    expect((view.match(/v-for="shift in activeShifts"/g) || []).length).toBe(3)
+    expect(view).toMatch(/v-for="item in zoneShiftsOf\(employee\)"/)
     // 当天卡那个下拉列的是**显示用**那份（他那天可能就是停用的那个班）——
     // 停用的那条标出来并禁掉。
     expect(view).toMatch(/v-for="shift in shifts"[\s\S]{0,260}?已停用/)

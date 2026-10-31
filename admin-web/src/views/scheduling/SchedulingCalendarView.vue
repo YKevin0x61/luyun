@@ -1754,6 +1754,58 @@ async function saveCycle(employee) {
   }
 }
 
+// ── 名单行（2026-11-01 用户「看着有点乱」重排）───────────────────────────────
+// 默认收起成一行（谁 / 这周怎么排 / 固定区在哪 / 编辑），点「编辑」才展开两组控件。
+// 为什么收起：名单 19–21 人，原来每人三行控件（7 格 + 5 键 + 3 个下拉），一屏只看得到
+// 一个人多一点；而且三样东西视觉重量一样，看不出哪是读数、哪是操作。
+const rosterOpen = ref([])
+
+function toggleRoster(employeeId) {
+  rosterOpen.value = rosterOpen.value.includes(employeeId)
+    ? rosterOpen.value.filter((id) => id !== employeeId)
+    : rosterOpen.value.concat(employeeId)
+}
+
+/** 规则格子里只写一个字（早/夜/中/休）：7 格并排还要写星期就横着滚了，完整话在 title 里。 */
+function cellShort(name) {
+  return name === '休' ? '休' : String(name || '').slice(0, 1)
+}
+
+/** 这个人**实际会被排到的班次**：规则里出现过的 + 已经配过固定区的（后者防止改了规则之后
+ *  那条旧配置在界面上消失）。按班次表的顺序出，找不到的班次跳过。 */
+function zoneShiftsOf(employee) {
+  const ids = new Set()
+  const cycle = (employee && employee.rule && employee.rule.cycle) || []
+  for (const id of cycle) if (id !== null && id !== undefined) ids.add(Number(id))
+  for (const key of Object.keys((employee && employee.zone_defaults) || {})) ids.add(Number(key))
+  const picked = shifts.value.filter((shift) => ids.has(Number(shift.id)))
+  // 一条规则都没有、也没配过区的人（新人）：退回「全部启用班次」，否则他连先配一个固定区的
+  // 入口都没有。只有真配过东西的人才按上面的收缩来。
+  const list = picked.length
+    ? picked
+    : shifts.value.filter((shift) => shift.is_active !== false && shift.is_active !== 0)
+  return list.map((shift) => ({ id: shift.id, name: shift.name }))
+}
+
+/** 收起态那句「固定区在哪」：只写配了的班次，一个都没配就说「固定区未配」。 */
+function zoneSummary(employee) {
+  const parts = zoneShiftsOf(employee)
+    .map((item) => {
+      const zoneId = zoneOf(employee, item.id)
+      if (zoneId === '') return ''
+      const zone = zones.value.find((candidate) => String(candidate.id) === String(zoneId))
+      return `${cellShort(item.name)}→${zone ? zone.name : '区已删'}`
+    })
+    .filter(Boolean)
+  return parts.length ? parts.join(' · ') : '固定区未配'
+}
+
+/** 这颗「固定X班」按钮是不是他现在的规则（规则只有一格且就是它）：选中态给按钮，省得猜。 */
+function isFixedShift(employee, shiftId) {
+  const cycle = (employee && employee.rule && employee.rule.cycle) || []
+  return cycle.length === 1 && Number(cycle[0]) === Number(shiftId)
+}
+
 // 每人每班次一个固定区（票 03）：白班在案板的人就一直排案板。没配 = 空串，
 // 下拉里显示「未配区」—— 那是个正常状态，不是错误。
 function zoneOf(employee, shiftId) {
@@ -2657,95 +2709,132 @@ useNudgePull({
             </section>
             <p v-if="!roster.length" class="gB-empty">名单是空的</p>
             <div v-else class="gRosterGrid">
-              <div v-for="employee in roster" :key="employee.id" class="gR">
-                <div class="gR-main">
-                  <b>{{ employee.name || employee.phone }}</b>
-                  <span>{{ employee.job_title || '—' }}</span>
-                  <span v-if="employee.resigned" class="gR-off">已离职</span>
-                  <span v-else-if="!employee.approved" class="gR-off">待批准</span>
-                </div>
-                <!-- 规则摘要：本周 7 格（一…日），与周表同一套读法。 -->
-                <div class="gR-week" :title="ruleLabel(employee.rule)">
-                  <span
-                    v-for="(cell, index) in ruleWeekCells(employee)"
-                    :key="index"
-                    class="gR-day"
-                    :class="{ off: cell === '休' }"
-                  ><i>{{ WEEK_HEADS[index] }}</i><b>{{ cell }}</b></span>
-                  <span v-if="!ruleWeekCells(employee).length" class="gR-norule">
-                    {{ employee.rule && employee.rule.invalid ? '规则坏了，重配一条' : '还没配规则' }}
-                  </span>
-                </div>
-                <div class="gR-act">
-                  <button
-                    v-for="shift in activeShifts"
-                    :key="shift.id"
-                    type="button"
-                    class="gBtn"
-                    :disabled="busyEmployeeId === employee.id"
-                    @click="setFixedShift(employee, shift.id)"
-                  >固定{{ shift.name }}</button>
-                  <button
-                    v-if="employee.rule"
-                    type="button"
-                    class="gBtn ghost"
-                    :disabled="busyEmployeeId === employee.id"
-                    @click="clearRule(employee)"
-                  >清空</button>
-                  <button
-                    type="button"
-                    class="gBtn ghost"
-                    :class="{ on: cycleOpenId === employee.id }"
-                    :disabled="busyEmployeeId === employee.id"
-                    @click="cycleOpenId === employee.id ? closeCycle() : openCycle(employee)"
-                  >{{ cycleOpenId === employee.id ? '收起' : '编周期' }}</button>
-                </div>
-                <div v-if="cycleOpenId === employee.id" class="gC">
-                  <input
-                    v-model="cycleText"
-                    class="gC-in"
-                    type="text"
-                    spellcheck="false"
-                    :placeholder="cyclePlaceholder"
-                    :disabled="busyEmployeeId === employee.id"
-                    @keyup.enter="saveCycle(employee)"
-                  >
-                  <label class="gC-anchor">
-                    <span>起点</span>
-                    <!-- 日期用站内组件（2026-10-13 用户裁定「日期格式要中国本土化」）：原生
-                         `<input type=date>` 的显示格式跟着**浏览器界面语言**走。 -->
-                    <LuyunDatePicker
-                      v-model="cycleAnchor"
-                      placeholder="选择起点"
-                      aria-label="轮转周期起点"
-                    />
-                  </label>
-                  <div class="gC-act">
-                    <button
-                      type="button"
-                      class="gBtn"
-                      :disabled="busyEmployeeId === employee.id"
-                      @click="saveCycle(employee)"
-                    >保存周期</button>
-                    <button type="button" class="gBtn ghost" @click="closeCycle()">取消</button>
+              <div
+                v-for="employee in roster"
+                :key="employee.id"
+                class="gR"
+                :class="{ open: rosterOpen.includes(employee.id) }"
+              >
+                <!-- 收起态一行说完四件事（2026-11-01 用户「名单看着有点乱」）：他是谁 / 这周怎么排 /
+                     固定区在哪 / 一个「编辑」。19 人一屏能扫到六七个，不用一条条往下推。 -->
+                <div class="gR-row">
+                  <div class="gR-main">
+                    <b>{{ employee.name || employee.phone }}</b>
+                    <span>{{ employee.job_title || '—' }}</span>
+                    <span v-if="employee.resigned" class="gR-off">已离职</span>
+                    <span v-else-if="!employee.approved" class="gR-off">待批准</span>
                   </div>
-                  <p class="gHint">空格隔开，一格一天，从起点那天算第 1 格；「休」= 那天不排班。起点留空就是今天。</p>
-                  <p v-if="cycleError" class="gErr">{{ cycleError }}</p>
+                  <!-- 规则摘要：本周 7 格（一…日，与周表同一套读法），只写班次头一个字 ——
+                       格子里再写星期就该横着滚了；完整话在 title / aria-label 里。 -->
+                  <div class="gR-week" :title="ruleLabel(employee.rule)" :aria-label="ruleLabel(employee.rule)">
+                    <span
+                      v-for="(cell, index) in ruleWeekCells(employee)"
+                      :key="index"
+                      class="gR-day"
+                      :class="{ off: cell === '休' }"
+                    >{{ cellShort(cell) }}</span>
+                    <span v-if="!ruleWeekCells(employee).length" class="gR-norule">
+                      {{ employee.rule && employee.rule.invalid ? '规则坏了' : '没配规则' }}
+                    </span>
+                  </div>
+                  <span class="gR-zoneSum">{{ zoneSummary(employee) }}</span>
+                  <button
+                    class="gBtn ghost gR-toggle"
+                    type="button"
+                    :aria-expanded="rosterOpen.includes(employee.id) ? 'true' : 'false'"
+                    :aria-label="`${employee.name || employee.phone}：${rosterOpen.includes(employee.id) ? '收起规则与固定区' : '编辑规则与固定区'}`"
+                    @click="toggleRoster(employee.id)"
+                  >{{ rosterOpen.includes(employee.id) ? '收起' : '编辑' }}</button>
                 </div>
-                <div class="gZ">
-                  <label v-for="shift in activeShifts" :key="shift.id" class="gZ-pick">
-                    <span>{{ shift.name }}</span>
-                    <select
-                      class="gZ-sel"
-                      :value="zoneOf(employee, shift.id)"
+                <!-- 展开态：按「配什么」分成两组 —— 上面是规则（固定班 / 周期），下面是固定工作区。
+                     两组各带一个 10px 的小标题，不再像原来那样按钮和下拉混在同一层。 -->
+                <div v-if="rosterOpen.includes(employee.id)" class="gR-edit">
+                  <div class="gR-field">
+                    <span class="gR-label">规则</span>
+                    <div class="gR-act">
+                      <!-- 主操作一行（固定哪个班），次要操作另起一行（清空 / 编周期）：
+                           五颗按钮混在一行会 4+1 折行，看着像谁掉队了。 -->
+                      <div class="gR-shifts">
+                        <button
+                          v-for="shift in activeShifts"
+                          :key="shift.id"
+                          type="button"
+                          class="gBtn"
+                          :class="{ on: isFixedShift(employee, shift.id) }"
+                          :disabled="busyEmployeeId === employee.id"
+                          @click="setFixedShift(employee, shift.id)"
+                        >固定{{ shift.name }}</button>
+                      </div>
+                      <div class="gR-more">
+                        <button
+                          v-if="employee.rule"
+                          type="button"
+                          class="gBtn ghost"
+                          :disabled="busyEmployeeId === employee.id"
+                          @click="clearRule(employee)"
+                        >清空</button>
+                        <button
+                          type="button"
+                          class="gBtn ghost"
+                          :class="{ on: cycleOpenId === employee.id }"
+                          :disabled="busyEmployeeId === employee.id"
+                          @click="cycleOpenId === employee.id ? closeCycle() : openCycle(employee)"
+                        >{{ cycleOpenId === employee.id ? '收起' : '编周期' }}</button>
+                      </div>
+                    </div>
+                  </div>
+                  <div v-if="cycleOpenId === employee.id" class="gC">
+                    <input
+                      v-model="cycleText"
+                      class="gC-in"
+                      type="text"
+                      spellcheck="false"
+                      :placeholder="cyclePlaceholder"
                       :disabled="busyEmployeeId === employee.id"
-                      @change="setZoneDefault(employee, shift.id, $event.target.value)"
+                      @keyup.enter="saveCycle(employee)"
                     >
-                      <option value="">未配区</option>
-                      <option v-for="zone in zones" :key="zone.id" :value="zone.id">{{ zone.name }}</option>
-                    </select>
-                  </label>
-                  <span v-if="!zones.length" class="gZ-none">还没有工作区，先去卫生的工作区页面建一个</span>
+                    <label class="gC-anchor">
+                      <span>起点</span>
+                      <!-- 日期用站内组件（2026-10-13 用户裁定「日期格式要中国本土化」）：原生
+                           `<input type=date>` 的显示格式跟着**浏览器界面语言**走。 -->
+                      <LuyunDatePicker
+                        v-model="cycleAnchor"
+                        placeholder="选择起点"
+                        aria-label="轮转周期起点"
+                      />
+                    </label>
+                    <div class="gC-act">
+                      <button
+                        type="button"
+                        class="gBtn"
+                        :disabled="busyEmployeeId === employee.id"
+                        @click="saveCycle(employee)"
+                      >保存周期</button>
+                      <button type="button" class="gBtn ghost" @click="closeCycle()">取消</button>
+                    </div>
+                    <p class="gHint">空格隔开，一格一天，从起点那天算第 1 格；「休」= 那天不排班。起点留空就是今天。</p>
+                    <p v-if="cycleError" class="gErr">{{ cycleError }}</p>
+                  </div>
+                  <div v-if="zoneShiftsOf(employee).length" class="gR-field">
+                    <span class="gR-label">固定区</span>
+                    <!-- 只列**这个人实际排到的班次**（规则里出现过的 + 已经配过区的）：原来把
+                         三个启用班次全摆出来，19 个人里绝大部分是「未配区」的噪音。 -->
+                    <div class="gZ">
+                      <label v-for="item in zoneShiftsOf(employee)" :key="item.id" class="gZ-pick">
+                        <span>{{ item.name }}</span>
+                        <select
+                          class="gZ-sel"
+                          :value="zoneOf(employee, item.id)"
+                          :disabled="busyEmployeeId === employee.id"
+                          @change="setZoneDefault(employee, item.id, $event.target.value)"
+                        >
+                          <option value="">未配区</option>
+                          <option v-for="zone in zones" :key="zone.id" :value="zone.id">{{ zone.name }}</option>
+                        </select>
+                      </label>
+                      <span v-if="!zones.length" class="gZ-none">还没有工作区，先去卫生的工作区页面建一个</span>
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>
@@ -3061,37 +3150,54 @@ useNudgePull({
 }
 .gR {
   display: flex; flex-direction: column; gap: 8px; min-width: 0;
-  padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--r-2);
+  padding: 8px 12px; border: 1px solid var(--line); border-radius: var(--r-2);
   background: var(--surface-2);
 }
-.gR-main { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
-.gR-main b { font-family: var(--font-sans); font-size: 12.5px; font-weight: 600; color: var(--ink); }
-.gR-main span { font-size: 10px; color: var(--ink-faint); }
+/* 收起态：一行。名字占剩下的空间，右边依次是「这周怎么排 / 固定区 / 编辑」。 */
+.gR-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.gR.open { border-color: var(--line-strong); background: var(--surface-1); }
+.gR-main {
+  display: flex; align-items: baseline; gap: 6px;
+  flex: 1 1 auto; min-width: 0; overflow: hidden; white-space: nowrap;
+}
+/* 压缩顺序写死：**名字不缩**（缩了就认不出是谁），职位先让位、固定区次之。390 宽里 7 格 +
+   编辑是定宽的，剩下的空间刚好够一个三字名 + 一截职位。 */
+.gR-main b { flex: none; font-family: var(--font-sans); font-size: 12.5px; font-weight: 600; color: var(--ink); }
+.gR-main span { font-size: 10px; color: var(--ink-faint); overflow: hidden; text-overflow: ellipsis; }
 .gR-main .gR-off { color: var(--danger-bright); }
-.gR-week {
-  display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 4px;
-}
+/* 7 格的规则摘要：小方块并排（一…日），只写一个字 —— 是读数，不是按钮。 */
+.gR-week { display: flex; gap: 3px; margin-left: auto; flex: none; }
 .gR-day {
-  display: flex; flex-direction: column; align-items: center; gap: 2px;
-  padding: 4px 0; border: 1px solid var(--line-strong); border-radius: var(--r-1);
-  background: var(--surface-1); min-width: 0;
+  width: 16px; height: 17px; display: grid; place-items: center;
+  border-radius: 3px; background: var(--surface-3);
+  font-family: var(--font-mono); font-size: 9.5px; font-weight: 600; color: var(--ink);
 }
-.gR-day i { font-style: normal; font-size: 8px; color: var(--ink-faint); }
-.gR-day b {
-  font-family: var(--font-mono); font-size: 10px; font-weight: 600; color: var(--ink);
-  max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+.gR-day.off { background: transparent; border: 1px dashed var(--line-strong); color: var(--ink-faint); }
+.gR-norule { font-size: 10px; color: var(--warn); white-space: nowrap; }
+/* 收起态那句固定区（「早班→主管」）：比班次格再弱一档，扫一眼知道配没配。 */
+.gR-zoneSum {
+  flex: 0 1 auto; min-width: 0; font-size: 9.5px; color: var(--ink-faint);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.gR-day.off { border-style: dashed; }
-.gR-day.off b { color: var(--ink-faint); }
-.gR-norule { grid-column: 1 / -1; font-size: 10px; color: var(--warn); }
-.gR-act { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 7px; }
+/* 触控下限 44px 由 `.gBtn` 自带（designGuard 卡的就是这条），这里只收横向内边距。 */
+.gR-toggle { flex: none; padding: 0 10px; font-size: 10px; }
+/* 展开态：两组「小标题 + 控件」，标题 10px 弱色，控件各自成行 —— 与原来的三层混排分开。 */
+.gR-edit { display: flex; flex-direction: column; gap: 10px; padding-top: 8px; border-top: 1px solid var(--line); }
+.gR-field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.gR-label {
+  font-size: 9.5px; letter-spacing: .08em; color: var(--ink-faint); text-transform: uppercase;
+}
+.gR-act { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; }
+.gR-shifts, .gR-more { display: flex; gap: 6px; flex-wrap: wrap; }
 /* 每个班的固定工作区（票 03）。一行两个班次的下拉，窄屏自动换行。 */
-.gZ { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-top: 7px; }
+.gZ { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
 .gZ-pick { display: inline-flex; align-items: center; gap: 6px; font-size: 10px; color: var(--ink-faint); }
 .gZ-sel {
   font: inherit; font-family: var(--font-mono); font-size: 10.5px; color: var(--ink);
   background: var(--surface-2); border: 1px solid var(--line-strong);
   border-radius: var(--r-1); padding: 6px; min-height: var(--tap); cursor: pointer;
+  /* 下拉按内容定宽就够（区名最长四个字），撑满半行会跟旁边的控件抢注意力。 */
+  max-width: 9em;
 }
 .gZ-sel:disabled { opacity: .45; cursor: default; }
 .gZ-none { font-size: 10px; color: var(--ink-faint); }
@@ -3512,6 +3618,12 @@ useNudgePull({
   .gB-body { padding-bottom: 22px; }
   .gRosterGrid { grid-template-columns: 1fr; }
 }
+@media (max-width: 560px) {
+  /* 一行里塞不下「名字 + 职位 + 7 格 + 固定区 + 编辑」：手机上先让固定区摘要退场
+     （点「编辑」就能看到它），名字与职位保持可读。 */
+  .gR-zoneSum { display: none; }
+}
+
 @media (max-width: 720px) {
   /* 笔栏在手机上铺满一行：留 12px 边，别贴着屏幕缘。球要**抬到底栏之上**（底栏 57px，
      见 `utils/workbenchInsets.js` 的 TAB_BAR_HEIGHT_PX），否则会压住「今天 / 人事 / 现场」；
