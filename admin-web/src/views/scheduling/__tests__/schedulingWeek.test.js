@@ -174,10 +174,10 @@ describe('店长端周表（员工 × 周）', () => {
     // ADR 0108：过去 30 天内可补记，弹**一次**确认点名是哪几天（不是每格弹一次）——
     // 单格也一样，点一格就是一笔。
     expect(view).toMatch(/const dates = pastDatesIn\(cells, \{ today: week\.value/)
-    expect(view).toMatch(/pastConfirm\.value = \{ action, options, cells, dates, voiding: action === PICK_VOID \}/)
+    expect(view).toMatch(/pastConfirm\.value = \{ action, options, cells, dates, voiding: action === PICK_VOID, who \}/)
     expect(view).toMatch(/<ConfirmDialog/)
     expect(view).toMatch(/:message="pastConfirmText"/)
-    expect(view).toMatch(/@confirm="runPaint\(pastConfirm\.action, pastConfirm\.options, pastConfirm\.cells\)"/)
+    expect(view).toMatch(/@confirm="runPaint\(pastConfirm\.action, pastConfirm\.options, pastConfirm\.cells, pastConfirm\.who\)"/)
     // 会被跳过的格子**不发请求**：超 30 天、已批的假（词表与回执同一套 `PICK_SKIP_TEXT`）。
     expect(view).toMatch(/const \[skip\] = predictSkips\(cells, skipContext\(action\)\)/)
     expect(view).toMatch(/跳过：\$\{skipText\(\[skip\]\)\}/)
@@ -283,7 +283,7 @@ describe('长按一格 → 弹层「要顶的档」→ 点一行装进笔（票 
     expect(view).toMatch(/from '\.\.\/\.\.\/utils\/weekCoverSlots'/)
     expect(view).toMatch(/coverSlotsFor\(\{/)
     expect(view).toMatch(/date: coverDate\.value/)
-    expect(view).toMatch(/coverSheet\.value = \{ date: day\.business_date \}/)
+    expect(view).toMatch(/coverSheet\.value = \{\n\s+date: day\.business_date,/)
   })
 
   it('底部弹层与遮罩复用月历抽屉那套层级与位置口径', () => {
@@ -313,7 +313,7 @@ describe('长按一格 → 弹层「要顶的档」→ 点一行装进笔（票 
     expect(view).toContain('今天没有要顶的档')
     expect(view).toContain('这一天没有要顶的档')
     // 顶部那句说明这一行是干什么的：点了会装笔，不是「已经派好了」。
-    expect(view).toContain('点一行 = 装进笔')
+    expect(view).toContain('点一行 = 写给 {{ coverSheet.employeeName }}')
   })
 
   it('一行 = 区 × 档 + 谁休/请假 + 还有谁；停用 / 已删的行照列但写明原因', () => {
@@ -368,11 +368,34 @@ describe('长按一格 → 弹层「要顶的档」→ 点一行装进笔（票 
     // 修法：遮罩与「行」都先问一次 `swallowLongPressTail()`；页根在 pointerdown 捕获阶段
     // 清掉标记，免得某次没发出尾音 click 时把下一次真点按吞掉。
     expect(view).toMatch(/function onCoverScrimClick\(\) \{\n\s+if \(swallowLongPressTail\(\)\) return\n\s+closeCoverSheet\(\)/)
-    expect(view).toMatch(/function onCoverRowClick\(row\) \{\n\s+if \(swallowLongPressTail\(\)\) return\n\s+penFromCoverSlot\(row\)/)
+    expect(view).toMatch(/function onCoverRowClick\(row\) \{\n\s+if \(swallowLongPressTail\(\)\) return\n\s+void assignCoverSlot\(row\)/)
     expect(view).toMatch(/@click="onCoverRowClick\(row\)"/)
     expect(view).toMatch(/@pointerdown\.capture="clearLongPressTail"/)
     // 行上不许再直接挂 penFromCoverSlot —— 那就绕过了守卫。
     expect(view).not.toMatch(/@click="penFromCoverSlot\(row\)"/)
+  })
+
+  it('点一行 = 直接把这一档写给被长按的那个人（2026-11-01 用户要的「省一步」）', () => {
+    // 长按谁 = 让谁顶：弹层记下被按那一格的人，点一行就把这个档的班次 + 工作区写给他，
+    // 不再经过笔、也不用回表格找格子。写仍走同一条批量写路径（过去二次确认 / 跳过点名 /
+    // 撤销都复用），只是多带一个 `who` 让回执说出「写给谁」。
+    expect(view).toMatch(/function assignCoverSlot\(row\) \{/)
+    const fn = view.slice(view.indexOf('function assignCoverSlot'), view.indexOf('\n}', view.indexOf('function assignCoverSlot')))
+    expect(fn).toMatch(/if \(!row\.can_pen \|\| !sheet \|\| !target\)/)
+    // 先关弹层再落笔：确认框压着弹层会让人以为「还得再点一下」。
+    expect(fn.indexOf('closeCoverSheet()')).toBeLessThan(fn.indexOf('requestPaint('))
+    expect(fn).toMatch(/PICK_SHIFT/)
+    expect(fn).toMatch(/shiftId: row\.shift_id, zoneId: String\(row\.zone_id\)/)
+    expect(fn).toMatch(/\[\{ employeeId: target\.id, date: sheet\.date \}\]/)
+    expect(fn).toMatch(/who/)
+    // 弹层顶部点名写给谁 —— 不然「点一下」看不出改的是哪一格。
+    expect(view).toContain('点一行 = 写给 {{ coverSheet.employeeName }}')
+    // 被长按的那一格要记人（只有日期是不够的）。
+    expect(view).toMatch(/employeeId: employee\.id/)
+    expect(view).toMatch(/employeeName: employee\.name/)
+    // 长按本身仍然只读：开弹层那条路不许出现 api. / paintCell（写只发生在点行那一下）。
+    const open = view.slice(view.indexOf('function openCoverSheet'), view.indexOf('\n}', view.indexOf('function openCoverSheet')))
+    expect(open).not.toMatch(/api\.|paintCell|requestPaint/)
   })
 
   it('弹层开着时不渲染笔球：它按 `--z-queue` 压在弹层那一行上（真机截图）', () => {
@@ -534,7 +557,7 @@ describe('旧两样退役：笔刷条 / 编辑抽屉都不在了；长按以只�
     expect(page).toMatch(/if \(swallowLongPressTail\(\)\) return/)
     // 长按那条路自己不碰落笔：开弹层只是把那一格的日子记下来。
     const open = view.slice(view.indexOf('function openCoverSheet'), view.indexOf('\n}', view.indexOf('function openCoverSheet')))
-    expect(open).toMatch(/coverSheet\.value = \{ date: day\.business_date \}/)
+    expect(open).toMatch(/coverSheet\.value = \{\n\s+date: day\.business_date,/)
     expect(open).not.toMatch(/paintCell|api\./)
     // 还没铺到的那几格是 `disabled`（本来就不冒 pointer 事件）；判据再写死在处理函数里一道。
     expect(view).toMatch(/:disabled="!day\.in_window"/)

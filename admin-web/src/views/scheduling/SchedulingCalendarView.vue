@@ -1099,7 +1099,7 @@ function reminderText(items) {
 
 /** 一次落笔之后的回执（**一行**）：写了几格、跳过几格、能不能撤。
  *  逐格点名的那几行收进 `details`（「看全部」展开）—— 跳过与待批的信息不丢。 */
-function sayResult(result, cells, action, options) {
+function sayResult(result, cells, action, options, who = '') {
   const undoable = !!pickUndo.value && pickUndo.value.plan.length > 0
   const parts = []
   // 回执说清**这一笔是什么**：原来一律「已刷 N 格」，选错笔（清当成了休）也看不出来。
@@ -1111,7 +1111,7 @@ function sayResult(result, cells, action, options) {
       : action === PICK_HALF_REST
         ? (options && options.halfRest ? '已标休半天' : '已取消休半天')
         : action === PICK_REST ? '已排休' : '已改班'
-  if (result.applied) parts.push(`${verb} ${result.applied} 格`)
+  if (result.applied) parts.push(`${verb} ${result.applied} 格${who ? ` · 写给 ${who}` : ''}`)
   if (result.skipped.length) parts.push(`跳过 ${result.skipped.length} 格`)
   if (!parts.length) parts.push('没有格子被改动')
   // 「撤销只留最近一批、只在这台手机上」这句说明跟着回执走（ADR 0107 决策 7）。
@@ -1245,7 +1245,7 @@ function onCellDown(event, employee, day) {
   longPressTimer = setTimeout(() => {
     longPressFiredAt = Date.now()
     cancelPress()
-    openCoverSheet(day)
+    openCoverSheet(day, employee)
   }, LONG_PRESS_MS)
 }
 
@@ -1263,9 +1263,22 @@ function onCellUp() {
 
 /** 弹层开在**被长按的那一格**的日子上（ADR 0127 决策 3）：补记上周漏排的人时，「看到的」
  *  与「列出来的」是同一天。开弹层不发请求、不写任何东西。 */
-function openCoverSheet(day) {
-  coverSheet.value = { date: day.business_date }
+function openCoverSheet(day, employee) {
+  // 2026-11-01 用户要求「直接选择行就可以改班次，不用再装进笔」：长按谁 = 让谁顶。
+  // 所以弹层记下被按的那一格是谁，点一行就直接把这个档的班次 + 工作区写给他。
+  coverSheet.value = {
+    date: day.business_date,
+    employeeId: employee.id,
+    employeeName: employee.name,
+  }
 }
+
+/** 被长按的那个人在这一页的最新一条（弹层开着时换了周/被筛掉就找不到 → 视为不能写）。 */
+const coverTarget = computed(() => {
+  const sheet = coverSheet.value
+  if (!sheet) return null
+  return weekEmployees.value.find((item) => item.id === sheet.employeeId) || null
+})
 
 function closeCoverSheet() {
   coverSheet.value = null
@@ -1285,7 +1298,32 @@ function onCoverScrimClick() {
 
 function onCoverRowClick(row) {
   if (swallowLongPressTail()) return
-  penFromCoverSlot(row)
+  void assignCoverSlot(row)
+}
+
+/** 把一个档直接写给**被长按的那个人**（2026-11-01 用户裁定：省掉「装进笔 → 再点格子」那一步）。
+ *
+ *  走的是同一条批量写路径（`requestPaint`）：过去 30 天的二次确认、已批请假的跳过与点名、
+ *  写完只重拉一次周表、`↺` 撤销 —— 这些一个字都不重写。弹层先关，再落笔：确认框弹在
+ *  弹层上面会让人以为「又要多点一下」。
+ *
+ *  长按仍然是**只读**：写只发生在点行这一下（尾音那一下已由 `swallowLongPressTail` 挡掉）。
+ */
+async function assignCoverSlot(row) {
+  const sheet = coverSheet.value
+  const target = coverTarget.value
+  if (!row.can_pen || !sheet || !target) {
+    if (sheet && !target) sayNotice('这一格对应的那个人已经不在当前这一周里了：刷新后再试', [], true)
+    return
+  }
+  const who = target.name
+  closeCoverSheet()
+  await requestPaint(
+    PICK_SHIFT,
+    { shiftId: row.shift_id, zoneId: String(row.zone_id) },
+    [{ employeeId: target.id, date: sheet.date }],
+    who,
+  )
 }
 
 /** 新手势一开始就作废「尾音」标记：万一某个浏览器**没**把尾音 click 发出来（标记就一直挂着），
@@ -1427,7 +1465,7 @@ async function applyRegionRestore() {
 
 /** 落笔前的三道闸（有没有格子 / 超没超 200 格 / 请求体全不全）；这一笔里有过去的日子
  *  再弹**一次**确认并点名是哪几天（ADR 0108 决策 3），确认之后才真写。 */
-async function requestPaint(action, options, cells) {
+async function requestPaint(action, options, cells, who = '') {
   if (!cells.length) return
   if (overLimit(cells)) {
     sayNotice(`一次最多 ${PICK_MAX_CELLS} 格，现在选了 ${cells.length} 格：缩小选区再刷。`, [], true)
@@ -1439,10 +1477,10 @@ async function requestPaint(action, options, cells) {
   }
   const dates = pastDatesIn(cells, { today: week.value ? week.value.today : '' })
   if (dates.length) {
-    pastConfirm.value = { action, options, cells, dates, voiding: action === PICK_VOID }
+    pastConfirm.value = { action, options, cells, dates, voiding: action === PICK_VOID, who }
     return
   }
-  await runPaint(action, options, cells)
+  await runPaint(action, options, cells, who)
 }
 
 const pastConfirmText = computed(() => {
@@ -1461,7 +1499,7 @@ const pastConfirmText = computed(() => {
 
 /** 真写：一次请求写完（单格也只是 `items` 里的一条），写完只重拉一次周表。
  *  撤销要的是**应用前**的原值 —— 服务端不留快照（`staff_assignments` 是原地 upsert）。 */
-async function runPaint(action, options, cells) {
+async function runPaint(action, options, cells, who = '') {
   pastConfirm.value = null
   pickBusy.value = true
   const snapshot = snapshotCells(cells, weekCellAt)
@@ -1473,7 +1511,7 @@ async function runPaint(action, options, cells) {
     // 「休半天」那一笔改的不是班次，撤销按原值写回 half_rest（见 `undoPlan` 的第三个参数）。
     const plan = undoPlan(snapshot, result.skipped, action)
     pickUndo.value = plan.length ? { plan } : null
-    sayResult(result, cells, action, options)
+    sayResult(result, cells, action, options, who)
     await loadWeek(week.value ? week.value.start : weekStart.value)
     await refreshMonthCounts()
   } catch (err) {
@@ -2547,8 +2585,9 @@ useNudgePull({
             >
               <div class="gCoverHd">
                 <b>{{ coverTitle }}</b>
-                <!-- 这一行说明它是**入口**不是结果：点了只会装笔，还要去点要顶的那一格。 -->
-                <span class="gCoverHint">点一行 = 装进笔</span>
+                <!-- 2026-11-01 用户改：点一行直接写给**被长按的那个人**，不再经过笔。
+                     这一行必须点名写给谁 —— 否则「点一下」看不出去改的是哪一格。 -->
+                <span class="gCoverHint">点一行 = 写给 {{ coverSheet.employeeName }}</span>
                 <button class="gDrawerClose" type="button" aria-label="收起要顶的档" @click="closeCoverSheet()">收起</button>
               </div>
               <!-- 过去的日子照样能长按、能装笔（ADR 0108 的 30 天补记）：只标一句实话。 -->
@@ -2728,7 +2767,7 @@ useNudgePull({
         :message="pastConfirmText"
         :confirm-label="pastConfirm.voiding ? '照样清空' : '照改'"
         cancel-label="再想想"
-        @confirm="runPaint(pastConfirm.action, pastConfirm.options, pastConfirm.cells)"
+        @confirm="runPaint(pastConfirm.action, pastConfirm.options, pastConfirm.cells, pastConfirm.who)"
         @cancel="pastConfirm = null"
       />
     </div>
