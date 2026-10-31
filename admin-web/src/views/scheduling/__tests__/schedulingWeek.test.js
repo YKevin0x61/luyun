@@ -353,6 +353,13 @@ describe('长按一格 → 弹层「要顶的档」→ 点一行装进笔（票 
     expect(view).toContain('长按看那一天要顶的档')
     expect(view).toContain('长按 = 只看，不改')
   })
+
+  it('弹层开着时不渲染笔球：它按 `--z-queue` 压在弹层那一行上（真机截图）', () => {
+    // 笔球是 200（`--z-queue`），弹层是 55（`--z-dialog`）—— 球会压住弹层里的某一行。
+    // 层级令牌那套语义不动；这里只是让球在弹层开着时不存在（弹层里点一行就是装笔，
+    // 装完回周表，球才重新有意义）。
+    expect(view).toMatch(/v-if="!coverSheet"[\s\S]{0,80}?class="gPick-fab"/)
+  })
 })
 
 
@@ -433,7 +440,18 @@ describe('名单面板「今天要顶的档」：长按的键盘等价入口（�
     // 首屏按 URL 落在 `?view=roster` 时只读过名单那一份（`/roster`），`week` 还是空的 ——
     // 不补一次这一节就永远不渲染，看起来像「今天没人休」，比不显示更糟。
     const fn = view.slice(view.indexOf('async function openPanel'), view.indexOf('\n}', view.indexOf('async function openPanel')))
-    expect(fn).toMatch(/if \(!week\.value\) await loadWeek\(/)
+    expect(fn).toMatch(/const coversToday = !!loadedWeek/)
+    expect(fn).toMatch(/if \(!coversToday\) await loadWeek\(mondayOf\(today\.value\)\)/)
+  })
+
+  it('翻过周之后打开名单也补今天那周：旧周那份里没有今天的格子', () => {
+    // `/week` 只回**打开那一周**的 7 天，`week.today` 恒是今天 —— 翻到上周 / 用 `?start=`
+    // 深链到旧周后，`week` 不空但那份只含旧周那 7 天。`rosterCoverRows` 拿它算不出今天的
+    // 格子，整节会静默消失，看着像「今天没人休」。所以判断是「空，或已加载那一周不含今天」。
+    const fn = view.slice(view.indexOf('async function openPanel'), view.indexOf('\n}', view.indexOf('async function openPanel')))
+    expect(fn).toMatch(/\(loadedWeek\.days \|\| \[\]\)\.some/)
+    expect(fn).toMatch(/day\.business_date === loadedWeek\.today/)
+    expect(fn).toMatch(/loadWeek\(mondayOf\(today\.value\)\)/)
   })
 })
 
@@ -642,6 +660,20 @@ describe('排班笔：悬浮球（2026-10-29）', () => {
     expect(view).toMatch(/\.gPick-fab \.dt\.half \{ background: var\(--info\)/)
     expect(view).not.toMatch(/\.gPick-fab \.dt\.tone-/)
     expect(view).toMatch(/return penShift\.value \? 'shift' : ''/)
+  })
+
+  it('点了球才展开球上的笔；装了区之后球面写「班次·区」（真机截图）', () => {
+    // 点一行装笔后球面只写「早班」，装载的区看不见 —— 而这功能的意义就是「哪个区」。
+    // 区名与班次名一样截到 3 个字，整体再交给 `.gPick-fabText` 的 52px + ellipsis 兜底；
+    // 「跟固定区」（`penZoneId === ''`）保持原样，只写班次名。
+    expect(view).toMatch(/function shortPenText/)
+    const fn = view.slice(view.indexOf('const penLabel = computed'), view.indexOf('\n})', view.indexOf('const penLabel = computed')))
+    expect(fn).toMatch(/penZoneId\.value === ''/)
+    expect(fn).toMatch(/zones\.value\.find/)
+    expect(fn).toMatch(/shortPenText\(zone\.name\)/)
+    expect(fn).toContain('·')
+    // 休 / 休半天 / 清 在接区名之前就 return 了（它们本来就不带区）。
+    expect(fn.indexOf("return '休半天'")).toBeLessThan(fn.indexOf('penZoneId'))
   })
 
   it('点球展开 / 再点收起，带走页面的让位与无障碍状态', () => {

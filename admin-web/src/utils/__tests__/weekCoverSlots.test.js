@@ -192,7 +192,7 @@ describe('排序与一人多行', () => {
     ])
   })
 
-  it('同一个人两个班次就是两行，挨着出现', () => {
+  it('同一个人两个班次就是两行，不保证相邻', () => {
     const rows = slots([emp(8, '张三', rest(), [def(2, 2, '馅档'), def(1, 1, '案板')])])
     expect(rows).toHaveLength(2)
     expect(rows.map((row) => [row.shift_id, row.zone_id])).toEqual([[1, 1], [2, 2]])
