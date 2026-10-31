@@ -96,7 +96,10 @@ describe('店长端周表（员工 × 周）', () => {
     // 票 14 修订（2026-10-13 用户真机裁定）：「还是之前点击方格就改写班次那种比较好」——
     // 格子从「选区手柄」改回**落笔点**：点一格 = 用笔栏上那支笔立刻写这一格
     // （用户①：原来点完格子还要再点一次班次才生效，多一步）。
-    expect(view).toMatch(/@click="paintCell\(employee, day\)"/)
+    // 票 03 起 click 先过 `onCellClick`：它只多做一件事 —— 长按那一手的尾音 click 被吞掉，
+    // 其余照旧交给 `paintCell`。落笔路径没变，只是「看」不再顺手变成「写」。
+    expect(view).toMatch(/@click="onCellClick\(employee, day\)"/)
+    expect(view).toMatch(/paintCell\(employee, day\)/)
     // 选区还在，但手柄只剩两个：日期列头 = 整列、人名 = 整行（只为批量存在）。
     expect(view).toMatch(/@click="onColPick\(day\)"/)
     expect(view).toMatch(/@click="onRowPick\(employee\)"/)
@@ -269,10 +272,217 @@ describe('店长端周表（员工 × 周）', () => {
   })
 })
 
+// 票 03 / ADR 0127：长按一格 = 只看「那一天要顶的档」—— 那天休 / 请假的人本来站哪个档、
+// 那个档现在还有谁；点一行把那个档的班次 + 工作区一次装进笔。长按**不写任何东西**：它只把
+// 「我知道该把谁挪过去」从记忆里搬到屏幕上，落笔仍要店长自己点下去（决策 4）。
+describe('长按一格 → 弹层「要顶的档」→ 点一行装进笔（票 03 / ADR 0127）', () => {
+  it('清单是票 02 的 `coverSlotsFor` 算的，日期跟着被长按的那一格', () => {
+    // 组件不重算：一行一条、`can_pen` / `blocked_reason` 的判据全在 `utils/weekCoverSlots`
+    // （那边有自己的单测，票 02）。这里只断「接上了」与「列的是这一格的日子」——
+    // 不是「永远列今天」（决策 3：补记上周的人时，看的和列的是同一天）。
+    expect(view).toMatch(/from '\.\.\/\.\.\/utils\/weekCoverSlots'/)
+    expect(view).toMatch(/coverSlotsFor\(\{/)
+    expect(view).toMatch(/date: coverDate\.value/)
+    expect(view).toMatch(/coverSheet\.value = \{ date: day\.business_date \}/)
+  })
+
+  it('底部弹层与遮罩复用月历抽屉那套层级与位置口径', () => {
+    // 不新造一层：遮罩还是 `.gDrawerScrim`（`--z-scrim`），弹层贴底、圆角、`--z-dialog`，
+    // 与 `.gDash--drawer` 里那张当天名单同一套。壳底栏在 `--z-shell`，遮罩一盖就是「让位」，
+    // 关掉自然「还位」—— 不再开一个 body 状态（`sched-picking` 2026-10-29 已退役）。
+    expect(view).toMatch(/class="gDrawerScrim gCoverScrim"/)
+    expect(view).toMatch(/class="gCoverSheet"/)
+    // 遮罩上挂的是**带尾音守卫**的那个处理器（真机上抬手那一下的 click 会落到它上面）；
+    // 无守卫的 `closeCoverSheet()` 只留给「收起」那颗按钮。
+    expect(view).toMatch(/@click="onCoverScrimClick"/)
+    expect(view).toMatch(/aria-label="收起要顶的档" @click="closeCoverSheet\(\)"/)
+    expect(view).toMatch(/\.gCoverSheet \{[\s\S]{0,160}?position: fixed/)
+    expect(view).toMatch(/\.gCoverSheet \{[\s\S]{0,300}?z-index: var\(--z-dialog\)/)
+    expect(view).toMatch(/\.gCoverScrim \{[\s\S]{0,120}?z-index: var\(--z-scrim\)/)
+    // 长按在桌面（鼠标按住）同样有效，而 `.gDrawerScrim` 那份只有手机档：遮罩补一条同值的
+    // base，不然桌面上弹层是悬空的（点外面关不掉）。
+    expect(view).toMatch(/@media \(max-width: 720px\)/)
+  })
+
+  it('标题 / 过去那句 / 空态都按被长按的那一天说话', () => {
+    // 今天：`今天要顶的档`；其它天：`M月D日 要顶的档`；过去的日子多一句实话。
+    expect(view).toContain('今天要顶的档')
+    expect(view).toMatch(/`\$\{monthDayText\(coverDate\.value\)\} 要顶的档`/)
+    expect(view).toContain('这一天已经过去')
+    // 空态跟标题同一套日期口径（决策 3）：今天说「今天」，其它天说「这一天」。
+    expect(view).toContain('今天没有要顶的档')
+    expect(view).toContain('这一天没有要顶的档')
+    // 顶部那句说明这一行是干什么的：点了会装笔，不是「已经派好了」。
+    expect(view).toContain('点一行 = 装进笔')
+  })
+
+  it('一行 = 区 × 档 + 谁休/请假 + 还有谁；停用 / 已删的行照列但写明原因', () => {
+    expect(view).toMatch(/\{\{ row\.zone_name \|\| '（工作区已删）' \}\} × \{\{ row\.shift_name \}\}/)
+    // 行上写的是**谁的假**：请假与「休」处理方式不同（请假可以找他本人确认）。
+    expect(view).toMatch(/row\.leave \? '请假' : '休'/)
+    // 「这个档现在还有谁」：半休的人班次还在，自然落进这一列（票 02 算好的）。
+    expect(view).toMatch(/coverOthersText\(row\)/)
+    expect(view).toContain('还有：')
+    expect(view).toContain('没人')
+    // 不能装笔的两条理由在渲染层翻成中文：店长要做的是去班次表启回来 / 补一个区，
+    // 不是以为系统漏了这一档（ADR 0127 决策 4）。
+    expect(view).toMatch(/\[BLOCKED_SHIFT_INACTIVE\]: '班次已停用'/)
+    expect(view).toMatch(/\[BLOCKED_ZONE_DELETED\]: '工作区已删'/)
+    expect(view).toMatch(/coverBlockedText\(row\)/)
+    // 不能装笔的行**没有按压态**：`disabled` 的按钮不冒 `:active`，也不进 Tab 序列，
+    // 不给「点得下去」的假象。
+    expect(view).toMatch(/:disabled="!row\.can_pen"/)
+  })
+
+  it('点一行 = 把那个档的班次 + 工作区一次装进笔，不调 `pickPenShift`', () => {
+    const fn = view.slice(view.indexOf('function penFromCoverSlot'), view.indexOf('\n}', view.indexOf('function penFromCoverSlot')))
+    // 不能装笔的行先挡下来（停用班次硬装会默默退化成第一个启用班次 —— 那会写错人）。
+    expect(fn).toMatch(/if \(!row\.can_pen\) return/)
+    expect(fn).toMatch(/penShiftId\.value = row\.shift_id/)
+    expect(fn).toMatch(/penZoneId\.value = String\(row\.zone_id\)/)
+    expect(fn).toMatch(/penRest\.value = false/)
+    expect(fn).toMatch(/penHalfRest\.value = false/)
+    expect(fn).toMatch(/penClear\.value = false/)
+    // 不调 `pickPenShift`：它会把 `penZoneId` 拨回「跟固定区」，正好清掉刚装上的区。
+    expect(fn).not.toMatch(/pickPenShift/)
+    // 关弹层 + 一行提示（`sayNotice` 自己会消失，不再挂第二行）；笔球**不展开**。
+    expect(fn).toMatch(/coverSheet\.value = null/)
+    expect(fn).toMatch(/已装笔：\$\{row\.shift_name\} × \$\{row\.zone_name\}，去点要顶的那一格/)
+    expect(fn).not.toMatch(/penOpen\.value = true/)
+    // 模板把这一行接在按钮上（按钮是行本身，不是行里再套一颗小按钮）；用的是**带尾音守卫**
+    // 的 `onCoverRowClick`（见下面那条触摸用例），守卫里再调 `penFromCoverSlot`。
+    expect(view).toMatch(/@click="onCoverRowClick\(row\)"/)
+  })
+
+  it('格子与 `?` 帮助里都写着「长按 = 只看，不改」', () => {
+    // 读屏用户从 `aria-label` 知道长按能干什么；键盘用户从下面这一行与 `?` 知道它是只读的，
+    // 等价入口在名单面板（票 04）。
+    expect(view).toContain('长按看那一天要顶的档')
+    expect(view).toContain('长按 = 只看，不改')
+  })
+
+  it('手机抬手那一下的 click 落在遮罩 / 行上也不许关弹层、不许装笔（真机）', () => {
+    // 2026-11-01 真机复现：触摸长按弹层正常出现，**一松手就关掉** —— 抬手合成的 click
+    // 落在遮罩上（弹层已经把手指那点盖住），`closeCoverSheet()` 立刻执行，看着像「长按没反应」。
+    // 桌面用鼠标时 click 落在格子上、被 `onCellClick` 吞掉，所以这条只在触摸下暴露。
+    // 修法：遮罩与「行」都先问一次 `swallowLongPressTail()`；页根在 pointerdown 捕获阶段
+    // 清掉标记，免得某次没发出尾音 click 时把下一次真点按吞掉。
+    expect(view).toMatch(/function onCoverScrimClick\(\) \{\n\s+if \(swallowLongPressTail\(\)\) return\n\s+closeCoverSheet\(\)/)
+    expect(view).toMatch(/function onCoverRowClick\(row\) \{\n\s+if \(swallowLongPressTail\(\)\) return\n\s+penFromCoverSlot\(row\)/)
+    expect(view).toMatch(/@click="onCoverRowClick\(row\)"/)
+    expect(view).toMatch(/@pointerdown\.capture="clearLongPressTail"/)
+    // 行上不许再直接挂 penFromCoverSlot —— 那就绕过了守卫。
+    expect(view).not.toMatch(/@click="penFromCoverSlot\(row\)"/)
+  })
+
+  it('弹层开着时不渲染笔球：它按 `--z-queue` 压在弹层那一行上（真机截图）', () => {
+    // 笔球是 200（`--z-queue`），弹层是 55（`--z-dialog`）—— 球会压住弹层里的某一行。
+    // 层级令牌那套语义不动；这里只是让球在弹层开着时不存在（弹层里点一行就是装笔，
+    // 装完回周表，球才重新有意义）。
+    expect(view).toMatch(/v-if="!coverSheet"[\s\S]{0,80}?class="gPick-fab"/)
+  })
+})
+
+
+// 票 04 / ADR 0127：长按是触摸菜单 —— 键盘 / 读屏 / 桌面用户进不去。名单面板顶部那一节
+// 「今天要顶的档」就是**等价入口**（「长按不做、改成显式按钮」被否掉的代价，见面票的
+// 背景那一段），所以它跟弹层吃同一份 `coverSlotsFor`，只有日期口径不同：这一节**固定今天**
+// （决策 3：它是等价入口，不是按日浏览的入口）。
+describe('名单面板「今天要顶的档」：长按的键盘等价入口（票 04 / ADR 0127）', () => {
+  // 名单那一栏的模板：从 `panel === 'roster'` 到它自己的 `</template>`。位置关系也是验收
+  // 的一条（在「名单 · 规则」头部下面、人名列表上面），所以按块内出现次序断，不按「有没有」。
+  const rosterStart = view.indexOf(`<template v-else-if="panel === 'roster'">`)
+  const rosterBlock = view.slice(rosterStart, view.indexOf('</template>', rosterStart))
+  const coverAt = rosterBlock.indexOf('gCoverRoster')
+
+  it('这一节在「名单 · 规则」头部下面、人名列表上面；标题与档数都写出来', () => {
+    expect(rosterStart).toBeGreaterThan(-1)
+    expect(coverAt).toBeGreaterThan(-1)
+    expect(rosterBlock.indexOf('gPanel-hd')).toBeLessThan(coverAt)
+    expect(coverAt).toBeLessThan(rosterBlock.indexOf('gRosterGrid'))
+    expect(rosterBlock).toContain('今天要顶的档')
+    // 右侧一行字数提示：`N 档`。N 就是这一节的行数，不另算一份。
+    expect(rosterBlock).toMatch(/\{\{ rosterCoverRows\.length \}\} 档/)
+  })
+
+  it('算清单用同一份 `coverSlotsFor`，日期固定今天（不跟弹层那一格走）', () => {
+    const rows = view.slice(view.indexOf('const rosterCoverRows'), view.indexOf('\n})', view.indexOf('const rosterCoverRows')))
+    expect(rows).toMatch(/coverSlotsFor\(\{/)
+    // 日期来自 `week.today`，**不是** `coverDate`（弹层那份跟着被长按的格子，决策 3）。
+    expect(rows).toMatch(/week\.value\.today/)
+    expect(rows).not.toMatch(/coverDate/)
+    // 三份输入与弹层同一个来源；不拿名单面板那份 `/roster` 的工作区兜底（它缺两个档位开关）。
+    expect(rows).toMatch(/employees: weekEmployees\.value/)
+    expect(rows).toMatch(/shifts: shifts\.value/)
+    expect(rows).toMatch(/zones: coverZones\.value/)
+  })
+
+  it('今天没有要顶的档时整节不渲染：不占位置，也不写空文案', () => {
+    // 名单面板本来就有自己的空态（「名单是空的」是**人名列表**的空态）。这一节再写一句
+    // 「今天没有要顶的档」，空表上会白占一块，还会让人以为清单算坏了。
+    expect(rosterBlock).toMatch(/<section[^>]*v-if="rosterCoverRows\.length"/)
+    // 空态文案不该出现在这一节里：空的时候整节连壳都不在，不是「壳在、里面写一句没有」。
+    expect(rosterBlock).not.toMatch(/>今天没有要顶的档</)
+  })
+
+  it('行是 <button>：可 Tab、有 aria-label、Enter / 空格可激活（原生按钮自带）', () => {
+    // 键盘路径是这票的硬项：`<div @click>` 永远进不了 Tab 序列，读屏也只念里面的字、
+    // 不会说「这是个按钮」。原生 `<button>` 一次拿到 Tab / Enter / 空格三样，不另写 keydown
+    // （自己实现 keydown 反而会漏掉空格、还会把按钮的默认行为再触发一次）。
+    const rowAt = rosterBlock.indexOf('class="gCoverRow"')
+    expect(rowAt).toBeGreaterThan(-1)
+    const row = rosterBlock.slice(rosterBlock.lastIndexOf('<button', rowAt), rosterBlock.indexOf('</button>', rowAt))
+    expect(row).toMatch(/type="button"/)
+    // aria-label 含区、档、谁休 / 请假、还有谁（`coverRowLabel` 与弹层同一份）。
+    expect(row).toMatch(/:aria-label="coverRowLabel\(row\)"/)
+    expect(row).toMatch(/@click="penFromRosterCover\(row\)"/)
+    expect(row).not.toMatch(/@keydown|@keyup/)
+    // 内容与弹层同一套写法（同一份数据、同一套文案，不是另起一套「谁 · 哪档」）。
+    expect(row).toMatch(/\{\{ row\.zone_name \|\| '（工作区已删）' \}\} × \{\{ row\.shift_name \}\}/)
+    expect(row).toMatch(/row\.leave \? '请假' : '休'/)
+    expect(row).toMatch(/coverOthersText\(row\)/)
+    expect(row).toMatch(/coverBlockedText\(row\)/)
+    // 不能装笔的行（停用班次 / 已删工作区）不给「点得下去」的假象。
+    expect(row).toMatch(/:disabled="!row\.can_pen"/)
+  })
+
+  it('点行 = 装笔 → 切回周表；装笔与提示只写一份（复用票 03 那个函数）', () => {
+    const fn = view.slice(view.indexOf('function penFromRosterCover'), view.indexOf('\n}', view.indexOf('function penFromRosterCover')))
+    // 装笔不复制：直接调 `penFromCoverSlot`，不在这里再写一遍笔的四个字段。
+    expect(fn).toMatch(/penFromCoverSlot\(row\)/)
+    expect(fn).not.toMatch(/penShiftId\.value =/)
+    // 装完必须切回周表 —— 那才是能落笔的地方（「装完停在名单」在票面的不做项里）。
+    expect(fn).toMatch(/openPanel\('week'\)/)
+    // 提示文案只存在一处（`penFromCoverSlot` 里那句）；这一条不再写第二份。
+    expect((view.match(/已装笔/g) || []).length).toBe(1)
+  })
+
+  it('直接落在名单面板（刷新 / 书签）也补一次周表数据，这一节不会静默消失', () => {
+    // 首屏按 URL 落在 `?view=roster` 时只读过名单那一份（`/roster`），`week` 还是空的 ——
+    // 不补一次这一节就永远不渲染，看起来像「今天没人休」，比不显示更糟。
+    const fn = view.slice(view.indexOf('async function openPanel'), view.indexOf('\n}', view.indexOf('async function openPanel')))
+    expect(fn).toMatch(/const coversToday = !!loadedWeek/)
+    expect(fn).toMatch(/if \(!coversToday\) await loadWeek\(mondayOf\(today\.value\)\)/)
+  })
+
+  it('翻过周之后打开名单也补今天那周：旧周那份里没有今天的格子', () => {
+    // `/week` 只回**打开那一周**的 7 天，`week.today` 恒是今天 —— 翻到上周 / 用 `?start=`
+    // 深链到旧周后，`week` 不空但那份只含旧周那 7 天。`rosterCoverRows` 拿它算不出今天的
+    // 格子，整节会静默消失，看着像「今天没人休」。所以判断是「空，或已加载那一周不含今天」。
+    const fn = view.slice(view.indexOf('async function openPanel'), view.indexOf('\n}', view.indexOf('async function openPanel')))
+    expect(fn).toMatch(/\(loadedWeek\.days \|\| \[\]\)\.some/)
+    expect(fn).toMatch(/day\.business_date === loadedWeek\.today/)
+    expect(fn).toMatch(/loadWeek\(mondayOf\(today\.value\)\)/)
+  })
+})
+
+
 // 票 14（ADR 0107）把那支常驻的笔整套换掉了：底部常驻笔刷条、展开的编辑抽屉、长按
 // （550ms）看 / 改这一格 —— 三样一起退役，单格的「看 / 改」由「点一格 → 动作条」接走。
-// 这一组断的就是「旧三样不在」＋「新的选区手柄与动作条在」。
-describe('旧三样退役：笔刷条 / 编辑抽屉 / 长按都不在了（票 14）', () => {
+// 2026-11-01（票 03 / ADR 0127）：退役的是**旧语义**（长按展开看 / 改这一格、连着写路径），
+// 长按本身以**只读入口**回来 —— 它只列「那一天要顶的档」，不写任何东西。ADR 0107 决策 8
+// 的原文与理由留在那份 ADR 里，不重写历史；下面那条防回归断言改成正向，不是删掉。
+describe('旧两样退役：笔刷条 / 编辑抽屉都不在了；长按以只读形态回来（票 14 / ADR 0127）', () => {
   it('底部常驻的笔刷条没有了（连它的控件与提示语一起）', () => {
     expect(view).not.toMatch(/gBrush-tag/)
     expect(view).not.toMatch(/gBrush-hint/)
@@ -294,13 +504,49 @@ describe('旧三样退役：笔刷条 / 编辑抽屉 / 长按都不在了（票 
     expect(view).not.toMatch(/api\.put\(`\/api\/scheduling\/overrides\/\$\{target\.employeeId\}/)
   })
 
-  it('长按（550ms）语义没有了：格子只有「点一下 = 落笔」这一种手势', () => {
-    expect(view).not.toMatch(/LONG_PRESS_MS/)
-    expect(view).not.toMatch(/onCellDown/)
-    expect(view).not.toMatch(/pressFired/)
-    expect(view).not.toMatch(/@pointerdown/)
-    expect(view).not.toMatch(/-webkit-touch-callout/)
-    expect(view).not.toMatch(/@contextmenu\.prevent/)
+  it('长按（550ms）回来了，但**只读**：手势在、吞 click 那句在、落笔路径没被它碰到', () => {
+    // 2026-11-01 用户裁定（ADR 0127 决策 1）：长按不再展开「看 / 改这一格」，改成**只读入口** ——
+    // 按住一格列出那一天要顶的档，松手不写任何东西。所以下面断的是「三个常量各一处」「吞掉
+    // 随之而来的 click」而不是「长按不在」；反之，格子仍然只有「点一下 = 落笔」这一种写入口。
+    expect(view).toMatch(/const LONG_PRESS_MS = 550/)
+    expect(view).toMatch(/const PRESS_FEEDBACK_MS = 300/)
+    expect(view).toMatch(/const MOVE_CANCEL_PX = 8/)
+    expect(view).toMatch(/@pointerdown="onCellDown\(\$event, employee, day\)"/)
+    expect(view).toMatch(/@pointermove="onCellMove\(\$event\)"/)
+    // 取消的三条路：松手 / 手势被系统收走 / 手指移出格子，都撤掉按压态。
+    for (const hook of ['@pointerup', '@pointercancel', '@pointerleave']) {
+      expect(view).toContain(`${hook}="onCellUp"`)
+    }
+    // **吞掉随之而来的 click**：落笔只从 `onCellClick` 里那句 `paintCell` 出去，而且它前头
+    // 先过一道「长按刚触发过就 return」。这一句不在，长按一眼就会把那一格改成笔上的班次。
+    // 触发时刻记在长按那一下上（`onCellDown` 的 550ms 计时器）；判断带过期时间，新手势
+    // 开始时也会清一次 —— 浏览器万一没把 click 发到格子上，标记不会留到下一次普通点按。
+    expect(view).toMatch(/longPressFiredAt = Date\.now\(\)/)
+    const swallow = view.slice(view.indexOf('function swallowLongPressTail'), view.indexOf('\n}', view.indexOf('function swallowLongPressTail')))
+    expect(swallow).toMatch(/Date\.now\(\) - longPressFiredAt <= LONG_PRESS_SWALLOW_MS/)
+    expect(swallow).toMatch(/return tail/)
+    const click = view.slice(view.indexOf('function onCellClick'), view.indexOf('\n}', view.indexOf('function onCellClick')))
+    expect(click).toMatch(/if \(swallowLongPressTail\(\)\) return/)
+    expect(click.indexOf('swallowLongPressTail')).toBeLessThan(click.indexOf('paintCell(employee, day)'))
+    // 尾音那一下的 target 常常是页根（弹层已经盖住手指）：那一处也得吞，否则「看一眼」会顺手
+    // 收掉笔栏、清掉正在用的选区。
+    const page = view.slice(view.indexOf('function onPageClick'), view.indexOf('\n}', view.indexOf('function onPageClick')))
+    expect(page).toMatch(/if \(swallowLongPressTail\(\)\) return/)
+    // 长按那条路自己不碰落笔：开弹层只是把那一格的日子记下来。
+    const open = view.slice(view.indexOf('function openCoverSheet'), view.indexOf('\n}', view.indexOf('function openCoverSheet')))
+    expect(open).toMatch(/coverSheet\.value = \{ date: day\.business_date \}/)
+    expect(open).not.toMatch(/paintCell|api\./)
+    // 还没铺到的那几格是 `disabled`（本来就不冒 pointer 事件）；判据再写死在处理函数里一道。
+    expect(view).toMatch(/:disabled="!day\.in_window"/)
+    const down = view.slice(view.indexOf('function onCellDown'), view.indexOf('\n}', view.indexOf('function onCellDown')))
+    expect(down).toMatch(/if \(!day\.in_window\) return/)
+    expect(down).toMatch(/longPressFiredAt = 0/)
+    // 手势自己压住 iOS 的系统菜单与安卓的选中文字（ADR 0127 Consequences）：三条 CSS
+    // 声明 + `@contextmenu.prevent`，少一条真机上就弹系统菜单。
+    expect(view).toMatch(/touch-action: manipulation/)
+    expect(view).toMatch(/-webkit-touch-callout: none/)
+    expect(view).toMatch(/user-select: none/)
+    expect(view).toMatch(/@contextmenu\.prevent/)
   })
 })
 
@@ -435,6 +681,20 @@ describe('排班笔：悬浮球（2026-10-29）', () => {
     expect(view).toMatch(/\.gPick-fab \.dt\.half \{ background: var\(--info\)/)
     expect(view).not.toMatch(/\.gPick-fab \.dt\.tone-/)
     expect(view).toMatch(/return penShift\.value \? 'shift' : ''/)
+  })
+
+  it('点了球才展开球上的笔；装了区之后球面写「班次·区」（真机截图）', () => {
+    // 点一行装笔后球面只写「早班」，装载的区看不见 —— 而这功能的意义就是「哪个区」。
+    // 区名与班次名一样截到 3 个字，整体再交给 `.gPick-fabText` 的 52px + ellipsis 兜底；
+    // 「跟固定区」（`penZoneId === ''`）保持原样，只写班次名。
+    expect(view).toMatch(/function shortPenText/)
+    const fn = view.slice(view.indexOf('const penLabel = computed'), view.indexOf('\n})', view.indexOf('const penLabel = computed')))
+    expect(fn).toMatch(/penZoneId\.value === ''/)
+    expect(fn).toMatch(/zones\.value\.find/)
+    expect(fn).toMatch(/shortPenText\(zone\.name\)/)
+    expect(fn).toContain('·')
+    // 休 / 休半天 / 清 在接区名之前就 return 了（它们本来就不带区）。
+    expect(fn.indexOf("return '休半天'")).toBeLessThan(fn.indexOf('penZoneId'))
   })
 
   it('点球展开 / 再点收起，带走页面的让位与无障碍状态', () => {

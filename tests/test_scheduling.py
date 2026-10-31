@@ -20,6 +20,7 @@ from database import CHINA_TZ, DatabaseManager
 from db_core.schema import ADMIN_READ_ONLY_TABLES, SCHEDULING_TABLES
 from services.business_day import current_workbench_date
 from services.hygiene.accounts import EmployeeAccounts
+from services.identity.zones import ZoneDirectory
 from services.scheduling.store import (
     EXPANSION_DAYS,
     MAX_REQUEST_NOTE,
@@ -107,14 +108,18 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
         )
         return [dict(row) for row in await cur.fetchall()]
 
-    async def _zone(self, name="案板"):
+    async def _zone(self, name="案板", *, day_shift=1, night_shift=1):
         """建一个工作区。表是卫生那条线建的（`hygiene_zones`），这里只当数据用 ——
-        排班读它要走公共层的 `ZoneDirectory`，测试里也不假装是排班自己的表。"""
+        排班读它要走公共层的 `ZoneDirectory`，测试里也不假装是排班自己的表。
+
+        `day_shift` / `night_shift` 是这个区跑不跑白班 / 夜班档（卫生建区时勾的两个开关），
+        排班做「要顶的档」要读它们（见 `ZoneDirectory.list_zones`）。
+        """
         now = self.fixed_now.isoformat()
         cur = await self.db._conn.execute(
             """INSERT INTO hygiene_zones (name, day_shift, night_shift, created_at, updated_at)
-               VALUES (?, 1, 1, ?, ?)""",
-            (name, now, now),
+               VALUES (?, ?, ?, ?, ?)""",
+            (name, day_shift, night_shift, now, now),
         )
         await self.db._conn.commit()
         return int(cur.lastrowid)
@@ -873,6 +878,154 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(grid["employees"][0]["cells"]["2026-10-01"]["shift_name"], "白班")
 
+    async def test_week_grid_carries_the_zone_list_with_both_shift_switches(self):
+        """验收：周表自己的回应带区名单（四项、按 id）—— 算「要顶的档」不用再读 `/roster`。
+
+        两个开关是「这个区跑不跑白班 / 夜班」：前端靠它跳过「馅档 × 早班」这种不存在的档。
+        """
+        employee = await self._employee()
+        day = await self._shift_id("白班")
+        await self.store.set_rule(employee["id"], [day])
+        night_only = await self._zone("馅档", day_shift=0, night_shift=1)
+        both = await self._zone("案板")
+
+        grid = await self.store.week_grid(TODAY)
+
+        self.assertEqual(
+            grid["zones"],
+            [
+                {"id": night_only, "name": "馅档", "day_shift": 0, "night_shift": 1},
+                {"id": both, "name": "案板", "day_shift": 1, "night_shift": 1},
+            ],
+        )
+
+    async def test_week_grid_carries_each_persons_fixed_zone_per_shift(self):
+        """验收：每个员工带 `zone_defaults`（`shift_id` / `zone_id` / `zone_name` 三项）。
+
+        没配过的人是 `[]`（键在、不是缺字段）—— 前端不用去猜「没有」和「没给」的区别。
+        """
+        employee = await self._employee("13800138001", "李四")
+        ruleless = await self._employee("13800138002", "王五")
+        day = await self._shift_id("白班")
+        zone = await self._zone("案板")
+        await self.store.set_rule(employee["id"], [day])
+        await self.store.set_zone_default(employee["id"], day, zone)
+
+        rows = {
+            row["name"]: row
+            for row in (await self.store.week_grid(TODAY))["employees"]
+        }
+
+        self.assertEqual(
+            rows["李四"]["zone_defaults"],
+            [{"shift_id": day, "zone_id": zone, "zone_name": "案板"}],
+        )
+        self.assertEqual(rows["王五"]["zone_defaults"], [])
+
+    async def test_week_grid_keeps_a_zone_default_whose_zone_was_deleted(self):
+        """验收：区被删了（配置行没有外键）→ `zone_name` 是 None、整行照留。
+
+        不是 500、不是悄悄丢行：弹层要照列这一行并标「工作区已删」（spec 的已知状态）。
+        """
+        employee = await self._employee()
+        day = await self._shift_id("白班")
+        zone = await self._zone("案板")
+        await self.store.set_rule(employee["id"], [day])
+        await self.store.set_zone_default(employee["id"], day, zone)
+
+        await self.db._conn.execute("DELETE FROM hygiene_zones WHERE id = ?", (zone,))
+        await self.db._conn.commit()
+
+        row = (await self.store.week_grid(TODAY))["employees"][0]
+        self.assertEqual(
+            row["zone_defaults"],
+            [{"shift_id": day, "zone_id": zone, "zone_name": None}],
+        )
+
+    async def test_week_grid_orders_zone_defaults_by_shift_id(self):
+        """验收：`zone_defaults` 的先后是 `shift_id` 升序，不靠 SQL 的偶然顺序。
+
+        故意按「夜班（后建、id 大）→ 白班（先建、id 小）」的逆序写入，回应里仍要升序。
+        """
+        employee = await self._employee()
+        day = await self._shift_id("白班")
+        night = await self._shift_id("夜班")
+        zone = await self._zone("案板")
+        await self.store.set_rule(employee["id"], [day])
+        await self.store.set_zone_default(employee["id"], night, zone)
+        await self.store.set_zone_default(employee["id"], day, zone)
+
+        row = (await self.store.week_grid(TODAY))["employees"][0]
+
+        self.assertEqual(
+            [item["shift_id"] for item in row["zone_defaults"]],
+            sorted([day, night]),
+        )
+
+    async def test_week_grid_shifts_still_carry_the_duty_slot(self):
+        """验收：`shifts[]` 每项带 `duty_slot`（白班 `day` / 夜班 `night`），停用的也照带。
+
+        前端算「要顶的档」靠 `duty_slot` 把区和档对上；这一列从 `_SHIFT_COLUMNS` 掉了，
+        它就只能去猜班次名。停用但这一周有行的班次同样在（`_shifts_for_display` 老口径）。
+        """
+        employee = await self._employee()
+        day = await self._shift_id("白班")
+        night = await self._shift_id("夜班")
+        await self.store.set_rule(employee["id"], [night])
+        # 让停用的白班这一周真有一行，才进得了 `_shifts_for_display`。
+        await self.store.set_override(employee["id"], "2026-09-25", shift_id=day)
+        await self.store.update_shift(day, is_active=False)
+
+        shifts = {
+            shift["name"]: shift
+            for shift in (await self.store.week_grid(TODAY))["shifts"]
+        }
+
+        self.assertEqual(
+            {
+                name: (shift["duty_slot"], shift["is_active"])
+                for name, shift in shifts.items()
+            },
+            {"白班": ("day", False), "夜班": ("night", True)},
+        )
+
+    async def test_week_grid_lists_an_inactive_shift_a_fixed_zone_points_to(self):
+        """固定区指向的停用班次，即使这一周一行都没有，也要进 `shifts[]`。
+
+        前端 `weekCoverSlots` 靠 `shiftById` 认班次：查不到只能当成「班次被硬删」，
+        那条「停用 → 照列、`can_pen=false`、原因 `shift_inactive`」的行就整行静默消失。
+        所以 `/week` 的 `shifts[]` 不能只看「这一周真有行」。
+        """
+        employee = await self._employee()
+        day = await self._shift_id("白班")
+        zone = await self._zone("案板")
+        # 顺序反了配不上：`set_zone_default` 只认还在用的班次。配完再停用 ——
+        # 这条路径正是 spec 要覆盖的状态（固定区还指着、班次已经停用、本周没有行）。
+        await self.store.set_zone_default(employee["id"], day, zone)
+        await self.store.update_shift(day, is_active=False)
+
+        grid = await self.store.week_grid(TODAY)
+
+        self.assertEqual(
+            [
+                (shift["name"], shift["is_active"], shift["duty_slot"])
+                for shift in grid["shifts"]
+                if shift["id"] == day
+            ],
+            [("白班", False, "day")],
+        )
+        # 固定区那一行照旧带着它（前端 `weekCoverSlots` 要用它算出那一行）。
+        self.assertEqual(
+            grid["employees"][0]["zone_defaults"],
+            [{"shift_id": day, "zone_id": zone, "zone_name": "案板"}],
+        )
+        # 这一周确实一行都没有 —— 否则这条用例只是重复「有行所以出」。
+        self.assertFalse(any(
+            cell["shift_id"] == day
+            for row in grid["employees"]
+            for cell in row["cells"].values()
+        ))
+
     async def test_week_grid_carries_shift_zone_and_the_override_flag(self):
         """验收 3 + 契约：格子里是班次、工作区与「这天跟规则不一样」；撤掉覆盖回规则。"""
         employee = await self._employee()
@@ -1213,6 +1366,23 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
             await self.store.set_zone_default(987654, day, zone)
         self.assertEqual(ctx.exception.code, "unknown_employee")
 
+    async def test_zone_directory_carries_the_two_shift_switches(self):
+        """公共层的区名单多给「跑不跑白班 / 夜班」两个开关（票 01）。
+
+        排班做「要顶的档」要知道这个区跑不跑那一档（馅档只跑夜市），所以 `list_zones`
+        不再裁掉 `day_shift` / `night_shift`；仍然只读、仍然不 import 卫生。
+        """
+        night_only = await self._zone("馅档", day_shift=0, night_shift=1)
+        both = await self._zone("案板")
+
+        self.assertEqual(
+            await ZoneDirectory(self.db).list_zones(),
+            [
+                {"id": night_only, "name": "馅档", "day_shift": 0, "night_shift": 1},
+                {"id": both, "name": "案板", "day_shift": 1, "night_shift": 1},
+            ],
+        )
+
     async def test_roster_carries_zones_and_each_persons_default(self):
         employee = await self._employee()
         day = await self._shift_id("白班")
@@ -1221,7 +1391,11 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
 
         roster = await self.store.roster_with_rules()
 
-        self.assertIn({"id": zone, "name": "熟笼"}, roster["zones"])
+        # 区名单是同一份（`ZoneDirectory` 原样透传）：`/roster` 也带上两个班次开关。
+        self.assertEqual(
+            roster["zones"],
+            [{"id": zone, "name": "熟笼", "day_shift": 1, "night_shift": 1}],
+        )
         self.assertEqual(roster["employees"][0]["zone_defaults"], {day: zone})
 
     async def test_zone_created_in_hygiene_is_pickable_at_once(self):
@@ -1234,7 +1408,9 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
 
         after = await self.store.roster_with_rules()
         self.assertNotIn(zone, [item["id"] for item in before["zones"]])
-        self.assertIn({"id": zone, "name": "肠粉"}, after["zones"])
+        self.assertIn(
+            {"id": zone, "name": "肠粉", "day_shift": 1, "night_shift": 1}, after["zones"]
+        )
         await self.store.set_zone_default(employee["id"], day, zone)
         self.assertEqual((await self.store.zone_defaults())[employee["id"]], {day: zone})
 

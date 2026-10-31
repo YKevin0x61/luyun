@@ -21,6 +21,9 @@ import { SHIFT_COLOR_NEUTRAL, mergeShiftList, shiftColorClass } from '../../util
 // 周表成员列那行存假与考勤表卡片写同一个字面，别在这里另起一套格式。
 import { formatDays } from '../../utils/attendanceSheet'
 import { eachDayInRange } from '../../utils/dateRange'
+// 「那一天要顶的档」的清单（票 02）：一行一条、`can_pen` / `blocked_reason` 全在那边算，
+// 这一页只渲染（票 03 的长按弹层与票 04 的名单面板那一节吃同一份输出）。
+import { BLOCKED_SHIFT_INACTIVE, BLOCKED_ZONE_DELETED, coverSlotsFor } from '../../utils/weekCoverSlots'
 // 周表的落笔与选区（票 14 / ADR 0107，2026-10-13 方向修订）：纯逻辑在
 // `utils/schedulingWeekPick.js` 里 —— 这一页只负责把手柄接上去、把笔与回执接上去。
 // `cellHandle` 不再被这一页用：格子从「选区手柄」改回「点一下就落笔」，手柄只剩
@@ -314,7 +317,19 @@ async function openPanel(next) {
     clearPick()
     penOpen.value = false
   }
-  if (next === 'roster') await loadRoster()
+  if (next === 'roster') {
+    await loadRoster()
+    // 名单顶部那一节（票 04）算的是「今天要顶的档」，吃的是 `/week` 那份数据（`week.today`
+    // 与 `week.employees`）。这一节说的**永远是今天**，可 `/week` 只回打开那一周的 7 天：
+    // 直接落在 `?view=roster`（刷新 / 书签）时周表还没读过，翻过周 / 用 `?start=` 深链到
+    // 旧周时手上那份又不含今天 —— 两种情况下 `rosterCoverRows` 都拿不到今天的格子，整节
+    // 静默消失，看起来像「今天没人休」。所以只要已加载的那一周不含 `week.today` 就补拉
+    // 今天那一周；拿到别的周的数据只会得出「今天没人休」这种假话。只补数据，不渲染周表。
+    const loadedWeek = week.value
+    const coversToday = !!loadedWeek
+      && (loadedWeek.days || []).some((day) => day.business_date === loadedWeek.today)
+    if (!coversToday) await loadWeek(mondayOf(today.value))
+  }
   // 周表按需读：默认落在月历上，没切过去就不发这个请求。
   else if (next === 'week') {
     await loadWeek(weekStart.value || mondayOf(today.value))
@@ -699,14 +714,16 @@ function weekCellLabel(employee, day) {
   // 格子是**落笔点**（票 14 修订：点一下就用笔栏上那支笔改写这一格）：名字里那半句是给
   // 读屏的（角色是 button，光有内容读不出点下去会发生什么）。
   const pick = '，点一下就用笔栏上的班次、休、休半天或清改写这一格'
+  // 长按是**只读**入口（票 03 / ADR 0127）：读屏用户从名字里知道它存在，也知道它不改东西。
+  const look = '，长按看那一天要顶的档'
   if (!cell || !cell.scheduled) {
-    return `${employee.name} ${when}：${blankReason(day, cell) || '还没排到'}${pick}`
+    return `${employee.name} ${when}：${blankReason(day, cell) || '还没排到'}${pick}${look}`
   }
   const what = cell.shift_id === null || cell.shift_id === undefined
     ? (cell.leave ? '请假' : '休')
     : `${cell.shift_name}${cell.half_rest ? '（休半天）' : ''}` +
       `${cell.zone_name ? `，${cell.zone_name}` : '，未配工作区'}`
-  return `${employee.name} ${when}：${what}${cell.overridden ? '，已手动调整' : ''}${pick}`
+  return `${employee.name} ${when}：${what}${cell.overridden ? '，已手动调整' : ''}${pick}${look}`
 }
 
 // 这一周有几格是「休半天」（票 07）：>0 时图例里多一句，免得格子里那个「半」没人解释。
@@ -804,14 +821,30 @@ const penZoneName = computed(() => {
   return zone ? zone.name : '跟固定区'
 })
 
-/** 悬浮球上写什么：当前那支笔。班次写名字（最多三个字，与格子里的缩写同一套口径），
- *  休 / 休半天 / 清各写一个字 —— 收起状态下也要一眼看出下一笔会写什么。 */
+/** 球面文字最多三个字（与格子里的班次缩写同一套口径）。球本身还受 `.gPick-fabText`
+ *  的 `max-width: 52px` + ellipsis 兜底，所以「早班·明档2」真放不下时会被截成省略号 ——
+ *  能看见「班次·区」的前半截，比只写班次名强。 */
+function shortPenText(value) {
+  const text = String(value || '')
+  return text.length > 3 ? text.slice(0, 3) : text
+}
+
+/** 悬浮球上写什么：当前那支笔。班次写名字（最多三个字），休 / 休半天 / 清各写一个字 ——
+ *  收起状态下也要一眼看出下一笔会写什么。
+ *
+ *  装过区（`penZoneId !== ''`）时把区名接在班次后面：这一笔写下去带着区，而「哪个区」
+ *  正是这个功能的意义（真机截图：点一行装笔后球面只剩「早班」，装载的区看不见）。
+ *  「跟固定区」（`penZoneId === ''`）不接 —— 它不需要挤进球面，写班次名就够；区查不到
+ *  （名单还没读到 / 区刚被删）也退回只写班次，拼一句「跟固定区」是假话。 */
 const penLabel = computed(() => {
   if (penClear.value) return '清'
   if (penHalfRest.value) return '休半天'
   if (penRest.value) return '休'
-  const name = penShift.value ? String(penShift.value.name || '班') : '班'
-  return name.length > 3 ? name.slice(0, 3) : name
+  const name = shortPenText(penShift.value ? penShift.value.name : '班') || '班'
+  const zone = penZoneId.value === ''
+    ? null
+    : zones.value.find((item) => String(item.id) === penZoneId.value)
+  return zone ? `${name}·${shortPenText(zone.name)}` : name
 })
 
 /** 球上那个小圆点的记号：班次 / 休 / 休半天 / 清。**只分这四档、不按班次配色**
@@ -993,6 +1026,9 @@ watch(weekFind, () => {
 /** 点表格外的空白 = 取消（ADR 0107 决策 3）：控件上的点击各有各的意思，不算「空白」。
  *  2026-10-29 起顺带收起悬浮球展开的笔栏 —— 点空白本来就是要「退出这一下」。 */
 function onPageClick(event) {
+  // 长按那一下的尾音 click 会落到页根上（弹层盖住了手指，target 是 pointerdown / pointerup
+  // 两者的共同祖先）：不在这里也吞掉，「看一眼」就会顺手收掉笔栏、清掉正在用的选区。
+  if (swallowLongPressTail()) return
   const target = event.target
   const skip = target && typeof target.closest === 'function'
     && target.closest('.gW, .gPick, .gD, button, input, select, label, a')
@@ -1025,6 +1061,9 @@ function sayNotice(text, details = [], warn = false) {
 onUnmounted(() => {
   if (noticeTimer) clearTimeout(noticeTimer)
   noticeTimer = null
+  // 长按的两个计时器（300ms 按压态 / 550ms 触发）也得收掉：页面切走时还挂着一个，
+  // 回来就会在没按任何格子的情况下弹出上一页那一格的清单。
+  cancelPress()
 })
 
 function skipText(items) {
@@ -1157,6 +1196,218 @@ async function paintCell(employee, day) {
     return
   }
   await executePaint(employee, day, action, options)
+}
+
+// ── 长按一格 = 只看「那一天要顶的档」（票 03 / ADR 0127）─────────────────────
+// 格子的**写入口仍然只有一条**：点一下落笔。长按是只读入口 —— 按住 550ms 弹一张底部弹层，
+// 列出那一天休 / 请假的人本来站哪个档、那个档现在还有谁；点一行把那个档的班次 + 工作区
+// 一次装进笔，落笔仍要店长自己点下去。ADR 0107 决策 8 退役的是「长按展开看 / 改这一格」
+// 那套连着写路径的旧语义，不是长按本身（ADR 0127 决策 1）。
+const LONG_PRESS_MS = 550
+const PRESS_FEEDBACK_MS = 300
+const MOVE_CANCEL_PX = 8
+// 长按之后**紧跟着**的那一次 click 必须吞掉：格子的 @click 是落笔，不吞就是「长按看一眼，
+// 顺手把这一格改成笔上的班次」——一次查看变成事故。标记带过期时间：万一浏览器没把 click
+// 发到格子上（弹层已经盖住手指），它也不会留到下一次普通点按。
+const LONG_PRESS_SWALLOW_MS = 1000
+
+const coverSheet = ref(null) // { date } | null：弹层开着时记的是**被长按那一格**的日子
+const pressKey = ref('') // 按压态挂在哪一格上（pointerdown 起 300ms 才亮，见 PRESS_FEEDBACK_MS）
+let pressTimer = 0
+let longPressTimer = 0
+let pressOrigin = null
+let longPressFiredAt = 0
+
+function cellPressKey(employee, day) {
+  return `${employee.id}|${day.business_date}`
+}
+
+/** 撤掉按压态与两个计时器：取消的每一条路（松手 / 系统收走手势 / 移出格子 / 位移超 8px）都走它。 */
+function cancelPress() {
+  if (pressTimer) clearTimeout(pressTimer)
+  if (longPressTimer) clearTimeout(longPressTimer)
+  pressTimer = 0
+  longPressTimer = 0
+  pressOrigin = null
+  pressKey.value = ''
+}
+
+/** 按住一格。`disabled` 的格子（还没铺到的那几天）本来就不冒 pointer 事件 —— 判据再写死一道，
+ *  免得哪天模板上的 `:disabled` 被挪走，长按就悄悄在「注定没有数据」的格子上生效。 */
+function onCellDown(event, employee, day) {
+  if (!day.in_window) return
+  // 新手势开始：上一手遗留的「尾音」标记作废（它只属于上一次那支手势）。
+  longPressFiredAt = 0
+  cancelPress()
+  pressOrigin = { x: event.clientX, y: event.clientY }
+  // 300ms 才亮按压态：手指按下去要**先有回应**，否则长按会变成「一直按、怀疑没按到」。
+  pressTimer = setTimeout(() => { pressKey.value = cellPressKey(employee, day) }, PRESS_FEEDBACK_MS)
+  longPressTimer = setTimeout(() => {
+    longPressFiredAt = Date.now()
+    cancelPress()
+    openCoverSheet(day)
+  }, LONG_PRESS_MS)
+}
+
+/** 手指一动就是滚动：8px 之外整条手势作废（ADR 0127 决策 1）—— 扫表时不会老弹窗。 */
+function onCellMove(event) {
+  if (!pressOrigin) return
+  const dx = event.clientX - pressOrigin.x
+  const dy = event.clientY - pressOrigin.y
+  if (Math.hypot(dx, dy) > MOVE_CANCEL_PX) cancelPress()
+}
+
+function onCellUp() {
+  cancelPress()
+}
+
+/** 弹层开在**被长按的那一格**的日子上（ADR 0127 决策 3）：补记上周漏排的人时，「看到的」
+ *  与「列出来的」是同一天。开弹层不发请求、不写任何东西。 */
+function openCoverSheet(day) {
+  coverSheet.value = { date: day.business_date }
+}
+
+function closeCoverSheet() {
+  coverSheet.value = null
+}
+
+/** 遮罩与弹层里的行也要过「尾音」这一道 —— **手机上不吞就是弹层一出来就没了**。
+ *
+ *  桌面用鼠标时，长按那一下的 click 落在**格子**上（pointerdown / pointerup 同元素），
+ *  由 `onCellClick` 吞掉。手机上抬手时弹层已经把手指那一点盖住了，浏览器合成的 click
+ *  会落到**最上层**：要么是遮罩（`closeCoverSheet` 立刻把弹层关掉，看着像「长按没反应」），
+ *  要么是某一行（一松手就顺手装了笔，比不反应更糟）。所以这两处入口都要先问一次
+ *  `swallowLongPressTail()`；真机复现与修法见 2026-11-01 的 `touch_probe.py`。 */
+function onCoverScrimClick() {
+  if (swallowLongPressTail()) return
+  closeCoverSheet()
+}
+
+function onCoverRowClick(row) {
+  if (swallowLongPressTail()) return
+  penFromCoverSlot(row)
+}
+
+/** 新手势一开始就作废「尾音」标记：万一某个浏览器**没**把尾音 click 发出来（标记就一直挂着），
+ *  下一次真点按会先过 `pointerdown`，这样它不会被误吞。 */
+function clearLongPressTail() {
+  longPressFiredAt = 0
+}
+
+/** 长按那一下的**尾音 click** 该不该吞掉：吞返回 true，顺手把标记清掉。
+ *
+ *  两层保险：`Date.now()` 过期自动失效（浏览器万一没把 click 发到格子上，标记也不会留到
+ *  下一次普通点按），`onCellDown` 在新手势开始时也会清一次。 */
+function swallowLongPressTail() {
+  if (!longPressFiredAt) return false
+  const tail = Date.now() - longPressFiredAt <= LONG_PRESS_SWALLOW_MS
+  longPressFiredAt = 0
+  return tail
+}
+
+/** 点一格 = 落笔，除非这一下是长按那支手势的尾音（见 `LONG_PRESS_SWALLOW_MS`）。 */
+function onCellClick(employee, day) {
+  if (swallowLongPressTail()) return
+  void paintCell(employee, day)
+}
+
+/** 那一天要顶的档：日期 = 被长按那一格的日子，清单由票 02 的 `coverSlotsFor` 算。 */
+const coverDate = computed(() => (coverSheet.value ? coverSheet.value.date : ''))
+
+/** 「要顶的档」用的工作区名单：`/week` 带下来的那份（票 01 起带 `day_shift` / `night_shift`）。
+ *
+ *  **不拿名单面板那份（`/roster`）兜底**：那份只有 `id` / `name`，缺了两个开关就判不出
+ *  「这个区跑不跑这一档」—— 拼上去只会把每一条都算成「区已删」或者全跳过，两种都是假话。
+ *  后端还没补上这两个字段时清单是空的，比说一句错的强。 */
+const coverZones = computed(() => (week.value && week.value.zones) || [])
+
+const coverRows = computed(() => (coverDate.value
+  ? coverSlotsFor({
+      employees: weekEmployees.value,
+      shifts: shifts.value,
+      zones: coverZones.value,
+      date: coverDate.value,
+    })
+  : []))
+
+/** 名单面板顶部那一节（票 04）：同一份 `coverSlotsFor`，但日期**固定今天** —— 这一节是
+ *  键盘 / 读屏 / 桌面用户的等价入口，不是按日浏览的入口（ADR 0127 决策 3：只有弹层跟着
+ *  被长按的那一格走）。今天还没有数据（`week.today` 为空）时返回空数组，模板据此整节不
+ *  渲染：不占位、也不写空文案 —— 名单面板本来就有自己的空态（「名单是空的」是**人名列表**
+ *  的空态，别把两件事混成一句）。 */
+const rosterCoverRows = computed(() => {
+  const date = week.value ? week.value.today : ''
+  if (!date) return []
+  return coverSlotsFor({
+    employees: weekEmployees.value,
+    shifts: shifts.value,
+    zones: coverZones.value,
+    date,
+  })
+})
+
+const coverIsToday = computed(() => !!coverDate.value && !!week.value && coverDate.value === week.value.today)
+const coverIsPast = computed(() => !!coverDate.value && !!week.value && coverDate.value < week.value.today)
+
+const coverTitle = computed(() => (coverIsToday.value
+  ? '今天要顶的档'
+  : `${monthDayText(coverDate.value)} 要顶的档`))
+// 空态跟标题**同一套日期口径**：今天说「今天」，其它天说「这一天」—— 两处说法不一致时，
+// 店长会以为弹层列错了日子（2026-11-01 裁定）。
+const coverEmptyText = computed(() => (coverIsToday.value ? '今天没有要顶的档' : '这一天没有要顶的档'))
+
+/** 行右侧那句「这个档现在还有谁」。没人就直说「没人」—— 留空会被读成「还没算」。 */
+function coverOthersText(row) {
+  return row.others.length ? `还有：${row.others.join(' / ')}` : '没人'
+}
+
+/** 不能装笔的两条理由（票 02 的常量 → 界面上的话）。店长要做的是去班次表把它启回来 /
+ *  去配置里补一个区，不是以为系统漏了这一档。 */
+const COVER_BLOCKED_TEXT = {
+  [BLOCKED_SHIFT_INACTIVE]: '班次已停用',
+  [BLOCKED_ZONE_DELETED]: '工作区已删',
+}
+
+function coverBlockedText(row) {
+  return COVER_BLOCKED_TEXT[row.blocked_reason] || ''
+}
+
+/** 行上读给读屏的一句话：区 × 档、谁休 / 请假、这个档还有谁；不能装笔的补一句原因。 */
+function coverRowLabel(row) {
+  const parts = [
+    `${row.zone_name || '工作区已删'} × ${row.shift_name}`,
+    `${row.employee_name}${row.leave ? '请假' : '休'}`,
+    coverOthersText(row),
+  ]
+  if (!row.can_pen) parts.push(coverBlockedText(row))
+  return parts.join('；')
+}
+
+/** 点一行 = 把那个档的**班次 + 工作区**一次装进笔（ADR 0127 决策 4），关弹层、给一行提示。
+ *
+ *  直接写 `penShiftId` / `penZoneId`，**不走 `pickPenShift`** —— 它会把 `penZoneId` 拨回
+ *  「跟固定区」，正好把刚装上的区清掉（那是「换班次」的语义，不是「装一支配好的笔」）。
+ *  笔球**不展开**：球面本来就写着当前那支笔，展开只会再把表格压掉一行。
+ *  停用班次 / 已删工作区的行在入口就挡下来：笔只认启用中的班次，硬装会默默退化成第一个
+ *  启用班次 —— 那会写到别人身上。 */
+function penFromCoverSlot(row) {
+  if (!row.can_pen) return
+  penShiftId.value = row.shift_id
+  penZoneId.value = String(row.zone_id)
+  penRest.value = false
+  penHalfRest.value = false
+  penClear.value = false
+  coverSheet.value = null
+  sayNotice(`已装笔：${row.shift_name} × ${row.zone_name}，去点要顶的那一格`)
+}
+
+/** 名单面板那一节点一行：装笔这件事只写一份 —— `penFromCoverSlot` 自带关弹层与那句提示，
+ *  这里只多一步「切回周表」。装完必须回到能落笔的地方，停在名单没有可点的格子
+ *  （票 04 的「不做」项）。不能装笔的行照旧先挡下来：切到周表却没有笔可用是一个死点击。 */
+function penFromRosterCover(row) {
+  if (!row.can_pen) return
+  penFromCoverSlot(row)
+  void openPanel('week')
 }
 
 /** 选区那一行的「刷」：把当前笔整片写下去（选区唯一的存在理由）。 */
@@ -1611,7 +1862,12 @@ useNudgePull({
 
 <template>
   <div class="hygiene-admin sched-page">
-    <div class="gB" :class="{ 'pen-week': panel === 'week' }" @click="onPageClick">
+    <div
+      class="gB"
+      :class="{ 'pen-week': panel === 'week' }"
+      @click="onPageClick"
+      @pointerdown.capture="clearLongPressTail"
+    >
       <div class="gB-body">
         <header class="gHead">
           <p class="gKicker">人事 · 排班</p>
@@ -1946,7 +2202,11 @@ useNudgePull({
             </div>
           <!-- 悬浮球（2026-10-29 用户要求）：笔栏常驻太占地方，收成右下角一颗球，点球才展开。
                球面写当前那支笔（班次名 / 休 / 休半天 / 清），收起也一眼知道下一笔会写什么。 -->
+          <!-- 弹层开着时不渲染笔球：球是 `--z-queue`（200），会压在弹层（`--z-dialog`）
+               某一行上（真机截图）。层级令牌那套语义不动，这里只是让它不在没用的时刻出现 ——
+               弹层里点一行本来就是「装笔」，装完回周表，球才重新有意义。 -->
           <button
+            v-if="!coverSheet"
             class="gPick-fab"
             type="button"
             :class="{ open: penOpen }"
@@ -2201,13 +2461,23 @@ useNudgePull({
                       </button>
                     </th>
                     <td v-for="day in weekDays" :key="day.business_date">
+                      <!-- 格子只有**一条写入口**：点一下 = 落笔。长按是只读入口（票 03 / ADR 0127）：
+                           按住 550ms 弹「那一天要顶的档」，松手不写任何东西 —— 随之而来的 click
+                           由 `onCellClick` 吞掉。三个禁止系统手势的声明（触摸滚动 / iOS 系统菜单 /
+                           安卓选中文字）挂在这一格上，少一条真机上就长按变弹菜单。 -->
                       <button
                         type="button"
                         class="gW-cell"
-                        :class="weekCellClass(employee, day)"
+                        :class="[weekCellClass(employee, day), { press: pressKey === cellPressKey(employee, day) }]"
                         :aria-label="weekCellLabel(employee, day)"
                         :disabled="!day.in_window"
-                        @click="paintCell(employee, day)"
+                        @pointerdown="onCellDown($event, employee, day)"
+                        @pointermove="onCellMove($event)"
+                        @pointerup="onCellUp"
+                        @pointercancel="onCellUp"
+                        @pointerleave="onCellUp"
+                        @contextmenu.prevent
+                        @click="onCellClick(employee, day)"
                       >
                         <span>
                           {{ weekCellText(employee, day) }}<i
@@ -2238,7 +2508,7 @@ useNudgePull({
             </div>
 
             <div class="gW-hintLine">
-              点一格落笔；点列头 / 人名选区，再用工具条「刷」批量。改规则在「名单」里。
+              点一格落笔；长按一格 = 只看那一天要顶的档；点列头 / 人名选区，再用工具条「刷」批量。
               <details class="gW-help">
                 <summary>?</summary>
                 <p class="gB-note">
@@ -2246,6 +2516,11 @@ useNudgePull({
                   「休半天」把那一格标成只上半天（再点一下取消），那天得先有班次。
                   「清」把这一格清成空白（还没排到）；「退回规则」把选中日子里手改过的那几天退回轮转规则；
                   改轮转规则在「名单」里。
+                </p>
+                <p class="gB-note">
+                  长按 = 只看，不改：按住一格约半秒，列出「那一天要顶的档」—— 那天休 / 请假的人
+                  本来站哪个档、那个档现在还有谁。点其中一行把那个档的班次与工作区装进笔，
+                  再去点要顶的那一格；松手不会改动任何一格。
                 </p>
                 <p v-if="weekNoDataNote" class="gB-note">{{ weekNoDataNote }}</p>
                 <p v-if="weekBeyondDays.length" class="gB-note">
@@ -2257,6 +2532,50 @@ useNudgePull({
             </div>
           </template>
           </section>
+
+          <!-- 长按一格 = 只看那一天要顶的档（票 03 / ADR 0127）：底部弹层 + 遮罩，与月历那张
+               当天名单抽屉**同一套位置口径**（`.gDrawerScrim` / 贴底 / `--z-dialog`）。遮罩盖过
+               壳底栏（`--z-shell`）就是让位、关掉自然还位 —— 不为它再开一个 body 状态
+               （2026-10-29 把笔栏收成悬浮球时，「底栏让位」那条整条退役了，别复活）。 -->
+          <template v-if="coverSheet">
+            <div class="gDrawerScrim gCoverScrim" @click="onCoverScrimClick"></div>
+            <section
+              class="gCoverSheet"
+              role="dialog"
+              aria-modal="true"
+              :aria-label="coverTitle"
+            >
+              <div class="gCoverHd">
+                <b>{{ coverTitle }}</b>
+                <!-- 这一行说明它是**入口**不是结果：点了只会装笔，还要去点要顶的那一格。 -->
+                <span class="gCoverHint">点一行 = 装进笔</span>
+                <button class="gDrawerClose" type="button" aria-label="收起要顶的档" @click="closeCoverSheet()">收起</button>
+              </div>
+              <!-- 过去的日子照样能长按、能装笔（ADR 0108 的 30 天补记）：只标一句实话。 -->
+              <p v-if="coverIsPast" class="gCoverPast">这一天已经过去</p>
+              <p v-if="!coverRows.length" class="gCoverEmpty">{{ coverEmptyText }}</p>
+              <ul v-else class="gCoverList">
+                <li v-for="row in coverRows" :key="`${row.employee_id}|${row.shift_id}|${row.zone_id}`">
+                  <!-- 整行是一颗按钮：点中就把这个档的班次 + 工作区一次装进笔。不能装笔的行
+                       `disabled`（停用班次 / 已删工作区）—— 没有按压态，右侧写明原因。 -->
+                  <button
+                    class="gCoverRow"
+                    type="button"
+                    :disabled="!row.can_pen"
+                    :aria-label="coverRowLabel(row)"
+                    @click="onCoverRowClick(row)"
+                  >
+                    <span class="gCoverSlot">{{ row.zone_name || '（工作区已删）' }} × {{ row.shift_name }}</span>
+                    <span class="gCoverMeta">
+                      <b class="gCoverWho">{{ row.employee_name }}{{ row.leave ? '请假' : '休' }}</b>
+                      <span class="gCoverOthers">{{ coverOthersText(row) }}</span>
+                      <span v-if="!row.can_pen" class="gCoverBlocked">{{ coverBlockedText(row) }}</span>
+                    </span>
+                  </button>
+                </li>
+              </ul>
+            </section>
+          </template>
         </template>
 
         <template v-else-if="panel === 'roster'">
@@ -2267,6 +2586,36 @@ useNudgePull({
               <span class="gPanel-hint">一人一条 · {{ roster.length }} 人</span>
               <span class="gPanel-more">固定班 / 编周期</span>
             </div>
+            <!-- 今天要顶的档（票 04）：长按是触摸菜单，键盘 / 读屏 / 桌面用户进不去，这一节就是
+                 那条不靠长按的路。行是原生 `<button>` —— Tab / Enter / 空格都白拿，不自己写
+                 keydown（那会漏掉空格、还会把按钮默认行为再触发一次）。内容与票 03 的弹层同一套
+                 （同一份 `coverRowLabel` / `coverOthersText` / `coverBlockedText`），装笔也调同一个
+                 函数，点完切回周表：那里才有格子可点。日期**固定今天**（ADR 0127 决策 3）；
+                 今天没有要顶的档时整节不渲染，名单面板本来就有自己的空态。 -->
+            <section v-if="rosterCoverRows.length" class="gCoverRoster">
+              <div class="gCoverRoster-hd">
+                <h3>今天要顶的档</h3>
+                <span class="gCoverRoster-n">{{ rosterCoverRows.length }} 档</span>
+              </div>
+              <ul class="gCoverList">
+                <li v-for="row in rosterCoverRows" :key="`${row.employee_id}|${row.shift_id}|${row.zone_id}`">
+                  <button
+                    class="gCoverRow"
+                    type="button"
+                    :disabled="!row.can_pen"
+                    :aria-label="coverRowLabel(row)"
+                    @click="penFromRosterCover(row)"
+                  >
+                    <span class="gCoverSlot">{{ row.zone_name || '（工作区已删）' }} × {{ row.shift_name }}</span>
+                    <span class="gCoverMeta">
+                      <b class="gCoverWho">{{ row.employee_name }}{{ row.leave ? '请假' : '休' }}</b>
+                      <span class="gCoverOthers">{{ coverOthersText(row) }}</span>
+                      <span v-if="!row.can_pen" class="gCoverBlocked">{{ coverBlockedText(row) }}</span>
+                    </span>
+                  </button>
+                </li>
+              </ul>
+            </section>
             <p v-if="!roster.length" class="gB-empty">名单是空的</p>
             <div v-else class="gRosterGrid">
               <div v-for="employee in roster" :key="employee.id" class="gR">
@@ -2844,11 +3193,23 @@ useNudgePull({
   border: 1px solid transparent; border-radius: var(--r-1);
   background: var(--surface-2); color: var(--ink);
   font: inherit; font-family: var(--font-sans); font-size: 11.5px; cursor: pointer;
+  /* 长按（票 03 / ADR 0127）：`touch-action: manipulation` 去掉双击缩放、把指针事件按时给到
+     这一格；`-webkit-touch-callout: none` 压住 iOS 长按的系统菜单；`user-select: none`
+     挡安卓的选中文字。三条少一条，真机上长按就变成系统菜单 / 选字（模板上的
+     `@contextmenu.prevent` 是最后一道）。 */
+  touch-action: manipulation;
+  -webkit-touch-callout: none;
+  user-select: none;
 }
 .gW-cell:disabled { cursor: default; }
 /* 班次缩写（2026-11-01）：字色已经是「同色相深字」，再把字重与字号提一档 —— 11.5px 的
    常规体在亮底上，色相读不出来，看着像一格黑字。工作区那行不动（9px 再粗就糊）。 */
 .gW-cell > span:first-child { font-size: 12.5px; font-weight: 700; letter-spacing: .01em; }
+/* 按住 300ms 起的按压态（`PRESS_FEEDBACK_MS`）：一圈内描边 + 轻微缩小，不引入新颜色 ——
+   格子的底色是班次色（0043），按压态不能跟「选中 / 今天 / 休半天」那几个记号抢。用
+   `outline` 而不是 `box-shadow`：`.today` 与 `.on` 都拿 `box-shadow` 画环，撞上去就会被
+   后定义的那条盖掉，今天那格反而没有按压反馈。 */
+.gW-cell.press { outline: 2px solid var(--line-control); outline-offset: -2px; transform: scale(.96); }
 .gW-cell.long { font-size: 10px; letter-spacing: -.02em; }
 /* 班次下面那行工作区名（2026-10-08 用户要的）：格子只有 ~39px 宽，所以是 9px 的小字、
    跟着班次那个色弱一档 —— 主信息仍然是班次那一个字。三个字的区名（明档1）单行放得下，
@@ -3040,6 +3401,72 @@ useNudgePull({
 .gPick-note { margin: 0; display: flex; align-items: center; gap: 8px; font-size: 10.5px; color: var(--ink-dim); }
 .gPick-note-text { flex: 1 1 auto; min-width: 0; }
 .gPick-detail { display: flex; flex-direction: column; gap: 4px; }
+/* ── 长按弹层「要顶的档」（票 03 / ADR 0127）────────────────────────────
+   与月历那张当天名单抽屉（`.gDash--drawer .gSide` + `.gDrawerScrim`）**同一套位置口径**：
+   贴底、圆角、`--z-dialog`，遮罩是 `--z-scrim`。壳底栏在 `--z-shell`，遮罩一盖就是「让位」，
+   关掉自然「还位」—— 不再开一个 body 状态去挪底栏。
+   位置口径写成 base 而不是只写在手机媒体查询里：长按在桌面（鼠标按住）同样有效，而
+   `.gDrawerScrim` 那份只写了手机档 —— 遮罩这里补一条同值的 base（`.gCoverScrim`），
+   否则桌面上弹层是悬空的，点外面关不掉。
+   零新增颜色引用：只用 `--surface-*` / `--ink-*` / `--line-*` / `--wb-scrim` 这些既有令牌。 */
+.gCoverScrim {
+  position: fixed; inset: 0; z-index: var(--z-scrim);
+  background: var(--wb-scrim);
+}
+.gCoverSheet {
+  position: fixed; left: 0; right: 0; bottom: 0;
+  z-index: var(--z-dialog);
+  max-width: 520px; margin: 0 auto;
+  max-height: 72vh; overflow-y: auto;
+  padding: 14px 14px calc(14px + var(--safe-b));
+  background: var(--surface-0);
+  border-top: 1px solid var(--line-strong);
+  border-radius: var(--r-2) var(--r-2) 0 0;
+  box-shadow: 0 -18px 40px var(--wb-scrim);
+}
+.gCoverHd { display: flex; align-items: center; gap: 8px; }
+.gCoverHd b { font-family: var(--font-sans); font-size: 12.5px; font-weight: 600; letter-spacing: .04em; color: var(--ink); }
+.gCoverHint { font-size: 10.5px; color: var(--ink-dim); }
+/* 「收起」在手机档由 `.gDrawerClose` 的媒体查询点亮；桌面档长按一样能用，所以这里补到所有宽度。 */
+.gCoverSheet .gDrawerClose { display: inline-flex; }
+.gCoverPast, .gCoverEmpty {
+  margin: 10px 0 0; font-size: 11px; color: var(--ink-dim);
+}
+.gCoverPast { color: var(--info); }
+.gCoverList { list-style: none; margin: 10px 0 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.gCoverRow {
+  width: 100%; min-height: var(--tap); padding: 9px 11px;
+  display: flex; align-items: center; gap: 10px;
+  border: 1px solid var(--line-strong); border-radius: var(--r-1);
+  background: var(--surface-1); color: var(--ink);
+  font: inherit; font-family: var(--font-sans); text-align: left; cursor: pointer;
+}
+/* 不能装笔的行（停用班次 / 已删工作区）没有按压态：`disabled` 的按钮不冒 `:active`，
+   右侧那行原因才是它要说的话。 */
+.gCoverRow:disabled { cursor: default; opacity: .72; }
+.gCoverRow:not(:disabled):active { background: var(--surface-3); }
+.gCoverSlot { flex: 0 0 auto; font-size: 12px; font-weight: 600; letter-spacing: .02em; }
+/* 右侧三行：谁休 / 请假、这个档还有谁、不能装笔的原因。窄屏也不折到左边来。 */
+.gCoverMeta { margin-left: auto; min-width: 0; display: flex; flex-direction: column; align-items: flex-end; gap: 2px; }
+.gCoverWho { font-size: 11.5px; font-weight: 600; white-space: nowrap; }
+.gCoverOthers { font-size: 10.5px; color: var(--ink-dim); text-align: right; }
+.gCoverBlocked { font-size: 10.5px; color: var(--ink-faint); }
+/* 名单面板顶部那一节（票 04）—— 长按的键盘等价入口。行样式直接复用上面 `.gCoverRow`
+   那一套（同一个 `.vue` 的 scoped 样式，两处都能用），这里只给节的壳：它要读起来是
+   「另一件事」，不是人名列表最上面的一列人。零新增颜色引用，仍只用既有令牌。 */
+.gCoverRoster {
+  margin: 12px 14px 0; padding: 10px 12px;
+  border: 1px solid var(--line); border-radius: var(--r-2);
+  background: var(--surface-0);
+}
+.gCoverRoster-hd { display: flex; align-items: baseline; gap: 8px; }
+.gCoverRoster-hd h3 {
+  margin: 0; font-family: var(--font-sans); font-size: 12.5px;
+  font-weight: 600; letter-spacing: .04em; color: var(--ink);
+}
+.gCoverRoster-n { margin-left: auto; font-family: var(--font-mono); font-size: 9.5px; color: var(--ink-faint); }
+/* 列表在弹层里是节的第一块，上边距 10px；放进节里收一点，别把这块撑高。 */
+.gCoverRoster .gCoverList { margin-top: 8px; }
 /* ── 窄屏：单列 ───────────────────────────────────────────────────────── */
 @media (max-width: 900px) {
   .gDash { grid-template-columns: 1fr; }
