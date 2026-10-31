@@ -289,7 +289,10 @@ describe('长按一格 → 弹层「要顶的档」→ 点一行装进笔（票 
     // 关掉自然「还位」—— 不再开一个 body 状态（`sched-picking` 2026-10-29 已退役）。
     expect(view).toMatch(/class="gDrawerScrim gCoverScrim"/)
     expect(view).toMatch(/class="gCoverSheet"/)
-    expect(view).toMatch(/@click="closeCoverSheet\(\)"/)
+    // 遮罩上挂的是**带尾音守卫**的那个处理器（真机上抬手那一下的 click 会落到它上面）；
+    // 无守卫的 `closeCoverSheet()` 只留给「收起」那颗按钮。
+    expect(view).toMatch(/@click="onCoverScrimClick"/)
+    expect(view).toMatch(/aria-label="收起要顶的档" @click="closeCoverSheet\(\)"/)
     expect(view).toMatch(/\.gCoverSheet \{[\s\S]{0,160}?position: fixed/)
     expect(view).toMatch(/\.gCoverSheet \{[\s\S]{0,300}?z-index: var\(--z-dialog\)/)
     expect(view).toMatch(/\.gCoverScrim \{[\s\S]{0,120}?z-index: var\(--z-scrim\)/)
@@ -343,8 +346,9 @@ describe('长按一格 → 弹层「要顶的档」→ 点一行装进笔（票 
     expect(fn).toMatch(/coverSheet\.value = null/)
     expect(fn).toMatch(/已装笔：\$\{row\.shift_name\} × \$\{row\.zone_name\}，去点要顶的那一格/)
     expect(fn).not.toMatch(/penOpen\.value = true/)
-    // 模板把这一行接在按钮上；按钮是行本身（不是行里再套一颗小按钮）。
-    expect(view).toMatch(/@click="penFromCoverSlot\(row\)"/)
+    // 模板把这一行接在按钮上（按钮是行本身，不是行里再套一颗小按钮）；用的是**带尾音守卫**
+    // 的 `onCoverRowClick`（见下面那条触摸用例），守卫里再调 `penFromCoverSlot`。
+    expect(view).toMatch(/@click="onCoverRowClick\(row\)"/)
   })
 
   it('格子与 `?` 帮助里都写着「长按 = 只看，不改」', () => {
@@ -352,6 +356,20 @@ describe('长按一格 → 弹层「要顶的档」→ 点一行装进笔（票 
     // 等价入口在名单面板（票 04）。
     expect(view).toContain('长按看那一天要顶的档')
     expect(view).toContain('长按 = 只看，不改')
+  })
+
+  it('手机抬手那一下的 click 落在遮罩 / 行上也不许关弹层、不许装笔（真机）', () => {
+    // 2026-11-01 真机复现：触摸长按弹层正常出现，**一松手就关掉** —— 抬手合成的 click
+    // 落在遮罩上（弹层已经把手指那点盖住），`closeCoverSheet()` 立刻执行，看着像「长按没反应」。
+    // 桌面用鼠标时 click 落在格子上、被 `onCellClick` 吞掉，所以这条只在触摸下暴露。
+    // 修法：遮罩与「行」都先问一次 `swallowLongPressTail()`；页根在 pointerdown 捕获阶段
+    // 清掉标记，免得某次没发出尾音 click 时把下一次真点按吞掉。
+    expect(view).toMatch(/function onCoverScrimClick\(\) \{\n\s+if \(swallowLongPressTail\(\)\) return\n\s+closeCoverSheet\(\)/)
+    expect(view).toMatch(/function onCoverRowClick\(row\) \{\n\s+if \(swallowLongPressTail\(\)\) return\n\s+penFromCoverSlot\(row\)/)
+    expect(view).toMatch(/@click="onCoverRowClick\(row\)"/)
+    expect(view).toMatch(/@pointerdown\.capture="clearLongPressTail"/)
+    // 行上不许再直接挂 penFromCoverSlot —— 那就绕过了守卫。
+    expect(view).not.toMatch(/@click="penFromCoverSlot\(row\)"/)
   })
 
   it('弹层开着时不渲染笔球：它按 `--z-queue` 压在弹层那一行上（真机截图）', () => {

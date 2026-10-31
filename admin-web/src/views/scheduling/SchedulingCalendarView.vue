@@ -1215,6 +1215,29 @@ function closeCoverSheet() {
   coverSheet.value = null
 }
 
+/** 遮罩与弹层里的行也要过「尾音」这一道 —— **手机上不吞就是弹层一出来就没了**。
+ *
+ *  桌面用鼠标时，长按那一下的 click 落在**格子**上（pointerdown / pointerup 同元素），
+ *  由 `onCellClick` 吞掉。手机上抬手时弹层已经把手指那一点盖住了，浏览器合成的 click
+ *  会落到**最上层**：要么是遮罩（`closeCoverSheet` 立刻把弹层关掉，看着像「长按没反应」），
+ *  要么是某一行（一松手就顺手装了笔，比不反应更糟）。所以这两处入口都要先问一次
+ *  `swallowLongPressTail()`；真机复现与修法见 2026-11-01 的 `touch_probe.py`。 */
+function onCoverScrimClick() {
+  if (swallowLongPressTail()) return
+  closeCoverSheet()
+}
+
+function onCoverRowClick(row) {
+  if (swallowLongPressTail()) return
+  penFromCoverSlot(row)
+}
+
+/** 新手势一开始就作废「尾音」标记：万一某个浏览器**没**把尾音 click 发出来（标记就一直挂着），
+ *  下一次真点按会先过 `pointerdown`，这样它不会被误吞。 */
+function clearLongPressTail() {
+  longPressFiredAt = 0
+}
+
 /** 长按那一下的**尾音 click** 该不该吞掉：吞返回 true，顺手把标记清掉。
  *
  *  两层保险：`Date.now()` 过期自动失效（浏览器万一没把 click 发到格子上，标记也不会留到
@@ -1783,7 +1806,12 @@ useNudgePull({
 
 <template>
   <div class="hygiene-admin sched-page">
-    <div class="gB" :class="{ 'pen-week': panel === 'week' }" @click="onPageClick">
+    <div
+      class="gB"
+      :class="{ 'pen-week': panel === 'week' }"
+      @click="onPageClick"
+      @pointerdown.capture="clearLongPressTail"
+    >
       <div class="gB-body">
         <header class="gHead">
           <p class="gKicker">人事 · 排班</p>
@@ -2445,7 +2473,7 @@ useNudgePull({
                壳底栏（`--z-shell`）就是让位、关掉自然还位 —— 不为它再开一个 body 状态
                （2026-10-29 把笔栏收成悬浮球时，「底栏让位」那条整条退役了，别复活）。 -->
           <template v-if="coverSheet">
-            <div class="gDrawerScrim gCoverScrim" @click="closeCoverSheet()"></div>
+            <div class="gDrawerScrim gCoverScrim" @click="onCoverScrimClick"></div>
             <section
               class="gCoverSheet"
               role="dialog"
@@ -2470,7 +2498,7 @@ useNudgePull({
                     type="button"
                     :disabled="!row.can_pen"
                     :aria-label="coverRowLabel(row)"
-                    @click="penFromCoverSlot(row)"
+                    @click="onCoverRowClick(row)"
                   >
                     <span class="gCoverSlot">{{ row.zone_name || '（工作区已删）' }} × {{ row.shift_name }}</span>
                     <span class="gCoverMeta">
