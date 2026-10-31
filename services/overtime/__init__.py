@@ -8,8 +8,12 @@
 
 from services.overtime.ledger import (
     HALF_HOURS_MAX,
+    HALF_HOURS_PER_LEAVE_DAY,
+    HOURS_PER_DAY,
+    KIND_LEAVE_DEDUCTION,
     KIND_MAKEUP,
     KIND_OVERTIME,
+    MAX_DEDUCTION_DAYS,
     MAX_REASON,
     MAX_REJECT_REASON,
     STATUS_APPROVED,
@@ -24,8 +28,12 @@ from services.overtime.ledger import (
 
 __all__ = [
     "HALF_HOURS_MAX",
+    "HALF_HOURS_PER_LEAVE_DAY",
+    "HOURS_PER_DAY",
+    "KIND_LEAVE_DEDUCTION",
     "KIND_MAKEUP",
     "KIND_OVERTIME",
+    "MAX_DEDUCTION_DAYS",
     "MAX_REASON",
     "MAX_REJECT_REASON",
     "STATUS_APPROVED",

@@ -324,16 +324,21 @@ async def _scheduling_nudge(reason: str, *employee_ids: Optional[int]) -> None:
 
 
 async def _require_scheduler(identity: dict = Depends(require_any_identity_session)) -> dict:
-    """店长那一面的门：管理端会话，**或**员工会话加「排班管理」（`schedule`）能力。
+    """人事那几页的门：管理端会话，**或**员工会话加「人事管理」（`schedule`）能力。
 
-    2026-10-14 用户裁定：排班不再只给超级管理员 —— 花名册上勾了「排班管理」的店长用
+    2026-10-14 用户裁定：排班不再只给超级管理员 —— 花名册上勾了这项能力的店长用
     **员工会话**也能改全店排班（月历 / 待办 / 班次表三页）。他本来就有员工账号，不该为了
     改一个班次专门去电脑上登录管理端。判据与加班审批那扇门（`api/overtime.py` 的
     `_require_reviewer`）同一形状：员工会话 + 一项能力，每次请求现读 `admin_caps`。
 
+    2026-10-31 用户裁定：考勤表页并入同一项能力（显示名随之从「排班管理」改成
+    「人事管理」，**键名仍是 `schedule`**）。`api/attendance.py` 的六个端点直接复用这道
+    门，不再自己写一份 —— 两处各判一次迟早会漂成两种口径。
+
     **花名册不在这扇门后面**：`roster`（审批入职、停用、改权限）是另一个键，仍只给
-    超级管理员 —— 身份证明细与底薪按 `docs/adr/0098` 不下发员工端，所以「能改排班」
-    不能连带拿到花名册页。
+    超级管理员 —— 身份证明细按 `docs/adr/0098` 不下发员工端，所以「能做人事」不能连带
+    拿到花名册页。底薪这一项例外：考勤表页本身就带底薪，2026-10-31 的裁定是把它和
+    排班放进同一档（用户已知这一代价后选的）。
 
     被拒是 **403**（「你没这个权限」），不是 404：后者会把「权限不够」说成「这一笔不
     存在」。收回能力后下一次请求就 403 —— 权限不在登录时快照。
@@ -344,7 +349,7 @@ async def _require_scheduler(identity: dict = Depends(require_any_identity_sessi
     if not has_cap(employee.get("admin_caps"), CAP_SCHEDULE):
         raise HTTPException(
             status_code=403,
-            detail="只有开了「排班管理」权限的人能改排班：请找超级管理员在花名册里开通",
+            detail="只有开了「人事管理」权限的人能改排班与考勤：请找超级管理员在花名册里开通",
         )
     return identity
 
@@ -356,7 +361,7 @@ async def my_days(
 ) -> dict:
     """员工自己这几天的班（「今天」页读的就是这一条）。
 
-    跟店长那扇门不是一回事：那边是 `_require_scheduler`（管理端会话，或带「排班管理」
+    跟店长那扇门不是一回事：那边是 `_require_scheduler`（管理端会话，或带「人事管理」
     能力的员工会话 —— 2026-10-14 起），这边要员工自己的手机端 cookie
     （`require_staff_session`），读的永远是自己。**接口上故意没有 `employee_id` 参数** ——
     员工会话能读到的只有自己，想读别人的班也没地方填。

@@ -96,14 +96,16 @@ describe('页面清单（唯一来源）', () => {
     expect(aliases.filter((alias) => paths.includes(alias))).toEqual([])
   })
 
-  it('staffCap 只标在这四页上，audience 仍是 admin（它是第四维，不是第二份 audience）', () => {
+  it('staffCap 只标在这五页上，audience 仍是 admin（它是第四维，不是第二份 audience）', () => {
     // 2026-10-14 用户裁定：排班三页（人事组）与损耗分析（后勤组）对「勾了对应能力的员工」
     // 也开。audience 仍是 admin —— 管理端会话照旧直接放行，员工身份再要那一项能力。
+    // 2026-10-31 用户裁定：考勤表页并进同一项（`schedule`，显示名改成「人事管理」）。
     const withCap = PAGE_ROUTES.filter((row) => row.staffCap)
     expect(withCap.map((row) => [row.path, row.staffCap])).toEqual([
       ['/workbench/hr/calendar', 'schedule'],
       ['/workbench/hr/inbox', 'schedule'],
       ['/workbench/hr/shifts', 'schedule'],
+      ['/workbench/hr/attendance', 'schedule'],
       ['/workbench/kitchen/loss', 'wastage'],
     ])
     for (const row of withCap) expect(row.audience, row.path).toBe('admin')

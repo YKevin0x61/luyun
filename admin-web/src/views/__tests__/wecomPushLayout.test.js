@@ -230,8 +230,9 @@ describe('任务卡的稳定排序与保存反馈（U1）', () => {
     const src = compact(view)
     expect(src).toContain('v-for="iteminjobs"')
     expect(src).toContain(':data-job-id="item.id"')
-    // 时间只**显示**在卡上（`item.schedule_time`），不参与排序：页面里没有 sort
-    expect(src).toContain("{{item.enabled?item.schedule_time:'停用'}}")
+    // 时间只**显示**在卡上（`schedule_text` 优先：周任务要显示「每周日 13:00」，
+    // 只写 13:00 会被当成每天推），不参与排序：页面里没有 sort
+    expect(src).toContain("{{item.enabled?(item.schedule_text||item.schedule_time):'停用'}}")
     expect(src).not.toContain('jobs.value.sort')
     expect(src).not.toContain('.sort(')
   })

@@ -33,6 +33,18 @@ describe('员工端「整月」页（票 06）', () => {
     expect(view).toMatch(/loginRedirectTarget\(router\.currentRoute\.value\)/)
   })
 
+  it('存假卡：读员工自己的 /api/attendance/me，负数是欠班，未封账标暂算值', () => {
+    // ADR 0124：员工在整月页看自己这个月的存假；接口没有 employee_id（只能看自己）。
+    expect(view).toMatch(/staffRequest\(`\/api\/attendance\/me/)
+    expect(view).not.toMatch(/staffRequest\(`\/api\/attendance\/sheet/)
+    expect(view).toContain('存假')
+    expect(view).toContain('欠班')
+    expect(view).toContain('暂算值')
+    // 明细与抵扣都在「怎么算的」里，口径同考勤表（同一份 util，不另算一遍）。
+    expect(view).toMatch(/leaveFormulaText/)
+    expect(view).toContain('leaveDeductedLabel')
+  })
+
   it('lays out a real month grid without horizontal scrolling', () => {
     // 验收 1/5：一个月一天一格、七列，手机上不用横着划。
     // 票 06：共享样式表不再由页面挂（跟着 `<html data-workbench>` 走，路由一处安装）。

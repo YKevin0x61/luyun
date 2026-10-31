@@ -11,7 +11,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Mapping, Optional
 from urllib.parse import parse_qs, urlparse
 
@@ -26,6 +26,9 @@ from services.wecom_push_topics import (
     TOPIC_RECONCILE_DIFF,
     TOPIC_SALES_REPORT,
     TOPIC_TEST_MESSAGE,
+    TOPIC_WEEKLY_SCHEDULE,
+    WEEKDAY_LABELS,
+    WEEKDAY_SHORT_LABELS,
     PushTrigger,
     get_topic,
     topic_display_name,
@@ -222,6 +225,121 @@ def render_sales_report_text(report_data: Dict[str, Any], fixed_dishes: Optional
     return RenderedMessage(content=content, byte_length=len(content.encode("utf-8")), parts=parts)
 
 
+def next_week_start(business_date: str) -> str:
+    """「下一周」的第一天：``business_date`` 所在周的**下一个周一**（ISO 日期）。
+
+    周日推 → 明天（周一）；周三推 → 下周一。只依赖营业日、不读钟：定时投递与失败
+    补发因此落在同一周（`WeeklyScheduleRenderer` 用出站行的 `created_at` 冻结出这个
+    营业日，见那里的注释）。
+    """
+    anchor = date.fromisoformat(business_date)
+    return (anchor - timedelta(days=anchor.weekday()) + timedelta(days=7)).isoformat()
+
+
+def _schedule_cell_text(cell: Mapping[str, Any]) -> str:
+    """周表一格在消息里的写法：班次 / 休 / 请假 / 未排。
+
+    「未排」与「休」必须分得开（`week_grid` 的 `scheduled=False` 是这一行还没写）：
+    把没排的格子写成「休」，店长会以为那个人下周不用来。
+    """
+    if not cell.get("scheduled"):
+        return "未排"
+    shift_name = cell.get("shift_name")
+    if shift_name is None:
+        return "请假" if cell.get("leave") else "休"
+    text = str(shift_name)
+    if cell.get("half_rest"):
+        text += "（半天）"
+    zone_name = cell.get("zone_name")
+    if zone_name:
+        text += f"·{zone_name}"
+    return text
+
+
+def _format_person_schedule(
+    days: List[Mapping[str, Any]], cells: Mapping[str, Any]
+) -> str:
+    """一个人的那一行：连续相同的日子合并成一段（``一~六 早班·熟笼 · 日 休``）。
+
+    为什么要合并：真实门店里绝大多数人是固定班（``早班·熟笼`` 一周七天都一样），逐日
+    铺开会变成同一句话重复七遍 —— 20 人的店一条就能发完的表要拆成两条，群里还得往下
+    翻。合并只动**连续相同**的日子，某天休 / 请假 / 半天照样单独成段，信息一个不丢；
+    七天完全相同时写「每天」，那是这种排班最常见的形态。
+    """
+    ordered = [
+        _schedule_cell_text(cells.get(str(day.get("business_date") or "")) or {})
+        for day in days
+    ]
+    if not ordered:
+        return ""
+    labels = [
+        WEEKDAY_SHORT_LABELS.get(int(day.get("weekday", 0)), "")
+        for day in days
+    ]
+
+    segments: List[tuple] = []  # (起始下标, 结束下标, 那一段的写法)
+    for index, text in enumerate(ordered):
+        if segments and segments[-1][2] == text and segments[-1][1] == index - 1:
+            start, _end, _text = segments[-1]
+            segments[-1] = (start, index, text)
+        else:
+            segments.append((index, index, text))
+
+    if len(segments) == 1:
+        return f"每天 {segments[0][2]}"
+
+    parts = []
+    for start, end, text in segments:
+        if start == end:
+            label = labels[start]
+        else:
+            label = f"{labels[start]}~{labels[end]}"
+        parts.append(f"{label} {text}")
+    return " · ".join(parts)
+
+
+def render_weekly_schedule_text(grid: Mapping[str, Any]) -> RenderedMessage:
+    """下一周排班表正文：一行一人，7 天按周一→周日排。
+
+    一行一人而不是一天一段：群里每个人要查的是「我下周哪几天上班」，按人扫一眼就到；
+    按天分段还得在 7 条消息里找自己的名字。一行一行也正好是 `expand_messages` 的拆分
+    单位 —— 超过 2048 字节时按整行切，不会把某个人切成两半。
+
+    数据全来自 `SchedulingStore.week_grid`（与页面周表同一份判据），这里只负责排版。
+    """
+    start = str(grid.get("start") or "")
+    end = str(grid.get("end") or "")
+    start_day = date.fromisoformat(start) if start else None
+    end_day = date.fromisoformat(end) if end else None
+
+    def short(day: Optional[date]) -> str:
+        return f"{day.month}/{day.day}" if day else ""
+
+    title = "【下周排班】"
+    if start_day and end_day:
+        title += (
+            f"{short(start_day)}（{WEEKDAY_LABELS[start_day.weekday()]}）"
+            f" - {short(end_day)}（{WEEKDAY_LABELS[end_day.weekday()]}）"
+        )
+
+    days = list(grid.get("days") or [])
+
+    lines: List[str] = [title, ""]
+    employees = list(grid.get("employees") or [])
+    for employee in employees:
+        name = str(employee.get("name") or "").strip()
+        if not name:
+            continue
+        cells = employee.get("cells") or {}
+        lines.append(f"{name}：" + _format_person_schedule(days, cells))
+
+    if not employees:
+        lines.append("这一周还没有排班（排班表里一个人都没有）。")
+
+    content = "\n".join(lines).rstrip()
+    return RenderedMessage(content=content, byte_length=len(content.encode("utf-8")))
+
+
 def assert_message_size(rendered_message: RenderedMessage) -> None:
     if rendered_message.byte_length > rendered_message.limit:
         raise ValueError(
@@ -383,12 +501,41 @@ class WeComPushService:
         )
         return RenderedMessage(content=content, byte_length=len(content.encode("utf-8")))
 
-    async def render_job_message(self, db: DatabaseManager, job: Mapping[str, Any]) -> RenderedMessage:
+    async def build_weekly_schedule_message(
+        self,
+        db: DatabaseManager,
+        *,
+        business_date: str = "",
+        now: Optional[datetime] = None,
+    ) -> RenderedMessage:
+        """「下一周」排班表正文（`business_date` = 投递那一刻的营业日）。
+
+        值来自排班自己的周表（`SchedulingStore.week_grid`）—— 与页面「工作台 → 班次表」
+        同一份数据、同一套行序，推送里看到的和店里看到的不会是两件事。
+
+        进门先补未来 90 天（`expand`，与周表接口一致）：没人打开过月历的那一周本来
+        可能还没有行，不补的话推出去是一张「未排」表。补排失败只记一条警告、继续用
+        已有行 —— 渲染阶段抛异常会让这条投递直接落终态（出站对渲染失败不重试）。
+        """
+        from services.scheduling.store import SchedulingStore
+
+        base = business_date or business_date_of(now or datetime.now(CHINA_TZ))
+        store = SchedulingStore(db)
+        try:
+            await store.expand()
+        except Exception as exc:  # noqa: BLE001 —— 补排失败不该让整条推送发不出去
+            logger.warning("下周排班推送前补排失败（继续用已有行）：%s", exc)
+        grid = await store.week_grid(start=next_week_start(base))
+        return render_weekly_schedule_text(grid)
+
+    async def render_job_message(
+        self, db: DatabaseManager, job: Mapping[str, Any], *, now: Optional[datetime] = None
+    ) -> RenderedMessage:
         """按任务的**内容类型**渲染正文（定时侧）。
 
         报表类照旧现算（数据要去库里取）；其余内容类型的正文由触发点放进参数的 `text`
         里（参数即正文）。所以注册表**新加一类内容类型时这里不用改** —— 只有当它的正文
-        需要现算数据时，才在这里多一条分支。
+        需要现算数据时，才在这里多一条分支。下周排班表就是这一类（现算，数据来自排班）。
         """
         topic_id = str(job.get("topic_id") or "")
         params = job_params(job)
@@ -403,6 +550,9 @@ class WeComPushService:
                 db,
                 date_range_mode=str(params.get("date_range_mode") or "today"),
             )
+        if topic_id == TOPIC_WEEKLY_SCHEDULE:
+            # 预览 / 立即发送用**此刻**的营业日：「下一周」对现在这一刻有意义。
+            return await self.build_weekly_schedule_message(db, now=now)
         text = str(params.get("text") or "").strip()
         if text:
             return RenderedMessage(content=text, byte_length=len(text.encode("utf-8")))
@@ -570,6 +720,8 @@ class WeComPushService:
                 continue
             if job.get("last_sent_date") == current_date:
                 continue
+            if not self._weekly_due(job, current_date):
+                continue
             try:
                 outbox_ids = await self.enqueue_job(
                     db, job, business_reference=current_date, now=current_time
@@ -586,6 +738,43 @@ class WeComPushService:
             except Exception as exc:
                 logger.error("企微定时推送任务失败 job_id=%s: %s", job.get("id"), exc)
         return dispatched_count
+
+    @staticmethod
+    def _weekly_due(job: Mapping[str, Any], business_date: str) -> bool:
+        """这条任务今天该不该触发（每周触发的内容类型）。
+
+        每天到点就推的内容类型永远该触发。``PushTopic.weekly`` 的那一类则由参数里的
+        ``weekday`` 决定：只在周表的那一天入队，其余六天直接跳过 —— 跳过**不写**
+        `last_sent_date`，所以那一天到了照样会发。
+
+        营业日而不是日历日：任务的 `schedule_time` 可以落在 00:00–06:00（营业日算前一天），
+        那种情况下「每周日」指的是**营业日**的周日，与 `last_sent_date` 用的是同一把尺子
+        （CORR-05）。
+
+        参数缺失 / 认不出来时**不发**（记一条警告）：默认成某一天会让一条配错的任务悄悄
+        每周发一次，而店长在页面上看到的是一个空的下拉。
+        """
+        topic = get_topic(str(job.get("topic_id") or ""))
+        if topic is None or not topic.weekly:
+            return True
+        raw = job_params(job).get("weekday")
+        try:
+            weekday = int(raw)
+        except (TypeError, ValueError):
+            logger.warning(
+                "每周推送任务的参数里没有合法的 weekday（任务 %s，值 %r），本次跳过",
+                job.get("id"),
+                raw,
+            )
+            return False
+        if weekday not in WEEKDAY_LABELS:
+            logger.warning(
+                "每周推送任务的 weekday 越界（任务 %s，值 %r），本次跳过",
+                job.get("id"),
+                raw,
+            )
+            return False
+        return date.fromisoformat(business_date).weekday() == weekday
 
     async def scheduler_loop(self, db: DatabaseManager) -> None:
         """30 秒一轮：定时任务到点就推 + 运维事件 + 统一出站的兜底、派发与保留清理。
@@ -686,4 +875,35 @@ class ScheduledReportRenderer:
             message = await self._service.build_data_quality_message(
                 self._db, business_date=business_date
             )
+        return RenderedDelivery(text=message.content)
+
+
+class WeeklyScheduleRenderer:
+    """「下周排班表」在统一出站上的渲染器（正文发送时现算，出站行里没有正文）。
+
+    用出站行的 ``created_at``（入队时刻）还原**营业日**，再由它算「下一周」：定时投递
+    失败后当天晚些会补发一次（出站对定时类固定 +10 分钟），补发那一刻如果已经跨过
+    06:00，再读一次钟就会把「下周」算成再下一周 —— 冻结在入队时刻才与 ADR 0095 的
+    口径一致（销售报表的 `business_date` 参数冻结是同一件事的另一种写法）。
+    """
+
+    def __init__(self, db: DatabaseManager, service: Optional[WeComPushService] = None) -> None:
+        self._db = db
+        self._service = service or wecom_push_service
+
+    async def render(
+        self, row: Mapping[str, Any], params: Mapping[str, Any]
+    ) -> "RenderedDelivery":
+        from services.wecom_outbox import RenderedDelivery
+
+        created = str(row.get("created_at") or "").strip()
+        try:
+            moment = datetime.fromisoformat(created) if created else datetime.now(CHINA_TZ)
+        except ValueError:
+            moment = datetime.now(CHINA_TZ)
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=CHINA_TZ)
+        message = await self._service.build_weekly_schedule_message(
+            self._db, business_date=business_date_of(moment)
+        )
         return RenderedDelivery(text=message.content)

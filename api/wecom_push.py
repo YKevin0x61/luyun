@@ -22,6 +22,7 @@ from services import auth_service, wecom_audit
 from services.wecom_outbox import ResolvedTarget, resolve_targets, wecom_outbox
 from services.wecom_push_topics import (
     TOPIC_MANUAL_SEND,
+    WEEKDAY_LABELS,
     WECOM_PUSH_API_VERSION,
     PushTopic,
     PushTrigger,
@@ -621,14 +622,19 @@ def _job_payload(row: Dict[str, Any], targets: List[ResolvedTarget]) -> Dict[str
         params = json.loads(str(row.get("params_json") or "{}"))
     except ValueError:
         params = {}
+    params = params if isinstance(params, dict) else {}
+    schedule_time = row.get("schedule_time", "")
     return {
         "id": int(row["id"]),
         "name": row.get("name", ""),
         "topic_id": topic_id,
         # 注册表里没有这个 id（内容类型下过线）就退回 id：页面要看得见这一行。
         "topic_name": _topic_name(topic_id),
-        "params": params if isinstance(params, dict) else {},
-        "schedule_time": row.get("schedule_time", ""),
+        "params": params,
+        "schedule_time": schedule_time,
+        # 卡片上那一枚时间徽章：每周触发的内容类型写成「每周日 13:00」—— 只写 13:00
+        # 会让店长以为它每天都推。中文名与注册表同一份（`WEEKDAY_LABELS`）。
+        "schedule_text": _job_schedule_text(topic_id, params, schedule_time),
         "enabled": bool(row.get("enabled")),
         "last_sent_date": row.get("last_sent_date", ""),
         "notes": row.get("notes", ""),
@@ -637,6 +643,24 @@ def _job_payload(row: Dict[str, Any], targets: List[ResolvedTarget]) -> Dict[str
         # 订阅目标数：停用的渠道**也算**（订阅保留、投递跳过并在记录里写明原因）。
         "target_count": len(targets),
     }
+
+
+def _job_schedule_text(
+    topic_id: str, params: Dict[str, Any], schedule_time: str
+) -> str:
+    """任务卡片上的时间文案（纯函数，便于测试断言）。"""
+    time_text = str(schedule_time or "")
+    topic = get_topic(topic_id)
+    if topic is None or not topic.weekly:
+        return time_text
+    try:
+        weekday = int(params.get("weekday"))
+    except (TypeError, ValueError):
+        return time_text
+    label = WEEKDAY_LABELS.get(weekday)
+    if not label:
+        return time_text
+    return f"每{label} {time_text}".strip()
 
 
 def _job_topic(payload: JobIn) -> PushTopic:

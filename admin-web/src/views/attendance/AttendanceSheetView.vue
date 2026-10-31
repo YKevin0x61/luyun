@@ -946,6 +946,11 @@ onMounted(() => {
               <i>{{ stat.label }}</i><b>{{ stat.value }}</b>
             </span>
           </p>
+          <!-- 本月经补钟抵扣（ADR 0124）：只在这张卡真抵过的时候出现 —— 没抵过的人
+               不该多看到一行「抵扣 0 天」。存假那个数已经减过它（`leave.balance`）。 -->
+          <p v-if="person.leave.deducted_days" class="aDeducted">
+            本月经补钟抵扣 {{ formatDays(person.leave.deducted_days) }}（这些补钟不再算净时长）
+          </p>
           <details class="aFormula">
             <summary>看算式</summary>
             <p class="aFormulaText">{{ leaveFormulaText(person.leave) }}</p>
@@ -1245,6 +1250,12 @@ onMounted(() => {
    同档可读。 */
 .aLv i { font-style: normal; white-space: nowrap; font-size: 10px; color: var(--ink-faint); }
 .aLv b { font-family: var(--font-mono); font-size: var(--fs-12); color: var(--ink); white-space: nowrap; }
+.aDeducted {
+  margin: 8px 0 0;
+  font-size: var(--fs-11);
+  line-height: 1.6;
+  color: var(--ok);
+}
 .aFormula summary {
   display: inline-flex; align-items: center; min-height: var(--tap);
   cursor: pointer; font-size: var(--fs-12); color: var(--ink-dim);

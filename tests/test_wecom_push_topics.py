@@ -11,7 +11,7 @@
 
 触发方式是**多值**：对账差异告警同时支持定时与事件——定时侧承载现有的「数据质量日报」
 任务（22:10 / 当天，票 08 的定时任务表单必须能选到它），事件侧是日终对账差异告警。
-其余七类各自只有一种触发方式。
+其余八类各自只有一种触发方式（下周排班表是定时）。
 """
 
 from __future__ import annotations
@@ -57,10 +57,12 @@ class FakeOpsParams(BaseModel):
     )
 
 
-# 八类内容类型：id / 显示名 / 触发方式（按声明顺序）。来源是票面与迁移 0016 的头注释。
+# 九类内容类型：id / 显示名 / 触发方式（按声明顺序）。前八类的来源是票面与迁移 0016
+# 的头注释，第九类「下周排班表」是后加的（同一张订阅矩阵，不需要新迁移）。
 # 只有对账差异告警两种触发方式都支持。
 EXPECTED_TOPICS = [
     ("sales_report", "销售报表", ("scheduled",)),
+    ("weekly_schedule", "下周排班表", ("scheduled",)),
     ("reconcile_diff", "对账差异告警", ("scheduled", "event")),
     ("unmapped_dish", "未映射菜品提醒", ("event",)),
     ("scraper_failure", "采集失败告警", ("event",)),
@@ -73,9 +75,14 @@ EXPECTED_TOPICS = [
 TOPIC_IDS = [row[0] for row in EXPECTED_TOPICS]
 EVENT_ONLY_TOPICS = [row[0] for row in EXPECTED_TOPICS if row[2] == ("event",)]
 
-# 定时类（支持定时触发的内容类型）的默认推送时间。与 `/meta` 旧字段 job_templates 里
-# 那两个模板逐字一致：销售报表 21:30、数据质量日报（= 对账差异告警的定时侧）22:10。
-EXPECTED_SCHEDULE_TIMES = {"sales_report": "21:30", "reconcile_diff": "22:10"}
+# 定时类（支持定时触发的内容类型）的默认推送时间。前两个与 `/meta` 旧字段 job_templates
+# 里那两个模板逐字一致：销售报表 21:30、数据质量日报（= 对账差异告警的定时侧）22:10；
+# 下周排班表默认周日 13:00（每周一次，见 `PushTopic.weekly`）。
+EXPECTED_SCHEDULE_TIMES = {
+    "sales_report": "21:30",
+    "weekly_schedule": "13:00",
+    "reconcile_diff": "22:10",
+}
 SCHEDULED_TOPICS = list(EXPECTED_SCHEDULE_TIMES)
 
 # 每类的参数：字段名 → (控件类型, 是否必填)。事件类的参数由触发点产出，注册表不声明
@@ -90,6 +97,10 @@ EXPECTED_PARAMS = {
     "reconcile_diff": {
         "schedule_time": ("time", False),
         "date_range_mode": ("select", False),
+    },
+    "weekly_schedule": {
+        "schedule_time": ("time", False),
+        "weekday": ("select", False),
     },
     "hygiene_photo": {
         "ref_key": ("text", True),
@@ -169,7 +180,7 @@ def test_only_the_photo_topic_is_marked_as_carrying_employee_photos():
     assert _payload("hygiene_reminder")["contains_employee_photos"] is False
 
 
-def test_registry_declares_the_eight_topics_in_order():
+def test_registry_declares_the_nine_topics_in_order():
     assert [(t.id, t.name) for t in all_topics()] == [
         (row[0], row[1]) for row in EXPECTED_TOPICS
     ]
@@ -204,6 +215,8 @@ def test_each_topic_payload_exposes_a_consumable_schema_and_uischema(
         "default_schedule_time",
         # 票 06：订阅视图上标「含员工实拍照片」用（判断依据是内容的性质，不是页面）
         "contains_employee_photos",
+        # 下周排班表：每周一次（调度循环按参数里的 weekday 过滤）
+        "weekly",
     }
 
     schema = payload["params_schema"]
@@ -246,7 +259,7 @@ def test_each_topic_declares_exactly_the_expected_params(topic_id):
 
 
 def test_only_the_data_quality_daily_topics_support_the_scheduled_trigger():
-    """定时类**就是**这两个：销售报表与对账差异告警（原数据质量日报）。
+    """定时类**就是**这三个：销售报表、下周排班表、对账差异告警（原数据质量日报）。
 
     多一个或少一个都要在这里响——票 08 的定时任务表单的内容类型下拉直接来自这一层，
     注册表把承载定时任务的内容类型标成纯事件，等于把现有功能从表单里抹掉。
@@ -467,7 +480,7 @@ def test_meta_keeps_the_fields_the_old_page_reads(meta_client):
     assert payload["job_templates"][0]["schedule_time"] == "21:30"
 
 
-def test_meta_lists_the_eight_topics_with_their_schema_and_uischema(meta_client):
+def test_meta_lists_the_nine_topics_with_their_schema_and_uischema(meta_client):
     payload = meta_client.get("/api/wecom-push/meta").json()
 
     assert [topic["id"] for topic in payload["topics"]] == [
@@ -653,5 +666,9 @@ def test_registry_matches_the_topics_documented_in_the_migration_header():
             trigger_label
         ), f"{topic_id} 的触发方式与迁移头注释不一致"
 
-    # 反方向也要对：注册表里的内容类型一个都不能漏在迁移注释之外。
-    assert set(registered) == {row[0] for row in rows}
+    # 反方向**不是**全等：迁移 0016 是那八类内容类型的**历史**声明，后来新增的内容类型
+    # （「下周排班表」）只加注册表、不加迁移（它只复用订阅与出站两张表，没有结构变更）。
+    # 所以这里要求「迁移注释里的 id 都还在注册表里，且注册表全量由 EXPECTED_TOPICS 钉住」
+    # —— 改名或下线仍会被上面那轮循环与注册表全量断言同时拦下。
+    assert {row[0] for row in rows} <= set(registered)
+    assert set(registered) == set(TOPIC_IDS)

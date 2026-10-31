@@ -36,15 +36,18 @@ from typing import Iterable, Optional
 # 2026-10-07 加了第 11 项 `overtime`（加班与补钟审批）：它在员工手机端**真有执行点**，
 # 所以进下面那组「可勾」，而不是「键保留、判据暂时没有」的只读说明 —— 见 `docs/adr/0103`。
 # 2026-10-14 用户裁定再加两项（同样在员工端真有执行点，所以同进「可勾」）：
-#   `schedule` 排班管理（员工端开放人事组的三页：月历 / 待办 / 班次表）；
+#   `schedule` 人事管理（员工端开放人事组的四页：月历 / 待办 / 班次表 / 考勤表）；
 #   `wastage`  损耗分析（后勤组那页：全店统计 + 含「谁记的」的明细）。
+# 2026-10-31 用户裁定：考勤表页也归 `schedule` 这一项，且它的显示名从「排班管理」
+# 改成「人事管理」—— 这一项现在管人事组四页，叫「排班管理」已经名不副实。**键名保持
+# `schedule`**（库值是契约，改键要迁移回填；中文标签只用于界面显示）。
 # 原来的 `roster`（花名册与排班）随之**收窄成只管花名册**：排班从那一个键里拆了出来，
 # 于是「能改排班」不再连带拿到身份证号与底薪 —— 那两样按 `docs/adr/0098` 不下发员工端。
 CAP_DAILY_REVIEW = "daily_review"  # 日常验收：判别人交的日常检查、看原图与标准图
 CAP_DEEP_REVIEW = "deep_review"  # 专项验收：判专项卫生的前后对照
 CAP_FIX = "fix"  # 整改单：开单 + 验收 + 驳回
 CAP_OVERTIME = "overtime"  # 加班与补钟审批：批 / 驳登记、代员工补录
-CAP_SCHEDULE = "schedule"  # 排班管理：改全店排班、批请假与换班、管班次表
+CAP_SCHEDULE = "schedule"  # 人事管理：改全店排班、批请假与换班、管班次表、看与改考勤表
 CAP_WASTAGE = "wastage"  # 损耗分析：看全店损耗统计与明细（含谁记的）
 CAP_ATTIRE = "attire"  # 仪容仪表：看/判仪容打卡、换标准
 CAP_STANDARD = "standard"  # 标准图管理：换标准图、改标注、导出
@@ -75,7 +78,7 @@ CAPABILITY_LABELS: dict[str, str] = {
     CAP_DEEP_REVIEW: "专项验收",
     CAP_FIX: "整改单",
     CAP_OVERTIME: "加班与补钟审批",
-    CAP_SCHEDULE: "排班管理",
+    CAP_SCHEDULE: "人事管理",
     CAP_WASTAGE: "损耗分析",
     CAP_ATTIRE: "仪容仪表",
     CAP_STANDARD: "标准图管理",
@@ -91,7 +94,7 @@ CAPABILITY_NOTES: dict[str, str] = {
     CAP_DEEP_REVIEW: "判专项卫生的前后对照",
     CAP_FIX: "开整改单、验收或驳回整改单",
     CAP_OVERTIME: "批 / 驳加班与补钟登记，代员工补录",
-    CAP_SCHEDULE: "改全店排班、批请假与换班、管班次表",
+    CAP_SCHEDULE: "改全店排班、批请假与换班、管班次表，看与改考勤表",
     CAP_WASTAGE: "看全店损耗统计与明细，含「谁记的」",
     CAP_ATTIRE: "看与判仪容打卡，维护仪容标准",
     CAP_STANDARD: "换标准图、改标注、导出整套标准",
@@ -109,8 +112,9 @@ LEGACY_ADMIN_CAPABILITIES: tuple[str, ...] = (CAP_DAILY_REVIEW, CAP_DEEP_REVIEW,
 #: 整改单在「卫生」页（判据见 `services/hygiene/work.py` 的 `_require_reviewer` /
 #: `_require_fix_*`），加班与补钟审批在「加班与补钟」页（判据见 `api/overtime.py` 的
 #: `_require_reviewer`；2026-10-07 由十项扩成十一项，见 `docs/adr/0103`）。
-#: 2026-10-14 又加两项：排班管理在人事组三页（判据见 `api/scheduling.py` 的
-#: `_require_scheduler`），损耗分析在后勤组那一页（判据见 `api/wastage.py` 的
+#: 2026-10-14 又加两项：人事管理在人事组四页（判据见 `api/scheduling.py` 的
+#: `_require_scheduler`；考勤表那一页是 2026-10-31 并进来的，`api/attendance.py` 复用
+#: 同一道门），损耗分析在后勤组那一页（判据见 `api/wastage.py` 的
 #: `_require_wastage_reader` 与 `WastageActor.sees_all`）。
 #: 花名册里**可勾**的就是这一组 —— 勾了就能用，不存在"勾了不生效"。
 STAFF_SIDE_CAPABILITIES: tuple[str, ...] = (

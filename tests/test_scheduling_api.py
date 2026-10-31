@@ -132,10 +132,11 @@ def _zone(db, name="案板"):
 
 
 def test_scheduling_routes_need_a_session_or_the_schedule_cap(scheduling_http, monkeypatch):
-    """匿名 401；员工会话有效但没有「排班管理」能力 → 403（不是 404、也不再是 401）。
+    """匿名 401；员工会话有效但没有「人事管理」能力 → 403（不是 404、也不再是 401）。
 
-    2026-10-14 用户裁定：排班那一面不再只认管理端会话 —— 花名册上勾了「排班管理」
-    （`schedule`）的员工用**员工会话**也能改全店排班。判定见 `api/scheduling.py` 的
+    2026-10-14 用户裁定：排班那一面不再只认管理端会话 —— 花名册上勾了「人事管理」
+    （`schedule`）的员工用**员工会话**也能改全店排班；2026-10-31 起考勤表并进同一项，
+    显示名随之从「排班管理」改成「人事管理」。判定见 `api/scheduling.py` 的
     `_require_scheduler`：管理端会话直接放行，员工会话要那一项能力，被拒是 403
     （「你没这个权限」）而不是 401（「你没登录」）—— 后者会把「权限不够」说成「会话没了」。
     """
@@ -168,7 +169,7 @@ def test_scheduling_routes_need_a_session_or_the_schedule_cap(scheduling_http, m
     assert client.put("/api/scheduling/shifts/1", json={"name": "早班"}).status_code == 401
     assert client.delete("/api/scheduling/shifts/1").status_code == 401
 
-    # 员工会话本身不是店长那一档：没勾「排班管理」时一律 403（会话在、权限不在）。
+    # 员工会话本身不是店长那一档：没勾「人事管理」时一律 403（会话在、权限不在）。
     _employee_id(accounts)
     _wire_staff_accounts(monkeypatch, accounts)
     login = _run(accounts.login(PHONE, PASSWORD))
@@ -176,7 +177,7 @@ def test_scheduling_routes_need_a_session_or_the_schedule_cap(scheduling_http, m
     client.cookies.set(settings.STAFF_SESSION_COOKIE_NAME, login["session_id"])
     denied = client.get("/api/scheduling/calendar", params={"month": "2026-09"})
     assert denied.status_code == 403, denied.text
-    assert "排班管理" in denied.json()["detail"]
+    assert "人事管理" in denied.json()["detail"]
 
 
 def test_admin_can_configure_and_see_it_on_the_calendar(scheduling_http):
@@ -591,7 +592,7 @@ def test_the_two_doors_do_not_open_each_other(scheduling_http, monkeypatch):
     assert client.get("/api/scheduling/me/requests").status_code == 200
     assert client.get("/api/scheduling/me/colleagues").status_code == 200
     # 反过来也一样：员工会话读不到店长的任何一条（周表、待办、班次表的编辑都在里面）。
-    # 被拒是 403（会话在、权限不在）—— 2026-10-14 起店长那一面也认「员工会话 + 排班管理」，
+    # 被拒是 403（会话在、权限不在）—— 2026-10-14 起店长那一面也认「员工会话 + 人事管理」，
     # 所以「没登录」那句 401 不再是这里的答案。
     assert client.get("/api/scheduling/roster").status_code == 403
     assert client.get("/api/scheduling/calendar", params={"month": "2026-09"}).status_code == 403
@@ -2833,7 +2834,9 @@ def test_my_requests_carries_the_note_limit(scheduling_http, monkeypatch):
 
 
 def test_staff_with_schedule_cap_can_manage_the_whole_shop(scheduling_http, monkeypatch):
-    """勾了「排班管理」（`schedule`）的员工用员工会话就能改全店排班（2026-10-14 用户裁定）。
+    """勾了「人事管理」（`schedule`）的员工用员工会话就能改全店排班（2026-10-14 用户裁定）。
+
+    2026-10-31 起考勤表也归这一项，显示名从「排班管理」改成「人事管理」（键名不变）。
 
     判据只在 `admin_caps` 那一列、每次请求现读：勾上就当场生效，收回就当场 403。
     **`roster`（花名册）是另一个键**：能改排班不等于能看花名册（身份证号与底薪不下发
@@ -2884,7 +2887,7 @@ def test_staff_with_schedule_cap_can_manage_the_whole_shop(scheduling_http, monk
 
 
 def test_schedule_cap_does_not_leak_colleagues_phone_numbers(scheduling_http, monkeypatch):
-    """「排班管理」能力拿到的是排班需要的名单，**不是全店同事的手机号**。
+    """「人事管理」能力拿到的是排班需要的名单，**不是全店同事的手机号**。
 
     `GET /api/scheduling/roster` 挂在 `_require_scheduler` 后面，而 2026-10-14 起
     「员工会话 + `schedule`」也进得来 —— 手机号是同事的私人联系方式、排班用不到，

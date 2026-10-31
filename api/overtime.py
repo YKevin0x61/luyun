@@ -69,17 +69,33 @@ _ERROR_DETAILS = {
     # 票 05 加表时也在这句里补上自己的文件名。
     "not_migrated": (
         "加班登记表还没建好：请在 Admin「系统更新 → 数据库迁移」应用 "
-        "migrations/pg/0021_overtime_entries.sql 与 "
-        "migrations/pg/0022_overtime_salary_snapshots.sql，然后刷新本页"
+        "migrations/pg/0021_overtime_entries.sql、"
+        "migrations/pg/0022_overtime_salary_snapshots.sql 与 "
+        "migrations/pg/0042_overtime_leave_deductions.sql，然后刷新本页"
     ),
+    # ── 补钟用存假抵扣（ADR 0124）──────────────────────────────────────────
+    "invalid_days": "抵扣天数要填整天：1 天起，不能填半天或 0",
+    # 带一个 `{}`：服务层把上限（`MAX_DEDUCTION_DAYS`）放在 `args[0]`。
+    "days_too_large": "一次最多抵 {} 天：超过了请分几次申请",
+    "deduction_exceeds_makeup": "这个月能抵的补钟不够：最多还能抵 {} 天",
+    "deduction_exceeds_leave": "存假不够扣：最多还能抵 {} 天",
+    "month_sealed": "这个月的账已经封了：封过的月份不能再抵扣，补钟只能按净时长算钱",
+    "employee_resigned": "这位同事已经离职：离职后的账请由超级管理员在考勤表上结",
+    "unknown_deduction": "这张抵扣单不存在：可能已经被撤回或作废，刷新看看",
+    "deduction_not_pending": "这张抵扣单已经处理过了：刷新看看它现在到哪一步",
+    "deduction_not_approved": "只有已批准的抵扣单能作废：这一张还没批，或已经被作废了",
+    "makeup_in_use": "这笔补钟里有已经抵扣出去的小时：请先作废对应的抵扣单，再作废补钟",
 }
 
 _ERROR_STATUS = {
     # 找不到的那一行：这里只有「这条登记」。撤别人的登记也走它。
     "unknown_entry": 404,
     "unknown_employee": 404,
+    "unknown_deduction": 404,
     # 「你没这个权限」不是「参数写错了」：403 与卫生的 `cannot_self_accept` 同一个口径。
     "cannot_self_accept": 403,
+    # 那个月的账封了 = 状态冲突，不是参数错：409 让前端能单独特判（封账提示）。
+    "month_sealed": 409,
     # `not_migrated` 不是「参数写错了」，是这台机器还没升级完 —— 503 比 400 诚实。
     "not_migrated": 503,
 }
@@ -96,6 +112,18 @@ class EntryRequest(BaseModel):
     entry_date: Optional[str] = None
     half_hours: Optional[float] = None
     reason: Optional[str] = None
+
+
+class DeductionRequest(BaseModel):
+    """提一张「用存假抵补钟」的抵扣单（ADR 0124）。
+
+    `month` 是**归月**（= 补钟登记月），不给就是本月；`days` 是整天数。两个字段都给默认值
+    的理由同 `EntryRequest`：缺了落到服务层的 `invalid_month` / `invalid_days` 上，回一句
+    中文 400，而不是 pydantic 的英文 422。
+    """
+
+    month: Optional[str] = None
+    days: Optional[float] = None
 
 
 def _bad_request(exc: OvertimeError) -> HTTPException:
@@ -255,6 +283,72 @@ async def cancel_entry(
     return {"employee": _who(employee), "entry": entry}
 
 
+# ── 员工端：补钟用存假抵扣（ADR 0124）──────────────────────────────────────
+
+
+@router.get("/me/deductions")
+async def my_deductions(
+    month: Optional[str] = Query(None, description="YYYY-MM；不填就是本月"),
+    db=Depends(get_db),
+    employee: dict = Depends(require_staff_session),
+) -> dict:
+    """我的抵扣单（全部历史）+ 某个月**还能抵几天**（申请弹窗的上限）。
+
+    「可抵几天」只在服务端算一份（`deduction_capacity`）：补钟与存假两头封顶、封过账的
+    月为 0。前端不把这条口径再写一遍 —— 弹出「可抵 2 天」、点下去却被拒是最糟的一种。
+    """
+    ledger = OvertimeLedger(db)
+    try:
+        target = month or ledger.today()[:7]
+        return {
+            "employee": _who(employee),
+            "today": ledger.today(),
+            "month": target,
+            "deductions": (
+                await ledger.list_deductions(employee_id=employee["id"])
+            )["deductions"],
+            "capacity": await ledger.deduction_capacity(employee["id"], target),
+            "can_review": _can_review(employee),
+            **_LIMITS,
+        }
+    except OvertimeError as exc:
+        raise _bad_request(exc) from exc
+
+
+@router.post("/me/deductions")
+async def submit_deduction(
+    payload: DeductionRequest,
+    db=Depends(get_db),
+    employee: dict = Depends(require_staff_session),
+) -> dict:
+    """提一张抵扣单（待店长/超管批）。归月 = 补钟登记月，只能整天。"""
+    ledger = OvertimeLedger(db)
+    try:
+        deduction = await ledger.submit_deduction(
+            _entry_actor(employee), payload.month, payload.days
+        )
+    except OvertimeError as exc:
+        raise _bad_request(exc) from exc
+    await _overtime_nudge("deduction_submitted", deduction["employee_id"])
+    return {"employee": _who(employee), "deduction": deduction}
+
+
+@router.delete("/me/deductions/{deduction_id}")
+async def cancel_deduction(
+    deduction_id: int,
+    db=Depends(get_db),
+    employee: dict = Depends(require_staff_session),
+) -> dict:
+    """撤回自己**还没被审批**的那张抵扣单。别人的一律 404（不区分「不存在」与「不是你的」）。"""
+    ledger = OvertimeLedger(db)
+    try:
+        deduction = await ledger.cancel_deduction(employee["id"], deduction_id)
+    except OvertimeError as exc:
+        raise _bad_request(exc) from exc
+    await _overtime_nudge("deduction_cancelled", deduction["employee_id"])
+    return {"employee": _who(employee), "deduction": deduction}
+
+
 # ── 管理端（票 02）：待办队列、批 / 驳 / 作废、代员工补录 ──────────────────────
 #
 # 两扇门各认各的 cookie：上面那三条只认员工会话，下面这些只认管理端会话。员工端
@@ -323,9 +417,18 @@ async def admin_pending(
     """
     ledger = OvertimeLedger(db)
     try:
-        return {**await ledger.list_pending(), **_LIMITS}
+        entries = await ledger.list_pending()
+        deductions = await ledger.list_pending_deductions()
     except OvertimeError as exc:
         raise _bad_request(exc) from exc
+    return {
+        **entries,
+        # 抵扣单跟加班登记同一个待办队列（ADR 0124）：店长一次看完、一次处理完，
+        # 不要为了「抵一天」再开第二个页面。`deduction_count` 给导航角标用。
+        "deductions": deductions["deductions"],
+        "deduction_count": deductions["count"],
+        **_LIMITS,
+    }
 
 
 @router.get("/admin/entries")
@@ -475,12 +578,18 @@ async def review_pending(
     """
     ledger = OvertimeLedger(db)
     try:
-        return {
-            **await ledger.list_pending(exclude_employee_id=reviewer["id"]),
-            **_LIMITS,
-        }
+        entries = await ledger.list_pending(exclude_employee_id=reviewer["id"])
+        deductions = await ledger.list_pending_deductions(
+            exclude_employee_id=reviewer["id"]
+        )
     except OvertimeError as exc:
         raise _bad_request(exc) from exc
+    return {
+        **entries,
+        "deductions": deductions["deductions"],
+        "deduction_count": deductions["count"],
+        **_LIMITS,
+    }
 
 
 @router.get("/review/employees")
@@ -565,3 +674,130 @@ async def review_reject(
         raise _bad_request(exc) from exc
     await _overtime_nudge("entry_rejected", entry["employee_id"])
     return {"entry": entry}
+
+
+# ── 抵扣单的审批与作废（ADR 0124）──────────────────────────────────────────
+#
+# 与加班登记那套**同一份状态机、同一批门**：员工提/撤在 `/me/*`（员工门），店长批在
+# `/review/*`（员工会话 + 加班与补钟审批能力），超管批/作废在 `/admin/*`（管理端门）。
+# 两条审批门落在同一套服务层方法上，所以「怎么判一张抵扣单」只有一份实现。
+
+
+@router.get("/admin/deductions")
+async def admin_deductions(
+    month: Optional[str] = Query(None, description="YYYY-MM；按归月筛"),
+    employee_id: Optional[int] = Query(None),
+    status: Optional[str] = Query(None),
+    db=Depends(get_db),
+    _: str = Depends(require_session),
+) -> dict:
+    """全店抵扣单（管理端）：可按归月 / 按人 / 按状态筛，新的在前。"""
+    ledger = OvertimeLedger(db)
+    try:
+        data = await ledger.list_deductions(
+            month=month, employee_id=employee_id, status=status
+        )
+    except OvertimeError as exc:
+        raise _bad_request(exc) from exc
+    return {**data, **_LIMITS}
+
+
+@router.post("/admin/deductions/{deduction_id}/approve")
+async def admin_approve_deduction(
+    deduction_id: int,
+    db=Depends(get_db),
+    _: str = Depends(require_session),
+) -> dict:
+    """批准一张待审批的抵扣单。状态谓词与上限校验都在服务层的写锁里。"""
+    ledger = OvertimeLedger(db)
+    try:
+        deduction = await ledger.approve_deduction(EntryActor(), deduction_id)
+    except OvertimeError as exc:
+        raise _bad_request(exc) from exc
+    await _overtime_nudge("deduction_approved", deduction["employee_id"])
+    return {"deduction": deduction}
+
+
+@router.post("/admin/deductions/{deduction_id}/reject")
+async def admin_reject_deduction(
+    deduction_id: int,
+    payload: RejectRequest,
+    db=Depends(get_db),
+    _: str = Depends(require_session),
+) -> dict:
+    """驳回一张待审批的抵扣单 —— **必须写理由**，理由会出现在员工手机上。"""
+    ledger = OvertimeLedger(db)
+    try:
+        deduction = await ledger.reject_deduction(
+            EntryActor(), deduction_id, payload.reason
+        )
+    except OvertimeError as exc:
+        raise _bad_request(exc) from exc
+    await _overtime_nudge("deduction_rejected", deduction["employee_id"])
+    return {"deduction": deduction}
+
+
+@router.post("/admin/deductions/{deduction_id}/void")
+async def admin_void_deduction(
+    deduction_id: int,
+    db=Depends(get_db),
+    _: str = Depends(require_session),
+) -> dict:
+    """作废一张**已批准**的抵扣单（封账前）。封过账的月份锁死 —— 服务层里判。"""
+    ledger = OvertimeLedger(db)
+    try:
+        deduction = await ledger.void_deduction(EntryActor(), deduction_id)
+    except OvertimeError as exc:
+        raise _bad_request(exc) from exc
+    await _overtime_nudge("deduction_voided", deduction["employee_id"])
+    return {"deduction": deduction}
+
+
+@router.get("/review/deductions/pending")
+async def review_pending_deductions(
+    db=Depends(get_db), reviewer: dict = Depends(_require_reviewer)
+) -> dict:
+    """店长手机上的抵扣待办 —— 自己提的不进来（不能批自己的，同加班登记）。"""
+    ledger = OvertimeLedger(db)
+    try:
+        return {
+            **await ledger.list_pending_deductions(exclude_employee_id=reviewer["id"]),
+            **_LIMITS,
+        }
+    except OvertimeError as exc:
+        raise _bad_request(exc) from exc
+
+
+@router.post("/review/deductions/{deduction_id}/approve")
+async def review_approve_deduction(
+    deduction_id: int,
+    db=Depends(get_db),
+    reviewer: dict = Depends(_require_reviewer),
+) -> dict:
+    ledger = OvertimeLedger(db)
+    try:
+        deduction = await ledger.approve_deduction(
+            _entry_actor(reviewer), deduction_id
+        )
+    except OvertimeError as exc:
+        raise _bad_request(exc) from exc
+    await _overtime_nudge("deduction_approved", deduction["employee_id"])
+    return {"deduction": deduction}
+
+
+@router.post("/review/deductions/{deduction_id}/reject")
+async def review_reject_deduction(
+    deduction_id: int,
+    payload: RejectRequest,
+    db=Depends(get_db),
+    reviewer: dict = Depends(_require_reviewer),
+) -> dict:
+    ledger = OvertimeLedger(db)
+    try:
+        deduction = await ledger.reject_deduction(
+            _entry_actor(reviewer), deduction_id, payload.reason
+        )
+    except OvertimeError as exc:
+        raise _bad_request(exc) from exc
+    await _overtime_nudge("deduction_rejected", deduction["employee_id"])
+    return {"deduction": deduction}

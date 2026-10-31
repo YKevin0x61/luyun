@@ -3994,7 +3994,7 @@ class SchedulingLayeringTest(unittest.TestCase):
                 self.assertNotIn("require_session", names, route.path)
             else:
                 # 2026-10-14 用户裁定：店长那一面（`_require_scheduler`）不再只认管理端会话
-                # —— 花名册上勾了「排班管理」（`schedule`）的员工用**员工会话**也进得来。
+                # —— 花名册上勾了「人事管理」（`schedule`）的员工用**员工会话**也进得来。
                 # 所以那一侧的断言点从 `require_session` 换成这一层门，它内部自带
                 # `require_any_identity_session`（先管理端、再员工）。
                 self.assertIn("_require_scheduler", names, route.path)

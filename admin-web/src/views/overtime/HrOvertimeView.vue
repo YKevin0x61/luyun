@@ -457,7 +457,8 @@ useNudgePull({ id: 'workbench-hr-overtime', topics: ['overtime'], pull: load })
               </div>
               <p class="oBy">
                 加班 {{ formatHalfHours(row.overtime_half_hours) }} · 补钟
-                {{ formatHalfHours(row.makeup_half_hours) }} · 底薪
+                {{ formatHalfHours(row.makeup_half_hours) }} · 已抵存假
+                {{ row.deducted_days }} 天（{{ row.deducted_hours }} 小时） · 底薪
                 {{ row.base_salary === null ? '待补' : `${row.base_salary} 元/月` }}
               </p>
             </li>
@@ -467,6 +468,9 @@ useNudgePull({ id: 'workbench-hr-overtime', topics: ['overtime'], pull: load })
             <span class="oH">{{ formatHalfHours(stats.total.net_half_hours) }} 小时</span>
             <span class="oSt">{{ stats.total.amount }} 元</span>
           </div>
+          <p v-if="stats.total.deducted_half_hours" class="oHint">
+            合计里已经扣掉用存假抵过的 {{ stats.total.deducted_hours }} 小时补钟（那部分时间按休假算）。
+          </p>
           <p v-if="stats.total.unpriced" class="oHint">
             还有 {{ stats.total.unpriced }} 个人没算出金额（底薪待补），他们不在合计里。
           </p>

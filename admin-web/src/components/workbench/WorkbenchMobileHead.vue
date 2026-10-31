@@ -74,7 +74,7 @@ const pages = computed(() => {
   if (props.items && props.items.length) return props.items
   if (!groupKey.value) return []
   // 组里的页按**当前身份 + 员工能力键**过滤（2026-10-14）：员工那一档的人事组只该看到
-  // 月历 / 待办 / 班次表（勾了「排班管理」时），花名册与另外四页不出现。
+  // 月历 / 待办 / 班次表 / 考勤表（勾了「人事管理」时），花名册与另外三页不出现。
   return workbenchPagesOf(
     groupKey.value,
     workbenchAudienceFor(identityStore.identity),

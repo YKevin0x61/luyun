@@ -51,7 +51,7 @@ describe('两套一级导航表（2026-10-19 信息架构重排第二层）', ()
 
   it('员工端：今天 / 卫生 / 后勤 / 我的（+ 人事那一格留作能力键页）', () => {
     // `hr` 在表里、默认不渲染：落点页是 `admin + staffCap: schedule`，由 `pageVisibleFor`
-    // 过滤 —— 删掉它会让勾了「排班管理」的员工再也进不去人事三页（2026-10-14 的既有行为）。
+    // 过滤 —— 删掉它会让勾了「人事管理」的员工再也进不去人事四页（2026-10-14 起三页，2026-10-31 起四页）。
     expect(STAFF_NAV_GROUPS.map((group) => group.key)).toEqual([
       'home', 'hr', 'hygiene', 'kitchen', 'me',
     ])
@@ -264,13 +264,13 @@ describe('按身份过滤导航', () => {
     expect(pageMeta('/workbench/staff/today').audience).toBe('staff')
   })
 
-  it('员工勾了「排班管理」/「损耗分析」之后，那两扇门才出现（2026-10-14）', () => {
+  it('员工勾了「人事管理」/「损耗分析」之后，那两扇门才出现（2026-10-14）', () => {
     const keysOf = (identity, caps) => [
       ...new Set(workbenchNavFor(identity, caps).map((item) => item.key)),
     ]
     // 没有能力键时与这条落地之前一字不差。
     expect(keysOf('staff', [])).toEqual(['home', 'hygiene', 'kitchen', 'me'])
-    // 勾了排班管理：人事那一格出现（落点是月历）。
+    // 勾了人事管理：人事那一格出现（落点是月历）。
     expect(keysOf('staff', ['schedule'])).toEqual(['home', 'hr', 'hygiene', 'kitchen', 'me'])
     // 勾了损耗分析：后勤那一格多出第三扇门。
     const kitchenTo = (caps) => workbenchNavFor('staff', caps)
@@ -284,15 +284,17 @@ describe('按身份过滤导航', () => {
     expect(keysOf('super', [])).toEqual(['home', 'hr', 'floor', 'kitchen'])
   })
 
-  it('组内导航：员工进人事组只看到他能用的三页', () => {
+  it('组内导航：员工进人事组只看到他能用的四页', () => {
     const hrPages = (audience, caps) => workbenchPagesOf('hr', audience, caps)
       .map((page) => page.path)
+    // 2026-10-31：考勤表并进同一项能力（`schedule`，显示名「人事管理」）。
     expect(hrPages('staff', ['schedule'])).toEqual([
       '/workbench/hr/calendar',
       '/workbench/hr/inbox',
       '/workbench/hr/shifts',
+      '/workbench/hr/attendance',
     ])
-    // 没勾就一页都不给（花名册 / 人事提醒 / 加班统计 / 考勤表 / 节假日日历都是管理端那一档）。
+    // 没勾就一页都不给（花名册 / 人事提醒 / 加班统计 / 节假日日历都是管理端那一档）。
     expect(hrPages('staff', [])).toEqual([])
     expect(hrPages('admin', [])).toHaveLength(8)
     // 后勤组：员工带「损耗分析」能力才多那一页（配方的印码与管理面仍是管理端专属）。

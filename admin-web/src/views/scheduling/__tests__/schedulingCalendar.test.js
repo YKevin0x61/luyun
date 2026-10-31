@@ -168,7 +168,7 @@ describe('店长端排班月历（原型 B）', () => {
     expect(router).toMatch(/meta: pageMeta\('\/workbench'\)/)
     // 票 02：meta 里还多了内容区的两个 opt-out（`ownBottomBar` / `flush`）—— 人事这几页
     // 两项都关着（清单里没标），断的是整份 meta 的形状。
-    // staffCap（2026-10-14）：人事三页对「勾了排班管理」的员工会话也开（`schedule`）。
+    // staffCap（2026-10-14，2026-10-31 起含考勤表）：人事四页对「勾了人事管理」的员工会话也开（`schedule`）。
     expect(pageMeta('/workbench/hr/calendar')).toEqual({
       standalone: true, public: false, audience: 'admin', staffCap: 'schedule',
       workbenchTheme: true, ownBottomBar: false, flush: false,

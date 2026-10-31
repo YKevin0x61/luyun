@@ -38,14 +38,26 @@ describe('整月六态一眼可辨（/workbench/staff/month）', () => {
 describe('加班与补钟（/workbench/staff/overtime）', () => {
   const src = read('../../overtime/MeOvertimeView.vue')
 
-  it('净时长 + 两枚状态徽章：已批准 / 待批', () => {
+  it('净时长 + 两枚状态徽章：净时长 / 待批（ADR 0124 起再加「已抵存假」）', () => {
     expect(src).toContain('net_half_hours')
-    expect(src).toMatch(/class="badge[^"]*">\s*已批准/)
+    expect(src).toMatch(/class="badge[^"]*">\s*净时长/)
     expect(src).toMatch(/class="badge[^"]*">\s*待批/)
+    expect(src).toMatch(/class="badge[^"]*">\s*已抵存假/)
   })
 
   it('那句解释性文案已经下线（由徽章各自说清）', () => {
     expect(src).not.toContain('只有「已批准」那一行是算数的')
+  })
+
+  it('用存假抵补钟（ADR 0124）：可抵天数来自服务端、只能整天、归到补钟那个月', () => {
+    expect(src).toContain('deduction_capacity')
+    expect(src).toContain('/api/overtime/me/deductions')
+    expect(src).toContain('用存假抵补钟')
+    expect(src).toContain('可抵')
+    // 8.5 小时 = 1 天，与加班费公式同一个分母；页面上不出现第二个天数换算。
+    expect(src).toMatch(/HOURS_PER_LEAVE_DAY\s*=\s*8\.5/)
+    // 提交时归月 = 当前正在看的那个月（补钟登记月），不是「今天」。
+    expect(src).toMatch(/month:\s*summary\.value\?\.month/)
   })
 
   it('页面无金额（ADR 0098 / 0103 的边界）：模板里不出现金额/底薪/¥', () => {

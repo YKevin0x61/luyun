@@ -29,9 +29,10 @@
  *
  *  `staffSide` 标的是**员工端有没有执行点**（后端 `STAFF_SIDE_CAPABILITIES` 的同义字段）：
  *  只有前六项在员工手机端真正生效 —— 三项在「卫生」页，`overtime` 在「加班与补钟」页
- *  （2026-10-07 加的第 11 项，见 `docs/adr/0103`），`schedule` 在人事组三页（月历 / 待办 /
- *  班次表），`wastage` 在后勤组的损耗分析页（2026-10-14 加的两项）—— 花名册里**可勾**的
- *  也只有它们。
+ *  （2026-10-07 加的第 11 项，见 `docs/adr/0103`），`schedule` 在人事组四页（月历 / 待办 /
+ *  班次表 / 考勤表，2026-10-31 起考勤表也并了进来、它的显示名随之从「排班管理」改成
+ *  「人事管理」），`wastage` 在后勤组的损耗分析页（2026-10-14 加的两项）—— 花名册里
+ *  **可勾**的也只有它们。
  *
  *  ## 为什么后七项还在表里，却不可勾
  *
@@ -50,7 +51,7 @@ export const ADMIN_CAP_DEFS = [
   { key: 'deep_review', label: '专项验收', note: '判专项卫生的前后对照', staffSide: true },
   { key: 'fix', label: '整改单', note: '开整改单、验收或驳回整改单', staffSide: true },
   { key: 'overtime', label: '加班与补钟审批', note: '批 / 驳加班与补钟登记，代员工补录', staffSide: true },
-  { key: 'schedule', label: '排班管理', note: '改全店排班、批请假与换班、管班次表', staffSide: true },
+  { key: 'schedule', label: '人事管理', note: '改全店排班、批请假与换班、管班次表，看与改考勤表', staffSide: true },
   { key: 'wastage', label: '损耗分析', note: '看全店损耗统计与明细，含「谁记的」', staffSide: true },
   { key: 'attire', label: '仪容仪表', note: '看与判仪容打卡，维护仪容标准', staffSide: false },
   { key: 'standard', label: '标准图管理', note: '换标准图、改标注、导出整套标准', staffSide: false },

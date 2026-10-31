@@ -82,7 +82,13 @@ export function leaveFormulaText(leave) {
   const sum = terms.map(([label, value]) => `${label} ${formatDays(value)}`).join(' + ')
   // `month_days` 是**本月在岗天数**（2026-10-29）：老员工 = 整月，入职当月从他入职
   // 那天算起 —— 只写「本月 17 天」读起来像笔误，所以明说是「在岗」。
-  return `${sum} = 可用 ${formatDays(leave.pool)}；本月在岗 ${leave.month_days} 天，存假 ${formatDays(leave.balance)}`
+  // 本月经补钟抵扣（ADR 0124）只在真抵过的时候念出来：没抵过的人看到的仍是原来那句
+  // 七项算式（存量页面的口径一个字没变）。
+  const deducted = Number(leave.deducted_days || 0)
+  const tail = deducted
+    ? `；本月在岗 ${leave.month_days} 天，用存假抵 ${formatDays(deducted)}，存假 ${formatDays(leave.balance)}`
+    : `；本月在岗 ${leave.month_days} 天，存假 ${formatDays(leave.balance)}`
+  return `${sum} = 可用 ${formatDays(leave.pool)}${tail}`
 }
 
 /** 未审批的加班 / 补钟（故事 14）：有单子等着批就把这一格标色，并说清待批几小时。

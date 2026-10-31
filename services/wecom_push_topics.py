@@ -47,6 +47,21 @@ _SCHEDULE_TIME_PATTERN = r"^([01]\d|2[0-3]):[0-5]\d$"
 
 DATE_RANGE_LABELS = {"today": "当天", "yesterday": "昨天"}
 
+# 每周触发的日子：值是 `date.weekday()`（周一 = 0 … 周日 = 6），与排班 / 月历同一套
+# 编号（`services/scheduling/store.py` 的 `days[].weekday`）。中文名只有这一处声明，
+# 页面下拉、任务卡片的「每周日 13:00」、消息标题都从它取。
+WEEKDAY_LABELS = {
+    0: "周一",
+    1: "周二",
+    2: "周三",
+    3: "周四",
+    4: "周五",
+    5: "周六",
+    6: "周日",
+}
+# 短名（消息正文按人一行时用：「一 白班 · 二 夜班」）。
+WEEKDAY_SHORT_LABELS = {value: label.replace("周", "") for value, label in WEEKDAY_LABELS.items()}
+
 # 接口版本：页面加载时拿它和本地构建里的版本比对，对不上就显示顶部提示条
 # （不阻断操作，spec「页面」一节）。**任何改变 `/meta`、`/webhooks`、
 # `/subscriptions` 等接口形状的改动都要把它 +1** —— 提示条的意义只在于「页面
@@ -54,9 +69,13 @@ DATE_RANGE_LABELS = {"today": "当天", "yesterday": "昨天"}
 #
 # v2（票 08）：推送任务的写请求换成「内容类型 + 参数 + 时间」，`/jobs` 的返回里没有
 # 收件人字段了（改成了 `topic_id` / `params` / `target_count`），旧的写请求会被拒。
+# v3（下周排班表）：`/meta` 的每一类多了 `weekly`（每周触发），`/jobs` 的每一行多了
+# `schedule_text`（「每周日 13:00」，页面那枚时间徽章读它）；`weekly_schedule` 这一类
+# 的定时侧参数多了 `weekday`。纯加法，但页面的时间徽章要换字段才显示得出「每周」，所以
+# 版本照规矩 +1。
 # 前端那一半在 `admin-web/src/composables/useWecomPush.js`（`WECOM_PUSH_API_VERSION`），
 # 两处由 `admin-web/src/composables/__tests__/useWecomPushSubscriptions.test.js` 钉住。
-WECOM_PUSH_API_VERSION = "v2"
+WECOM_PUSH_API_VERSION = "v3"
 
 
 
@@ -78,6 +97,14 @@ def _station_choices() -> Dict[str, str]:
 
 
 _STATION_CHOICES = _station_choices()
+
+
+def _weekday_choices() -> Dict[str, str]:
+    """每周触发的日子下拉：值就是 ``date.weekday()`` 的字符串形式。"""
+    return {str(value): label for value, label in WEEKDAY_LABELS.items()}
+
+
+_WEEKDAY_CHOICES = _weekday_choices()
 
 
 class PushTrigger(str, Enum):
@@ -184,6 +211,35 @@ class ReconcileDiffScheduleParams(_ScheduleFormParams):
     schedule_time: str = _schedule_time_field("22:10")
 
 
+class WeeklyScheduleParams(_FormParams):
+    """下一周排班表：每周固定某一天推「从下一个周一开始」的那一周。
+
+    ``weekday`` 不是内容参数，而是**调度参数**：它决定这条任务一周里哪一天触发
+    （``PushTopic.weekly`` 为真时调度循环按它过滤）。放在参数里而不是加一列，是因为
+    它随任务一起存档、随出站行一起冻结 —— 排查「这周为什么没推」时能直接看到
+    当时配的是哪一天。默认周日 13:00（门店这周排完、群里先知会下周）。
+
+    「下一周」固定是下一个周一那一周，不给参数：周日推「明天开始的那一周」，
+    周三推「下周一开始」，都是同一句话。
+    """
+
+    schedule_time: str = _schedule_time_field("13:00")
+    weekday: str = Field(
+        "6",
+        title="每周推送日",
+        description="每周的这一天推送下一周（下周一起）的排班表。",
+        json_schema_extra=_select_extras(_WEEKDAY_CHOICES),
+    )
+
+    @field_validator("weekday")
+    @classmethod
+    def _check_weekday(cls, value: str) -> str:
+        normalized = str(value or "").strip()
+        if normalized not in _WEEKDAY_CHOICES:
+            raise ValueError("推送日只支持周一至周日")
+        return normalized
+
+
 class ReconcileDiffParams(_EventParams):
     """对账差异告警的事件侧：日终对账发现差异时即时投递。"""
 
@@ -236,6 +292,7 @@ TOPIC_HYGIENE_REMINDER = "hygiene_reminder"
 TOPIC_HYGIENE_PHOTO = "hygiene_photo"
 TOPIC_UPDATE_BACKUP = "update_backup"
 TOPIC_RESOURCE_WATERMARK = "resource_watermark"
+TOPIC_WEEKLY_SCHEDULE = "weekly_schedule"
 
 
 def _format_errors(exc: ValidationError) -> str:
@@ -262,6 +319,9 @@ class PushTopic:
     # 含员工实拍照片：订阅视图上要标注「含员工实拍照片」（用户故事 11）。
     # 判断依据是**这一类内容的性质**，不是渲染器怎么实现 —— 放在注册表里，页面零硬编码。
     contains_employee_photos: bool = False
+    # 每周触发一次（不是每天）：调度循环按参数里的 ``weekday`` 过滤，只在那一周的那一天
+    # 入队。别的定时内容类型照旧每天到点就推。
+    weekly: bool = False
 
     def __post_init__(self) -> None:
         if not self.id:
@@ -339,6 +399,7 @@ class PushTopic:
             "uischema": self.uischema,
             "default_schedule_time": self.default_schedule_time,
             "contains_employee_photos": self.contains_employee_photos,
+            "weekly": self.weekly,
         }
 
     def _resolve_trigger(self, trigger: Optional[PushTrigger]) -> PushTrigger:
@@ -469,6 +530,16 @@ register_topic(PushTopic(
     name="销售报表",
     triggers=frozenset({PushTrigger.SCHEDULED}),
     schedule_params_model=SalesReportParams,
+))
+# 每周一次的下周排班表：周日 13:00 把「下周一那一周」所有人的班次推到群里。
+# 一周只触发一次由 `weekly` 声明，调度循环按参数里的 weekday 过滤（见
+# `WeComPushService.dispatch_due_jobs`）。
+register_topic(PushTopic(
+    id=TOPIC_WEEKLY_SCHEDULE,
+    name="下周排班表",
+    triggers=frozenset({PushTrigger.SCHEDULED}),
+    schedule_params_model=WeeklyScheduleParams,
+    weekly=True,
 ))
 # 唯一一个两种触发方式都有的内容类型：定时侧承载原「数据质量日报」（22:10 / 当天），
 # 事件侧是日终对账差异告警（迁移 0016 把旧 push_type `data_quality_alert` 映射到它）。

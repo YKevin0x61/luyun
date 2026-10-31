@@ -344,11 +344,12 @@ async def lifespan(app: FastAPI):
         from services.hygiene.wecom_share import HygieneCaptureSharer
         from services.hygiene.work import HygieneWork
         from services.wecom_outbox import wecom_outbox
-        from services.wecom_push_service import ScheduledReportRenderer
+        from services.wecom_push_service import ScheduledReportRenderer, WeeklyScheduleRenderer
         from services.wecom_push_topics import (
             TOPIC_HYGIENE_PHOTO,
             TOPIC_RECONCILE_DIFF,
             TOPIC_SALES_REPORT,
+            TOPIC_WEEKLY_SCHEDULE,
         )
         from pathlib import Path
         if db_manager and db_manager.is_connected():
@@ -368,6 +369,10 @@ async def lifespan(app: FastAPI):
             report_renderer = ScheduledReportRenderer(db_manager)
             wecom_outbox.register_renderer(TOPIC_SALES_REPORT, report_renderer.render)
             wecom_outbox.register_renderer(TOPIC_RECONCILE_DIFF, report_renderer.render)
+            # 下周排班表同理：出站行里只有内容类型与参数，正文要发送时从排班现算。
+            wecom_outbox.register_renderer(
+                TOPIC_WEEKLY_SCHEDULE, WeeklyScheduleRenderer(db_manager).render
+            )
             hygiene_work = HygieneWork(
                 db_manager,
                 captures=hygiene_captures,
@@ -1105,7 +1110,7 @@ app.include_router(release_update_router)
 app.include_router(db_migrations_router)
 app.include_router(runtime_settings_router)
 app.include_router(logs_router)
-# 排班自己带 `_require_scheduler`（管理端会话，或带「排班管理」能力的员工会话 ——
+# 排班自己带 `_require_scheduler`（管理端会话，或带「人事管理」能力的员工会话 ——
 # 2026-10-14），不挂 verify_admin_token：店长用的是浏览器会话，不是 API token。
 app.include_router(scheduling_router)
 # 加班与补钟同理（票 01 起）：员工那一面自己带 require_staff_session，
@@ -1115,8 +1120,9 @@ app.include_router(overtime_router)
 # 日常损耗登记：两个身份一个面（读写在服务层按归属分），路由自己带
 # require_any_identity_session —— 与加班同理，不挂 verify_admin_token。
 app.include_router(wastage_router)
-# 考勤表（考勤表导出票 01）同理：只有管理端那一面，自己带 require_session ——
-# 这一页有全店人的底薪与假期，员工那一档连页面都进不去。
+# 考勤表（考勤表导出票 01）同理：2026-10-31 起并入人事那一项能力，自己带
+# `_require_scheduler`（管理端会话，或带「人事管理」能力的员工会话）—— 这一页有全店人的
+# 底薪与假期，页面清单里 `staffCap: schedule` 与这扇门同一档。
 app.include_router(attendance_router)
 # 法定节假日日历（考勤表导出 票 02）：三条路由都只认管理端会话（`require_session`），
 # 匿名与员工 cookie 一律 401 —— 这张日历决定「法定节假日补休」怎么算，员工改不得。

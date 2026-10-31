@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import functools
 import logging
+import math
 import re
 from calendar import monthrange
 from dataclasses import dataclass
@@ -34,9 +35,12 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "HALF_HOURS_MAX",
+    "HALF_HOURS_PER_LEAVE_DAY",
     "HOURS_PER_DAY",
+    "KIND_LEAVE_DEDUCTION",
     "KIND_MAKEUP",
     "KIND_OVERTIME",
+    "MAX_DEDUCTION_DAYS",
     "MAX_REASON",
     "MAX_REJECT_REASON",
     "EntryActor",
@@ -60,6 +64,16 @@ STATUS_VOIDED = "voided"
 # 读的时候按符号派生：正数是加班、负数是补钟。它不是库里的一列。
 KIND_OVERTIME = "overtime"
 KIND_MAKEUP = "makeup"
+# 补钟用存假抵扣（ADR 0124）：它不是加班登记的一种，是那张 `overtime_leave_deductions`
+# 表上的一行 —— 但列表接口把两种记录并排下发时，前端要靠这个字段分渲染。
+KIND_LEAVE_DEDUCTION = "leave_deduction"
+
+# 一个工作日的半小时数（8.5 小时 = 17 个半小时）：抵扣只能整天，`days × 17` 就是
+# 它从补钟账上注销的半小时数。与 `HOURS_PER_DAY` 同源，改一个必须改另一个。
+# （定义在 `HOURS_PER_DAY` 之后 —— 这里读的是它的值。）
+
+# 一次最多抵几天：一个月最多 31 天，再大就是手滑（防的不是业务，是「抵 100 天」）。
+MAX_DEDUCTION_DAYS = 31
 
 # 界面上的步长是 0.5 小时，库里存它的整数倍（`half_hours`）。单条上限 ±12 小时 ——
 # 防的是手滑打成 120，不是替业务定政策。
@@ -77,6 +91,10 @@ MAX_REJECT_REASON = 100
 # 它与 `half_hours` 的单位无关 —— 金额那一步才把「半小时数」折成小时。
 HOURS_PER_DAY = 8.5
 
+# 一个工作日的半小时数（8.5 小时 = 17 个半小时）：抵扣只能整天，`days × 17` 就是它
+# 从补钟账上注销的半小时数。与 `HOURS_PER_DAY` 同源，改一个必须改另一个。
+HALF_HOURS_PER_LEAVE_DAY = int(HOURS_PER_DAY * 2)
+
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _MONTH_RE = re.compile(r"^\d{4}-\d{2}$")
 
@@ -84,6 +102,12 @@ _MONTH_RE = re.compile(r"^\d{4}-\d{2}$")
 _ENTRY_COLUMNS = (
     "id, employee_id, entry_date, half_hours, reason, status, reject_reason,"
     " created_by, decided_by, decided_at, created_at, updated_at"
+)
+
+# 抵扣单读出来选的列：与 `_ENTRY_COLUMNS` 同一个理由（两处读口不各写一份列名）。
+_DEDUCTION_COLUMNS = (
+    'id, employee_id, "month", days, half_hours, status, created_by,'
+    " decided_by, decided_at, reject_reason, created_at, updated_at"
 )
 
 
@@ -214,6 +238,40 @@ def _row_to_entry(row: Any) -> dict:
     return entry
 
 
+def _row_to_deduction(row: Any) -> dict:
+    """一行抵扣单 → 前端要的形状：加 `hours`、`kind`（派生值，库里没有）。
+
+    `half_hours` 是「这笔抵扣注销掉多少补钟小时」——整天的话就是 `days × 17`。它刻意
+    与 `days` 一起给：页面上写「抵 1 天（8.5 小时）」两个数都要，账上对得起来。
+    """
+    item = dict(row)
+    days = int(item.get("days") or 0)
+    item["days"] = days
+    item["half_hours"] = int(item.get("half_hours") or days * HALF_HOURS_PER_LEAVE_DAY)
+    item["hours"] = item["half_hours"] / 2
+    item["kind"] = KIND_LEAVE_DEDUCTION
+    return item
+
+
+def _require_days(value: Any) -> int:
+    """抵扣天数：正整数、不超过一个月（31）—— 界面上的步长是「整天」。"""
+    if isinstance(value, bool):
+        raise OvertimeError("invalid_days", "invalid_days")
+    if isinstance(value, float):
+        if value != int(value):
+            raise OvertimeError("invalid_days", "invalid_days")
+        value = int(value)
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        raise OvertimeError("invalid_days", "invalid_days")
+    if number < 1:
+        raise OvertimeError("invalid_days", "invalid_days")
+    if number > MAX_DEDUCTION_DAYS:
+        raise OvertimeError("days_too_large", str(MAX_DEDUCTION_DAYS))
+    return number
+
+
 def _require_month(value: Any) -> str:
     text = str(value or "").strip()
     if not _MONTH_RE.match(text):
@@ -249,7 +307,7 @@ def _pay_for(salary: int, days: int, net_hours: float) -> int:
     return int(amount.quantize(Decimal("1"), rounding=ROUND_HALF_UP))
 
 
-def _month_summary(rows: list[dict], month: str) -> dict:
+def _month_summary(rows: list[dict], month: str, *, deducted_days: int = 0) -> dict:
     """一个月的合计，**待审批与已批准分开**（员工端那张月度卡的口径）。
 
     只有这两种状态算进「这个月加了多少」：已驳回 / 已撤回 / 已作废的登记不进合计
@@ -257,7 +315,12 @@ def _month_summary(rows: list[dict], month: str) -> dict:
 
     净时长 = 加班与补钟**正负相抵**（`GLOSSARY.md` 的「净时长」）。负数照实给：员工端
     要看得见「这个月是净欠的」，扣不扣钱是票 03 的事。
+
+    ``deducted_days`` 是那人那个月**已经批下来**的存假抵扣天数（ADR 0124）：被抵掉的
+    那部分补钟从净时长里注销（净时长 = 加班 − 补钟 + 抵扣小时），所以它只进**已批准**
+    那一桶 —— 待审批的抵扣还没生效，一分都不算。
     """
+    deducted_half_hours = int(deducted_days) * HALF_HOURS_PER_LEAVE_DAY
     buckets = {
         status: {"overtime_half_hours": 0, "makeup_half_hours": 0}
         for status in (STATUS_PENDING, STATUS_APPROVED)
@@ -271,10 +334,13 @@ def _month_summary(rows: list[dict], month: str) -> dict:
         bucket[key] += abs(half_hours)
     summary: dict[str, Any] = {"month": month}
     for status, bucket in buckets.items():
+        offset = deducted_half_hours if status == STATUS_APPROVED else 0
+        bucket["deducted_half_hours"] = offset
+        bucket["deducted_days"] = int(deducted_days) if status == STATUS_APPROVED else 0
         bucket["net_half_hours"] = (
-            bucket["overtime_half_hours"] - bucket["makeup_half_hours"]
+            bucket["overtime_half_hours"] - bucket["makeup_half_hours"] + offset
         )
-        for name in ("overtime", "makeup", "net"):
+        for name in ("overtime", "makeup", "net", "deducted"):
             bucket[f"{name}_hours"] = bucket[f"{name}_half_hours"] / 2
         summary[status] = bucket
     return summary
@@ -412,12 +478,15 @@ class OvertimeLedger:
             " WHERE employee_id = ?", (int(employee_id),), "entry_date DESC, id DESC"
         )
         target = self.today()[:7] if month in (None, "") else _require_month(month)
+        deducted = await self._deduction_days(int(employee_id), target)
         return {
             "today": self.today(),
             "yesterday": self.yesterday(),
             "month": target,
-            "summary": _month_summary(rows, target),
+            "summary": _month_summary(rows, target, deducted_days=deducted),
             "entries": rows,
+            "deductions": await self._my_deduction_rows(int(employee_id)),
+            "deduction_capacity": await self.deduction_capacity(int(employee_id), target),
         }
 
     async def _name_index(self) -> dict[int, str]:
@@ -587,6 +656,399 @@ class OvertimeLedger:
             int(entry_id), STATUS_CANCELLED, (STATUS_PENDING,), f"staff:{int(employee_id)}"
         )
 
+    # ── 补钟用存假抵扣（ADR 0124，2026-10-31 用户裁定）────────────────────────
+    #
+    # 一条抵扣单 = 员工 × **补钟登记月** × 天数（整天，`days × 17` 个半小时）。
+    # 它不动补钟台账那几行本身（**不追溯**「抵的是哪几笔」：整天粒度本来就不对齐
+    # 单笔，一笔可能是 6 小时），只在算净时长与存假余额时按月度汇总扣减。
+
+    async def _deduction_rows(
+        self, clause: str, params: tuple, order: str = ""
+    ) -> list[dict]:
+        """读抵扣单。**缺 0042 时回空**（读路径不 503）：没这张表就等于没抵过 ——
+        加班页的登记与记录不该因为一次还没做的迁移整页挂掉。写路径另有一道
+        `_require_deduction_table` 会点名要应用哪个脚本。"""
+        try:
+            cur = await self._conn.execute(
+                f"SELECT {_DEDUCTION_COLUMNS} FROM overtime_leave_deductions{clause}"
+                f"{f' ORDER BY {order}' if order else ''}",
+                params,
+            )
+        except (asyncpg.UndefinedTableError, asyncpg.UndefinedColumnError):
+            await self._rollback_quietly()
+            return []
+        return [_row_to_deduction(row) for row in await cur.fetchall()]
+
+    async def _deduction_by_id(self, deduction_id: int) -> Optional[dict]:
+        rows = await self._deduction_rows(" WHERE id = ?", (int(deduction_id),))
+        return rows[0] if rows else None
+
+    async def _my_deduction_rows(self, employee_id: int) -> list[dict]:
+        """我自己提过的抵扣单（全部历史，新的在前）——员工端列表里那一块。"""
+        return await self._deduction_rows(
+            " WHERE employee_id = ?", (int(employee_id),), '"month" DESC, id DESC'
+        )
+
+    async def _deduction_days(self, employee_id: int, month: str) -> int:
+        """那个人那个月**已批准**的抵扣天数合计（0 = 没抵过 / 缺 0042）。"""
+        try:
+            cur = await self._conn.execute(
+                """SELECT COALESCE(SUM(days), 0) AS days FROM overtime_leave_deductions
+                   WHERE employee_id = ? AND "month" = ? AND status = ?""",
+                (int(employee_id), month, STATUS_APPROVED),
+            )
+            row = await cur.fetchone()
+        except (asyncpg.UndefinedTableError, asyncpg.UndefinedColumnError):
+            await self._rollback_quietly()
+            return 0
+        return int(dict(row)["days"] or 0) if row is not None else 0
+
+    async def _deduction_days_by_employee(self, month: str) -> dict[int, int]:
+        """那个月全店已批准的抵扣天数：``{员工号: 天数}``（月结账单用；缺表回空）。"""
+        try:
+            cur = await self._conn.execute(
+                """SELECT employee_id, COALESCE(SUM(days), 0) AS days
+                   FROM overtime_leave_deductions
+                   WHERE "month" = ? AND status = ? GROUP BY employee_id""",
+                (month, STATUS_APPROVED),
+            )
+            rows = await cur.fetchall()
+        except (asyncpg.UndefinedTableError, asyncpg.UndefinedColumnError):
+            await self._rollback_quietly()
+            return {}
+        return {
+            int(dict(row)["employee_id"]): int(dict(row)["days"] or 0) for row in rows
+        }
+
+    async def _approved_makeup_half_hours(self, employee_id: int, month: str) -> int:
+        """那个人那个月**已批准**的补钟小时（正数、半小时单位）—— 可抵的池子。"""
+        cur = await self._conn.execute(
+            """SELECT COALESCE(SUM(-half_hours), 0) AS half_hours FROM overtime_entries
+               WHERE employee_id = ? AND entry_date LIKE ? AND status = ?
+                 AND half_hours < 0""",
+            (int(employee_id), f"{month}%", STATUS_APPROVED),
+        )
+        row = await cur.fetchone()
+        return int(dict(row)["half_hours"] or 0) if row is not None else 0
+
+    async def _month_sealed(self, employee_id: int, month: str) -> bool:
+        """那个月这个人的考勤台账**封过账没有** —— 封过就锁死，不能再抵。
+
+        `attendance_ledger` 是考勤面的表（0027），这里只读那一行的 `sealed_at`：
+        封账 = 定稿，再用存假抵它等于让封下的结余与现状各说各话（ADR 0113 / 0124）。
+        缺表时回 `False`（老库先跑着，真正写时会由那张表自己的缺表错误兜住）。
+        """
+        try:
+            cur = await self._conn.execute(
+                """SELECT sealed_at FROM attendance_ledger
+                   WHERE employee_id = ? AND "month" = ?""",
+                (int(employee_id), month),
+            )
+            row = await cur.fetchone()
+        except (asyncpg.UndefinedTableError, asyncpg.UndefinedColumnError):
+            await self._rollback_quietly()
+            return False
+        return bool(row is not None and dict(row).get("sealed_at"))
+
+    async def _leave_balance(self, employee_id: int, month: str) -> float:
+        """存假有效天数（扣过已批抵扣、含人工定稿）—— 借考勤那一层的算式。
+
+        **函数内 import**：`services/attendance/store.py` 在模块级 import 本模块的
+        `STATUS_APPROVED`，这里若也模块级 import 回去就是循环。函数内 import 只在第一次
+        调用时解析，那时两个模块都已加载完 —— 而且这条路径不会在模块导入期跑。
+        """
+        from services.attendance.store import AttendanceStore
+
+        return await AttendanceStore(
+            self._write_lock_owner, now=self._now
+        ).leave_balance_days(int(employee_id), month)
+
+    async def deduction_capacity(self, employee_id: int, month: str) -> dict:
+        """那个人那个月**还能抵几天**：补钟与存假两头都封顶（用户裁定）。
+
+        * 补钟侧：已批补钟小时 − 已抵小时，够 `days × 8.5` 才抵得动；
+        * 存假侧：当前有效余额（已扣掉已批抵扣）够 `days` 天才抵得动 —— **不能把存假
+          抵成负数**（欠班本来就该欠着，拿不存在的假去抵是另一笔账）；
+        * 已封账的月 `max_days` 直接 0（「封过账就不能再抵」的唯一判据）。
+
+        这个数同时是员工端「申请抵扣」弹窗的上限与店长审批时的那道闸 —— 只有一份实现，
+        两边不会对不上（弹出「可抵 2 天」、点下去却被拒是最糟的一种）。
+        """
+        target = _require_month(month)
+        employee_id = int(employee_id)
+        makeup_half = await self._approved_makeup_half_hours(employee_id, target)
+        deducted_half = (
+            await self._deduction_days(employee_id, target)
+        ) * HALF_HOURS_PER_LEAVE_DAY
+        available_half = max(0, makeup_half - deducted_half)
+        sealed = await self._month_sealed(employee_id, target)
+        balance = await self._leave_balance(employee_id, target)
+        by_makeup = available_half // HALF_HOURS_PER_LEAVE_DAY
+        by_leave = math.floor(balance) if balance > 0 else 0
+        return {
+            "month": target,
+            "makeup_half_hours": makeup_half,
+            "makeup_hours": makeup_half / 2,
+            "deducted_days": int(deducted_half // HALF_HOURS_PER_LEAVE_DAY),
+            "deducted_half_hours": deducted_half,
+            "deducted_hours": deducted_half / 2,
+            "available_half_hours": available_half,
+            "available_hours": available_half / 2,
+            "leave_balance": balance,
+            "max_days_by_makeup": int(by_makeup),
+            "max_days_by_leave": int(by_leave),
+            "max_days": 0 if sealed else int(min(by_makeup, by_leave)),
+            "sealed": bool(sealed),
+            "half_hours_per_day": HALF_HOURS_PER_LEAVE_DAY,
+            "hours_per_day": HOURS_PER_DAY,
+        }
+
+    async def _require_deduction_table(self) -> None:
+        """写路径的那道闸：缺 0042 时给一句能照做的 503，而不是一句业务错误。"""
+        try:
+            await self._conn.execute("SELECT 1 FROM overtime_leave_deductions LIMIT 1")
+        except (asyncpg.UndefinedTableError, asyncpg.UndefinedColumnError) as exc:
+            await self._rollback_quietly()
+            raise OvertimeError("not_migrated", "overtime_leave_deductions") from exc
+
+    async def _capacity_for_decision(self, employee_id: int, month: str, days: int) -> dict:
+        """提交/审批共用的那道闸：天数必须同时不超过补钟与存假（已在锁内调用）。"""
+        capacity = await self.deduction_capacity(employee_id, month)
+        if capacity["sealed"]:
+            raise OvertimeError("month_sealed", month)
+        if capacity["available_half_hours"] < days * HALF_HOURS_PER_LEAVE_DAY:
+            raise OvertimeError(
+                "deduction_exceeds_makeup", str(capacity["max_days_by_makeup"])
+            )
+        if capacity["leave_balance"] < days:
+            raise OvertimeError(
+                "deduction_exceeds_leave", str(capacity["max_days_by_leave"])
+            )
+        return capacity
+
+    @_needs_migration
+    @serialized_write
+    async def submit_deduction(self, actor: EntryActor, month: Any, days: Any) -> dict:
+        """员工提一笔「用存假抵补钟」：归月 = 补钟登记月，只能整天。
+
+        三道闸（全在写锁里）：那个月**没封账**、补钟够抵、存假够扣。离职的人不能再提
+        （他的账该由超管在离职时结掉）；别人的账提不了 —— `actor.employee_id` 是谁就
+        提谁的，接口上也没有 `employee_id` 可填。
+        """
+        await self._require_deduction_table()
+        if actor.employee_id is None:
+            raise OvertimeError("unknown_employee", "unknown_employee")
+        employee_id = int(actor.employee_id)
+        target = _require_month(month)
+        count = _require_days(days)
+        roster = await EmployeeAccounts(self._write_lock_owner).list_roster()
+        me = next(
+            (item for item in roster if int(item["id"]) == employee_id), None
+        )
+        if me is None:
+            raise OvertimeError("unknown_employee", "unknown_employee")
+        if me.get("resigned"):
+            raise OvertimeError("employee_resigned", "employee_resigned")
+        await self._capacity_for_decision(employee_id, target, count)
+
+        stamp = self._now_iso()
+        cur = await self._conn.execute(
+            "INSERT INTO overtime_leave_deductions"
+            " (employee_id, \"month\", days, half_hours, status, created_by,"
+            "  created_at, updated_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
+            (
+                employee_id,
+                target,
+                count,
+                count * HALF_HOURS_PER_LEAVE_DAY,
+                STATUS_PENDING,
+                actor.stamp,
+                stamp,
+                stamp,
+            ),
+        )
+        created = await cur.fetchone()
+        await self._conn.commit()
+        deduction = await self._deduction_by_id(int(created["id"]))
+        assert deduction is not None  # 刚写进去的那一行
+        return deduction
+
+    @_needs_migration
+    async def list_pending_deductions(
+        self, *, exclude_employee_id: Optional[int] = None
+    ) -> dict:
+        """全店**等审批**的抵扣单（旧的在前，同加班登记那条队列的口径）。
+
+        `exclude_employee_id` 给店长那一面用：自己提的抵扣不能自己批（同
+        `approve_deduction` 的 `cannot_self_accept`），摆在队列里就是一颗点了必被拒的钥匙。
+        """
+        clause = " WHERE status = ?"
+        params: list[Any] = [STATUS_PENDING]
+        if exclude_employee_id is not None:
+            clause += " AND employee_id <> ?"
+            params.append(int(exclude_employee_id))
+        rows = await self._deduction_rows(clause, tuple(params), "created_at, id")
+        names = await self._name_index()
+        for row in rows:
+            row["employee_name"] = names.get(int(row["employee_id"]), "")
+        return {"today": self.today(), "count": len(rows), "deductions": rows}
+
+    @_needs_migration
+    async def list_deductions(
+        self,
+        *,
+        month: Optional[str] = None,
+        employee_id: Optional[int] = None,
+        status: Optional[str] = None,
+    ) -> dict:
+        """全店抵扣单（管理端）：可按月 / 按人 / 按状态筛，新的在前。"""
+        where: list[str] = []
+        params: list[Any] = []
+        if month not in (None, ""):
+            where.append('"month" = ?')
+            params.append(_require_month(month))
+        if employee_id is not None:
+            where.append("employee_id = ?")
+            params.append(int(employee_id))
+        if status not in (None, ""):
+            where.append("status = ?")
+            params.append(str(status))
+        clause = f" WHERE {' AND '.join(where)}" if where else ""
+        rows = await self._deduction_rows(
+            clause, tuple(params), '"month" DESC, id DESC'
+        )
+        names = await self._name_index()
+        for row in rows:
+            row["employee_name"] = names.get(int(row["employee_id"]), "")
+        return {"today": self.today(), "count": len(rows), "deductions": rows}
+
+    async def _claim_deduction(
+        self,
+        deduction_id: int,
+        status: str,
+        expect: tuple[str, ...],
+        stamp: str,
+        decided_by: str,
+        reject_reason: Optional[str] = None,
+        error_code: str = "deduction_not_pending",
+    ) -> None:
+        """把这一张从 `expect` 改成 `status`；没抢到报「已经处理过了」（同 `_claim`）。"""
+        marks = ", ".join("?" for _ in expect)
+        cur = await self._conn.execute(
+            f"""UPDATE overtime_leave_deductions
+                SET status = ?, decided_at = ?, decided_by = ?, reject_reason = ?,
+                    updated_at = ?
+                WHERE id = ? AND status IN ({marks})""",
+            (status, stamp, decided_by, reject_reason, stamp, int(deduction_id), *expect),
+        )
+        if cur.rowcount != 1:
+            raise OvertimeError(error_code, error_code)
+
+    async def _decide_deduction_locked(
+        self,
+        deduction_id: int,
+        status: str,
+        expect: tuple[str, ...],
+        decided_by: str,
+        reject_reason: Optional[str] = None,
+        error_code: str = "deduction_not_pending",
+    ) -> dict:
+        """锁内的状态变更 + 提交 + 回读（`_decide_locked` 的抵扣单版本）。"""
+        stamp = self._now_iso()
+        await self._claim_deduction(
+            deduction_id, status, expect, stamp, decided_by, reject_reason, error_code
+        )
+        await self._conn.commit()
+        deduction = await self._deduction_by_id(int(deduction_id))
+        assert deduction is not None  # 刚改过的那一行
+        return deduction
+
+    @_needs_migration
+    @serialized_write
+    async def approve_deduction(self, actor: EntryActor, deduction_id: int) -> dict:
+        """批一张抵扣单（店长 / 超管）。
+
+        批之前**重算一次上限**：提交到批准之间可能又抵了别的、或某笔补钟被作废，照着
+        旧的数字放行就是超额抵扣。判据与提交同一份（`_capacity_for_decision`）。
+        自己提的不能自己批（`cannot_self_accept`，同加班登记）。
+        """
+        await self._require_deduction_table()
+        row = await self._deduction_by_id(int(deduction_id))
+        if row is None:
+            raise OvertimeError("unknown_deduction", "unknown_deduction")
+        employee_id = int(row["employee_id"])
+        if actor.employee_id is not None and int(actor.employee_id) == employee_id:
+            raise OvertimeError("cannot_self_accept", "cannot_self_accept")
+        if row["status"] != STATUS_PENDING:
+            raise OvertimeError("deduction_not_pending", "deduction_not_pending")
+        await self._capacity_for_decision(employee_id, str(row["month"]), int(row["days"]))
+        return await self._decide_deduction_locked(
+            int(deduction_id), STATUS_APPROVED, (STATUS_PENDING,), actor.stamp
+        )
+
+    @_needs_migration
+    @serialized_write
+    async def reject_deduction(
+        self, actor: EntryActor, deduction_id: int, reason: Any
+    ) -> dict:
+        """驳回一张抵扣单 —— **必须写理由**（同加班登记的驳回口径）。"""
+        text = _clean_reject_reason(reason)
+        await self._require_deduction_table()
+        row = await self._deduction_by_id(int(deduction_id))
+        if row is None:
+            raise OvertimeError("unknown_deduction", "unknown_deduction")
+        if row["status"] != STATUS_PENDING:
+            raise OvertimeError("deduction_not_pending", "deduction_not_pending")
+        return await self._decide_deduction_locked(
+            int(deduction_id),
+            STATUS_REJECTED,
+            (STATUS_PENDING,),
+            actor.stamp,
+            reject_reason=text,
+        )
+
+    @_needs_migration
+    @serialized_write
+    async def cancel_deduction(self, employee_id: int, deduction_id: int) -> dict:
+        """员工撤回自己**还没被审批**的那张抵扣单（别人的当作不存在）。"""
+        await self._require_deduction_table()
+        row = await self._deduction_by_id(int(deduction_id))
+        if row is None or int(row["employee_id"]) != int(employee_id):
+            raise OvertimeError("unknown_deduction", "unknown_deduction")
+        if row["status"] != STATUS_PENDING:
+            raise OvertimeError("deduction_not_pending", "deduction_not_pending")
+        return await self._decide_deduction_locked(
+            int(deduction_id),
+            STATUS_CANCELLED,
+            (STATUS_PENDING,),
+            f"staff:{int(employee_id)}",
+        )
+
+    @_needs_migration
+    @serialized_write
+    async def void_deduction(self, actor: EntryActor, deduction_id: int) -> dict:
+        """作废一张**已批准**的抵扣单（超管，封账前）。
+
+        封账之后锁死：那个月的存假已经是定稿，再撤一张抵扣单会让封下的数与现状各说
+        各话 —— 要改只能走考勤表人工定稿（那是另一条有留痕的路，不是这个接口）。
+        """
+        await self._require_deduction_table()
+        row = await self._deduction_by_id(int(deduction_id))
+        if row is None:
+            raise OvertimeError("unknown_deduction", "unknown_deduction")
+        if row["status"] != STATUS_APPROVED:
+            raise OvertimeError("deduction_not_approved", "deduction_not_approved")
+        if await self._month_sealed(int(row["employee_id"]), str(row["month"])):
+            raise OvertimeError("month_sealed", str(row["month"]))
+        return await self._decide_deduction_locked(
+            int(deduction_id),
+            STATUS_VOIDED,
+            (STATUS_APPROVED,),
+            actor.stamp,
+            error_code="deduction_not_approved",
+        )
+
     # ── 按月统计与加班费（票 03）────────────────────────────────────────────
 
     @_needs_migration
@@ -622,6 +1084,8 @@ class OvertimeLedger:
 
         days = _days_in_month(target)
         names = await self._name_index()
+        # 那个月全店已批准的补钟抵扣（ADR 0124）：净时长里被抵掉的补钟加回来。
+        deductions = await self._deduction_days_by_employee(target)
         buckets: dict[int, dict] = {}
         for row in rows:
             employee_id = int(row["employee_id"])
@@ -637,7 +1101,10 @@ class OvertimeLedger:
             bucket = buckets[employee_id]
             overtime = bucket["overtime_half_hours"]
             makeup = bucket["makeup_half_hours"]
-            net_half_hours = overtime - makeup
+            deducted_days = deductions.get(employee_id, 0)
+            deducted_half_hours = deducted_days * HALF_HOURS_PER_LEAVE_DAY
+            # 净时长 = 加班 − 补钟 + 已用存假抵掉的补钟（那部分时间按休假算，不再欠班）。
+            net_half_hours = overtime - makeup + deducted_half_hours
             net_hours = net_half_hours / 2
             salary = snapshots.get(employee_id)
             items.append(
@@ -648,6 +1115,9 @@ class OvertimeLedger:
                     "overtime_hours": overtime / 2,
                     "makeup_half_hours": makeup,
                     "makeup_hours": makeup / 2,
+                    "deducted_days": deducted_days,
+                    "deducted_half_hours": deducted_half_hours,
+                    "deducted_hours": deducted_half_hours / 2,
                     "net_half_hours": net_half_hours,
                     "net_hours": net_hours,
                     "base_salary": salary,
@@ -660,12 +1130,14 @@ class OvertimeLedger:
         total = {
             "overtime_half_hours": sum(item["overtime_half_hours"] for item in items),
             "makeup_half_hours": sum(item["makeup_half_hours"] for item in items),
+            "deducted_half_hours": sum(item["deducted_half_hours"] for item in items),
             "net_half_hours": sum(item["net_half_hours"] for item in items),
             "amount": sum(item["amount"] or 0 for item in items),
             "unpriced": sum(1 for item in items if item["amount"] is None),
         }
         total["overtime_hours"] = total["overtime_half_hours"] / 2
         total["makeup_hours"] = total["makeup_half_hours"] / 2
+        total["deducted_hours"] = total["deducted_half_hours"] / 2
         total["net_hours"] = total["net_half_hours"] / 2
         return {
             "month": target,
@@ -778,6 +1250,7 @@ class OvertimeLedger:
         )
 
     @_needs_migration
+    @serialized_write
     async def void(self, actor: EntryActor, entry_id: int) -> dict:
         """作废一笔**已批准**的登记（票 02 的验收 3）。
 
@@ -787,8 +1260,25 @@ class OvertimeLedger:
 
         期望状态是 `approved`（不是 `pending`），所以失败时用的 code 也不一样：
         「还没批」与「已经不是已批准了」是两件事。
+
+        **已经拿去抵扣的补钟不能作废**（ADR 0124 的作废冲突，用户裁定）：那部分小时已经
+        变成存假了，作废这一笔会让存假凭空少一天。判据是「作废后，那个月剩下的已批补钟
+        还够不够抵已批的抵扣天数」——不够就拒（`makeup_in_use`），提示先作废抵扣单。
         """
-        return await self._decide(
+        row = await self._entry_by_id(int(entry_id))
+        if row is None:
+            raise OvertimeError("unknown_entry", "unknown_entry")
+        if int(row["half_hours"]) < 0:
+            employee_id = int(row["employee_id"])
+            month = str(row["entry_date"])[:7]
+            makeup = await self._approved_makeup_half_hours(employee_id, month)
+            deducted = (
+                await self._deduction_days(employee_id, month)
+            ) * HALF_HOURS_PER_LEAVE_DAY
+            remaining = makeup - abs(int(row["half_hours"]))
+            if remaining < deducted:
+                raise OvertimeError("makeup_in_use", month)
+        return await self._decide_locked(
             int(entry_id),
             STATUS_VOIDED,
             (STATUS_APPROVED,),

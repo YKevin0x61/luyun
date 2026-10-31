@@ -412,10 +412,11 @@ def test_subscription_matrix_rows_are_topics_and_columns_are_channels(api):
 
     assert payload["api_version"]
     rows = {row["id"]: row for row in payload["topics"]}
-    # 八类内容类型一行不少（行序就是注册表声明顺序）
+    # 九类内容类型一行不少（行序就是注册表声明顺序）
     assert list(rows) == [
-        "sales_report", "reconcile_diff", "unmapped_dish", "scraper_failure",
-        "hygiene_reminder", "hygiene_photo", "update_backup", "resource_watermark",
+        "sales_report", "weekly_schedule", "reconcile_diff", "unmapped_dish",
+        "scraper_failure", "hygiene_reminder", "hygiene_photo", "update_backup",
+        "resource_watermark",
     ]
     assert rows["sales_report"]["channels"] == [
         {"id": channel["id"], "enabled": True}

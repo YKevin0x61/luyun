@@ -570,7 +570,10 @@ def test_the_manual_send_paths_no_longer_write_the_legacy_log_table(api):
 
 
 def test_the_page_contract_version_moved_for_the_new_job_shape(api):
-    """任务接口的形状变了 → 版本 +1：旧 bundle 加载时会看到顶部提示条。"""
+    """任务接口的形状变了 → 版本 +1：旧 bundle 加载时会看到顶部提示条。
+
+    v3 是「下周排班表」这一批：`/meta` 多了 `weekly`、`/jobs` 多了 `schedule_text`。
+    """
     meta = api.as_session("GET", f"{API_PREFIX}/meta").json()
 
-    assert meta["api_version"] == "v2"
+    assert meta["api_version"] == "v3"

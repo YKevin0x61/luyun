@@ -61,6 +61,7 @@ export const TABLE_LABELS = {
   wecom_push_audit: '企微配置变更',
   overtime_entries: '加班与补钟',
   overtime_salary_snapshots: '计薪底薪快照',
+  overtime_leave_deductions: '补钟抵扣存假',
   seniority_bonus_changes: '工龄奖变更',
   statutory_holidays: '法定节假日',
   attendance_ledger: '月度考勤台账',
@@ -131,6 +132,7 @@ export const TABLE_ICONS = {
   wecom_push_audit: 'receipt',
   overtime_entries: 'timer',
   overtime_salary_snapshots: 'calculator',
+  overtime_leave_deductions: 'calendar',
   seniority_bonus_changes: 'receipt',
   statutory_holidays: 'calendar',
   attendance_ledger: 'clipboard',
@@ -203,6 +205,7 @@ export const COLUMN_LABELS = {
   'hygiene_wecom_shares.kind': '业务类型',
   'hygiene_employees.health_cert_date': '健康证到期',
   'hygiene_employees.resigned_at': '离职日期',
+  'overtime_leave_deductions.days': '抵扣天数', 'overtime_leave_deductions.half_hours': '抵扣小时数',
   'attendance_ledger.month': '月份', 'attendance_ledger.shift_name': '本月班次',
   'wastage_records.item_name': '物品名称', 'wastage_records.reason': '损耗原因',
   'wastage_templates.item_name': '物品名称', 'wastage_templates.reason': '损耗原因',
@@ -333,6 +336,14 @@ const CELL_VALUE_LABELS = {
   },
   // 加班与补钟
   'overtime_entries.status': {
+    pending: '待审批',
+    approved: '已批准',
+    rejected: '已驳回',
+    cancelled: '已撤回',
+    voided: '已作废',
+  },
+  // 加班与补钟：补钟用存假抵扣（ADR 0124）
+  'overtime_leave_deductions.status': {
     pending: '待审批',
     approved: '已批准',
     rejected: '已驳回',

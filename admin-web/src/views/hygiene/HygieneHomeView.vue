@@ -199,7 +199,7 @@ const canDailyReview = computed(() => hasCap(caps.value, 'daily_review'))
 const canDeepReview = computed(() => hasCap(caps.value, 'deep_review'))
 const canFix = computed(() => hasCap(caps.value, 'fix'))
 /** 卫生这一页只数**卫生那三项**（日常验收 / 专项验收 / 整改单）—— 2026-10-14 起花名册
- *  上可勾的还有「排班管理」与「损耗分析」，但那两项是别的页的事，数进来会让这页的身份
+ *  上可勾的还有「人事管理」与「损耗分析」，但那两项是别的页的事，数进来会让这页的身份
  *  胶囊写成「可判 5 项」，而它们不是「判」。
  *
  *  页首那颗身份胶囊用它 —— 顶栏只写「员工（张三）」，被放权的这一档在界面上一直看不出来

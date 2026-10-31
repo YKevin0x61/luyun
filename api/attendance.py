@@ -2,8 +2,11 @@
 # -*- coding: utf-8 -*-
 """考勤表的 HTTP 适配层。口径在 `services/attendance/store.py`，这里只管翻译。
 
-票 01 只有**一扇门**：管理端会话（`require_session`）。考勤表是店长的表 —— 里面有
-全店人的底薪与假期，员工那一档连页面都进不去（页面清单里 `audience: admin`）。
+票 01 原本只有**一扇门**：管理端会话（`require_session`）—— 考勤表是店长的表，
+里面有全店人的底薪与假期。**2026-10-31 用户裁定把它并入人事那一项能力**（`schedule`，
+显示名「人事管理」）：管理端会话照旧直接放行，员工会话则要花名册上勾了「人事管理」
+（`_require_scheduler`，与排班三页同一个依赖）。页面清单一侧同步成 `staffCap: schedule`，
+所以「页面能打开」与「接口能读」仍是两处都判。
 
 票 06 给这扇门加了**第一个写动作**：逐日改格（把某天改成休、或换成另一个启用中的
 班次）。它**没有第二套写排班的方式** —— 走的是排班服务层的单日覆盖
@@ -38,8 +41,8 @@ from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel
 
 from api.scheduling import _bad_request as _scheduling_bad_request
-from api.scheduling import _scheduling_nudge
-from api.security import require_session
+from api.scheduling import _require_scheduler, _scheduling_nudge
+from api.security import require_staff_session
 from database import get_db
 from services.attendance import (
     LEDGER_WRITE_FIELDS,
@@ -90,6 +93,8 @@ _ERROR_DETAILS = {
     # 同一句话把两件事都说到，所以点的是「格子与存假」，不只是格子。
     "month_sealed": "{} 已经封账了：封过的月只读，它里面的格子与存假都不再改",
     "half_rest_needs_shift": "那天没有班次（休 / 还没排到），标不上「休半天」：先给那天排一个班次",
+    # 员工端读自己那个月（ADR 0124）：月份格式写错直说该怎么写。
+    "invalid_month": "月份格式应该是 YYYY-MM（例如 2026-10）",
 }
 
 _ERROR_STATUS = {
@@ -257,7 +262,7 @@ class ManualColumnsRequest(BaseModel):
 @router.get("/sheet")
 async def attendance_sheet(
     db=Depends(get_db),
-    _session: str = Depends(require_session),
+    _: dict = Depends(_require_scheduler),
 ) -> dict:
     """当月那一张考勤表（一人一张卡）。
 
@@ -271,10 +276,30 @@ async def attendance_sheet(
         raise _bad_request(exc) from exc
 
 
+@router.get("/me")
+async def my_leave(
+    month: Optional[str] = None,
+    db=Depends(get_db),
+    employee: dict = Depends(require_staff_session),
+) -> dict:
+    """员工看**自己**某个月的存假（整月页那张卡，ADR 0124）。
+
+    与上面那条是两扇门、两个口径：`/sheet` 是店长的全店表（要「人事管理」能力），
+    这一条只认员工会话，**接口上没有 `employee_id`** —— 员工读得到的只有自己那一行
+    （同 `/api/scheduling/me/month` 的边界）。`month` 只决定看哪个月，决定不了看谁；
+    整月页能翻月，所以月份是参数，不给就是本月。
+    """
+    store = AttendanceStore(db)
+    try:
+        return await store.leave_summary(employee["id"], month)
+    except AttendanceError as exc:
+        raise _bad_request(exc) from exc
+
+
 @router.get("/sheet.xlsx")
 async def export_attendance_sheet(
     db=Depends(get_db),
-    _session: str = Depends(require_session),
+    _: dict = Depends(_require_scheduler),
 ) -> Response:
     """一键导出当月考勤表（票 08）：一份 `.xlsx` 直接下发，**不落服务器、不推送**。
 
@@ -285,8 +310,8 @@ async def export_attendance_sheet(
     同源。文件名按 RFC 5987 的 `filename*=UTF-8''…` 给（中文名不靠 ASCII 兜底），前端
     `api.download` 优先读它。
 
-    鉴权与这一页的其它门一样是 `require_session`：匿名与员工会话都拿不到（票面最后一条）
-    —— 这一份表里有全店人的底薪与假期。
+    鉴权与这一页的其它门一样是 `_require_scheduler`：管理端会话直接放行，员工会话要在
+    花名册上勾了「人事管理」—— 这一份表里有全店人的底薪与假期，所以它与页面同一道闸。
     """
     store = AttendanceStore(db)
     try:
@@ -314,7 +339,7 @@ async def set_attendance_manual_columns(
     employee_id: int,
     payload: ManualColumnsRequest,
     db=Depends(get_db),
-    _session: str = Depends(require_session),
+    _: dict = Depends(_require_scheduler),
 ) -> dict:
     """把某人**本月的四个手填列**（外加期初 / 期末存假）存进月度考勤台账（票 05 + 35 + 09）。
 
@@ -364,7 +389,7 @@ class SealRequest(BaseModel):
 async def seal_month(
     payload: Optional[SealRequest] = None,
     db=Depends(get_db),
-    _session: str = Depends(require_session),
+    _: dict = Depends(_require_scheduler),
 ) -> dict:
     """把**已经过完的**某个自然月的存假结余写进月度考勤台账并定稿（票 04 / ADR 0113）。
 
@@ -390,7 +415,7 @@ async def set_attendance_day(
     business_date: str,
     payload: DayEditRequest,
     db=Depends(get_db),
-    _session: str = Depends(require_session),
+    _: dict = Depends(_require_scheduler),
 ) -> dict:
     """把某人某一天改成休、换成另一个启用中的班次（票 06），或标「休半天」（票 07）。
 

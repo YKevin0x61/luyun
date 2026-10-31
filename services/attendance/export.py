@@ -32,6 +32,7 @@ from datetime import date
 from typing import Any, Optional
 
 from openpyxl import Workbook
+from openpyxl.comments import Comment
 from openpyxl.formatting.rule import CellIsRule, Rule
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.styles.differential import DifferentialStyle
@@ -191,6 +192,15 @@ def _write_headers(worksheet, year: int, month_no: int, day_count: int) -> None:
         column = summary_columns[index]
         cell = _header_cell(worksheet, 4, column, text, mark=index > 0)
         cell.alignment = WRAPPED_CENTER
+        if index == 0:
+            # 「存休天数」旁注（ADR 0124）：这一列读的是 `leave.balance`，已经扣过当月
+            # 已批准的补钟抵扣 —— 不加注的话，店长对不上「卡上少了一天、表上也是」是
+            # 为什么。批注不改样表格线（列结构一字不动）。
+            cell.comment = Comment(
+                "本列已扣掉当月已批准的补钟抵扣天数（8.5 小时 = 1 天）。"
+                "抵扣明细见考勤表卡片上「本月经补钟抵扣」那一行。",
+                "luyun",
+            )
     for column in range(9, last_day_column + 1):
         _header_cell(worksheet, 4, column, column - 8)
     worksheet.row_dimensions[4].height = ROW_HEIGHT_BODY

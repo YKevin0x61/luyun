@@ -12,7 +12,7 @@ import { api } from '../api/client'
  * `admin-web/src/composables/__tests__/useWecomPushSubscriptions.test.js`
  * 与 `tests/test_wecom_push_channels_api.py`。
  */
-export const WECOM_PUSH_API_VERSION = 'v2'
+export const WECOM_PUSH_API_VERSION = 'v3'
 
 /**
  * 订阅视图切「多选列表」的渠道数阈值。

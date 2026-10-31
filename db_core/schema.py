@@ -116,6 +116,10 @@ OVERTIME_TABLES = (
     "overtime_entries",
     "overtime_salary_snapshots",
     "seniority_bonus_changes",
+    # 补钟用存假抵扣（迁移 0042，ADR 0124）：员工 × 归月 × 抵扣天数一行，只记月度
+    # 汇总、不追溯到具体补钟单。`OvertimeLedger` 写它，`services/attendance/store.py`
+    # 与读者（净时长、存假扣减）读它。
+    "overtime_leave_deductions",
 )
 
 # 考勤面的表（迁移 0026 起，`.scratch/考勤表导出/`）：

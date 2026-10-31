@@ -13,7 +13,7 @@ import WecomPushView from '../WecomPushView.vue'
 // 与 `wecomPushLayout.test.js`（读源码钉窄屏那几条 CSS）分工：那一份挡的是"样式被
 // 顺手简化掉"，这一份挡的是"功能没接上"。
 
-const API_VERSION = 'v2'
+const API_VERSION = 'v3'
 
 /** 一条渠道的完整卡片形状（读接口给的就是这个）。 */
 function channel(id, name, overrides = {}) {

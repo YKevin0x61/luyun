@@ -52,12 +52,14 @@ afterEach(() => {
 })
 
 describe('守卫：员工会话 + staffCap', () => {
-  it('勾了「排班管理」的员工进得去人事三页', async () => {
+  it('勾了「人事管理」的员工进得去人事四页', async () => {
     staffEmployee = { id: 7, name: '张三', admin_caps: ['schedule'] }
     for (const path of [
       '/workbench/hr/calendar',
       '/workbench/hr/inbox',
       '/workbench/hr/shifts',
+      // 考勤表 2026-10-31 并进同一项能力（页面清单 staffCap: schedule）。
+      '/workbench/hr/attendance',
     ]) {
       const router = await freshRouter()
       await router.push(path)
@@ -65,7 +67,7 @@ describe('守卫：员工会话 + staffCap', () => {
     }
   })
 
-  it('没勾「排班管理」的员工落无权访问页（不是静默改道、也不是登录页）', async () => {
+  it('没勾「人事管理」的员工落无权访问页（不是静默改道、也不是登录页）', async () => {
     staffEmployee = { id: 7, name: '张三', admin_caps: [] }
     const router = await freshRouter()
     await router.push('/workbench/hr/calendar')
@@ -73,7 +75,7 @@ describe('守卫：员工会话 + staffCap', () => {
     expect(router.currentRoute.value.query.next).toBe('/workbench/hr/calendar')
   })
 
-  it('花名册没有 staffCap：连勾了排班也进不去（身份证与底薪不下发员工端）', async () => {
+  it('花名册没有 staffCap：连勾了人事管理也进不去（身份证明细不下发员工端）', async () => {
     staffEmployee = { id: 7, name: '张三', admin_caps: ['schedule'] }
     const router = await freshRouter()
     await router.push('/workbench/hr/roster')

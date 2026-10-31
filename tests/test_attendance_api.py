@@ -152,7 +152,7 @@ def _as_admin(client, session_id):
 
 
 def _sheet(client, admin, params=None):
-    """以管理端会话读一次当月考勤表（这一页只有这一扇门）。"""
+    """以管理端会话读一次当月考勤表（管理端那一侧照旧直接放行）。"""
     _as_admin(client, admin)
     resp = client.get("/api/attendance/sheet", params=params)
     assert resp.status_code == 200, resp.text
@@ -196,23 +196,23 @@ def _staff_days(client, staff_session):
     return {day["business_date"]: day for day in resp.json()["days"]}
 
 
-# ── 票 01 验收 2/8：当月、且只有管理端那扇门 ────────────────────────────────
+# ── 票 01 验收 2/8：当月、且只在人事那道门后面（2026-10-31 起含员工会话+能力）──
 
 
-def test_the_sheet_is_the_current_month_behind_the_admin_door(attendance_http):
+def test_the_sheet_is_the_current_month_behind_the_hr_cap_door(attendance_http):
     client, _db, accounts = attendance_http
     admin = _admin_cookie(client)
     _employee_id(accounts)
     staff_session = _run(accounts.login(PHONE, PASSWORD))["session_id"]
 
-    # 匿名打不开这一页；**员工会话也不是它的钥匙**（验收 8）—— 这一页有全店人的
-    # 底薪，员工那一档连页面都进不去（页面清单里 `audience: admin`）。
+    # 匿名打不开这一页；员工会话有效、但花名册上没勾「人事管理」也是 403（2026-10-31
+    # 用户裁定：考勤表并入人事那一项能力，与排班三页同一道门）。
     client.cookies.clear()
     assert client.get("/api/attendance/sheet").status_code == 401
     client.cookies.set(settings.STAFF_SESSION_COOKIE_NAME, staff_session)
     denied = client.get("/api/attendance/sheet")
-    assert denied.status_code == 401
-    assert denied.json()["detail"] == "需要登录"
+    assert denied.status_code == 403
+    assert "人事管理" in denied.json()["detail"]
 
     _as_admin(client, admin)
     resp = client.get("/api/attendance/sheet")
@@ -607,8 +607,8 @@ def test_a_day_that_still_has_an_undecided_request_is_refused_and_nothing_is_wri
     assert cells["2026-09-22"] == "todo"
 
 
-def test_the_day_editor_is_still_the_admin_door(attendance_http):
-    """验收 6：匿名与员工会话都被拒 —— 这一页有全店人的底薪，员工那一档进不来。"""
+def test_the_day_editor_is_behind_the_hr_cap_door(attendance_http):
+    """验收 6（2026-10-31 改判）：匿名 401；员工会话没勾「人事管理」403，勾了就能改。"""
     client, db, accounts = attendance_http
     admin = _admin_cookie(client)
     employee_id = _employee_id(accounts)
@@ -623,8 +623,8 @@ def test_the_day_editor_is_still_the_admin_door(attendance_http):
     assert anonymous.status_code == 401
     client.cookies.set(settings.STAFF_SESSION_COOKIE_NAME, staff_session)
     denied = client.put(f"/api/attendance/sheet/{employee_id}/{TODAY}", json={"is_rest": True})
-    assert denied.status_code == 401
-    assert denied.json()["detail"] == "需要登录"
+    assert denied.status_code == 403
+    assert "人事管理" in denied.json()["detail"]
 
     # 两次都被拒 = 今天还是规则那条白班：凭据不对就没写进去。
     mine = {day["business_date"]: day for day in _card(_sheet(client, admin), employee_id)["days"]}
@@ -1277,8 +1277,8 @@ def test_a_sealed_balance_does_not_move_when_last_months_schedule_changes(attend
     assert _leave(_sheet(client, admin), employee_id)["previous_balance"] == sealed
 
 
-def test_sealing_is_the_admin_door(attendance_http):
-    """验收 6：匿名与员工会话都被拒 —— 封账是管理端那一档的事。"""
+def test_sealing_is_behind_the_hr_cap_door(attendance_http):
+    """验收 6（2026-10-31 改判）：匿名 401；没勾「人事管理」的员工会话 403。"""
     client, db, accounts = attendance_http
     admin = _admin_cookie(client)
     employee_id = _employee_id(accounts)
@@ -1289,8 +1289,8 @@ def test_sealing_is_the_admin_door(attendance_http):
     assert anonymous.status_code == 401
     client.cookies.set(settings.STAFF_SESSION_COOKIE_NAME, staff_session)
     denied = client.post("/api/attendance/seal", json={})
-    assert denied.status_code == 401
-    assert denied.json()["detail"] == "需要登录"
+    assert denied.status_code == 403
+    assert "人事管理" in denied.json()["detail"]
 
     # 两次都被拒 = 台账里没有封账行。
     assert _ledger_row(db, employee_id, "2026-08") is None
@@ -1695,8 +1695,8 @@ def test_the_manual_columns_stay_in_the_ledger_and_never_touch_the_roster(attend
     assert _ledger_values(db, employee_id, MONTH, ["resigned"]) == {"resigned": None}
 
 
-def test_the_manual_columns_door_is_still_the_admin_door(attendance_http):
-    """验收 6：匿名与员工会话都被拒 —— 而且**一个字都没写进去**。"""
+def test_the_manual_columns_door_is_behind_the_hr_cap_door(attendance_http):
+    """验收 6（2026-10-31 改判）：匿名 401、没勾「人事管理」403 —— 而且**一个字都没写进去**。"""
     client, db, accounts = attendance_http
     admin = _admin_cookie(client)
     employee_id = _employee_id(accounts, "13800138099", "员工打不开这扇门")
@@ -1707,8 +1707,8 @@ def test_the_manual_columns_door_is_still_the_admin_door(attendance_http):
     assert client.put(url, json={"lodging": "是"}).status_code == 401
     client.cookies.set(settings.STAFF_SESSION_COOKIE_NAME, staff_session)
     denied = client.put(url, json={"lodging": "是"})
-    assert denied.status_code == 401
-    assert denied.json()["detail"] == "需要登录"
+    assert denied.status_code == 403
+    assert "人事管理" in denied.json()["detail"]
 
     # 两次都被拒 = 台账那一行压根没被建出来（凭据不对就没写进去）。
     cur = _run(
@@ -1999,8 +1999,8 @@ def test_only_the_attendance_sheet_can_set_half_rest(attendance_http):
     denied = client.put(
         f"/api/attendance/sheet/{employee_id}/{TODAY}", json={"half_rest": True}
     )
-    assert (anonymous.status_code, denied.status_code) == (401, 401)
-    assert denied.json()["detail"] == "需要登录"
+    assert (anonymous.status_code, denied.status_code) == (401, 403)
+    assert "人事管理" in denied.json()["detail"]
     assert _assignment_rows(employee_id, TODAY) == [(shifts["白班"], 0)]
 
     # 2) 排班页那条单日覆盖：body 里带 `half_rest` 也只会落回它自己那套校验，
@@ -2418,8 +2418,8 @@ def test_the_download_is_named_after_the_month_the_response_reports(attendance_h
     )
 
 
-def test_the_export_door_is_the_same_admin_door_as_the_page(attendance_http):
-    """验收 10：匿名与员工会话都被拒 —— 这一份表里有全店人的底薪与假期。"""
+def test_the_export_door_is_the_same_hr_cap_door_as_the_page(attendance_http):
+    """验收 10（2026-10-31 改判）：匿名 401、没勾「人事管理」403 —— 与页面同一道闸。"""
     client, db, accounts = attendance_http
     admin = _admin_cookie(client)
     _export_employees(accounts, db)
@@ -2430,8 +2430,8 @@ def test_the_export_door_is_the_same_admin_door_as_the_page(attendance_http):
     assert anonymous.status_code == 401
     client.cookies.set(settings.STAFF_SESSION_COOKIE_NAME, staff_session)
     denied = client.get(EXPORT_URL)
-    assert denied.status_code == 401
-    assert denied.json()["detail"] == "需要登录"
+    assert denied.status_code == 403
+    assert "人事管理" in denied.json()["detail"]
     # 两次都被拒 = 没有工作簿漏出去（成功那条路是 200 + 那个 MIME）。
     assert "spreadsheetml" not in denied.headers.get("content-type", "")
 
@@ -3201,3 +3201,58 @@ def test_the_export_writes_the_effective_closing_balance(attendance_http):
     card = _card(_sheet(client, admin), employee_id)
     assert card["leave"]["balance_computed"] == -30.0
     assert card["leave"]["balance"] == 10.0
+
+
+# ── 2026-10-31 用户裁定：考勤表页并入人事那一项能力（`schedule`，显示名「人事管理」）──
+#
+# 它和排班三页共用 `api/scheduling.py` 的 `_require_scheduler`：管理端会话照旧直接放行，
+# 员工会话要在花名册上勾了「人事管理」。上面那几条「门」用例钉的是拒绝那一侧（匿名 401、
+# 没勾 403），这一条钉放行那一侧 —— 勾上就当场生效、收回就当场 403，判据不在登录时快照。
+
+
+def test_staff_with_the_hr_cap_can_read_and_edit_the_sheet(attendance_http):
+    """勾了「人事管理」（`schedule`）的员工用员工会话就能看与改全店考勤表。
+
+    2026-10-31 用户裁定：考勤表与排班三页放进同一档（**这一档会看到全店底薪**，用户
+    知道代价后选的）。判据只看 `admin_caps` 那一列，每次请求现读。
+
+    「花名册」仍是另一个键：能看考勤表不等于能看花名册（身份证号不下发员工端）——
+    那是 `roster` 的事，这条用例不碰。
+    """
+    client, db, accounts = attendance_http
+    admin = _admin_cookie(client)
+    employee_id = _employee_id(accounts)
+    _run(_scheduler(db).set_rule(employee_id, [_shift_ids(db)["白班"]]))
+    staff_session = _run(accounts.login(PHONE, PASSWORD))["session_id"]
+
+    client.cookies.clear()
+    client.cookies.set(settings.STAFF_SESSION_COOKIE_NAME, staff_session)
+    # 没勾之前：会话在、权限不在 → 403（不是 401「需要登录」）。
+    assert client.get("/api/attendance/sheet").status_code == 403
+
+    _run(accounts.set_admin_caps(employee_id, ["schedule"]))
+
+    # 读：整张表与导出件都放行。
+    sheet = client.get("/api/attendance/sheet")
+    assert sheet.status_code == 200, sheet.text
+    assert sheet.json()["month"] == MONTH
+    exported = client.get(EXPORT_URL)
+    assert exported.status_code == 200, exported.text
+    assert "spreadsheetml" in exported.headers["content-type"]
+
+    # 写：逐日改格与手填列走的是同一扇门。
+    assert client.put(
+        f"/api/attendance/sheet/{employee_id}/{TODAY}", json={"is_rest": True}
+    ).status_code == 200
+    assert client.put(
+        f"/api/attendance/sheet/{employee_id}/manual", json={"lodging": "是"}
+    ).status_code == 200
+
+    # 收回能力：下一次请求就 403，写口也不再放行。
+    _run(accounts.set_admin_caps(employee_id, []))
+    assert client.get("/api/attendance/sheet").status_code == 403
+    assert client.put(
+        f"/api/attendance/sheet/{employee_id}/{TODAY}", json={"is_rest": True}
+    ).status_code == 403
+
+    _as_admin(client, admin)

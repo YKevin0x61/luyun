@@ -25,6 +25,7 @@ import { useNudgePull } from '../../composables/useNudgePull'
 import { loginRedirectTarget } from '../../utils/loginNext'
 import { staffRequest } from '../../utils/hygieneStaff'
 import { workbenchDocumentTitle } from '../../utils/workbenchCopy'
+import { formatDays } from '../../utils/attendanceSheet'
 import {
   HALF_HOURS_MAX,
   MAX_REASON,
@@ -45,6 +46,15 @@ const yesterday = ref('')
 const entries = ref([])
 const summary = ref(null)
 const errorText = ref('')
+// 补钟用存假抵扣（ADR 0124）：`/api/overtime/me` 把「我的抵扣单」与「本月还能抵几天」
+// 一起带下来 —— 可抵天数在服务端算一份，前端不重复推那套上限。
+const deductions = ref([])
+const deductionCapacity = ref(null)
+const applyOpen = ref(false)
+const applyDays = ref(1)
+const applyBusy = ref(false)
+const applyError = ref('')
+const cancelDeductionId = ref(null)
 
 // 上限从接口响应里来（`max_reason` / `max_half_hours`）：页面不写死第二份 50 与 12，
 // 服务端改口径时这里跟着走（同「今天」页读 `max_request_note` 的写法）。
@@ -64,6 +74,9 @@ const cancelBusyId = ref(null)
 // 页面不自己重写一遍 caps 判据 —— 权限判据只有一处，改口径时不会漏掉这一页。
 const canReview = ref(false)
 const pending = ref([])
+// 抵扣单跟加班登记同一个待办队列（ADR 0124）：店长一次看完、一次处理完。
+const pendingDeductions = ref([])
+const rejectingDeductionId = ref(null)
 const roster = ref([])
 const reviewError = ref('')
 const reviewBusyId = ref(null)
@@ -79,6 +92,36 @@ const dayOptions = computed(() =>
 const hoursText = computed(() => formatHalfHours(halfHours.value))
 const canSubmit = computed(() => !!day.value && !!reason.value.trim() && !busy.value)
 
+// 存假抵扣（ADR 0124）：8.5 小时 = 1 天，只能整天 —— 与加班费公式、考勤表同一个分母。
+const HOURS_PER_LEAVE_DAY = 8.5
+const capacity = computed(() => deductionCapacity.value || null)
+const applyPreview = computed(() => {
+  const left = Number(capacity.value?.leave_balance || 0) - applyDays.value
+  return `抵 ${applyDays.value} 天后，存假还剩 ${formatDays(left)}；这 ${applyDays.value * HOURS_PER_LEAVE_DAY} 小时补钟不再算净时长。`
+})
+const capacityText = computed(() => {
+  const c = capacity.value
+  if (!c) return ''
+  return `本月已批补钟 ${formatHalfHours(c.makeup_half_hours)} 小时，已用存假抵 ${c.deducted_days} 天；当前存假 ${formatDays(c.leave_balance)}。`
+})
+const deductionEmptyText = computed(() => {
+  const c = capacity.value
+  if (!c) return ''
+  const left = Number(c.available_hours || 0)
+  if (left <= 0) return '本月没有可抵的补钟。'
+  const rest = Math.round(left * 2) % 17
+  if (rest === 0) return ''
+  return `本月补钟还差 ${((17 - rest) / 2).toFixed(1)} 小时才满一天（8.5 小时）。`
+})
+function deductionText(item) {
+  return `抵 ${item.hours} 小时补钟`
+}
+function openApply() {
+  applyDays.value = Math.max(1, Number(capacity.value?.max_days || 1))
+  applyOpen.value = true
+  applyError.value = ''
+}
+
 async function load(quiet = false) {
   if (!quiet) state.value = 'loading'
   try {
@@ -88,6 +131,8 @@ async function load(quiet = false) {
     yesterday.value = data.yesterday
     entries.value = data.entries || []
     summary.value = data.summary || null
+    deductions.value = data.deductions || []
+    deductionCapacity.value = data.deduction_capacity || null
     maxReason.value = data.max_reason || MAX_REASON
     maxHalfHours.value = data.max_half_hours || HALF_HOURS_MAX
     maxRejectReason.value = data.max_reject_reason || MAX_REJECT_REASON
@@ -167,6 +212,88 @@ async function cancelEntry(entry) {
   }
 }
 
+// ── 存假抵扣（ADR 0124）────────────────────────────────────────────────────
+
+/** 提交一张抵扣单：归月 = 补钟登记月（就是这一页正在看的那个月），单位是整天。 */
+async function applyDeduction() {
+  if (applyBusy.value) return
+  applyBusy.value = true
+  applyError.value = ''
+  note.value = ''
+  try {
+    await staffRequest('/api/overtime/me/deductions', {
+      method: 'POST',
+      body: { month: summary.value?.month, days: applyDays.value },
+    })
+    note.value = '抵扣申请提上去了，等店长批'
+    applyOpen.value = false
+    await load(true)
+  } catch (err) {
+    if (err.status === 401) {
+      const target = loginRedirectTarget(router.currentRoute.value)
+      if (target) router.replace(target)
+      return
+    }
+    applyError.value = err.message || '没提交成'
+  } finally {
+    applyBusy.value = false
+  }
+}
+
+async function cancelDeduction(deduction) {
+  if (cancelDeductionId.value) return
+  cancelDeductionId.value = deduction.id
+  note.value = ''
+  applyError.value = ''
+  try {
+    await staffRequest(`/api/overtime/me/deductions/${deduction.id}`, { method: 'DELETE' })
+    note.value = '那张抵扣撤回了'
+    await load(true)
+  } catch (err) {
+    if (err.status === 401) {
+      const target = loginRedirectTarget(router.currentRoute.value)
+      if (target) router.replace(target)
+      return
+    }
+    applyError.value = err.message || '没撤回成'
+  } finally {
+    cancelDeductionId.value = null
+  }
+}
+
+function startRejectDeduction(deduction) {
+  rejectingDeductionId.value = deduction.id
+  rejectReason.value = ''
+  reviewError.value = ''
+}
+
+/** 店长批 / 驳一张抵扣单（`/review/deductions/{id}/{action}`）。 */
+async function decideDeduction(deduction, action, body = {}) {
+  if (reviewBusyId.value) return
+  reviewBusyId.value = deduction.id
+  reviewError.value = ''
+  note.value = ''
+  try {
+    await staffRequest(`/api/overtime/review/deductions/${deduction.id}/${action}`, {
+      method: 'POST',
+      body,
+    })
+    note.value = action === 'approve' ? '抵扣批了，他手机上就能看到' : '抵扣驳回了，理由会给他看到'
+    rejectingDeductionId.value = null
+    rejectReason.value = ''
+    await load(true)
+  } catch (err) {
+    if (err.status === 401) {
+      const target = loginRedirectTarget(router.currentRoute.value)
+      if (target) router.replace(target)
+      return
+    }
+    reviewError.value = err.message || '没处理成'
+  } finally {
+    reviewBusyId.value = null
+  }
+}
+
 // ── 店长那一面（票 04）：待审批队列、批 / 驳、代录选人 ────────────────────────
 
 /** 拉待审批队列与选人名单。两者都只认「加班与补钟审批」能力（没给的人调它 403）。 */
@@ -178,6 +305,7 @@ async function loadReview() {
       staffRequest('/api/overtime/review/employees'),
     ])
     pending.value = queue.entries || []
+    pendingDeductions.value = queue.deductions || []
     roster.value = people.employees || []
   } catch (err) {
     if (err.status === 401) {
@@ -259,12 +387,16 @@ useNudgePull({ id: 'me-overtime', topics: ['overtime'], pull: () => load(true) }
         </div>
         <dl class="stats">
           <div class="stat">
-            <dt><span class="badge ok">已批准</span></dt>
+            <dt><span class="badge ok">净时长</span></dt>
             <dd>{{ formatHalfHours(summary.approved.net_half_hours) }}<i>小时</i></dd>
           </div>
           <div class="stat">
             <dt><span class="badge warn">待批</span></dt>
             <dd>{{ formatHalfHours(summary.pending.net_half_hours) }}<i>小时</i></dd>
+          </div>
+          <div class="stat">
+            <dt><span class="badge">已抵存假</span></dt>
+            <dd>{{ summary.approved.deducted_days || 0 }}<i>天</i></dd>
           </div>
         </dl>
       </section>
@@ -327,7 +459,56 @@ useNudgePull({ id: 'me-overtime', topics: ['overtime'], pull: () => load(true) }
             </div>
           </li>
         </ul>
-        <p v-else class="mSub oEmpty">没有等着你批的登记。</p>
+        <ul v-if="pendingDeductions.length" class="oList">
+          <li v-for="item in pendingDeductions" :key="`d-${item.id}`" class="oItem">
+            <div class="oItem-top">
+              <span class="oDate">{{ item.month }}</span>
+              <span class="oPill wait">{{ item.employee_name }} · 抵扣</span>
+            </div>
+            <p class="oItem-mid">
+              <b class="oH">{{ item.days }}<i>天</i></b>
+              <span class="oReason">{{ deductionText(item) }}</span>
+            </p>
+            <div class="oActs">
+              <button
+                class="btn oAct ok"
+                type="button"
+                :disabled="reviewBusyId === item.id"
+                @click="decideDeduction(item, 'approve')"
+              >
+                批准
+              </button>
+              <button
+                class="btn oAct bad"
+                type="button"
+                :disabled="reviewBusyId === item.id"
+                @click="startRejectDeduction(item)"
+              >
+                驳回
+              </button>
+            </div>
+            <div v-if="rejectingDeductionId === item.id" class="oReject">
+              <input
+                v-model="rejectReason"
+                class="input"
+                type="text"
+                :maxlength="maxRejectReason"
+                placeholder="为什么不算（必填，员工看得到）"
+              />
+              <button
+                class="btn oAct bad"
+                type="button"
+                :disabled="!rejectReason.trim() || reviewBusyId === item.id"
+                @click="decideDeduction(item, 'reject', { reason: rejectReason.trim() })"
+              >
+                确认驳回
+              </button>
+            </div>
+          </li>
+        </ul>
+        <p v-if="!pending.length && !pendingDeductions.length" class="mSub oEmpty">
+          没有等着你批的登记。
+        </p>
       </section>
 
       <form class="panel oForm" @submit.prevent="submit">
@@ -424,10 +605,68 @@ useNudgePull({ id: 'me-overtime', topics: ['overtime'], pull: () => load(true) }
           </button>
           <p class="oRule">
             加班记正数、补钟记负数，1 格 = 0.5 小时，单笔最多 {{ maxHalfHours / 2 }} 小时。
-            只能登记今天与昨天，更早的请找店长补录。
+            只能登记今天与昨天，更早的请找店长补录。用存假抵补钟：8.5 小时 = 1 天、只能整天，
+            归到补钟所在那个月，封账后不能再抵；净时长已扣掉抵过的那部分。
           </p>
         </div>
       </form>
+
+      <!-- 补钟用存假抵扣（ADR 0124）：8.5 小时 = 1 天、只能整天；可抵天数由服务端
+           按「已批补钟 − 已抵」与「存假余额」两头封顶后带下来，这里不重复推一次 ——
+           弹出「可抵 2 天」、点下去却被拒是最糟的一种。 -->
+      <section v-if="capacity" class="panel">
+        <div class="panel-hd">
+          <h2>存假抵扣</h2>
+          <span class="hint">{{ capacity.sealed ? '本月已封账' : `可抵 ${capacity.max_days} 天` }}</span>
+        </div>
+        <div class="oPad">
+          <p class="oRule">{{ capacityText }}</p>
+          <p v-if="capacity.sealed" class="oRule">已封账</p>
+          <template v-else-if="capacity.max_days > 0">
+            <button v-if="!applyOpen" class="btn btn-block" type="button" @click="openApply">
+              申请抵扣
+            </button>
+            <template v-else>
+              <div class="row">
+                <span class="row-lb">抵几天</span>
+                <div class="stepper">
+                  <button
+                    class="step"
+                    type="button"
+                    aria-label="减一天"
+                    @click="applyDays = Math.max(1, applyDays - 1)"
+                  >
+                    −
+                  </button>
+                  <p class="readout"><b class="hours">{{ applyDays }}</b><i>天</i></p>
+                  <button
+                    class="step"
+                    type="button"
+                    aria-label="加一天"
+                    @click="applyDays = Math.min(capacity.max_days, applyDays + 1)"
+                  >
+                    +
+                  </button>
+                </div>
+              </div>
+              <p class="oRule">{{ applyPreview }}</p>
+              <p v-if="applyError" class="oErr">{{ applyError }}</p>
+              <button
+                class="btn btn-primary btn-block"
+                type="button"
+                :disabled="applyBusy"
+                @click="applyDeduction"
+              >
+                {{ applyBusy ? '提交中…' : '提交申请' }}
+              </button>
+              <button class="btn btn-block" type="button" @click="applyOpen = false">
+                先不抵
+              </button>
+            </template>
+          </template>
+          <p v-else-if="deductionEmptyText" class="oRule">{{ deductionEmptyText }}</p>
+        </div>
+      </section>
 
       <section class="panel">
         <div class="panel-hd">
@@ -468,6 +707,38 @@ useNudgePull({ id: 'me-overtime', topics: ['overtime'], pull: () => load(true) }
         <p v-else class="mSub oEmpty">
           还没有登记过。加班记一笔、欠钟记一笔，都会出现在这里。
         </p>
+      </section>
+
+      <section class="panel">
+        <div class="panel-hd">
+          <h2>我的抵扣</h2>
+          <span class="hint">{{ deductions.length }} 张</span>
+        </div>
+        <ul v-if="deductions.length" class="oList">
+          <li v-for="item in deductions" :key="item.id" class="oItem">
+            <div class="oItem-top">
+              <span class="oDate">{{ item.month }}</span>
+              <span class="oPill" :class="entryStatusTone(item.status)">
+                {{ entryStatusText(item.status) }}
+              </span>
+            </div>
+            <p class="oItem-mid">
+              <b class="oH">{{ item.days }}<i>天</i></b>
+              <span class="oReason">{{ deductionText(item) }}</span>
+            </p>
+            <p v-if="item.reject_reason" class="oErr">驳回理由：{{ item.reject_reason }}</p>
+            <button
+              v-if="item.status === 'pending'"
+              class="oCancel"
+              type="button"
+              :disabled="cancelDeductionId === item.id"
+              @click="cancelDeduction(item)"
+            >
+              {{ cancelDeductionId === item.id ? '撤回中…' : '撤回' }}
+            </button>
+          </li>
+        </ul>
+        <p v-else class="mSub oEmpty">暂无抵扣</p>
       </section>
     </div>
   </div>
@@ -722,6 +993,9 @@ useNudgePull({ id: 'me-overtime', topics: ['overtime'], pull: () => load(true) }
   line-height: 1.7;
   color: var(--ink-faint);
 }
+
+/* 直接挂在面板里（不在 .oPad 里）的那一句：自己让出横向内边距，别贴着面板边。 */
+.oRulePad { padding: 0 14px 12px; }
 
 /* ── 列表（我的记录 / 等批）──────────────────────────────────────────── */
 .oList { list-style: none; margin: 0; padding: 0; }

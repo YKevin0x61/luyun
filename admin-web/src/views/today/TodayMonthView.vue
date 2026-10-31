@@ -30,6 +30,7 @@ import { useNudgePull } from '../../composables/useNudgePull'
 import { workbenchDocumentTitle } from '../../utils/workbenchCopy'
 import { staffRequest } from '../../utils/hygieneStaff'
 import { eachDayInRange } from '../../utils/dateRange'
+import { formatDays, leaveFormulaText } from '../../utils/attendanceSheet'
 import { loginRedirectTarget } from '../../utils/loginNext'
 import { actFromQuery, dateFromQuery, monthOfDate } from '../../utils/staffDayActions'
 import {
@@ -55,6 +56,9 @@ const leaveLeadDays = ref(0)
 const lead = ref(0)
 const days = ref([])
 const errorText = ref('')
+// 存假卡（ADR 0124，2026-10-31 用户裁定）：单独一条 `/api/attendance/me`，与「我的班」
+// 并行读 —— 它读不出来只让卡片消失，不把整页打回错误态（班次才是这一页的主件）。
+const leaveData = ref(null)
 
 const title = computed(() => monthLabel(month.value, today.value))
 // 每格只算一次四态：`:class` 与格子里的字共用这份（判据仍在 util 里读一次）。
@@ -80,6 +84,23 @@ const todayLine = computed(() => {
 const beyond = computed(() => days.value.filter((day) => dayBeyondWindow(day, windowEnd.value)).length)
 const outside = computed(() => days.value.length > 0 && beyond.value === days.value.length)
 const isThisMonth = computed(() => month.value === today.value.slice(0, 7))
+// 存假卡（ADR 0124）：负数是欠班，不是脏数据 —— 写「欠班 X 天」而不是一个孤零零的负号。
+const leave = computed(() => leaveData.value?.leave || null)
+const balanceLabel = computed(() => {
+  const value = Number(leave.value?.balance || 0)
+  if (value < 0) return `欠班 ${formatDays(Math.abs(value))}`
+  return formatDays(value)
+})
+const leaveSubLabel = computed(() => {
+  if (!leave.value) return ''
+  return `上月结转 ${formatDays(leave.value.previous_balance)} · 本月在岗 ${leave.value.month_days} 天`
+})
+const leaveDeductedLabel = computed(() => {
+  const days = Number(leave.value?.deducted_days || 0)
+  if (!days) return ''
+  return `本月经补钟抵扣 ${formatDays(days)}（= ${days * 8.5} 小时补钟）`
+})
+const leaveFormula = computed(() => leaveFormulaText(leave.value))
 // 往后到展开窗口末就该停：再翻只会看见一个空月（判据在 `stepMonth` 里，页面不自算 90 天）。
 const canNext = computed(() => !!stepMonth(month.value, 1, windowEnd.value))
 
@@ -107,6 +128,7 @@ async function load(target, quiet = false) {
     nextDayLocked.value = Boolean(data.next_day_locked)
     leaveLeadDays.value = Number(data.leave_lead_days || 0)
     state.value = 'ready'
+    loadLeave(data.month)
   } catch (err) {
     if (err.status === 401) {
       toLogin()
@@ -114,6 +136,17 @@ async function load(target, quiet = false) {
     }
     errorText.value = err.message || '读不到你的班'
     state.value = 'error'
+  }
+}
+
+/** 存假那一块（ADR 0124）：翻到哪个月就看哪个月 —— 与月历同一条月份口径。
+ *  失败静默（卡片不出现）：这一页的主件是班次，存假读不到不该让它整页报错。 */
+async function loadLeave(target) {
+  const query = target ? `?month=${encodeURIComponent(target)}` : ''
+  try {
+    leaveData.value = await staffRequest(`/api/attendance/me${query}`)
+  } catch (err) {
+    leaveData.value = null
   }
 }
 
@@ -237,6 +270,7 @@ useNudgePull({
   topics: ['scheduling'],
   pull: () => {
     load(month.value, true)
+    loadLeave(month.value)
     loadRequestMarks()
   },
 })
@@ -331,6 +365,24 @@ useNudgePull({
               />
             </button>
           </div>
+        </section>
+
+        <!-- 存假卡（ADR 0124）：员工在这里看自己**这个月**攒了多少假。与店长的考勤表
+             同一个数（超管定稿优先），未封账标「暂算值」；负数是欠班。 -->
+        <section v-if="leave" class="mBoard leaveBoard">
+          <div class="leaveTop">
+            <span class="leaveKicker">存假</span>
+            <span class="leaveBig" :class="{ neg: Number(leave.balance) < 0 }">{{ balanceLabel }}</span>
+            <span class="leaveTag" :class="{ sealed: !leaveData.provisional }">
+              {{ leaveData.provisional ? '暂算值' : '已封账' }}
+            </span>
+          </div>
+          <p class="leaveSub">{{ leaveSubLabel }}</p>
+          <details class="leaveMore">
+            <summary>明细 ›</summary>
+            <p class="leaveFormula">{{ leaveFormula }}</p>
+            <p v-if="leaveDeductedLabel" class="leaveFormula">{{ leaveDeductedLabel }}</p>
+          </details>
         </section>
 
         <!-- 图例 LED 行：一格里那几笔各是什么，用 6px 灯 + 小字说清。 -->
@@ -763,6 +815,69 @@ useNudgePull({
 /* 申请中：圆点 + action 色（当前/信息），与旁边「班次已调整」的琥珀分开。 */
 .dot.pending {
   background: var(--action);
+}
+
+.leaveBoard {
+  margin-top: 14px;
+  padding: 14px 16px 12px;
+}
+
+.leaveTop {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.leaveKicker {
+  font: 500 9.5px/1 var(--font-sans);
+  letter-spacing: .26em;
+  color: var(--ink-faint);
+}
+
+.leaveBig {
+  font: 600 26px/1.1 var(--font-mono);
+  color: var(--ink);
+}
+
+.leaveBig.neg {
+  color: var(--warn);
+}
+
+.leaveTag {
+  margin-left: auto;
+  padding: 2px 9px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-full);
+  font-size: 11px;
+  color: var(--ink-dim);
+}
+
+.leaveTag.sealed {
+  border-color: var(--ok);
+  color: var(--ok);
+}
+
+.leaveSub {
+  margin: 9px 0 0;
+  font-size: 12px;
+  color: var(--ink-dim);
+}
+
+.leaveMore {
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--ink-dim);
+}
+
+.leaveMore summary {
+  cursor: pointer;
+  list-style: none;
+}
+
+.leaveFormula {
+  margin: 7px 0 0;
+  line-height: 1.65;
+  color: var(--ink-dim);
 }
 
 .mWarn {
