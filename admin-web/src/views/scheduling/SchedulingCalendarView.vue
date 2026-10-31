@@ -314,7 +314,14 @@ async function openPanel(next) {
     clearPick()
     penOpen.value = false
   }
-  if (next === 'roster') await loadRoster()
+  if (next === 'roster') {
+    await loadRoster()
+    // 名单顶部那一节（票 04）算的是「今天要顶的档」，吃的是 `/week` 那份数据（`week.today`
+    // 与 `week.employees`）。直接落在 `?view=roster`（刷新 / 书签）时周表还没读过 —— 不补
+    // 这一次，那一节会静默消失，看起来比「今天没人休」更糟（像是功能坏了）。只补数据，
+    // 不渲染周表。
+    if (!week.value) await loadWeek(weekStart.value || mondayOf(today.value))
+  }
   // 周表按需读：默认落在月历上，没切过去就不发这个请求。
   else if (next === 'week') {
     await loadWeek(weekStart.value || mondayOf(today.value))
@@ -1223,6 +1230,22 @@ const coverRows = computed(() => (coverDate.value
     })
   : []))
 
+/** 名单面板顶部那一节（票 04）：同一份 `coverSlotsFor`，但日期**固定今天** —— 这一节是
+ *  键盘 / 读屏 / 桌面用户的等价入口，不是按日浏览的入口（ADR 0127 决策 3：只有弹层跟着
+ *  被长按的那一格走）。今天还没有数据（`week.today` 为空）时返回空数组，模板据此整节不
+ *  渲染：不占位、也不写空文案 —— 名单面板本来就有自己的空态（「名单是空的」是**人名列表**
+ *  的空态，别把两件事混成一句）。 */
+const rosterCoverRows = computed(() => {
+  const date = week.value ? week.value.today : ''
+  if (!date) return []
+  return coverSlotsFor({
+    employees: weekEmployees.value,
+    shifts: shifts.value,
+    zones: coverZones.value,
+    date,
+  })
+})
+
 const coverIsToday = computed(() => !!coverDate.value && !!week.value && coverDate.value === week.value.today)
 const coverIsPast = computed(() => !!coverDate.value && !!week.value && coverDate.value < week.value.today)
 
@@ -1276,6 +1299,15 @@ function penFromCoverSlot(row) {
   penClear.value = false
   coverSheet.value = null
   sayNotice(`已装笔：${row.shift_name} × ${row.zone_name}，去点要顶的那一格`)
+}
+
+/** 名单面板那一节点一行：装笔这件事只写一份 —— `penFromCoverSlot` 自带关弹层与那句提示，
+ *  这里只多一步「切回周表」。装完必须回到能落笔的地方，停在名单没有可点的格子
+ *  （票 04 的「不做」项）。不能装笔的行照旧先挡下来：切到周表却没有笔可用是一个死点击。 */
+function penFromRosterCover(row) {
+  if (!row.can_pen) return
+  penFromCoverSlot(row)
+  void openPanel('week')
 }
 
 /** 选区那一行的「刷」：把当前笔整片写下去（选区唯一的存在理由）。 */
@@ -2436,6 +2468,36 @@ useNudgePull({
               <span class="gPanel-hint">一人一条 · {{ roster.length }} 人</span>
               <span class="gPanel-more">固定班 / 编周期</span>
             </div>
+            <!-- 今天要顶的档（票 04）：长按是触摸菜单，键盘 / 读屏 / 桌面用户进不去，这一节就是
+                 那条不靠长按的路。行是原生 `<button>` —— Tab / Enter / 空格都白拿，不自己写
+                 keydown（那会漏掉空格、还会把按钮默认行为再触发一次）。内容与票 03 的弹层同一套
+                 （同一份 `coverRowLabel` / `coverOthersText` / `coverBlockedText`），装笔也调同一个
+                 函数，点完切回周表：那里才有格子可点。日期**固定今天**（ADR 0127 决策 3）；
+                 今天没有要顶的档时整节不渲染，名单面板本来就有自己的空态。 -->
+            <section v-if="rosterCoverRows.length" class="gCoverRoster">
+              <div class="gCoverRoster-hd">
+                <h3>今天要顶的档</h3>
+                <span class="gCoverRoster-n">{{ rosterCoverRows.length }} 档</span>
+              </div>
+              <ul class="gCoverList">
+                <li v-for="row in rosterCoverRows" :key="`${row.employee_id}|${row.shift_id}|${row.zone_id}`">
+                  <button
+                    class="gCoverRow"
+                    type="button"
+                    :disabled="!row.can_pen"
+                    :aria-label="coverRowLabel(row)"
+                    @click="penFromRosterCover(row)"
+                  >
+                    <span class="gCoverSlot">{{ row.zone_name || '（工作区已删）' }} × {{ row.shift_name }}</span>
+                    <span class="gCoverMeta">
+                      <b class="gCoverWho">{{ row.employee_name }}{{ row.leave ? '请假' : '休' }}</b>
+                      <span class="gCoverOthers">{{ coverOthersText(row) }}</span>
+                      <span v-if="!row.can_pen" class="gCoverBlocked">{{ coverBlockedText(row) }}</span>
+                    </span>
+                  </button>
+                </li>
+              </ul>
+            </section>
             <p v-if="!roster.length" class="gB-empty">名单是空的</p>
             <div v-else class="gRosterGrid">
               <div v-for="employee in roster" :key="employee.id" class="gR">
@@ -3224,6 +3286,22 @@ useNudgePull({
 .gCoverWho { font-size: 11.5px; font-weight: 600; white-space: nowrap; }
 .gCoverOthers { font-size: 10.5px; color: var(--ink-dim); text-align: right; }
 .gCoverBlocked { font-size: 10.5px; color: var(--ink-faint); }
+/* 名单面板顶部那一节（票 04）—— 长按的键盘等价入口。行样式直接复用上面 `.gCoverRow`
+   那一套（同一个 `.vue` 的 scoped 样式，两处都能用），这里只给节的壳：它要读起来是
+   「另一件事」，不是人名列表最上面的一列人。零新增颜色引用，仍只用既有令牌。 */
+.gCoverRoster {
+  margin: 12px 14px 0; padding: 10px 12px;
+  border: 1px solid var(--line); border-radius: var(--r-2);
+  background: var(--surface-0);
+}
+.gCoverRoster-hd { display: flex; align-items: baseline; gap: 8px; }
+.gCoverRoster-hd h3 {
+  margin: 0; font-family: var(--font-sans); font-size: 12.5px;
+  font-weight: 600; letter-spacing: .04em; color: var(--ink);
+}
+.gCoverRoster-n { margin-left: auto; font-family: var(--font-mono); font-size: 9.5px; color: var(--ink-faint); }
+/* 列表在弹层里是节的第一块，上边距 10px；放进节里收一点，别把这块撑高。 */
+.gCoverRoster .gCoverList { margin-top: 8px; }
 /* ── 窄屏：单列 ───────────────────────────────────────────────────────── */
 @media (max-width: 900px) {
   .gDash { grid-template-columns: 1fr; }

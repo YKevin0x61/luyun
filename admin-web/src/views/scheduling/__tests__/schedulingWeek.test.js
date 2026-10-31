@@ -356,6 +356,88 @@ describe('长按一格 → 弹层「要顶的档」→ 点一行装进笔（票 
 })
 
 
+// 票 04 / ADR 0127：长按是触摸菜单 —— 键盘 / 读屏 / 桌面用户进不去。名单面板顶部那一节
+// 「今天要顶的档」就是**等价入口**（「长按不做、改成显式按钮」被否掉的代价，见面票的
+// 背景那一段），所以它跟弹层吃同一份 `coverSlotsFor`，只有日期口径不同：这一节**固定今天**
+// （决策 3：它是等价入口，不是按日浏览的入口）。
+describe('名单面板「今天要顶的档」：长按的键盘等价入口（票 04 / ADR 0127）', () => {
+  // 名单那一栏的模板：从 `panel === 'roster'` 到它自己的 `</template>`。位置关系也是验收
+  // 的一条（在「名单 · 规则」头部下面、人名列表上面），所以按块内出现次序断，不按「有没有」。
+  const rosterStart = view.indexOf(`<template v-else-if="panel === 'roster'">`)
+  const rosterBlock = view.slice(rosterStart, view.indexOf('</template>', rosterStart))
+  const coverAt = rosterBlock.indexOf('gCoverRoster')
+
+  it('这一节在「名单 · 规则」头部下面、人名列表上面；标题与档数都写出来', () => {
+    expect(rosterStart).toBeGreaterThan(-1)
+    expect(coverAt).toBeGreaterThan(-1)
+    expect(rosterBlock.indexOf('gPanel-hd')).toBeLessThan(coverAt)
+    expect(coverAt).toBeLessThan(rosterBlock.indexOf('gRosterGrid'))
+    expect(rosterBlock).toContain('今天要顶的档')
+    // 右侧一行字数提示：`N 档`。N 就是这一节的行数，不另算一份。
+    expect(rosterBlock).toMatch(/\{\{ rosterCoverRows\.length \}\} 档/)
+  })
+
+  it('算清单用同一份 `coverSlotsFor`，日期固定今天（不跟弹层那一格走）', () => {
+    const rows = view.slice(view.indexOf('const rosterCoverRows'), view.indexOf('\n})', view.indexOf('const rosterCoverRows')))
+    expect(rows).toMatch(/coverSlotsFor\(\{/)
+    // 日期来自 `week.today`，**不是** `coverDate`（弹层那份跟着被长按的格子，决策 3）。
+    expect(rows).toMatch(/week\.value\.today/)
+    expect(rows).not.toMatch(/coverDate/)
+    // 三份输入与弹层同一个来源；不拿名单面板那份 `/roster` 的工作区兜底（它缺两个档位开关）。
+    expect(rows).toMatch(/employees: weekEmployees\.value/)
+    expect(rows).toMatch(/shifts: shifts\.value/)
+    expect(rows).toMatch(/zones: coverZones\.value/)
+  })
+
+  it('今天没有要顶的档时整节不渲染：不占位置，也不写空文案', () => {
+    // 名单面板本来就有自己的空态（「名单是空的」是**人名列表**的空态）。这一节再写一句
+    // 「今天没有要顶的档」，空表上会白占一块，还会让人以为清单算坏了。
+    expect(rosterBlock).toMatch(/<section[^>]*v-if="rosterCoverRows\.length"/)
+    // 空态文案不该出现在这一节里：空的时候整节连壳都不在，不是「壳在、里面写一句没有」。
+    expect(rosterBlock).not.toMatch(/>今天没有要顶的档</)
+  })
+
+  it('行是 <button>：可 Tab、有 aria-label、Enter / 空格可激活（原生按钮自带）', () => {
+    // 键盘路径是这票的硬项：`<div @click>` 永远进不了 Tab 序列，读屏也只念里面的字、
+    // 不会说「这是个按钮」。原生 `<button>` 一次拿到 Tab / Enter / 空格三样，不另写 keydown
+    // （自己实现 keydown 反而会漏掉空格、还会把按钮的默认行为再触发一次）。
+    const rowAt = rosterBlock.indexOf('class="gCoverRow"')
+    expect(rowAt).toBeGreaterThan(-1)
+    const row = rosterBlock.slice(rosterBlock.lastIndexOf('<button', rowAt), rosterBlock.indexOf('</button>', rowAt))
+    expect(row).toMatch(/type="button"/)
+    // aria-label 含区、档、谁休 / 请假、还有谁（`coverRowLabel` 与弹层同一份）。
+    expect(row).toMatch(/:aria-label="coverRowLabel\(row\)"/)
+    expect(row).toMatch(/@click="penFromRosterCover\(row\)"/)
+    expect(row).not.toMatch(/@keydown|@keyup/)
+    // 内容与弹层同一套写法（同一份数据、同一套文案，不是另起一套「谁 · 哪档」）。
+    expect(row).toMatch(/\{\{ row\.zone_name \|\| '（工作区已删）' \}\} × \{\{ row\.shift_name \}\}/)
+    expect(row).toMatch(/row\.leave \? '请假' : '休'/)
+    expect(row).toMatch(/coverOthersText\(row\)/)
+    expect(row).toMatch(/coverBlockedText\(row\)/)
+    // 不能装笔的行（停用班次 / 已删工作区）不给「点得下去」的假象。
+    expect(row).toMatch(/:disabled="!row\.can_pen"/)
+  })
+
+  it('点行 = 装笔 → 切回周表；装笔与提示只写一份（复用票 03 那个函数）', () => {
+    const fn = view.slice(view.indexOf('function penFromRosterCover'), view.indexOf('\n}', view.indexOf('function penFromRosterCover')))
+    // 装笔不复制：直接调 `penFromCoverSlot`，不在这里再写一遍笔的四个字段。
+    expect(fn).toMatch(/penFromCoverSlot\(row\)/)
+    expect(fn).not.toMatch(/penShiftId\.value =/)
+    // 装完必须切回周表 —— 那才是能落笔的地方（「装完停在名单」在票面的不做项里）。
+    expect(fn).toMatch(/openPanel\('week'\)/)
+    // 提示文案只存在一处（`penFromCoverSlot` 里那句）；这一条不再写第二份。
+    expect((view.match(/已装笔/g) || []).length).toBe(1)
+  })
+
+  it('直接落在名单面板（刷新 / 书签）也补一次周表数据，这一节不会静默消失', () => {
+    // 首屏按 URL 落在 `?view=roster` 时只读过名单那一份（`/roster`），`week` 还是空的 ——
+    // 不补一次这一节就永远不渲染，看起来像「今天没人休」，比不显示更糟。
+    const fn = view.slice(view.indexOf('async function openPanel'), view.indexOf('\n}', view.indexOf('async function openPanel')))
+    expect(fn).toMatch(/if \(!week\.value\) await loadWeek\(/)
+  })
+})
+
+
 // 票 14（ADR 0107）把那支常驻的笔整套换掉了：底部常驻笔刷条、展开的编辑抽屉、长按
 // （550ms）看 / 改这一格 —— 三样一起退役，单格的「看 / 改」由「点一格 → 动作条」接走。
 // 2026-11-01（票 03 / ADR 0127）：退役的是**旧语义**（长按展开看 / 改这一格、连着写路径），
