@@ -2664,7 +2664,13 @@ class SchedulingStore:
                 "row_count": row_count.get(key, 0),
             })
 
-        zone_names = await self._zone_name_index()
+        # 一次读名单：既建区名索引（格子里写区名），也原样给回应（票 01：算「要顶的档」
+        # 要知道每个区跑不跑白班 / 夜班，前端不靠 `/roster` 也拿得到这份名单）。
+        zones = await self._zone_directory().list_zones()
+        zone_names = {zone["id"]: zone["name"] for zone in zones}
+        # 每人每班次的固定区（票 01）：周表自己的回应里带上，前端算「要顶的档」时
+        # 不用再打 `/roster`（周表的护栏是只用排班自己的接口）。没配过的人不在里面。
+        defaults = await self.zone_defaults()
         # 启用的全出 + 停用但这一周真有行的才出（`_shifts_for_display` 的老口径）：
         # 抽屉要拿它当班次选择列，所以启用的一个不少。
         shifts = await self._shifts_for_display(used)
@@ -2755,6 +2761,18 @@ class SchedulingStore:
                 "job_title": employee["job_title"],
                 # 配过规则就有这一行（`_rule_rows()` 只出配过的，`rule is None` 是没配过）。
                 "has_rule": employee["id"] in rules,
+                "zone_defaults": [
+                    {
+                        "shift_id": shift_id,
+                        "zone_id": zone_id,
+                        # 区被删了（`staff_assignments.zone_id` / 这里都没有外键）：
+                        # 名字给 None，整行照留 —— 弹层要照列并标「工作区已删」。
+                        "zone_name": None if zone_id is None else zone_names.get(zone_id),
+                    }
+                    # 顺序在这里钉死（`shift_id` 升序）：`zone_defaults()` 不带 ORDER BY，
+                    # 靠 DB 的物理顺序迟早会漂。
+                    for shift_id, zone_id in sorted(defaults.get(employee["id"], {}).items())
+                ],
                 "cells": cells,
             })
 
@@ -2767,6 +2785,8 @@ class SchedulingStore:
             "spans_months": first.month != last.month,
             "days": days,
             "shifts": shifts,
+            # 区名单连同两个班次开关一起给（票 01）；与 `/roster` 同一份口径、按 id。
+            "zones": zones,
             "employees": employees,
             "excluded": excluded,
         }

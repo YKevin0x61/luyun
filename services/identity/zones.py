@@ -7,9 +7,12 @@
 但读这张表的那段代码放在公共层 —— 排班从这里取名单，不去 import 卫生的任何东西
 （`spec.md` 的「分层」：两边各读各的，谁都不认识对方的业务）。
 
-这里只出 `id` / `name`：`day_shift` / `night_shift` 两个开关的含义是「这个区跑不跑
-白班 / 夜班」，那是卫生那两段固定班次的说法，卫生自己读（`HygieneWork.list_zones`），
-排班不关心 —— 排班的班次是数据（`staff_shifts`），跟卫生的「白 / 夜」两个字不是一回事。
+这里出 `id` / `name`，以及 `day_shift` / `night_shift` 两个开关（「这个区跑不跑
+白班 / 夜班」）。排班做「要顶的档」需要知道这个区跑不跑这一档：馅档只跑夜市，把
+一个人配到「馅档 × 早班」时那一行不该出现（见 `.scratch/week-cover/spec.md`）。开关
+本身仍然是卫生那两段固定班次的说法（卫生自己读，`HygieneWork.list_zones`），排班
+只读、不解释 —— 排班的班次是数据（`staff_shifts`），跟卫生的「白 / 夜」两个字不是
+一回事。
 """
 
 from __future__ import annotations
@@ -30,9 +33,20 @@ class ZoneDirectory:
         self._conn = getattr(conn_or_db, "_conn", conn_or_db)
 
     async def list_zones(self) -> list[dict]:
-        """全部工作区，按 id（= 建区的先后）。"""
+        """全部工作区，按 id（= 建区的先后），带两个班次开关（0 / 1）。"""
         cur = await self._conn.execute(
-            "SELECT id, name FROM hygiene_zones ORDER BY id ASC"
+            """SELECT id, name, day_shift, night_shift
+               FROM hygiene_zones ORDER BY id ASC"""
         )
         rows = await cur.fetchall()
-        return [{"id": int(dict(row)["id"]), "name": dict(row)["name"]} for row in rows]
+        return [
+            {
+                "id": int(dict(row)["id"]),
+                "name": dict(row)["name"],
+                # 列是 BIGINT NOT NULL DEFAULT 1；`or 0` 跟卫生侧的归一化同一条口径，
+                # 人工 SQL 写进来的 NULL 不会被读成「跑这一档」。
+                "day_shift": int(dict(row)["day_shift"] or 0),
+                "night_shift": int(dict(row)["night_shift"] or 0),
+            }
+            for row in rows
+        ]
