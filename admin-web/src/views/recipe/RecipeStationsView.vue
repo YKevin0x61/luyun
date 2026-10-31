@@ -462,7 +462,7 @@ function onDocumentPointerDown(evt) {
   background: var(--wb-warn-a10);
   color: var(--warn);
   font-size: 11px;
-  font-weight: 500;
+  font-weight: 600;
   letter-spacing: 0.04em;
   font-variant-numeric: tabular-nums;
 }
@@ -578,7 +578,7 @@ function onDocumentPointerDown(evt) {
     gap: 8px;
     font-family: var(--font-mono);
     font-size: 11px;
-    font-weight: 500;
+    font-weight: 600;
     color: var(--ink-faint);
   }
   .station-link-count {

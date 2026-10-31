@@ -262,7 +262,7 @@ function closePanel() {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.image-upload-task-copy strong { font-size: 12px; font-weight: 500; color: var(--ink); }
+.image-upload-task-copy strong { font-size: 12px; font-weight: 600; color: var(--ink); }
 .image-upload-task-copy span {
   margin-top: 2px;
   color: var(--ink-dim);

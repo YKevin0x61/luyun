@@ -812,7 +812,7 @@ applyManageQuery()
     background: var(--surface-2);
     color: var(--ink-faint);
     font-size: 11px;
-    font-weight: 500;
+    font-weight: 600;
     letter-spacing: .06em;
   }
   /* v3：列宽按内容固定，名称列吃剩余宽度（等价 minmax(200px,1fr)） */
@@ -916,7 +916,7 @@ applyManageQuery()
     border-radius: 0;
     background: transparent;
     font-size: 11px;
-    font-weight: 500;
+    font-weight: 600;
     color: var(--ink-dim);
   }
   .badge-status::before {
@@ -944,7 +944,7 @@ applyManageQuery()
     background: var(--wb-warn-a10);
     color: var(--warn);
     font-size: 11px;
-    font-weight: 500;
+    font-weight: 600;
     letter-spacing: .04em;
   }
 }

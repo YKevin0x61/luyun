@@ -29,17 +29,22 @@ html[data-workbench] {
      **色值深浅两主题共用同一套**：同一个班次换个主题还是同一个颜色，否则员工会
      以为班次变了；主题只影响页面底色与 `neutral` 那一档。
      判据（`.scratch/scheduling-shift-color/palette.py` 可复算）：任意两档底色 CIE76
-     ΔE ≥ 26.7、每档文字对底色对比度 ≥ 4.80:1。改任何一档都要重跑那份脚本。
+     ΔE ≥ 26.7、每档文字对底色对比度 ≥ 4.72:1。改任何一档都要重跑那份脚本。
      色相避开红（0°–20°）与琥珀（30°–50°）：那两段是 danger / warn 的地盘，
      红色格子会被读成「出事了」。 */
-  --shift-moss:#bad04e;   --shift-moss-ink:#0a1014;
-  --shift-mint:#6cd096;   --shift-mint-ink:#0a1014;
-  --shift-tide:#4ebad0;   --shift-tide-ink:#0a1014;
-  --shift-sky:#7c7cda;    --shift-sky-ink:#0a1014;
-  --shift-pine:#4b8b78;   --shift-pine-ink:#0a1014;
-  --shift-rose:#cc5c94;   --shift-rose-ink:#0a1014;
-  --shift-grass:#4aa43d;  --shift-grass-ink:#0a1014;
-  --shift-lilac:#b2a1d9;  --shift-lilac-ink:#0a1014;
+  /* 字色不是纯黑，而是**同一个色相压深一档**（2026-11-01 用户要求「字体也要有颜色、
+     看字更清晰」）：格子里的字因此读起来是「这个班的颜色」，而不是一格黑字。
+     每档对底色的对比度都 ≥ 4.72:1（`palette.py` 复算），比纯黑字低不了多少，
+     但字与底色同族，小字（工作区那行 9px）不再靠透明度压 —— 那会把 9px 的对比度
+     压到 ~3.5:1，越调越糊。 */
+  --shift-moss:#bad04e;   --shift-moss-ink:#434d0f;
+  --shift-mint:#6cd096;   --shift-mint-ink:#0f4d29;
+  --shift-tide:#4ebad0;   --shift-tide-ink:#093e49;
+  --shift-sky:#7c7cda;    --shift-sky-ink:#05054d;
+  --shift-pine:#4b8b78;   --shift-pine-ink:#061410;
+  --shift-rose:#cc5c94;   --shift-rose-ink:#260214;
+  --shift-grass:#4aa43d;  --shift-grass-ink:#072602;
+  --shift-lilac:#b2a1d9;  --shift-lilac-ink:#380aa3;
   /* 中性档：不参与调色板（可重复），第 9 个启用班次与「迁移还没应用」都走它。 */
   --shift-neutral:var(--surface-2); --shift-neutral-ink:var(--ink-dim);
   /* 8 档都是亮底，所以边界统一用一根深发丝，不按档重复定义。 */

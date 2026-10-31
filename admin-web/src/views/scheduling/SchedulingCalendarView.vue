@@ -17,6 +17,9 @@ import { api } from '../../api/client'
 // <link>，壳一层管住就跟卫生管理端一个做法。
 import { useNudgePull } from '../../composables/useNudgePull'
 import { SHIFT_COLOR_NEUTRAL, mergeShiftList, shiftColorClass } from '../../utils/shiftTable'
+// 天数的写法只有一份（`12 天` / `19.5 天` / `0 天`，负数带全角减号 = 欠班）：
+// 周表成员列那行存假与考勤表卡片写同一个字面，别在这里另起一套格式。
+import { formatDays } from '../../utils/attendanceSheet'
 import { eachDayInRange } from '../../utils/dateRange'
 // 周表的落笔与选区（票 14 / ADR 0107，2026-10-13 方向修订）：纯逻辑在
 // `utils/schedulingWeekPick.js` 里 —— 这一页只负责把手柄接上去、把笔与回执接上去。
@@ -319,6 +322,8 @@ async function openPanel(next) {
     if (!roster.value.length || !zones.value.length) await loadRoster()
     // 待批提醒按天取（周表每格没有这个字段）：进周表时把待办读一遍。
     await loadPendingMarks()
+    // 成员列名字底下那行存假（2026-11-01 用户要的）：与待办一样，切到周表才读。
+    await loadLeaveBalances()
   }
 }
 
@@ -543,6 +548,57 @@ const weekRows = computed(() => {
   return weekEmployees.value.filter((employee) => (employee.name || '').includes(keyword))
 })
 const weekFilteredOut = computed(() => weekEmployees.value.length - weekRows.value.length)
+
+// ── 成员列的存假（2026-11-01 用户要的）────────────────────────────────────────
+// 店长在周表上排人的时候要同时看「这个人这个月还攒着几天假」—— 不然排到第 5 天
+// 才想起来去考勤表翻一眼。**数只有一个来源**：考勤表那张 `GET /api/attendance/sheet`
+// 里的 `leave.balance`（有效值 = 手填期末 ?? 公式，扣过已批抵扣）。这里不重算：
+// 存假那条算式（`_leave_terms` + `_with_manual_balance`）拆成两份就一定会漂，
+// 员工手机上的「存假卡」与店长这张周表必须是同一个数。
+//
+// 为什么读得到：考勤表与排班三页**同一道门**（`_require_scheduler`），所以能打开
+// 这一页的人就一定能读那张表，不需要新接口、也不需要放开权限。
+// 为什么是当月：那条接口刻意没有月份参数（考勤表页只算当月），周表跟着这个口径；
+// 跨月的周（10/26–11/1）两边的格子都在，但数字仍是服务器「今天」那个月 ——
+// 存假本来就是月度概念，硬按周切反而会给出一个考勤表上没有的数。
+const leaveBalance = ref({})   // employeeId → 天数（负数是欠班）
+const leaveMonth = ref('')     // 这份数字属于哪个月（'YYYY-MM'），只进 title
+
+async function loadLeaveBalances() {
+  try {
+    const data = await api.get('/api/attendance/sheet')
+    const map = {}
+    for (const person of data.employees || []) {
+      const days = person.leave && person.leave.balance
+      if (typeof days === 'number') map[person.id] = days
+    }
+    leaveBalance.value = map
+    leaveMonth.value = data.month || ''
+  } catch {
+    // **静默失败**：存假是这一列的附加信息，读不到就是不显示那一行小字，
+    // 不该把整张周表拖成报错（周表本身是这一页的主件）。
+    leaveBalance.value = {}
+    leaveMonth.value = ''
+  }
+}
+
+/** 名字后面那个带圈的数字：**只写数**（`36.5` / `4` / `−0.5`），单位与「存假 / 欠班」两个字
+ *  都不占版面 —— 含义交给颜色（绿=攒下的假、橙=欠班）与悬停提示（`leaveTitle`）。
+ *  数一律借 `formatDays` 的写法再摘掉「天」：整数不带 `.0`、小数留一位、负数是全角减号，
+ *  这些规则只该有一份（考勤表卡片与这里写同一个字面）。 */
+function leaveBadge(days) {
+  const value = Number(days)
+  if (!Number.isFinite(value)) return ''
+  return formatDays(value).replace(' 天', '')
+}
+
+/** 徽标只有数字，说清楚它是什么靠这一句（悬停可见）。 */
+function leaveTitle(days) {
+  const value = Number(days)
+  if (!Number.isFinite(value)) return ''
+  const said = value < 0 ? `欠班 ${formatDays(Math.abs(value))}` : `存假 ${formatDays(value)}`
+  return `${leaveMonth.value} 月${said}（与考勤表同一个数）`
+}
 
 function cellOf(employee, day) {
   return (employee.cells && employee.cells[day.business_date]) || null
@@ -2130,7 +2186,16 @@ useNudgePull({
                         :aria-label="`${employee.name}：选中这一整周`"
                         @click="onRowPick(employee)"
                       >
-                        <b>{{ employee.name }}</b>
+                        <b>{{ employee.name }}</b><!--
+                          存假（2026-11-01 用户要的）：名字后面跟一个带圈的数字，只写天数 ——
+                          「存假 / 欠班」与「天」都不占版面，含义在颜色与悬停提示里。
+                          读不到就整条不渲染（`loadLeaveBalances` 静默失败），不占位置。
+                      --><span
+                          v-if="leaveBalance[employee.id] !== undefined"
+                          class="gW-leave"
+                          :class="{ debt: leaveBalance[employee.id] < 0 }"
+                          :title="leaveTitle(leaveBalance[employee.id])"
+                        >{{ leaveBadge(leaveBalance[employee.id]) }}</span>
                         <!-- 没配规则的人整行都是空的 —— 不在这里说一句，看着像这店不给他排班。 -->
                         <em v-if="!employee.has_rule" class="gW-norule" title="这个人还没有轮转规则">没规则</em>
                       </button>
@@ -2349,7 +2414,7 @@ useNudgePull({
 }
 .gKicker {
   grid-area: kick; margin: 0; font-family: var(--font-sans); font-size: 9.5px; line-height: 1;
-  font-weight: 500; letter-spacing: .26em; color: var(--ink-faint);
+  font-weight: 600; letter-spacing: .26em; color: var(--ink-faint);
 }
 .gTitleRow { grid-area: title; display: flex; align-items: baseline; gap: var(--sp-4); min-width: 0; }
 .gTitle {
@@ -2415,7 +2480,7 @@ useNudgePull({
   display: flex; align-items: baseline; gap: 10px; padding: 9px 14px 5px;
 }
 .gGap-hd span {
-  font-family: var(--font-sans); font-size: 9px; font-weight: 500;
+  font-family: var(--font-sans); font-size: 9px; font-weight: 600;
   letter-spacing: .18em; color: var(--ink-faint);
 }
 .gGap-hd em { margin-left: auto; font-style: normal; font-family: var(--font-mono); font-size: 9px; color: var(--ink-faint); }
@@ -2429,7 +2494,7 @@ useNudgePull({
   font: inherit; text-align: left; cursor: pointer;
 }
 .gGapRow:hover { background: var(--surface-2); }
-.gGapRow b { font-family: var(--font-mono); font-size: 10.5px; font-weight: 500; }
+.gGapRow b { font-family: var(--font-mono); font-size: 10.5px; font-weight: 600; }
 .gGapN { font-family: var(--font-mono); font-size: 10px; color: var(--warn); }
 .gGapGo { color: var(--ink-faint); }
 .gCalPanel { padding-bottom: 12px; }
@@ -2625,7 +2690,7 @@ useNudgePull({
 }
 .gR-day i { font-style: normal; font-size: 8px; color: var(--ink-faint); }
 .gR-day b {
-  font-family: var(--font-mono); font-size: 10px; font-weight: 500; color: var(--ink);
+  font-family: var(--font-mono); font-size: 10px; font-weight: 600; color: var(--ink);
   max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .gR-day.off { border-style: dashed; }
@@ -2682,7 +2747,10 @@ useNudgePull({
 .gW-tip { font-size: 10px; color: var(--ink-faint); }
 /* 筛人：一屏只放得下四行多，名单十几号人时靠翻页找人太慢（图片里那套也有这个框）。 */
 .gW-findBtn {
-  margin-left: auto; min-width: var(--tap); min-height: var(--tap); padding: 0;
+  /* 原来靠 flex 的 `margin-left: auto` 推到右边；成员列改成 table-cell 之后它跟
+     「成员」两个字同一行排下来（`vertical-align` 对齐），`margin-left` 只留一点点缝。 */
+  margin-left: 4px; min-width: var(--tap); min-height: var(--tap); padding: 0;
+  vertical-align: middle;
   border: 0; border-radius: var(--r-1);
   background: transparent; color: var(--ink-faint); font: inherit; font-size: 14px; line-height: 1; cursor: pointer;
 }
@@ -2707,20 +2775,35 @@ useNudgePull({
 .gW-find span { flex: none; font-family: var(--font-mono); font-size: 10px; color: var(--ink-faint); }
 .gW { width: 100%; table-layout: fixed; border-collapse: separate; border-spacing: 4px; }
 .gW-cname { width: 4.6em; }
-/* 表头粘住：滚下去以后还得知道哪一列是哪天（门店那套滚动时表头也在）。 */
+/* 表头粘住：滚下去以后还得知道哪一列是哪天（门店那套滚动时表头也在）。
+   `top` 在宽屏要让开壳的顶栏（见文件末尾那条 `@media (min-width: 721px)`）——
+   设成 0 会让日期行钻进 `.wb-top` 底下被盖住；手机上那条栏整条不显示，所以还是 0。 */
 .gW thead th {
   position: sticky; top: 0; z-index: var(--z-shell);
   padding: 3px 0 5px; border-radius: var(--r-1);
   background: var(--surface-2);
-  font-family: var(--font-sans); font-weight: 400; font-size: 9px;
+  /* 粘住时**不能让根露出来**：这一格有 8px 圆角，格与格之间还有 4px 的 border-spacing，
+     滚过去的内容会从两个圆角（对角缺口约 2.3px）和格缝里钻上来。外扩 4px 的同色阴影
+     把这两处一起盖住 —— 看上去像表头连成一条，布局上仍是各自独立的 th。 */
+  box-shadow: 0 0 0 4px var(--surface-2);
+  font-family: var(--font-sans); font-weight: 500; font-size: 9px;
   letter-spacing: .06em; color: var(--ink-faint); line-height: 1.3;
 }
 .gW thead th .d { display: block; font-family: var(--font-mono); font-size: 12px; color: var(--ink); }
 .gW thead th .m { display: block; font-style: normal; font-size: 9px; color: var(--ink-faint); }
-.gW thead th.today { background: var(--action-soft); box-shadow: inset 0 0 0 1px var(--action); }
+/* 粘住以后这一格必须**不透明**：`--action-soft` 是 12% 的色，滚动时下面的格子会透上来
+   （表头其余格本来就是实底 `--surface-2`）。把软色叠在实底上，深浅两档主题都成立。 */
+.gW thead th.today {
+  background-color: var(--surface-2);
+  background-image: linear-gradient(var(--action-soft), var(--action-soft));
+  /* 外扩那一圈与相邻格同色（不是绿），否则今天这一列会在表头里镶一圈绿边。 */
+  box-shadow: 0 0 0 4px var(--surface-2), inset 0 0 0 1px var(--action);
+}
 .gW thead th.today .w { color: var(--action); }
 .gW thead th.today .d { color: var(--action); font-weight: 700; }
-.gW thead th.mute { opacity: .45; }
+/* 同上：`opacity` 会让整格（连底一起）半透明，粘住时透出下面的内容 —— 改成只降字色。 */
+.gW thead th.mute { color: var(--ink-faint); }
+.gW thead th.mute .d { color: var(--ink-faint); }
 .gW thead th.weekend .w { color: var(--ink-dim); }
 /* 表头与人名列是**手柄**（票 14 / ADR 0107 决策 9）：它们原来是完全不可交互的 <th>，
    现在是一个真按钮 —— 键盘 Tab 得到、读屏有名字，聚焦圈用浏览器默认那一圈（共享表没给
@@ -2732,11 +2815,27 @@ useNudgePull({
 .gW-th:disabled { cursor: default; }
 .gW-name {
   padding: 0 2px; text-align: left; vertical-align: middle;
-  display: flex; align-items: center; gap: 6px;
-  font-family: var(--font-sans); font-weight: 400; font-size: 11px; color: var(--ink); line-height: 1.35;
+  /* **不能是 flex**：`display: flex` 会让这个 `<th>` 不再是 table-cell，
+     表头那一行里它的 `position: sticky` 于是完全不生效（2026-11-01 实测：
+     同排的日期列都粘住了，只有这一格跟着内容滚出去）。名字 / 带圈数字 / 「没规则」
+     本来就是 inline + block 排得出来，用不着 flex。 */
+  font-family: var(--font-sans); font-weight: 500; font-size: 11px; color: var(--ink); line-height: 1.35;
   overflow-wrap: anywhere;
 }
 .gW-name b { font-weight: 600; }
+/* 存假（2026-11-01 用户要的）：名字后面一个**带圈的数字**，紧跟着名字、不换行 ——
+   圈里只放数（`36.5` / `4` / `−0.5`），「存假 / 欠班」与「天」交给颜色和悬停提示。
+   正数（攒下的假）走 action 那一档绿，负数（欠班，ADR 0124）走 warn 橙；
+   两档的 soft 底在深浅两个主题里都有声明，所以换主题不掉色。
+   `min-width` 撑住一位数那个正圆，两位数 / 带小数时它自然长成胶囊。 */
+.gW-leave {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 16px; height: 16px; padding: 0 5px; margin-left: 4px;
+  border-radius: 999px; vertical-align: 1px;
+  font-size: 9px; font-weight: 600; line-height: 1; font-variant-numeric: tabular-nums;
+  background: var(--action-soft); color: var(--action);
+}
+.gW-leave.debt { background: var(--warn-soft); color: var(--warn); }
 /* 没配规则的人整行都是空的 —— 行内就得说一句，不然看着像这店不给他排班。 */
 .gW-norule { display: block; font-style: normal; font-size: 9px; color: var(--warn); }
 .gW-cell {
@@ -2747,6 +2846,9 @@ useNudgePull({
   font: inherit; font-family: var(--font-sans); font-size: 11.5px; cursor: pointer;
 }
 .gW-cell:disabled { cursor: default; }
+/* 班次缩写（2026-11-01）：字色已经是「同色相深字」，再把字重与字号提一档 —— 11.5px 的
+   常规体在亮底上，色相读不出来，看着像一格黑字。工作区那行不动（9px 再粗就糊）。 */
+.gW-cell > span:first-child { font-size: 12.5px; font-weight: 700; letter-spacing: .01em; }
 .gW-cell.long { font-size: 10px; letter-spacing: -.02em; }
 /* 班次下面那行工作区名（2026-10-08 用户要的）：格子只有 ~39px 宽，所以是 9px 的小字、
    跟着班次那个色弱一档 —— 主信息仍然是班次那一个字。三个字的区名（明档1）单行放得下，
@@ -2754,15 +2856,25 @@ useNudgePull({
 /* 周表格子里的「半」（票 07）：那天仍然挂着这个班次，只是只上半天 —— 跟在班次缩写
    后面，小一号、信息蓝（语义令牌）。 */
 .gW-cell .gW-half {
-  margin-left: 1px; font-style: normal; font-family: var(--font-mono); font-size: 9px; color: var(--info);
+  /* 「半」= 反白小胶囊（2026-11-01 用户反馈「休半天的『半』看不清」）：底色用班次字色、
+     字用班次底色 —— 在任何一档上对比度都跟正文一样（≥ 4.7:1），而且一眼能看出它是
+     「贴在班次上的标记」，不是班次名的一部分。原来这里是 9px 的 --info 蓝字，
+     落在潮青/薄荷这些亮底上几乎看不见。 */
+  display: inline-flex; align-items: center; justify-content: center;
+  margin-left: 2px; padding: 1px 2px; border-radius: 3px;
+  font-style: normal; font-family: var(--font-mono); font-size: 8.5px; line-height: 1;
+  font-weight: 700; letter-spacing: 0;
+  background: var(--shift-ink); color: var(--shift-fill);
 }
 .gW-cell .gW-zone {
   display: block; max-width: 100%; margin-top: 1px;
-  font-size: 9px; line-height: 1.1; letter-spacing: -.02em; opacity: .75;
+  /* 不压透明度（2026-11-01）：9px 的小字在 75% 下只剩 ~3.5:1，跟「看字更清晰」反过来。
+     它跟班次缩写同一个色相，靠字号（9 vs 11.5）分主次，不靠变淡。 */
+  font-size: 9px; line-height: 1.1; letter-spacing: -.02em;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 /* 班次格子（0043）：实底 + 深字 + 一根深发丝。8 档都是亮底，所以边界统一走
-   `--shift-edge`，不再按档重复定义；文字色是每档自带的近黑，实测最低 4.80:1。 */
+   `--shift-edge`，不再按档重复定义；文字色是每档自带的「同色相深一档」，实测最低 4.72:1。 */
 .gW-cell.tone-moss, .gW-cell.tone-mint, .gW-cell.tone-tide, .gW-cell.tone-sky,
 .gW-cell.tone-pine, .gW-cell.tone-rose, .gW-cell.tone-grass, .gW-cell.tone-lilac {
   color: var(--shift-ink);
@@ -2978,6 +3090,15 @@ useNudgePull({
   }
   .gDrawerClose { display: inline-flex; }
   .gB-dayBody { max-height: none; }
-  .gW-wrap { overflow-x: auto; }
+}
+/* 周表的横向滚动条**不能**加：`overflow-x: auto` 会让 `.gW-wrap` 变成滚动容器
+   （另一轴 `visible` 被算成 `auto`），表头那个 `position: sticky` 于是相对它吸附 ——
+   而它高度随内容撑开、自己永远不滚，结果是表头**完全不粘**（2026-11-01 实测：
+   手机滚 682px / 桌面滚 527px 后 `th` 的 `top` 已经是 −412 / −254）。
+   也不用担心横向溢出：`.gW` 是 `table-layout: fixed; width: 100%`，七列等分、不会撑宽。 */
+@media (min-width: 721px) {
+  /* 宽屏 `.wb-top` 粘在顶上：min-height 52 + 上内边距 6 + 1px 分隔线 = 55（实测）。
+     ≤720px 那条栏 `display: none`，表头贴屏幕顶即可。 */
+  .gW thead th { top: 55px; }
 }
 </style>

@@ -472,7 +472,7 @@ onMounted(() => {
 }
 .sKicker {
   grid-area: kick; margin: 0; font-family: var(--font-sans); font-size: 9.5px; line-height: 1;
-  font-weight: 500; letter-spacing: .26em; color: var(--ink-faint);
+  font-weight: 600; letter-spacing: .26em; color: var(--ink-faint);
 }
 .sTitleRow {
   grid-area: title; display: flex; align-items: baseline; gap: var(--sp-4); min-width: 0;
@@ -519,7 +519,7 @@ onMounted(() => {
   gap: 10px; padding: 7px 14px; background: var(--surface-2);
   border-bottom: 1px solid var(--line);
   font-family: var(--font-sans); font-size: 8.5px; line-height: 1;
-  font-weight: 500; letter-spacing: .2em; color: var(--ink-faint);
+  font-weight: 600; letter-spacing: .2em; color: var(--ink-faint);
 }
 .sTh-act { text-align: right; }
 .sList { list-style: none; margin: 0; padding: 0; }

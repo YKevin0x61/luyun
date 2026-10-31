@@ -1235,7 +1235,7 @@ useNudgePull({
   margin-left: auto;
   font-family: var(--font-mono), var(--font-sans);
   font-size: 9.5px;
-  font-weight: 500;
+  font-weight: 600;
   line-height: 1;
   color: var(--ink-faint);
 }
@@ -1245,7 +1245,7 @@ useNudgePull({
   margin-left: auto;
   font-family: var(--font-mono), var(--font-sans);
   font-size: 9.5px;
-  font-weight: 500;
+  font-weight: 600;
   line-height: 1;
   letter-spacing: .02em;
   color: var(--ink-faint);
@@ -1411,7 +1411,7 @@ useNudgePull({
   margin: 0;
   font-family: var(--font-mono), var(--font-sans);
   font-size: 20px;
-  font-weight: 500;
+  font-weight: 600;
   color: var(--ink);
 }
 .score-empty {
@@ -1646,7 +1646,7 @@ details.tA-foot {
   outline-offset: -2px;
 }
 .cap-row.off .cap-mark { color: var(--ink-faint); }
-.cap-row.off .cap-name { font-weight: 500; color: var(--ink-dim); }
+.cap-row.off .cap-name { font-weight: 600; color: var(--ink-dim); }
 .cap-row.off .cap-note { color: var(--ink-faint); }
 .cap-row.off .cap-chev { opacity: .3; }
 

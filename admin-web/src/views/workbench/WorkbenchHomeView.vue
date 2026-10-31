@@ -387,7 +387,7 @@ useNudgePull({
   background: var(--surface-1); color: var(--ink-dim);
   font: 500 10px/1 var(--font-mono);
 }
-.wbh-pill b { color: var(--ink); font-weight: 500; }
+.wbh-pill b { color: var(--ink); font-weight: 600; }
 .wbh-pill.is-warn b { color: var(--warn); }
 
 .wbh-led { width: 6px; height: 6px; border-radius: 50%; display: inline-block; flex: 0 0 6px; }
@@ -459,7 +459,7 @@ useNudgePull({
   padding: 9px 14px; border-top: 1px solid var(--wb-ink-a08);
   font-size: 10.5px; color: var(--ink-dim);
 }
-.wbh-offs li b { min-width: 26px; font-weight: 500; color: var(--ink); }
+.wbh-offs li b { min-width: 26px; font-weight: 600; color: var(--ink); }
 .wbh-offs li i { font-style: normal; margin-left: auto; color: var(--ink-dim); }
 
 /* 等我处理：类型 / 主副两行 / 箭头，行高 56（触控），一行一条。 */
@@ -486,7 +486,7 @@ useNudgePull({
 .wbh-kind.warn { color: var(--warn); }
 .wbh-kind.bad { color: var(--danger-bright); }
 .wbh-todo-main { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
-.wbh-todo-main b { font-size: 12px; font-weight: 500; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wbh-todo-main b { font-size: 12px; font-weight: 600; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .wbh-todo-main i { font-style: normal; font: 400 9.5px/1.2 var(--font-mono); color: var(--ink-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .wbh-chev { color: var(--ink-faint); font-size: 14px; }
 .wbh-empty { margin: 0; padding: 14px; font-size: 11px; color: var(--ink-dim); }
@@ -515,7 +515,7 @@ useNudgePull({
   border-bottom: 1px solid var(--wb-ink-a08);
 }
 .wbh-prep li:last-child { border-bottom: 0; }
-.wbh-prep b { font-weight: 500; font-size: 12px; color: var(--ink); }
+.wbh-prep b { font-weight: 600; font-size: 12px; color: var(--ink); }
 .wbh-prep span {
   font-size: 13px; font-weight: 600; color: var(--action);
   font-variant-numeric: tabular-nums;

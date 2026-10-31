@@ -47,7 +47,7 @@ const offline = computed(() => connected && connected.value === false)
   background: var(--action); box-shadow: 0 0 0 3px var(--wb-tint-14);
 }
 .sched-conn b {
-  font-family: var(--font-sans); font-size: 9.5px; font-weight: 500;
+  font-family: var(--font-sans); font-size: 9.5px; font-weight: 600;
   letter-spacing: .12em; color: var(--ink-dim);
 }
 .sched-conn.off { color: var(--danger-bright); }

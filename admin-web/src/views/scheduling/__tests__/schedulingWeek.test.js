@@ -78,6 +78,9 @@ describe('店长端周表（员工 × 周）', () => {
     expect(view).toMatch(/v-if="weekCellHalf\(employee, day\)"/)
     expect(view).toMatch(/function weekCellHalf\(employee, day\)/)
     expect(view).toMatch(/class="gW-half"/)
+    // 「半」得看得见（2026-11-01 用户反馈）：反白小胶囊 —— 底色取班次字色、字取班次底色，
+    // 在任何一档上都跟正文同档对比度；以前是 9px 的 --info 蓝字，落在亮底上几乎看不见。
+    expect(view).toMatch(/\.gW-cell \.gW-half \{[^}]*background: var\(--shift-ink\); color: var\(--shift-fill\)/)
     expect(view).toMatch(/cell\.half_rest \? '（休半天）' : ''/)
     // 图例里解释那个「半」（只在真有这样的格子时才出现）。
     expect(view).toMatch(/const weekHalfCount = computed/)
@@ -520,5 +523,98 @@ describe('选笔时工作区回到「跟固定区」（2026-10-29）', () => {
   it('「跟固定区」本身仍是 zoneId 空串：服务端按这个人这个班次的固定区回填', () => {
     expect(view).toMatch(/if \(penZoneId\.value === ''\) return '跟固定区'/)
     expect(view).toMatch(/zoneId: penZoneId\.value \}/)
+  })
+})
+
+// 2026-11-01 用户：周表成员列「名字后面要能看到存假天数」。
+describe('成员列的存假天数（2026-11-01）', () => {
+  it('数从考勤表那张读口来，不在这里重算一份', () => {
+    // 存假只有一条算式（`AttendanceStore.sheet()` 的 `leave.balance`：手填期末 ?? 公式，
+    // 扣过已批抵扣）。周表要是自己算，员工手机上的「存假卡」与这张表迟早对不上。
+    // 考勤表与排班三页**同一道门**（`_require_scheduler`），所以这一步不需要新接口。
+    expect(view).toMatch(/api\.get\('\/api\/attendance\/sheet'\)/)
+    expect(view).toMatch(/person\.leave && person\.leave\.balance/)
+    // 不能在周表里重推存假：这两处只属于服务端的假期台账。
+    expect(view).not.toMatch(/previous_balance/)
+    expect(view).not.toMatch(/monthly_rest/)
+  })
+
+  it('只在切到周表时读，且读不到就整条不渲染（不把周表拖成报错）', () => {
+    const start = view.indexOf("else if (next === 'week')")
+    const body = view.slice(start, view.indexOf('\n}', start))
+    expect(body).toMatch(/loadLeaveBalances\(\)/)
+    // 静默失败：`catch` 里只清空，不写 `weekError`（周表本身是这一页的主件）。
+    const fnStart = view.indexOf('async function loadLeaveBalances')
+    const fnBody = view.slice(fnStart, view.indexOf('\n}', fnStart))
+    expect(fnBody).toMatch(/catch \{[\s\S]*?leaveBalance\.value = \{\}/)
+    expect(fnBody).not.toMatch(/weekError/)
+    // 读不到时那一行 span 根本不存在（不是显示一个 0）。
+    expect(view).toMatch(/v-if="leaveBalance\[employee\.id\] !== undefined"/)
+  })
+
+  it('名字后面一个带圈的数字，只写天数；负数是欠班（ADR 0124），用 warn 那一档色', () => {
+    // 2026-11-01 用户改口径：不要「存假 X 天」那行字，名字后面跟一个带圈的数字即可 ——
+    // 单位与「存假 / 欠班」两个字都交给颜色和悬停提示。
+    const start = view.indexOf('function leaveBadge')
+    const body = view.slice(start, view.indexOf('\n}', start))
+    expect(body).toMatch(/return formatDays\(value\)\.replace\(' 天', ''\)/)
+    // 天数写法复用考勤表那一套（`12` / `19.5` / `−10.5`），不另起一套取整规则。
+    expect(view).toMatch(/import \{ formatDays \} from '\.\.\/\.\.\/utils\/attendanceSheet'/)
+    expect(view).not.toMatch(/function leaveText/)
+    expect(view).toMatch(/class="gW-leave"/)
+    expect(view).toMatch(/:class="\{ debt: leaveBalance\[employee\.id\] < 0 \}"/)
+    // 「带圈」= 紧贴名字、不换行的圆角徽标（一位数是正圆，两位数自然长成胶囊）。
+    expect(view).toMatch(/\.gW-leave \{[\s\S]{0,200}?display: inline-flex; align-items: center; justify-content: center;/)
+    expect(view).toMatch(/\.gW-leave \{[\s\S]{0,400}?border-radius: 999px;/)
+    expect(view).toMatch(/\.gW-leave \{[\s\S]{0,400}?background: var\(--action-soft\); color: var\(--action\);/)
+    expect(view).toMatch(/\.gW-leave\.debt \{ background: var\(--warn-soft\); color: var\(--warn\); \}/)
+    // 悬停要能说清这个数是什么、属于哪个月。
+    expect(view).toMatch(/function leaveTitle/)
+    expect(view).toMatch(/月\$\{said\}（与考勤表同一个数）/)
+  })
+
+  it('跨月周也不另算月份：考勤表那条接口恒为「今天」所在的月', () => {
+    const start = view.indexOf('async function loadLeaveBalances')
+    const body = view.slice(start, view.indexOf('\n}', start))
+    // 不带 `month` 参数 —— 考勤表刻意没有月份选择，周表跟着这个口径。
+    expect(body).not.toMatch(/month:/)
+    expect(view).toMatch(/leaveMonth\.value = data\.month \|\| ''/)
+  })
+})
+
+// 2026-11-01 用户：「这个模块顶部的日期怎么滑动都要保持在屏幕内」。
+describe('周表表头粘住（2026-11-01）', () => {
+  it('日期行贴在屏幕上沿；宽屏让开壳的顶栏（55px），手机上那条栏整条不显示', () => {
+    expect(view).toMatch(/\.gW thead th \{\s*position: sticky; top: 0; z-index: var\(--z-shell\)/)
+    expect(view).toMatch(/@media \(min-width: 721px\) \{[\s\S]{0,320}?\.gW thead th \{ top: 55px; \}/)
+  })
+
+  it('滚动容器不能再是 `.gW-wrap`：那会让 sticky 相对它吸附、永远不生效', () => {
+    // `overflow-x: auto` 会把另一轴也算成 auto（规范如此），`.gW-wrap` 于是成了滚动容器；
+    // 它高度随内容撑开、自己从不滚动，表头就跟着内容一起滚出屏幕（实测 top 变成 −412）。
+    expect(view).not.toMatch(/\.gW-wrap \{[^}]*overflow-x: auto/)
+    // 不靠滚动条兜底的前提：表格是定宽等分，永远不会横向撑出容器。
+    expect(view).toMatch(/\.gW \{ width: 100%; table-layout: fixed;/)
+  })
+
+  it('成员列表头不能是 flex —— `display: flex` 的 `<th>` 不再是 table-cell，sticky 对它无效', () => {
+    const start = view.indexOf('.gW-name {')
+    const body = view.slice(start, view.indexOf('}', start))
+    // 只认「声明行」：这块注释里正解释着那个 `display: flex`，别把注释也当违规。
+    expect(body).not.toMatch(/^\s+display: flex;/m)
+    expect(body).toMatch(/vertical-align: middle/)
+    // 放大镜原来靠 flex 的 `margin-left: auto` 推右，改成同行排下来。
+    expect(view).toMatch(/\.gW-findBtn \{[\s\S]{0,220}?margin-left: 4px;/)
+  })
+
+  it('粘住时不透出下面的内容：today 实底、mute 不用 opacity、圆角和格缝用同色阴影盖住', () => {
+    // `--action-soft` 只有 12% 不透明度，滚动时下面的格子会透上来。
+    expect(view).toMatch(/\.gW thead th\.today \{[\s\S]{0,220}?background-color: var\(--surface-2\);/)
+    expect(view).toMatch(/\.gW thead th\.today \{[\s\S]{0,400}?box-shadow: 0 0 0 4px var\(--surface-2\), inset 0 0 0 1px var\(--action\);/)
+    // `opacity` 会让整格连底一起半透明。
+    expect(view).not.toMatch(/\.gW thead th\.mute \{ opacity/)
+    expect(view).toMatch(/\.gW thead th\.mute \{ color: var\(--ink-faint\); \}/)
+    // 8px 圆角 + 格间 4px border-spacing 是两个漏底的口子，同色外扩阴影一并盖住。
+    expect(view).toMatch(/box-shadow: 0 0 0 4px var\(--surface-2\);/)
   })
 })

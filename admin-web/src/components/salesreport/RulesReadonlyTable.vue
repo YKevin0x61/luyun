@@ -128,7 +128,7 @@ onMounted(load)
   top: 0;
   background: var(--card2);
   color: var(--text-dim);
-  font-weight: 500;
+  font-weight: 600;
   font-size: 11.5px;
   text-align: left;
   padding: 9px 12px;

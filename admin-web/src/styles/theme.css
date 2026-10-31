@@ -46,6 +46,11 @@ body {
     radial-gradient(circle at 88% 10%, rgba(6, 182, 212, 0.08), transparent 28%),
     var(--bg);
   color: var(--text);
+  /* 字重基准（2026-11-01 用户要求「全站字体改粗体」，口径＝整体上移一档）：
+     没写 font-weight 的正文全部继承这里的 500（PingFang SC 的 Medium）；源码里显式
+     写过 400/500 的已在各自位置同步上移（400→500、500→600）。600 及以上是标题 / 强调
+     层，保持原值 —— 再往上堆会让密集表格糊成一片，层级也就没了。 */
+  font-weight: 500;
 }
 
 .app-shell { display: flex; flex-direction: column; height: 100vh; height: 100dvh; --global-nav-height: clamp(38px, 4.4vh, 46px); }
@@ -64,7 +69,7 @@ body {
 }
 .global-nav-brand { color: #fff; font-weight: 700; font-size: 13px; letter-spacing: .3px; white-space: nowrap; }
 .global-nav-brand span { color: var(--accent); }
-.global-nav-brand .global-nav-subtitle { color: var(--text-dim); font-weight: 400; }
+.global-nav-brand .global-nav-subtitle { color: var(--text-dim); font-weight: 500; }
 .global-nav-tabs { display: flex; gap: 4px; min-width: 0; overflow-x: auto; scrollbar-width: none; }
 .global-nav-tabs::-webkit-scrollbar { display: none; }
 .nav-tab {
@@ -298,7 +303,7 @@ table.data-table td.actions { display: flex; gap: 6px; }
 @media (max-width: 1100px) { .insight-grid { grid-template-columns: 1fr; } }
 .insight-card { background: rgba(17, 24, 39, 0.88); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; min-height: 142px; }
 .insight-card-header { padding: 8px 11px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.insight-card-header h3 { font-size: 12px; color: var(--text-dim); font-weight: 500; }
+.insight-card-header h3 { font-size: 12px; color: var(--text-dim); font-weight: 600; }
 .insight-card-body { padding: 8px 11px; height: 110px; overflow: auto; }
 .chart-wrap { height: 100%; min-height: 92px; }
 .chart-svg { width: 100%; height: 100%; display: block; }
@@ -319,7 +324,7 @@ table.data-table td.actions { display: flex; gap: 6px; }
 @media (max-width: 900px) { .two-col { grid-template-columns: 1fr; } }
 .table-card { background: rgba(17, 24, 39, 0.88); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; height: 100%; min-height: 0; display: flex; flex-direction: column; flex: 1; }
 .table-card-header { padding: 8px 11px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
-.table-card-header h3 { font-size: 12px; color: var(--text-dim); font-weight: 500; }
+.table-card-header h3 { font-size: 12px; color: var(--text-dim); font-weight: 600; }
 .table-card-header h3 span { color: var(--text); }
 .table-tools { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
 .table-tools .input { width: 150px; }

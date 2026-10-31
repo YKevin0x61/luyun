@@ -985,7 +985,7 @@ onMounted(() => {
 }
 .aKicker {
   margin: 0; font-family: var(--font-sans); font-size: 9.5px; line-height: 1;
-  font-weight: 500; letter-spacing: .26em; color: var(--ink-faint);
+  font-weight: 600; letter-spacing: .26em; color: var(--ink-faint);
 }
 .aMetaRow { display: flex; align-items: center; gap: var(--sp-4); flex-wrap: wrap; }
 .aScope {
@@ -1019,7 +1019,7 @@ onMounted(() => {
   font-style: normal; font-family: var(--font-sans); font-size: 9.5px;
   letter-spacing: .18em; color: var(--ink-faint);
 }
-.aKpi b { font-family: var(--font-mono); font-size: 20px; line-height: 1; font-weight: 500; color: var(--ink); }
+.aKpi b { font-family: var(--font-mono); font-size: 20px; line-height: 1; font-weight: 600; color: var(--ink); }
 .aKpi em { font-style: normal; font-size: 9.5px; color: var(--ink-faint); }
 /* 待补排行（页头下第一块）：姓名 / 待补天数 / 净时长，点人展开。 */
 .aRankPanel {
@@ -1136,7 +1136,7 @@ onMounted(() => {
   border-top: 1px solid var(--wb-ink-a08);
 }
 .aDaysHead > span:first-child {
-  font-family: var(--font-sans); font-size: 9px; font-weight: 500;
+  font-family: var(--font-sans); font-size: 9px; font-weight: 600;
   letter-spacing: .18em; color: var(--ink-faint);
 }
 .aDaysHint { margin-left: auto; font-family: var(--font-mono); font-size: 9px; color: var(--ink-faint); }
@@ -1156,7 +1156,7 @@ onMounted(() => {
 /* 「今天」的第二个记号（B 批返工 ②）：颜色不是唯一线索，格子里那个数字后面跟一个
    「今」字。它跟日期数字同一行，格子高度不变。 */
 .aTodayMark { margin-left: 2px; font-style: normal; color: var(--accent); }
-.aDayText { font-size: var(--fs-11); font-weight: 500; color: var(--ink-dim); }
+.aDayText { font-size: var(--fs-11); font-weight: 600; color: var(--ink-dim); }
 /* 能点的那一格是一颗按钮，但长得跟别的格子一样：卡片是 30 个格子，多一层按钮边框会吵。 */
 .aDayBtn {
   display: flex; flex-direction: column; align-items: center; gap: 1px; width: 100%;

@@ -954,7 +954,7 @@ onMounted(async () => {
 .pr-res { color: var(--action) !important; }
 .pr-card { border: 1px solid var(--line); border-radius: var(--r-1); padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; background: var(--surface-2); }
 .pr-card h3 { margin: 0; font-size: var(--fs-12); font-weight: 600; color: var(--ink-dim); display: flex; gap: 8px; align-items: center; }
-.pr-card h3 span { font-weight: 400; color: var(--ink-faint); font-size: var(--fs-11); }
+.pr-card h3 span { font-weight: 500; color: var(--ink-faint); font-size: var(--fs-11); }
 .pr-var {
   display: flex; align-items: center; justify-content: space-between;
   border: 1px solid transparent;

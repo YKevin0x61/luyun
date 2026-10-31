@@ -265,7 +265,7 @@ onMounted(() => {
 }
 .hKicker {
   grid-area: kick; margin: 0; font-family: var(--font-sans); font-size: 9.5px; line-height: 1;
-  font-weight: 500; letter-spacing: .26em; color: var(--ink-faint);
+  font-weight: 600; letter-spacing: .26em; color: var(--ink-faint);
 }
 .hTitleRow { grid-area: title; display: flex; align-items: baseline; gap: var(--sp-4); min-width: 0; }
 .hTop h1 {

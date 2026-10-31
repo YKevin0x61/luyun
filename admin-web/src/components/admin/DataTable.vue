@@ -730,7 +730,7 @@ function formatCellText(col, val) {
   }
   :deep(table.data-table td.dt-col-key)::before {
     content: '序号 ';
-    font-weight: 400;
+    font-weight: 500;
   }
   :deep(table.data-table td) {
     display: flex;

@@ -695,7 +695,7 @@ function statusClass(status) {
 .daily-page .queue-btn strong {
   grid-column: 1;
   font-size: 12.5px;
-  font-weight: 500;
+  font-weight: 600;
   color: var(--ink);
   letter-spacing: .01em;
 }

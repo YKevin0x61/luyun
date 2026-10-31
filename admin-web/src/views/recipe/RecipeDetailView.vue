@@ -1209,7 +1209,7 @@ onBeforeUnmount(() => {
     border-radius: var(--r-1);
     color: var(--ink-dim);
     font-size: 12px;
-    font-weight: 500;
+    font-weight: 600;
   }
   .sop-toolbar-chip {
     border-radius: var(--r-1);
@@ -1220,7 +1220,7 @@ onBeforeUnmount(() => {
   .sop-chip {
     border-radius: var(--r-1);
     font-size: 11px;
-    font-weight: 500;
+    font-weight: 600;
     color: var(--ink-dim);
   }
 
@@ -1399,7 +1399,7 @@ onBeforeUnmount(() => {
     background: var(--wb-warn-a10);
     color: var(--warn);
     font-size: 10px;
-    font-weight: 500;
+    font-weight: 600;
     letter-spacing: .06em;
   }
   .sop-body :deep(article.recipe-card.recipe-card--new .recipe-card-head) {
@@ -1416,7 +1416,7 @@ onBeforeUnmount(() => {
     padding: 2px 8px;
     border-radius: var(--r-full);
     font-size: 10px;
-    font-weight: 500;
+    font-weight: 600;
   }
 }
 @media (max-width: 720px) {

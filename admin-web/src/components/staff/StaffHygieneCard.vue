@@ -483,7 +483,7 @@ useNudgePull({
   margin-left: auto;
   font-family: var(--font-mono), var(--font-sans);
   font-size: 16px;
-  font-weight: 500;
+  font-weight: 600;
   color: var(--ink);
 }
 /* 合计并进首行末尾（面板头只报截止）：与 16px 读数同一行，用 mono 小字。 */

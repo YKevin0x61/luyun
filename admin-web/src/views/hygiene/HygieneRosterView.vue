@@ -1225,21 +1225,21 @@ async function copyInvite() {
   display: inline-flex; align-items: center;
   min-height: 38px; padding: 0 .7rem;
   border: 1px dashed var(--line-strong); border-radius: var(--r-1);
-  background: var(--surface-2); color: var(--ink); font-weight: 400;
+  background: var(--surface-2); color: var(--ink); font-weight: 500;
 }
 .roster-page .roster-readonly.is-mono { font-family: var(--font-mono); }
 .roster-page .roster-field-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: .35rem; }
 .roster-page .roster-field-note { color: var(--warn); font-size: .72rem; font-weight: 600; }
-.roster-page .roster-expiry { font-size: .72rem; font-weight: 400; color: var(--ink-faint); }
+.roster-page .roster-expiry { font-size: .72rem; font-weight: 500; color: var(--ink-faint); }
 .roster-page .roster-input-suffix { display: flex; align-items: center; gap: .4rem; }
 .roster-page .roster-input-suffix .input { flex: 1 1 auto; min-width: 0; }
-.roster-page .roster-suffix { flex: 0 0 auto; font-size: .76rem; font-weight: 400; color: var(--ink-dim); }
+.roster-page .roster-suffix { flex: 0 0 auto; font-size: .76rem; font-weight: 500; color: var(--ink-dim); }
 .roster-page .roster-caps { min-width: 0; margin: 0; padding: 0; border: 0; display: flex; flex-direction: column; gap: .35rem; }
 .roster-page .roster-caps-title { padding: 0; font-size: .76rem; font-weight: 600; color: var(--ink-faint); }
 .roster-page .roster-caps-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(8rem, 1fr)); gap: .15rem .7rem; max-width: 44rem; }
 .roster-page .hy-person-fields .roster-cap {
   display: flex; flex-direction: row; align-items: center; gap: .4rem;
-  min-height: 34px; font-weight: 500; color: var(--ink); cursor: pointer;
+  min-height: 34px; font-weight: 600; color: var(--ink); cursor: pointer;
 }
 .roster-page .roster-cap input { flex: 0 0 auto; width: 16px; height: 16px; margin: 0; accent-color: var(--action); }
 .roster-page .roster-cap span { min-width: 0; }

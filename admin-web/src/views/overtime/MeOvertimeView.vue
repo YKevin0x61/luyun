@@ -840,7 +840,7 @@ useNudgePull({ id: 'me-overtime', topics: ['overtime'], pull: () => load(true) }
   margin: 0;
   font-family: var(--font-mono), var(--font-sans);
   font-size: 19px;
-  font-weight: 500;
+  font-weight: 600;
   line-height: 1;
   font-variant-numeric: tabular-nums;
   color: var(--ink);
@@ -863,7 +863,7 @@ useNudgePull({ id: 'me-overtime', topics: ['overtime'], pull: () => load(true) }
   margin-left: 3px;
   font-family: var(--font-sans);
   font-style: normal;
-  font-weight: 400;
+  font-weight: 500;
   font-size: 10px;
   color: var(--ink-faint);
 }
@@ -889,7 +889,7 @@ useNudgePull({ id: 'me-overtime', topics: ['overtime'], pull: () => load(true) }
   padding: 0 18px;
   font-family: inherit;
   font-size: 13px;
-  font-weight: 500;
+  font-weight: 600;
   color: var(--ink);
   background: transparent;
   border: 1px solid var(--line-strong);
@@ -945,7 +945,7 @@ useNudgePull({ id: 'me-overtime', topics: ['overtime'], pull: () => load(true) }
 .hours {
   font-family: var(--font-mono), var(--font-sans);
   font-size: 24px;
-  font-weight: 500;
+  font-weight: 600;
   line-height: 1;
   font-variant-numeric: tabular-nums;
   color: var(--ink);
@@ -1035,7 +1035,7 @@ useNudgePull({ id: 'me-overtime', topics: ['overtime'], pull: () => load(true) }
   flex: none;
   font-family: var(--font-mono), var(--font-sans);
   font-size: 17px;
-  font-weight: 500;
+  font-weight: 600;
   line-height: 1.2;
   font-variant-numeric: tabular-nums;
   color: var(--ink);

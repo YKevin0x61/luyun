@@ -28,7 +28,7 @@
     repeating-linear-gradient(90deg, var(--wb-ink-a04) 0 1px, transparent 1px 46px);
   background-attachment: fixed;
   font-family: var(--font-sans);
-  font-weight: 500;
+  font-weight: 600;
   line-height: 1.55;
   color-scheme: dark;
 }
@@ -582,7 +582,7 @@
   color: var(--hy-muted);
   font-size: .84rem;
   line-height: 1.7;
-  font-weight: 400;
+  font-weight: 500;
 }
 .hygiene-admin .rule-help {
   margin-top: .55rem;
@@ -903,7 +903,7 @@
   border: 1px solid var(--hy-seal-line);
   color: var(--hy-seal-bright);
   font-size: .82rem;
-  font-weight: 500;
+  font-weight: 600;
 }
 .hygiene-admin .roster-empty {
   padding: 34px 16px;

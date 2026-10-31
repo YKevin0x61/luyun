@@ -139,7 +139,7 @@ function submit() {
           <option v-for="s in stationsStore.list" :key="s.id" :value="s.id">{{ s.name }}</option>
         </select>
 
-        <label v-else-if="inputMode === 'toggle'" class="luyun-check-row" style="font-weight:400">
+        <label v-else-if="inputMode === 'toggle'" class="luyun-check-row" style="font-weight:500">
           <LuyunCheckbox v-model="toggleValue" />
           {{ toggleValue ? '启用 (1)' : '停用 (0)' }}
         </label>

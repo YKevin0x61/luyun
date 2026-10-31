@@ -315,7 +315,7 @@ useNudgePull({ id: 'workbench-inbox', topics: ['scheduling'], pull: load })
 }
 .iKicker {
   grid-area: kick; margin: 0; font-family: var(--font-sans); font-size: 9.5px; line-height: 1;
-  font-weight: 500; letter-spacing: .26em; color: var(--ink-faint);
+  font-weight: 600; letter-spacing: .26em; color: var(--ink-faint);
 }
 .iTitleRow { grid-area: title; display: flex; align-items: baseline; gap: var(--sp-4); min-width: 0; }
 .iTop h1 {
@@ -332,7 +332,7 @@ useNudgePull({ id: 'workbench-inbox', topics: ['scheduling'], pull: load })
   background: var(--surface-1); color: var(--warn); cursor: pointer;
   font-family: var(--font-mono); font-size: 10px; line-height: 1;
 }
-.iChip b { color: var(--ink); font-weight: 500; }
+.iChip b { color: var(--ink); font-weight: 600; }
 .iLed { width: 6px; height: 6px; border-radius: 50%; display: inline-block; flex: 0 0 6px; }
 .iLed.warn { background: var(--warn); box-shadow: 0 0 0 3px var(--wb-warn-a16); }
 .iHint { margin: 0; font-size: 12.5px; color: var(--ink-dim); }
@@ -375,7 +375,7 @@ useNudgePull({ id: 'workbench-inbox', topics: ['scheduling'], pull: load })
 .iItem-hd b { min-width: 0; font-size: 13px; font-weight: 600; color: var(--ink); }
 .iKind {
   font-family: var(--font-sans); font-size: 8.5px; line-height: 1;
-  font-weight: 500; letter-spacing: .2em; color: var(--info);
+  font-weight: 600; letter-spacing: .2em; color: var(--info);
 }
 .iWhen { font-family: var(--font-mono); font-size: 11px; color: var(--ink); }
 .iDays { font-family: var(--font-mono); font-size: 10px; color: var(--ink-faint); }

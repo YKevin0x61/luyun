@@ -279,7 +279,7 @@ onMounted(() => {
 }
 .hKicker {
   grid-area: kick; margin: 0; font-family: var(--font-sans); font-size: 9.5px; line-height: 1;
-  font-weight: 500; letter-spacing: .26em; color: var(--ink-faint);
+  font-weight: 600; letter-spacing: .26em; color: var(--ink-faint);
 }
 .hTitleRow { grid-area: title; display: flex; align-items: baseline; gap: var(--sp-4); min-width: 0; }
 .hTop h1 {
@@ -380,7 +380,7 @@ onMounted(() => {
 .hCell::after { content: ""; position: absolute; inset: -2px; }
 .hCell:hover { border-color: var(--line-strong); color: var(--ink); }
 .hCell-blank { cursor: default; }
-.hCell b { font-weight: 500; font-family: var(--font-mono); font-size: 14px; line-height: 1.15; }
+.hCell b { font-weight: 600; font-family: var(--font-mono); font-size: 14px; line-height: 1.15; }
 .hCell em {
   font-style: normal; font-size: 9.5px; line-height: 1.15; max-width: 60px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--warn);
