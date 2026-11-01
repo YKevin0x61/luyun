@@ -256,6 +256,42 @@ describe('订阅矩阵', () => {
     expect(table.findAll('tbody tr')).toHaveLength(2)
   })
 
+  // 票 04：渠道停用但订阅还在 —— 那一格不能画成「未勾」（勾了也不生效、重载还是未勾），
+  // 改成只读标记；点它说清楚订阅还在、去哪儿启用。
+  it('停用渠道的格子是只读标记「已停用（订阅保留）」，点它不写库只指路', async () => {
+    const { wrapper, fetchMock } = await mountView({
+      channels: [channel(1, '门店群'), { ...channel(2, '二楼包间群'), enabled: false }],
+      topics: [topic('sales_report', '销售报表', [1, 2], { triggers: ['scheduled'] })],
+    })
+    await openTab(wrapper, '订阅')
+
+    const cells = wrapper.find('table.wp-matrix').findAll('tbody tr')[0].findAll('td')
+    // 门面渠道正常：还是可勾的复选框
+    expect(cells[1].find('button[role=checkbox]').exists()).toBe(true)
+    // 停用渠道：没有复选框，只有只读标记
+    expect(cells[2].find('button[role=checkbox]').exists()).toBe(false)
+    expect(cells[2].text()).toContain('已停用（订阅保留）')
+
+    await cells[2].trigger('click')
+    await flushPromises()
+    expect(fetchMock.calls.filter((call) => call.method === 'POST')).toEqual([])
+    expect(wrapper.text()).toContain('这条订阅还留着')
+    expect(wrapper.text()).toContain('到「渠道」tab 启用后就会恢复投递')
+  })
+
+  // 票 04：渠道重新启用后，原订阅直接恢复成已勾 —— 不用再勾一次。
+  it('渠道重新启用后，原订阅恢复显示为已勾', async () => {
+    const { wrapper } = await mountView({
+      channels: [channel(1, '门店群'), channel(2, '二楼包间群')],
+      topics: [topic('sales_report', '销售报表', [1, 2], { triggers: ['scheduled'] })],
+    })
+    await openTab(wrapper, '订阅')
+
+    const cells = wrapper.find('table.wp-matrix').findAll('tbody tr')[0].findAll('td')
+    expect(cells[1].find('button[role=checkbox]').attributes('aria-checked')).toBe('true')
+    expect(cells[2].find('button[role=checkbox]').attributes('aria-checked')).toBe('true')
+  })
+
   // 票 07：9 类内容里多数只有事件触发 —— 建不了任务不等于不会发，页面上要写出来。
   it('每行标出触发方式，且只来自 /meta 的 triggers', async () => {
     const { wrapper } = await mountView({
@@ -447,9 +483,11 @@ describe('多选列表（渠道 > 8）的勾选与保存反馈', () => {
     expect(checked.filter((value) => value === 'true')).toHaveLength(1)
   })
 
-  it('「订了但渠道停着」不算已勾：徽章与勾选数用同一份判据', async () => {
+  // 票 04：停用渠道那一行原来看起来就是「未勾」—— 勾一下、保存、重载还是未勾（死交互）。
+  // 现在它是只读标记：订阅还在的写「已停用（订阅保留）」，点它只说去哪儿启用。
+  it('「订了但渠道停着」不算已勾：那一行是只读标记，点它不写库只指路', async () => {
     const many = MANY.map((item, index) => (index === 1 ? { ...item, enabled: false } : item))
-    const { wrapper } = await mountView({
+    const { wrapper, fetchMock } = await mountView({
       channels: many,
       topics: [topic('hygiene_reminder', '卫生提醒', [], {
         // 群 2 停着（订阅保留、投递跳过），群 3 正常
@@ -459,9 +497,25 @@ describe('多选列表（渠道 > 8）的勾选与保存反馈', () => {
     await openPicker(wrapper)
 
     expect(wrapper.findAll('.wp-pick-row')[0].text()).toContain('1 个渠道')
-    expect(checkboxes(wrapper).filter((value) => value === 'true')).toHaveLength(1)
-    expect(checkboxes(wrapper)[2]).toBe('true')
-    expect(checkboxes(wrapper)[1]).toBe('false')
+    const rows = wrapper.findAll('.luyun-check-row')
+    expect(rows).toHaveLength(9)
+    // 群 2（停用、订阅还在）：没有复选框，只有一句说明
+    expect(rows[1].find('button[role=checkbox]').exists()).toBe(false)
+    expect(rows[1].text()).toContain('已停用（订阅保留）')
+
+    await rows[1].trigger('click')
+    await flushPromises()
+    expect(fetchMock.calls.filter((call) => call.method === 'POST')).toEqual([])
+    expect(wrapper.text()).toContain('到「渠道」tab 启用后就会恢复投递')
+
+    // 剩下的复选框里，只有群 3 是已勾
+    const checked = rows
+      .map((row) => row.find('button[role=checkbox]'))
+      .filter((box) => box.exists())
+      .map((box) => box.attributes('aria-checked'))
+    expect(checked).toHaveLength(8)
+    expect(checked.filter((value) => value === 'true')).toHaveLength(1)
+    expect(checked[1]).toBe('true')
   })
 
   it('取消勾选发出的是带真实渠道 id 的停用请求', async () => {

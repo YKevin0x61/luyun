@@ -365,7 +365,32 @@ export function topicActiveChannelIds(row) {
     .map((channel) => Number(channel.id))
 }
 
-/** 某一行的零订阅判定：一个**可投递**的渠道都没有，就是这类内容当前一条都不发。
+/**
+ * 某一行**订阅过**的渠道 id（票 04）：不管渠道启停，只问「这条订阅还在不在」。
+ *
+ * 与 `topicActiveChannelIds` 是两件事：那个回答「现在真的会发到哪里」（停用渠道不算），
+ * 这个回答「订阅本身还在不在」。两者差出来的那几个渠道，就是矩阵里「已停用（订阅保留）」
+ * 的那些格子 —— 拿前者渲染勾选态会把「订阅还在、渠道停着」画成未勾，点一下也没用。
+ */
+export function topicSubscribedChannelIds(row) {
+  return ((row && row.channels) || [])
+    .filter((channel) => channel && channel.id !== undefined && channel.id !== null)
+    .map((channel) => Number(channel.id))
+}
+
+/**
+ * 矩阵一格的状态（票 04）：`subscribed` / `unsubscribed` / `disabled-subscribed` /
+ * `disabled`。后两种是**渠道停用**的格子：不再渲染成可勾的复选框 —— 勾了也投不出去，
+ * 而且重载之后仍然是未勾（死交互）。页面据它显示只读标记 + 指路「去渠道启用」。
+ */
+export function matrixCellState(row, channel) {
+  if (!channel || channel.id === undefined || channel.id === null) return 'unsubscribed'
+  const subscribed = topicSubscribedChannelIds(row).includes(Number(channel.id))
+  if (!channel.enabled) return subscribed ? 'disabled-subscribed' : 'disabled'
+  return subscribed ? 'subscribed' : 'unsubscribed'
+}
+
+/** 某一行的零订阅判定：一个**可投递**的渠道都没有，就是这类内容当前一条都不发。/** 某一行的零订阅判定：一个**可投递**的渠道都没有，就是这类内容当前一条都不发。
  *
  * 「订阅了但渠道停着」也算零订阅 —— 投递会跳过停用渠道（出站记 skipped），页面上不
  * 亮出来，店长会以为还在发（用户故事 9 要的正是这个可见性）。

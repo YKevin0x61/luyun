@@ -8,6 +8,7 @@ import {
   DELIVERY_STATUS_OPTIONS,
   deliveryStatusLabel, deliveryErrorSummary, formatDeliveryTime,
   deliveryTriggerLabel, deliveryTaskLabel,
+  matrixCellState, topicSubscribedChannelIds,
   auditActionLabel,
   auditObjectLabel, auditVisibleFields, auditChangeText,
 } from '../composables/useWecomPush'
@@ -205,6 +206,11 @@ const subscriptionIds = computed(() => {
   return map
 })
 
+// 多选形态里「现在选中的那一类内容」：停用渠道的格子在多选列表里也要判订阅状态（票 04）。
+const pickedTopicRow = computed(
+  () => matrixRows.value.find((row) => row.id === multiSelect.topicId) || null,
+)
+
 function topicSubscribed(topicId, channelId) {
   return (subscriptionIds.value[topicId] || []).includes(Number(channelId))
 }
@@ -236,7 +242,25 @@ function matrixCellId(row, channel) {
  */
 function handleMatrixCellClick(row, channel, event) {
   if (event.target && event.target.closest && event.target.closest('.luyun-checkbox')) return
+  // 票 04：渠道停用时格子是只读的 —— 点了不可能是「勾上又弹回去」，要说清楚为什么。
+  if (!channel.enabled) {
+    flashDisabledChannelSubscription(row, channel)
+    return
+  }
   handleToggleSubscription(row, channel)
+}
+
+/**
+ * 停用渠道的格子被点：说明订阅还在不在、去哪儿启用（票 04）。
+ *
+ * 后端对「勾选停用渠道」没有任何兜底提示 —— 勾了只是把订阅写成启用，重载后仍未勾，
+ * 所以这一格必须自己给出答案，不能静默。
+ */
+function flashDisabledChannelSubscription(row, channel) {
+  const kept = topicSubscribedChannelIds(row).includes(Number(channel.id))
+  flash(kept
+    ? `渠道「${channel.name}」已停用：这条订阅还留着，到「渠道」tab 启用后就会恢复投递`
+    : `渠道「${channel.name}」已停用：启用后才能勾选这条订阅`)
 }
 
 async function handleSaveChannel() {
@@ -718,7 +742,15 @@ onMounted(async () => {
                       class="wp-matrix-cell"
                       @click="handleMatrixCellClick(row, channel, $event)"
                     >
-                      <span class="wp-matrix-hit">
+                      <!-- 票 04：渠道停用时这一格是**只读**的。原来渲染成未勾的复选框，
+                           点一下 POST、重载还是未勾（渠道停用不算「会真的收到」）—— 死交互。
+                           订阅还在的写「已停用（订阅保留）」，点一下说去哪儿启用。 -->
+                      <span v-if="!channel.enabled" class="wp-matrix-off">{{
+                        matrixCellState(row, channel) === 'disabled-subscribed'
+                          ? '已停用（订阅保留）'
+                          : '已停用'
+                      }}</span>
+                      <span v-else class="wp-matrix-hit">
                         <LuyunCheckbox
                           :id="matrixCellId(row, channel)"
                           :model-value="topicSubscribed(row.id, channel.id)"
@@ -767,8 +799,21 @@ onMounted(async () => {
               <div style="font-size:13px">
                 勾选要接收「{{ (matrixRows.find((r) => r.id === multiSelect.topicId) || {}).name }}」的渠道：
               </div>
-              <label v-for="channel in matrixColumns" :key="channel.id" class="luyun-check-row">
+              <!-- 票 04：停用渠道在多选列表里同样是只读的（同一份状态，另一种渲染）。 -->
+              <label
+                v-for="channel in matrixColumns"
+                :key="channel.id"
+                class="luyun-check-row"
+                :class="{ 'is-off': !channel.enabled }"
+                @click="!channel.enabled && flashDisabledChannelSubscription(pickedTopicRow, channel)"
+              >
+                <span v-if="!channel.enabled" class="wp-matrix-off">{{
+                  matrixCellState(pickedTopicRow, channel) === 'disabled-subscribed'
+                    ? '已停用（订阅保留）'
+                    : '已停用'
+                }}</span>
                 <LuyunCheckbox
+                  v-else
                   :model-value="(multiSelect.channelIds || []).includes(channel.id)"
                   @update:model-value="(checked) => {
                     multiSelect.channelIds = checked
@@ -776,7 +821,7 @@ onMounted(async () => {
                       : multiSelect.channelIds.filter((id) => id !== channel.id)
                   }"
                 />
-                {{ channel.name }}<span v-if="!channel.enabled" style="color:var(--text-dim)">（停用，投递会跳过）</span>
+                {{ channel.name }}<span v-if="!channel.enabled" style="color:var(--text-dim)">（停用）</span>
               </label>
               <div style="display:flex;gap:8px;margin-top:6px">
                 <button class="btn btn-primary" type="button" @click="handleSaveMultiSelect">保存订阅</button>
@@ -787,9 +832,12 @@ onMounted(async () => {
           </template>
         </template>
 
+        <!-- 票 04：这段原来写「渠道停用时订阅保留、投递跳过」，但停用渠道那几格看起来
+             就是未勾 —— 文案与画面互相打脸。现在停用格是只读标记，文案照实说。 -->
         <p style="color:var(--text-dim);font-size:12px;margin:10px 0 0">
           取消勾选是停用那条订阅（保留配置，重新勾上不用重配）；保存后下一次触发即按新订阅投递。
-          渠道停用时订阅保留、投递跳过。
+          渠道停用时对应格子变成「已停用（订阅保留）」的只读标记：订阅还在，到「渠道」tab
+          启用后自动恢复投递，不用重新勾。
         </p>
       </div>
     </div>
@@ -1309,6 +1357,21 @@ onMounted(async () => {
   color: var(--text-dim);
   white-space: normal;
 }
+
+/* 票 04：停用渠道的格子 / 勾选行是只读标记 —— 它原来是个「勾了也不生效」的复选框。 */
+.wp-matrix-off {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 26px;
+  padding: 0 6px;
+  font-size: 11px;
+  line-height: 1.3;
+  color: var(--text-dim);
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+}
+.luyun-check-row.is-off { cursor: help; }
 
 /* 多选列表里「先选内容类型」的那一列按钮：选中态要看得出来。 */
 .wp-pick-row {
