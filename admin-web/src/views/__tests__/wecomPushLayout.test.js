@@ -118,6 +118,15 @@ describe('企微推送页的立即发送', () => {
     expect(src).toContain('targetNames:sendTargetNames.value,')
   })
 
+  // 票 01：预览与当前任务 / 参数对不上时，按钮变灰还不够 —— 页面得说清是哪一步让预览
+  // 失效了（换任务 / 改参数 / 刚保存过），否则店长只会以为按钮坏了。
+  it('预览失效时页面给出理由，确认文案也不带正文首行（票 01）', () => {
+    const src = compact(view)
+    expect(src).toContain('v-if="previewStaleReason"class="wp-preview-stale"')
+    expect(src).toContain('.wp-preview-stale{')
+    expect(src).toContain('staleReason:previewStaleReason.value,')
+  })
+
   // U12：预览已经选中任务（右上写着「当前任务：每日销售报表」），空 textarea 里却写
   // 「选择任务后点击刷新预览」—— 让店长去做一件已经做完的事。按钮的 title 在 U8 里已经
   // 改成同一口径，两处不能各说各话。

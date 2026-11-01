@@ -23,7 +23,8 @@ const TABS = [
 
 const {
   meta, channels, topics, groups, jobs, matrix, deliveries, audit, selectedJobId,
-  previewContent, previewImage, previewMeta, loading, error, errorDetail, activeTab, channelForm,
+  previewContent, previewImage, previewMeta, previewStaleReason, loading, error, errorDetail,
+  activeTab, channelForm,
   channelGroupForm, multiSelect, contractWarning, zeroSubscriptionTip, viewMode,
   zeroTopicIds,
   resetChannelForm, resetChannelGroupForm, resetJobForm, jobForm,
@@ -393,6 +394,8 @@ async function handleSend() {
     content: previewContent.value,
     targetNames: sendTargetNames.value,
     kind: previewMeta.value.kind,
+    // 预览失效时确认框不能给出正文首行（票 01）：那一行属于上一条任务 / 上一版参数。
+    staleReason: previewStaleReason.value,
   })
   if (!window.confirm(text)) return
   try {
@@ -905,6 +908,10 @@ onMounted(async () => {
               </template>
             </span>
           </div>
+          <!-- 预览失效（票 01）：换了任务 / 改了参数 / 刚保存过，预览就不再属于当前这条
+               任务，正文已清空、「立即发送」置灰。这里说清**为什么**变灰，否则店长只会
+               以为按钮坏了。 -->
+          <div v-if="previewStaleReason" class="wp-preview-stale">{{ previewStaleReason }}</div>
           <!-- 预览与实际外发是同一条渲染路径：后端给图就显示图。图片按原比例缩到面板宽，
                不裁不放大 —— 店长要看的是"这周末谁上班"，不是缩略图本身。 -->
           <div v-if="previewIsImage" class="wp-preview-image">
@@ -1264,6 +1271,13 @@ onMounted(async () => {
   font-size: 11px;
   line-height: 1.5;
   color: var(--text-dim);
+}
+
+/* 预览失效的原因（票 01）：与「字节数」同一处视线里，说清「立即发送」为什么变灰。 */
+.wp-preview-stale {
+  font-size: 12px;
+  color: var(--yellow);
+  margin-bottom: 8px;
 }
 
 /* 发送记录（票 07）：筛选行在窄屏要能换行（三个下拉 + 两个按钮在一行里挤不下）。 */
