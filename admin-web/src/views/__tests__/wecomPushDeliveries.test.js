@@ -545,3 +545,61 @@ describe('发送记录的卡片式标记（U2）', () => {
     expect(table.element.closest('.wp-card-table-wrap'), '滚动容器没挂卡片式的类').toBeTruthy()
   })
 })
+
+// 票 06：出站（`services/wecom_outbox.py`）自己写进 `last_error` 的三种失败，表格那 7 列
+// 里的「最后一次错误」得能指导下一步 —— 光看 `目标渠道不存在: 5` / `正文渲染失败：…` 谁
+// 也不知道该做什么。原文仍然只在「详情」里展开。
+describe('出站失败的三种人话（票 06）', () => {
+  async function mountWithOutboxError(raw) {
+    return mountView({
+      channels: [channel(1, '门店群')],
+      topics: [topic('sales_report', '销售报表', [1])],
+      deliveriesFor: () => ({
+        success: true,
+        rows: [delivery({ status: 'failed', attempts: 1, last_error: raw })],
+        total: 1, page: 1, page_size: 50, pages: 1,
+      }),
+    })
+  }
+
+  function errorCell(wrapper) {
+    return deliveryTable(wrapper).findAll('tbody tr')[0].findAll('td')[6]
+  }
+
+  it('目标渠道不存在：告诉人去「订阅」重新勾收件群', async () => {
+    const { wrapper } = await mountWithOutboxError('目标渠道不存在: 5')
+    await openTab(wrapper, '发送记录')
+
+    const cell = errorCell(wrapper)
+    expect(cell.text()).toContain('发送目标渠道已被删除')
+    expect(cell.text()).toContain('重新勾选收件群')
+    // 不把后端原文（渠道 id）当成人话丢给店长
+    expect(cell.text()).not.toContain('目标渠道不存在: 5')
+  })
+
+  it('正文渲染失败：带原因，并明确说这类失败不会自动重试', async () => {
+    const raw = '正文渲染失败：请填写推送时间'
+    const { wrapper } = await mountWithOutboxError(raw)
+    await openTab(wrapper, '发送记录')
+
+    const cell = errorCell(wrapper)
+    expect(cell.text()).toContain('内容生成失败：请填写推送时间')
+    expect(cell.text(), '这类失败直接落终态，不写清楚会让人一直等自动重试').toContain('不会自动重试')
+    expect(cell.text()).toContain('重新发送')
+
+    // 「详情」仍然能展开完整原文：人话是给人看的，原文不能吞掉
+    const toggle = deliveryTable(wrapper).findAll('button').find((node) => node.text() === '详情')
+    expect(toggle, '第 7 列没有展开入口').toBeTruthy()
+    await toggle.trigger('click')
+    expect(wrapper.find('tr.wp-delivery-detail').text()).toContain(raw)
+  })
+
+  it('webhook 解密失败：告诉人去「渠道」重填 webhook', async () => {
+    const { wrapper } = await mountWithOutboxError('webhook 解密失败：InvalidToken')
+    await openTab(wrapper, '发送记录')
+
+    const cell = errorCell(wrapper)
+    expect(cell.text()).toContain('渠道地址无法解密')
+    expect(cell.text()).toContain('重新填写 webhook')
+  })
+})

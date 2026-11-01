@@ -93,6 +93,30 @@ export const WECOM_ERRCODE_HINTS = {
 }
 
 /**
+ * 出站（`services/wecom_outbox.py`）自己写进 `last_error` 的几种失败。
+ *
+ * 它们不是企微的 errcode，也不是网络层的问题，而是「这条记录本身没法继续」：
+ *   - `目标渠道不存在: <id>` / `目标渠道不存在（渠道已删）`（outbox :427 / :433）——渠道被
+ *     删了，去「订阅」重新勾收件群才能再发；
+ *   - `正文渲染失败：<原因>`（outbox :451）——参数坏了 / 图被清理 / 装不下，**直接落终态、
+ *     不重试**，所以文案必须说清楚「不会自动重试」；
+ *   - `webhook 解密失败：<原因>`（outbox :469）——走退避重试，重填 webhook 才能好。
+ *
+ * 值可以是函数：带原因的那两类要把原因嵌进人话里，原文仍然进「详情」。
+ */
+export const WECOM_OUTBOX_FAILURE_HINTS = [
+  [/目标渠道不存在/, () => '发送目标渠道已被删除，请到「订阅」重新勾选收件群'],
+  [
+    /正文渲染失败[：:]\s*([\s\S]*)$/,
+    (matched) => `内容生成失败：${(matched[1] || '').trim() || '原因不明'}。这类失败不会自动重试，请稍后在任务里重新发送`,
+  ],
+  [
+    /webhook 解密失败[：:]\s*([\s\S]*)$/,
+    () => '渠道地址无法解密，请到「渠道」重新填写 webhook',
+  ],
+]
+
+/**
  * 认得出但不是 errcode 的那几种失败（网络层最常见）。
  *
  * 顺序有意义：先匹配到的先用。
@@ -120,6 +144,12 @@ export function deliveryErrorSummary(text) {
   if (!raw) return ''
   const hint = WECOM_ERRCODE_HINTS[wecomErrcode(raw)]
   if (hint) return hint
+  // 出站的失败排在网络正则前面：`正文渲染失败：<原因>` 里的原因可能是任何异常（包括一条
+  // 连接超时），先被通用的网络正则接走就会丢掉「不会自动重试」这条关键信息。
+  for (const [pattern, translate] of WECOM_OUTBOX_FAILURE_HINTS) {
+    const matched = pattern.exec(raw)
+    if (matched) return translate(matched)
+  }
   const matched = WECOM_ERROR_PATTERNS.find(([pattern]) => pattern.test(raw))
   return matched ? matched[1] : raw
 }
