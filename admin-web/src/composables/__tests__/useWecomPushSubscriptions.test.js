@@ -21,6 +21,7 @@ const {
   useWecomPush, WECOM_PUSH_API_VERSION, MATRIX_CHANNEL_LIMIT, MATRIX_VIEW_MULTI_SELECT,
   matrixViewMode, matrixZeroTopicNames, zeroSubscriptionWarning, contractMismatchWarning,
   channelDeleteConfirmText, channelGroupNames, channelTopicNames, formatSentAt,
+  groupCellState,
 } = await import('../useWecomPush.js')
 
 const CONTRACT_SOURCE = join(
@@ -338,5 +339,56 @@ describe('群组与成员管理', () => {
     Object.assign(channelGroupForm, { id: 5, name: '日报群组 A' })
     await saveChannelGroup()
     expect(apiPut.mock.calls[0][0]).toBe('/api/wecom-push/channel-groups/5')
+  })
+})
+
+// 票 08 的「群组行与单渠道行的状态不会互相打架」：一格画成勾/半选/未勾，必须与「点一下
+// 会变成什么」自洽。两种打架最伤人 —— 组里部分订了却画未勾（点一下有变化，看着没变化）、
+// 组里全订了却画未勾（点一下什么都不变）。
+describe('群组一格的勾选态（票 08）', () => {
+  const GROUP = {
+    id: 9, name: '二楼包间群', enabled: true, member_channel_ids: [3, 4],
+  }
+
+  function row({ groups = [], channels = [] } = {}) {
+    return { id: 'sales_report', name: '销售报表', groups, channels }
+  }
+
+  it('整组订阅过：勾', () => {
+    expect(groupCellState(row({ groups: [{ id: 9 }] }), GROUP)).toBe('subscribed')
+  })
+
+  it('组里只有一部分渠道被单独订了：半选', () => {
+    expect(groupCellState(row({ channels: [{ id: 3 }] }), GROUP)).toBe('partial')
+  })
+
+  it('组里每个渠道都被单独订了：画成勾，但记作单独订阅而非群组订阅', () => {
+    // 回归：改之前这里是 unsubscribed —— 全订了却显示没勾。
+    const state = groupCellState(row({ channels: [{ id: 3 }, { id: 4 }] }), GROUP)
+    expect(state).toBe('direct-covered')
+    expect(state).not.toBe('subscribed')
+  })
+
+  it('一个都没订才是未勾', () => {
+    expect(groupCellState(row(), GROUP)).toBe('unsubscribed')
+  })
+
+  it('空群组不算「全订」', () => {
+    expect(groupCellState(row(), { ...GROUP, member_channel_ids: [] })).toBe('unsubscribed')
+  })
+
+  it('经群组来的渠道不算单独订（它们由群组那一行代表）', () => {
+    expect(groupCellState(row({ channels: [{ id: 3, via_group: true }] }), GROUP)).toBe('unsubscribed')
+  })
+
+  it('停用的群组只读：订阅还在就是「已停用（订阅保留）」，否则单纯停用', () => {
+    const off = { ...GROUP, enabled: false }
+    expect(groupCellState(row({ groups: [{ id: 9 }] }), off)).toBe('group-disabled-subscribed')
+    expect(groupCellState(row(), off)).toBe('group-disabled')
+  })
+
+  it('没给群组（或没 id）：未勾，不抛错', () => {
+    expect(groupCellState(row(), null)).toBe('unsubscribed')
+    expect(groupCellState(row(), { name: '没有 id' })).toBe('unsubscribed')
   })
 })

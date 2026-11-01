@@ -219,15 +219,36 @@ export function deliveryTaskLabel(row) {
  * 空筛选**不发这个键**：`api.get` 会把空串整个丢掉，后端也就分得清「没筛这一项」与
  * 「按空值筛」（后者在 `topic_id=` 上一行都筛不出来）。带哪些键只在这里决定。
  */
-export function deliveryQuery({ topicId = '', channelId = '', status = '', page = 1 } = {}) {
-  const params = { page: Number(page) || 1, page_size: DELIVERY_PAGE_SIZE }
+export function deliveryQuery({
+  topicId = '', channelId = '', status = '', jobId = null, page = 1, pageSize = null,
+} = {}) {
+  const params = { page: Number(page) || 1, page_size: Number(pageSize) || DELIVERY_PAGE_SIZE }
   const topic = String(topicId || '').trim()
   const channel = channelId === 0 || channelId ? Number(channelId) : 0
   const state = String(status || '').trim()
+  const job = jobId === 0 || jobId ? Number(jobId) : 0
   if (topic) params.topic_id = topic
   if (channel) params.channel_id = channel
   if (state) params.status = state
+  if (job) params.job_id = job
   return params
+}
+
+/**
+ * 「本次发送」结果卡要的那几行（票 05）。
+ *
+ * **独立取一页，不读 `deliveries`**：那张表属于「发送记录」tab，用户随时会在那边换筛选、
+ * 翻页。借用它的 `rows` 再按内容类型过滤，就会出现「筛了只看失败 → 结果卡少了待发的行」
+ * 「翻到第 2 页 → 结果卡列出的是上周的行」这种错位。这里按任务 id 直接问后端要最新的
+ * 几行，与那边怎么筛、停在第几页无关。
+ */
+async function fetchDeliveryRows({ jobId = null, topicId = '', pageSize = 3 } = {}) {
+  const size = Math.max(1, Number(pageSize) || 3)
+  const data = await api.get(
+    '/api/wecom-push/logs',
+    deliveryQuery({ jobId, topicId, page: 1, pageSize: size }),
+  )
+  return (data.rows || []).slice(0, size)
 }
 
 /**
@@ -450,16 +471,18 @@ function topicDirectChannelIds(row) {
 }
 
 /**
- * 群组一格的勾选态（票 08）：`subscribed` / `partial` / `unsubscribed` /
+ * 群组一格的勾选态（票 08）：`subscribed` / `direct-covered` / `partial` / `unsubscribed` /
  * `group-disabled` / `group-disabled-subscribed`。
  *
- * - `subscribed`：这个群组对这类内容是整组订着的；
+ * - `subscribed`：这个群组对这类内容是整组订着的（有一行 `target_group_id` 的订阅）；
+ * - `direct-covered`：没有群组订阅行，但组里**每个**渠道都被单独订了 —— 这一组事实上全订了，
+ *   所以画成勾；点它不能写库（没有那行可取消），只提示去渠道列逐个取消；
  * - `partial`（半选）：整组没订，但组里有**一部分**成员被单独订了 —— 勾一次等于把整组补齐；
  * - `group-disabled*`：群组自己停着。订阅还在、投递暂停，格子只读，与停用渠道同一套语义
  *   （后端 `resolve_targets` 对停用群组整组跳过）。
  *
  * 一个成员都没订才叫未勾：只要有一个成员被单独订了，画成未勾会让下一次点勾「看起来没变化」
- * 却真的改了订阅。
+ * 却真的改了订阅。反过来，全都订了却画成未勾，下一次点勾更是空操作 —— 这两种都算「打架」。
  */
 export function groupCellState(row, group) {
   if (!group || group.id === undefined || group.id === null) return 'unsubscribed'
@@ -469,7 +492,9 @@ export function groupCellState(row, group) {
   const members = groupMemberIds(group)
   const direct = topicDirectChannelIds(row)
   const hit = members.filter((channelId) => direct.includes(channelId))
-  if (hit.length && hit.length < members.length) return 'partial'
+  // 空群组（一个渠道都没有）不能算「全订」：`hit.length === members.length === 0`。
+  if (members.length && hit.length === members.length) return 'direct-covered'
+  if (hit.length) return 'partial'
   return 'unsubscribed'
 }
 
@@ -1363,7 +1388,7 @@ export function useWecomPush() {
     contractWarning, zeroSubscriptionTip, viewMode, zeroTopicIds,
     resetChannelForm, resetChannelGroupForm, resetJobForm, jobForm,
     loadAll, reloadAll, loadMeta, loadChannels, loadSubscriptions, loadChannelGroups, loadJobs,
-    loadDeliveries, applyDeliveryFilters,
+    loadDeliveries, applyDeliveryFilters, fetchDeliveryRows,
     loadAuditLog, applyAuditFilters,
     editChannel, saveChannel, deleteChannel, toggleChannelEnabled, testChannel,
     editChannelGroup, saveChannelGroup, deleteChannelGroup,

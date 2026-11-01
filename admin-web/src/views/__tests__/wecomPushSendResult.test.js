@@ -178,11 +178,15 @@ afterEach(() => {
 describe('点「立即发送」之后的结果卡（票 05）', () => {
   it('不离开当前 tab 就能看到本次发送的逐条状态，且「查看全部」带 topic 过滤', async () => {
     const { wrapper, fetchMock } = await mountView({
-      logRows: () => [
-        delivery({ id: 101, status: 'pending' }),
-        // 另一个内容类型的投递：结果卡只认本次这条任务，不能把它算进来
-        delivery({ id: 102, topic_id: 'unmapped_dish', channel_name: '后厨群', status: 'sent' }),
-      ],
+      // 结果卡按任务 id 取行（带 job_id），只该拿到本次这条；发送记录那条全表查询里混着
+      // 别的内容类型 —— 结果卡若借用那边的一页，这行就会漏进来。
+      logRows: (params) => (params.get('job_id')
+        ? [delivery({ id: 101, status: 'pending' })]
+        : [
+          delivery({ id: 101, status: 'pending' }),
+          // 另一个内容类型的投递：结果卡只认本次这条任务，不能把它算进来
+          delivery({ id: 102, topic_id: 'unmapped_dish', channel_name: '后厨群', status: 'sent' }),
+        ]),
     })
     await openJobsWithPreview(wrapper)
 
@@ -264,6 +268,33 @@ describe('点「立即发送」之后的结果卡（票 05）', () => {
     // 到点之后不再有请求：不无限轮询
     await vi.advanceTimersByTimeAsync(60 * 1000)
     expect(logsCalls(fetchMock).length - before).toBe(12)
+
+    wrapper.unmount()
+  })
+
+  it('发送记录那边筛空、翻页，不影响本次发送的结果卡', async () => {
+    // 结果卡曾经复用「发送记录」当前那一页再按内容类型过滤 —— 用户在那边筛了「只看失败」
+    // 或翻到第 2 页，卡上就空了、或者列出上周的行。这里让「不带 job_id」的查询返回空页：
+    // 一旦实现退回旧写法，卡上什么都看不到。
+    const { wrapper, fetchMock } = await mountView({
+      logRows: (params) => (params.get('job_id') ? [delivery({ id: 201, status: 'pending' })] : []),
+    })
+    await openJobsWithPreview(wrapper)
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+
+    await wrapper.find('.wp-send-now').trigger('click')
+    await flushPromises()
+    await flushPromises()
+
+    const text = wrapper.text()
+    expect(text).toContain('本次发送')
+    expect(text).toContain('待发')
+    expect(text).toContain('门店群')
+
+    // 取行要按**这条任务**并且只要 3 行，与发送记录那边的筛选、页码无关。
+    const scoped = logsCalls(fetchMock).filter((call) => call.path.includes('job_id=7'))
+    expect(scoped.length, '结果卡没有按任务 id 取行').toBeGreaterThan(0)
+    expect(scoped.at(-1).path).toContain('page_size=3')
 
     wrapper.unmount()
   })

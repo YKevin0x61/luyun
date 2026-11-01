@@ -36,7 +36,7 @@ const {
   zeroTopicIds,
   resetChannelForm, resetChannelGroupForm, resetJobForm, jobForm,
   // `loadAll` 不再直接调：首屏与「重试」都走 `reloadAll`（它还负责把发送记录一页带上）。
-  reloadAll, loadSubscriptions, loadJobs, loadDeliveries,
+  reloadAll, loadSubscriptions, loadJobs, loadDeliveries, fetchDeliveryRows,
   applyDeliveryFilters, loadChannels, loadAuditLog, applyAuditFilters,
   editChannel, saveChannel, deleteChannel, toggleChannelEnabled, testChannel,
   editChannelGroup, saveChannelGroup, deleteChannelGroup,
@@ -361,11 +361,20 @@ function flashViaGroupSubscription(row, channel) {
  * 求解（`resolve_targets` 已做并集去重 —— 同一渠道被直接订阅与群组订阅同时命中只投一次）。
  *
  * 半选（`partial`）时点一下等于「补齐整组」：向 enabled=true 走，与全未勾时同一个方向。
+ *
+ * `direct-covered`（组里每个渠道都被单独订了、但没有群组订阅行）**不写库**：那一格画成勾
+ * 只是因为「事实上全订了」，并不存在可以取消的群组订阅行；照 `partial` 那条路走会凭空写
+ * 一行 `enabled:false` 的死订阅。改为说清楚这些订阅的来处。
  */
 async function handleToggleGroupSubscription(row, group) {
   const state = groupCellState(row, group)
   if (state === 'group-disabled' || state === 'group-disabled-subscribed') {
     flashDisabledGroupSubscription(row, group)
+    return
+  }
+  if (state === 'direct-covered') {
+    flash(`「${row.name}」在这组里的渠道都是各渠道单独订的（不是群组订阅）：`
+      + '要取消请到上面矩阵里对应的渠道格，或把这个渠道移出群组')
     return
   }
   const enabled = state !== 'subscribed'
@@ -594,6 +603,9 @@ async function handleSend() {
   if (!window.confirm(text)) return
   const job = selectedJob.value
   const topicId = String((job && job.topic_id) || '')
+  // 本次是**哪条任务**发的：结果卡按它取行，比按内容类型筛更准（同一个内容类型可以
+  // 挂多条任务，按类型筛会把别的任务刚发的行也算进来）。
+  const jobId = Number((job && job.id) || 0) || null
   const jobName = (job && job.name) || ''
   // 发送结果留在原地（票 05）：`send-now` 只是**入队**，真正发出去由出站做（30 秒一轮）。
   // 3 秒 toast 一闪，店长还得自己去「发送记录」里翻哪几条是刚才发的 —— 所以这里落一张
@@ -604,13 +616,17 @@ async function handleSend() {
     const ok = Boolean(result && result.success)
     sendOutcome.value = {
       jobName,
+      jobId,
       topicId,
       targetCount: Number(result && result.target_count) || 0,
       error: ok ? '' : String((result && (result.error || result.response_text)) || '发送失败'),
       exhausted: false,
+      rows: [],
     }
     if (ok) {
       startSendPolling()
+      // 先立刻取一次，别让店长先盯着空卡等满 10 秒。
+      await refreshSendOutcomeRows()
       // toast 降成辅助：真正的结果与逐条状态在「本次发送」卡上。
       flash('已加入发送队列，约半分钟内出结果（见「本次发送」）', 'success')
     } else {
@@ -619,7 +635,8 @@ async function handleSend() {
   } catch (e) {
     stopSendPolling()
     sendOutcome.value = {
-      jobName, topicId, targetCount: 0, error: e.message || '发送失败', exhausted: false,
+      jobName, jobId, topicId, targetCount: 0, error: e.message || '发送失败',
+      exhausted: false, rows: [],
     }
     flash(e.message, 'error')
   }
@@ -636,15 +653,32 @@ const sendOutcome = ref(null)
 let sendPollTimer = null
 let sendPollRounds = 0
 
-/** 卡上列「最近 3 条」：刚入队的投递就在发送记录第一页的最前面（按创建时间倒序）。 */
+/**
+ * 卡上列「最近 3 条」。
+ *
+ * **不读 `deliveries.rows`**：那是「发送记录」tab 的当前一页，随时会被用户在那边换筛选、
+ * 翻页。借它来画结果卡，就会出现「在发送记录里筛了『只看失败』→ 结果卡里待发的那行不见了」
+ * 「翻到第 2 页 → 结果卡列的是上周的行」。这里只认自己按任务 id 取回来的那几行。
+ */
 const sendOutcomeRows = computed(() => {
-  const rows = deliveries.rows || []
   const outcome = sendOutcome.value
-  const scoped = outcome && outcome.topicId
-    ? rows.filter((row) => String(row.topic_id || '') === outcome.topicId)
-    : rows
-  return scoped.slice(0, 3)
+  return (outcome && outcome.rows) || []
 })
+
+/** 按本次任务取最新几行（票 05）。与发送记录 tab 的筛选/页码完全无关。 */
+async function refreshSendOutcomeRows() {
+  const outcome = sendOutcome.value
+  if (!outcome) return
+  try {
+    const rows = await fetchDeliveryRows({
+      jobId: outcome.jobId, topicId: outcome.topicId, pageSize: 3,
+    })
+    if (sendOutcome.value === outcome) sendOutcome.value = { ...outcome, rows }
+  } catch (err) {
+    // 取行失败不动卡上已有内容：下一轮再来，别把「确实入队了」这条抹掉。
+    console.warn('[wecom-push] 取本次发送的投递行失败，保留上一轮:', err)
+  }
+}
 
 function stopSendPolling() {
   if (sendPollTimer) {
@@ -657,11 +691,7 @@ async function pollSendOutcome() {
   // 轮询失败不动卡上的旧内容：下一次再来，别把「刚才确实入队了」这条信息抹掉。
   // 但要留痕 —— 连续几轮都失败时，卡上显示的还是「发送中」，没有日志就查不出
   // 是后端慢还是请求打不通。
-  try {
-    await loadDeliveries()
-  } catch (err) {
-    console.warn('[wecom-push] 发送结果轮询失败，保留上一轮结果:', err)
-  }
+  await refreshSendOutcomeRows()
   sendPollRounds += 1
   if (sendPollRounds >= SEND_POLL_MAX_ROUNDS) {
     stopSendPolling()
@@ -1134,7 +1164,8 @@ onMounted(async () => {
                     <span v-else class="wp-matrix-hit">
                       <LuyunCheckbox
                         :id="groupCellId(row, group)"
-                        :model-value="groupCellState(row, group) === 'subscribed'"
+                        :model-value="groupCellState(row, group) === 'subscribed'
+                          || groupCellState(row, group) === 'direct-covered'"
                         :indeterminate="groupCellState(row, group) === 'partial'"
                         :aria-label="groupCellLabel(row, group)"
                         @update:model-value="() => handleToggleGroupSubscription(row, group)"
