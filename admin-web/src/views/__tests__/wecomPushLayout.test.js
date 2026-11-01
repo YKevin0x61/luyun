@@ -137,6 +137,28 @@ describe('企微推送页的立即发送', () => {
     expect(src).toContain("'点「刷新预览」后可发送'")
     expect(src).not.toContain('先选择任务并刷新预览')
   })
+
+  // 票 05：`send-now` 只是入队，出站 30 秒一轮。点完按钮只看 3 秒 toast 的话，店长还得
+  // 自己去发送记录里翻哪几条是刚发的 —— 结果卡要留在预览卡下面，并且只能承诺
+  // 「约半分钟内出结果」，不能写「已发送」。
+  it('发送结果留在原地，文案不承诺即时送达且有轮询上限（票 05）', () => {
+    const src = compact(view)
+    expect(src).toContain('v-if="activeTab===\'jobs\'&&sendOutcome"')
+    expect(src).toContain('class="cardwp-send-result"')
+    expect(src).toContain('@click="handleViewSendResults"')
+    expect(src).toContain('已加入发送队列：将发给{{sendOutcome.targetCount}}个群，约半分钟内出结果。')
+    // 不得出现「已发送」这类即时送达的承诺
+    expect(src).not.toContain('已成功发送')
+    expect(src).not.toContain('已发送给')
+    expect(src).toContain('constSEND_POLL_MAX_ROUNDS=12')
+    expect(src).toContain('轮询已停止：可稍后在「发送记录」查看结果。')
+    expect(src).toContain('.wp-send-result__rows{')
+    // 轮询在组件卸载时停掉，不留一个还在发请求的定时器
+    expect(src).toContain('stopSendPolling()')
+    // toast 降成辅助，但读屏要能听到
+    expect(src).toContain('role="status"')
+    expect(src).toContain('aria-live="polite"')
+  })
 })
 
 // U6（旧清单 A29）：「测试」一点就真外发，而它和「删除」并排、同为小按钮。

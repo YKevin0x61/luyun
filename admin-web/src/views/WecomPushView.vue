@@ -349,6 +349,8 @@ function flashSavedJob(id) {
 onBeforeUnmount(() => {
   clearTimeout(flashTimer)
   jobCards.clear()
+  // 离开页面时停掉「本次发送」的轮询（票 05）：组件没了还留着定时器只会白发请求。
+  stopSendPolling()
 })
 
 // 发送记录的「最后一次错误」：展开看完整原文（U16）。一次只展开一行 —— 一屏几十行里
@@ -398,14 +400,91 @@ async function handleSend() {
     staleReason: previewStaleReason.value,
   })
   if (!window.confirm(text)) return
+  const job = selectedJob.value
+  const topicId = String((job && job.topic_id) || '')
+  const jobName = (job && job.name) || ''
+  // 发送结果留在原地（票 05）：`send-now` 只是**入队**，真正发出去由出站做（30 秒一轮）。
+  // 3 秒 toast 一闪，店长还得自己去「发送记录」里翻哪几条是刚才发的 —— 所以这里落一张
+  // 卡，下面按上限轮询它。
   try {
     const result = await sendSelectedJob()
-    flash(
-      result.success
-        ? `已加入发送队列：将发给 ${result.target_count} 个群，结果见「发送记录」`
-        : `发送失败：${result.error || result.response_text}`,
-      result.success ? 'success' : 'error',
-    )
+    stopSendPolling()
+    const ok = Boolean(result && result.success)
+    sendOutcome.value = {
+      jobName,
+      topicId,
+      targetCount: Number(result && result.target_count) || 0,
+      error: ok ? '' : String((result && (result.error || result.response_text)) || '发送失败'),
+      exhausted: false,
+    }
+    if (ok) {
+      startSendPolling()
+      // toast 降成辅助：真正的结果与逐条状态在「本次发送」卡上。
+      flash('已加入发送队列，约半分钟内出结果（见「本次发送」）', 'success')
+    } else {
+      flash('发送失败，原因见「本次发送」', 'error')
+    }
+  } catch (e) {
+    stopSendPolling()
+    sendOutcome.value = {
+      jobName, topicId, targetCount: 0, error: e.message || '发送失败', exhausted: false,
+    }
+    flash(e.message, 'error')
+  }
+}
+
+// ── 「本次发送」结果卡（票 05）────────────────────────────────────────────────
+// 出站每 30 秒一轮，所以这里只能承诺「约半分钟内出结果」，不能写「已发送」。轮询有
+// 上限（12 轮 × 10 秒 = 2 分钟）：一次投递可能因为退避重试几分钟后才落定，页面无限
+// 轮询既没有意义，也会让一个开着不动的后台标签页一直发请求。
+const SEND_POLL_INTERVAL_MS = 10000
+const SEND_POLL_MAX_ROUNDS = 12
+
+const sendOutcome = ref(null)
+let sendPollTimer = null
+let sendPollRounds = 0
+
+/** 卡上列「最近 3 条」：刚入队的投递就在发送记录第一页的最前面（按创建时间倒序）。 */
+const sendOutcomeRows = computed(() => {
+  const rows = deliveries.rows || []
+  const outcome = sendOutcome.value
+  const scoped = outcome && outcome.topicId
+    ? rows.filter((row) => String(row.topic_id || '') === outcome.topicId)
+    : rows
+  return scoped.slice(0, 3)
+})
+
+function stopSendPolling() {
+  if (sendPollTimer) {
+    clearInterval(sendPollTimer)
+    sendPollTimer = null
+  }
+}
+
+async function pollSendOutcome() {
+  // 轮询失败不动卡上的旧内容：下一次再来，别把「刚才确实入队了」这条信息抹掉。
+  try { await loadDeliveries() } catch (e) { /* 见上 */ }
+  sendPollRounds += 1
+  if (sendPollRounds >= SEND_POLL_MAX_ROUNDS) {
+    stopSendPolling()
+    if (sendOutcome.value) sendOutcome.value = { ...sendOutcome.value, exhausted: true }
+  }
+}
+
+function startSendPolling() {
+  stopSendPolling()
+  sendPollRounds = 0
+  sendPollTimer = setInterval(() => { pollSendOutcome() }, SEND_POLL_INTERVAL_MS)
+}
+
+/** 「查看全部 →」：落到**已经按这条任务的内容类型筛过**的发送记录，而不是全表。 */
+async function handleViewSendResults() {
+  stopSendPolling()
+  const topicId = (sendOutcome.value && sendOutcome.value.topicId) || ''
+  deliveryFilterForm.value = { topicId, channelId: '', status: '' }
+  handleSwitchTab('logs')
+  try {
+    await applyDeliveryFilters(deliveryFilterForm.value)
   } catch (e) { flash(e.message, 'error') }
 }
 async function copyPreview() {
@@ -448,7 +527,14 @@ onMounted(async () => {
     <div v-if="contractWarning" class="dash-error-banner"><SvgIcon name="alert-triangle" :size="14" /> {{ contractWarning }}</div>
     <!-- 零订阅：这类内容当前一条都不发，页面上不写出来店长只会以为"今天没有" -->
     <div v-if="zeroSubscriptionTip" class="dash-error-banner"><SvgIcon name="alert-triangle" :size="14" /> {{ zeroSubscriptionTip }}</div>
-    <div v-if="toastMsg" class="badge" :style="toastType === 'error' ? 'color:var(--red);border-color:var(--red)' : 'color:var(--green);border-color:var(--green)'">
+    <!-- toast 只是辅助（票 05）：真正的发送结果在「本次发送」卡上，这里让读屏也能听到。 -->
+    <div
+      v-if="toastMsg"
+      class="badge"
+      role="status"
+      aria-live="polite"
+      :style="toastType === 'error' ? 'color:var(--red);border-color:var(--red)' : 'color:var(--green);border-color:var(--green)'"
+    >
       {{ toastMsg }}
     </div>
 
@@ -928,6 +1014,49 @@ onMounted(async () => {
             style="min-height:280px;width:100%;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;white-space:pre-wrap"
           ></textarea>
         </div>
+
+        <!-- ═══ 本次发送（票 05）══════════════════════════════════════════
+             `send-now` 只是**入队**，出站 30 秒一轮才真正发出去。所以点完「立即发送」
+             不能只弹一条 3 秒 toast 就把人打回列表：店长要的是「刚才那几条现在什么状态」，
+             而那几条此刻还散在「发送记录」里。结果留在这张卡上，按上限轮询刷新；文案只
+             承诺「约半分钟内出结果」，不写「已发送」—— 这里没说谎。 -->
+        <div
+          v-if="activeTab === 'jobs' && sendOutcome"
+          class="card wp-send-result"
+          role="status"
+          aria-live="polite"
+        >
+          <div class="panel-title" style="display:flex;justify-content:space-between;align-items:center">
+            <span>本次发送</span>
+            <button class="btn btn-sm" type="button" @click="handleViewSendResults">查看全部 →</button>
+          </div>
+          <div v-if="sendOutcome.error" class="wp-send-result__error">
+            <SvgIcon name="alert-triangle" :size="14" /> 发送失败：{{ sendOutcome.error }}
+          </div>
+          <template v-else>
+            <div class="wp-send-result__head">
+              已加入发送队列：将发给 {{ sendOutcome.targetCount }} 个群，约半分钟内出结果。
+            </div>
+            <div v-if="!sendOutcomeRows.length" class="wp-job-hint">
+              投递记录还没出来，点「查看全部」可去发送记录跟。
+            </div>
+            <ul v-else class="wp-send-result__rows">
+              <li
+                v-for="row in sendOutcomeRows"
+                :key="row.id"
+                :class="{ 'is-failed': row.status === 'failed' }"
+              >
+                <span class="wp-send-result__channel">{{ row.channel_name || '—' }}</span>
+                <span class="wp-send-result__status">{{ deliveryStatusLabel(row.status) }}</span>
+                <span class="wp-send-result__error-text">{{ deliveryErrorSummary(row.last_error) }}</span>
+              </li>
+            </ul>
+            <div class="wp-job-hint">
+              <template v-if="sendOutcome.exhausted">轮询已停止：可稍后在「发送记录」查看结果。</template>
+              <template v-else>出站每 30 秒一轮，这张卡每 10 秒自动刷新（最多约 2 分钟）。</template>
+            </div>
+          </template>
+        </div>
       </div>
     </div>
 
@@ -1279,6 +1408,37 @@ onMounted(async () => {
   color: var(--yellow);
   margin-bottom: 8px;
 }
+
+/* 「本次发送」（票 05）：发送后不离开当前 tab 就能看到这几条投递的具体状态。 */
+.wp-send-result__head {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-bottom: 8px;
+}
+.wp-send-result__error {
+  font-size: 12px;
+  color: var(--red);
+  word-break: break-word;
+}
+.wp-send-result__rows {
+  list-style: none;
+  margin: 0 0 8px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+}
+.wp-send-result__rows li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: baseline;
+}
+.wp-send-result__channel { color: var(--text); }
+.wp-send-result__status { color: var(--text-dim); }
+.wp-send-result__rows li.is-failed .wp-send-result__status { color: var(--red); }
+.wp-send-result__error-text { color: var(--red); word-break: break-word; }
 
 /* 发送记录（票 07）：筛选行在窄屏要能换行（三个下拉 + 两个按钮在一行里挤不下）。 */
 .wp-delivery-filters {
