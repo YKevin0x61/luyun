@@ -2,6 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import {
   useWecomPush, WECOM_PUSH_API_VERSION, MATRIX_CHANNEL_LIMIT, scheduledTopics,
+  unschedulableTopics, topicTriggerLabel,
   channelDeleteConfirmText, channelGroupNames, channelTopicNames, formatSentAt,
   canSendNow, sendNowConfirmText, sendNowTargetNames, testChannelConfirmText,
   DELIVERY_STATUS_OPTIONS,
@@ -167,6 +168,9 @@ const selectedJob = computed(() => jobs.value.find((j) => j.id === selectedJobId
 // 定时任务的内容类型下拉：只列**支持定时触发**的（来自 /meta 的注册表，票 08）。
 // 参数区跟着选中的这一类走 —— 字段名、标签、下拉选项全部由它的 schema + uischema 给。
 const jobTopics = computed(() => scheduledTopics(meta.value))
+// 票 07：不能建任务的那几类（只有事件触发）单独成组列在下拉里 —— 原来它们静默消失，
+// 店长看不到「验收照片」就以为这类内容压根不会发。名单同样只来自 `/meta` 的 triggers。
+const jobAutoTopics = computed(() => unschedulableTopics(meta.value))
 const selectedJobTopic = computed(
   () => jobTopics.value.find((topic) => topic.id === jobForm.topic_id) || null,
 )
@@ -701,6 +705,8 @@ onMounted(async () => {
                     <td>
                       <strong>{{ row.name }}</strong>
                       <span v-if="topicHasPhotos(row)" class="badge" style="margin-left:6px;color:var(--cyan);border-color:var(--cyan)">含员工实拍照片</span>
+                      <!-- 票 07：这类内容是「什么时候发」的——多数只有事件触发，任务覆盖不到。 -->
+                      <div v-if="topicTriggerLabel(row)" class="wp-topic-trigger">{{ topicTriggerLabel(row) }}</div>
                       <div v-if="zeroTopicIds.includes(row.id)" style="color:var(--yellow);font-size:11px">零订阅：当前不会发出</div>
                     </td>
                     <!-- 整格都是热区（U3）：原来只有 16×16 的勾选框可点，矩阵 64 格实测 192 次
@@ -751,6 +757,7 @@ onMounted(async () => {
                 @click="handlePickTopic(row.id)"
               >
                 <span>{{ row.name }}</span>
+                <span v-if="topicTriggerLabel(row)" class="wp-topic-trigger">{{ topicTriggerLabel(row) }}</span>
                 <span v-if="topicHasPhotos(row)" class="badge" style="color:var(--cyan);border-color:var(--cyan)">含员工实拍照片</span>
                 <span class="badge">{{ (subscriptionIds[row.id] || []).length }} 个渠道</span>
                 <span v-if="zeroTopicIds.includes(row.id)" class="badge" style="color:var(--yellow);border-color:var(--yellow)">零订阅</span>
@@ -820,6 +827,13 @@ onMounted(async () => {
                 <option v-for="topic in jobTopics" :key="topic.id" :value="topic.id">
                   {{ topic.name }}
                 </option>
+                <!-- 票 07：只有事件触发的内容类型也列出来，但**禁用** + 一句说明。
+                     静默不出现会让人以为这类内容不会发；能点会让人建出一条永远不触发的任务。 -->
+                <optgroup v-if="jobAutoTopics.length" label="自动触发，不用建任务（不能建任务）">
+                  <option v-for="topic in jobAutoTopics" :key="topic.id" :value="topic.id" disabled>
+                    {{ topic.name }}
+                  </option>
+                </optgroup>
               </select>
             </div>
             <!-- 参数区：字段名、标签、下拉选项、默认值全部来自这一类内容的 `params_schema` +
@@ -1285,6 +1299,16 @@ onMounted(async () => {
 :deep(.data-table tr.wp-matrix-zero) td { background: rgba(245, 158, 11, 0.08); }
 :deep(.data-table.wp-matrix th),
 :deep(.data-table.wp-matrix td) { white-space: nowrap; }
+
+/* 票 07：一类内容「什么时候会发」（可建定时任务 / 自动触发）。
+   矩阵首列与多选行共用；首列外层是 nowrap（横滑表格的规矩），这里显式允许折行，
+   否则「自动触发，不用建任务」会把冻结列顶宽。 */
+.wp-topic-trigger {
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--text-dim);
+  white-space: normal;
+}
 
 /* 多选列表里「先选内容类型」的那一列按钮：选中态要看得出来。 */
 .wp-pick-row {

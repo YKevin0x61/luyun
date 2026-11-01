@@ -506,6 +506,37 @@ export function scheduledTopics(meta) {
 }
 
 /**
+ * 不能建任务的**那几类**内容（票 07）：只有事件触发，没有定时侧。
+ *
+ * 它们原来在下拉里静默消失 —— 店长看不到「验收照片」这一类，就以为它压根不能发。
+ * 现在与能建任务的分成两组列出（这一组禁用 + 一句说明），名单同样只来自注册表的
+ * `triggers`，加一类内容类型不用改前端。
+ */
+export function unschedulableTopics(meta) {
+  return ((meta && meta.topics) || []).filter(
+    (topic) => !(topic.triggers || []).includes('scheduled'),
+  )
+}
+
+/**
+ * 一类内容**什么时候会发**（票 07）：注册表里的 `triggers` 翻成一句人话。
+ *
+ * 9 类内容里多数只有事件触发（未映射菜品、采集失败、卫生提醒…），任务只覆盖其中带
+ * 定时侧的那几类。不写出来，页面上「没法建任务 = 不会发」就会被当成事实。
+ * 不认识触发方式时回空串（下拉/矩阵按「没有标注」渲染，而不是瞎猜一个）。
+ */
+export function topicTriggerLabel(topic) {
+  const triggers = (topic && topic.triggers) || []
+  const scheduled = triggers.includes('scheduled')
+  const event = triggers.includes('event')
+  // 两种都有时两句都说：只写「可建定时任务」会让人以为它不会自动发。
+  if (scheduled && event) return '可建定时任务，也会自动触发'
+  if (scheduled) return '可建定时任务'
+  if (event) return '自动触发，不用建任务'
+  return ''
+}
+
+/**
  * 某类内容类型的参数默认值：直接取它的 JSON Schema 里每个字段的 `default`。
  *
  * 切换内容类型时用它把参数区铺满（下拉要有选中项），所以**字段名一个都不写死** ——

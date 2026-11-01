@@ -8,7 +8,8 @@ import { createPinia, setActivePinia } from 'pinia'
 import WecomPushView from '../WecomPushView.vue'
 
 // 票 08 页面那一半的接线：定时任务 tab 的内容类型下拉与参数区都来自 `/meta` 的注册表
-// （内容类型下拉只列支持定时触发的），任务卡片显示的是订阅目标数而不是单个群名。
+// （能建任务的列在下拉里，只有事件触发的单列一组、禁用并标「自动触发」—— 票 07），
+// 任务卡片显示的是订阅目标数而不是单个群名。
 //
 // 关键的一条是「夹具里的假内容类型」：它在页面代码里从未出现过，只要它出现在 `/meta`
 // 里，下拉里就有它、选中之后参数区就渲染出它自己的字段。哪天有人把某一类内容的字段名
@@ -190,13 +191,21 @@ afterEach(() => {
 })
 
 describe('定时任务 tab 的表单', () => {
-  it('内容类型下拉来自 /meta，只列支持定时触发的', async () => {
+  it('内容类型下拉来自 /meta：能建任务的列出来，只有事件触发的单列一组并说明', async () => {
     const { wrapper } = await mountView({ topics: [SALES_TOPIC, PHOTO_TOPIC] })
     await openTab(wrapper, '定时任务')
 
     const options = optionTexts(wrapper)
     expect(options).toContain('销售报表')
-    expect(options).not.toContain('验收照片')
+    // 票 07：不能建任务的那几类不再静默消失 —— 列出来、禁用、整组带一句说明。
+    expect(options).toContain('验收照片')
+    const photo = wrapper.findAll('option').find((option) => option.text() === '验收照片')
+    expect(photo.attributes('disabled')).toBeDefined()
+    const group = wrapper.find('optgroup')
+    expect(group.exists()).toBe(true)
+    expect(group.attributes('label')).toContain('自动触发，不用建任务')
+    // 能建任务的那一类不在禁用组里（它在上面的普通选项里）
+    expect(group.findAll('option').map((option) => option.text())).not.toContain('销售报表')
     // 收件人不再由任务指定
     expect(wrapper.text()).not.toContain('目标渠道')
     expect(wrapper.text()).not.toContain('目标 Webhook')

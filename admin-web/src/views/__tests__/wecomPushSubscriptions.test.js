@@ -256,6 +256,27 @@ describe('订阅矩阵', () => {
     expect(table.findAll('tbody tr')).toHaveLength(2)
   })
 
+  // 票 07：9 类内容里多数只有事件触发 —— 建不了任务不等于不会发，页面上要写出来。
+  it('每行标出触发方式，且只来自 /meta 的 triggers', async () => {
+    const { wrapper } = await mountView({
+      channels: CHANNELS,
+      topics: [
+        topic('sales_report', '销售报表', [1], { triggers: ['scheduled'] }),
+        topic('hygiene_photo', '验收照片', [], {
+          triggers: ['event'], contains_employee_photos: true,
+        }),
+        // 页面代码里从没有过这一类：标注照样正确（写死 topic id 的实现会漏掉它）
+        topic('brand_new_topic', '后端新增的一类', [], { triggers: ['event'] }),
+      ],
+    })
+    await openTab(wrapper, '订阅')
+
+    const rows = wrapper.find('table.wp-matrix').findAll('tbody tr')
+    expect(rows[0].text()).toContain('可建定时任务')
+    expect(rows[1].text()).toContain('自动触发，不用建任务')
+    expect(rows[2].text()).toContain('自动触发，不用建任务')
+  })
+
   it('勾选某个内容类型给某个渠道：请求体带 topic / channel / enabled', async () => {
     const { wrapper, fetchMock } = await mountView({ channels: CHANNELS, topics: TOPICS })
     await openTab(wrapper, '订阅')
@@ -406,6 +427,14 @@ describe('多选列表（渠道 > 8）的勾选与保存反馈', () => {
     await button.trigger('click')
     await flushPromises()
   }
+
+  // 票 07：多选形态是同一份注册表的另一套渲染，触发方式那行字也得在。
+  it('多选形态的行上同样标出触发方式', async () => {
+    const { wrapper } = await mountView({ channels: MANY, topics: TOPICS })
+    await openTab(wrapper, '订阅')
+
+    expect(wrapper.findAll('.wp-pick-row')[0].text()).toContain('自动触发，不用建任务')
+  })
 
   it('已有订阅显示为已勾（与同一行的「N 个渠道」徽章说的是同一件事）', async () => {
     const { wrapper } = await mountView({ channels: MANY, topics: TOPICS })
