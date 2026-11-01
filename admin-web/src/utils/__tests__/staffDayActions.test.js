@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   actFromQuery,
+  blockingLeaveOnDay,
   candidateLine,
   dateFromQuery,
   dayActions,
@@ -298,5 +299,36 @@ describe('从今天页跳过来那两参数', () => {
   it('日期 → 月份（翻月与「回到本月」都按它比）', () => {
     expect(monthOfDate('2026-10-05')).toBe('2026-10')
     expect(monthOfDate('')).toBe('')
+  })
+})
+
+describe('那天是不是已经有假了（同一天不重复提，2026-11-02）', () => {
+  const requests = [
+    { id: 1, kind: 'leave', status: 'pending_manager', start_date: '2026-10-08', end_date: '2026-10-08' },
+    { id: 2, kind: 'leave', status: 'approved', start_date: '2026-10-20', end_date: '2026-10-22' },
+    { id: 3, kind: 'leave', status: 'rejected', start_date: '2026-10-25', end_date: '2026-10-25' },
+    { id: 4, kind: 'leave', status: 'cancelled', start_date: '2026-10-26', end_date: '2026-10-26' },
+    { id: 5, kind: 'swap', status: 'pending_manager', start_date: '2026-10-27', end_date: '2026-10-27' },
+  ]
+
+  it('等批的与已批的都算占着那天', () => {
+    expect(blockingLeaveOnDay(requests, '2026-10-08').id).toBe(1)
+    // 跨天假在区间里的每一天都占着。
+    expect(blockingLeaveOnDay(requests, '2026-10-21').id).toBe(2)
+  })
+
+  it('驳回 / 撤回的不占 —— 被驳一次不该再也请不了那天', () => {
+    expect(blockingLeaveOnDay(requests, '2026-10-25')).toBeNull()
+    expect(blockingLeaveOnDay(requests, '2026-10-26')).toBeNull()
+  })
+
+  it('换班不挡请假：那是另一件事', () => {
+    expect(blockingLeaveOnDay(requests, '2026-10-27')).toBeNull()
+  })
+
+  it('没申请的那天返回 null（按钮照常可点）', () => {
+    expect(blockingLeaveOnDay(requests, '2026-10-09')).toBeNull()
+    expect(blockingLeaveOnDay([], '2026-10-09')).toBeNull()
+    expect(blockingLeaveOnDay(null, '2026-10-09')).toBeNull()
   })
 })

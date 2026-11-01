@@ -126,6 +126,21 @@ export function requestsOnDay(requests, businessDate) {
   })
 }
 
+/** 那天**已经占着**的一条假（还在等批、或已经批下来），没有就 null。
+ *
+ *  服务端 `submit_leave` 会挡「同一天重复提」（`leave_already_requested`，2026-11-02
+ *  用户要求）。这里提前一步把按钮灰掉 —— 让员工点了才读红字属于白跑一趟；
+ *  驳回 / 撤回的那条不算占着（服务端也放行），所以不挡。
+ */
+export function blockingLeaveOnDay(requests, businessDate) {
+  const hit = requestsOnDay(requests, businessDate).filter((request) => (
+    request
+    && request.kind === 'leave'
+    && (request.status === 'pending_manager' || request.status === 'approved')
+  ))
+  return hit[0] || null
+}
+
 /** 那天有没有人找我换班（票 09 的那几条待回应，服务端只给还没回应的）。 */
 export function incomingOnDay(incoming, businessDate) {
   if (!businessDate) return []

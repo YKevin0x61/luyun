@@ -1817,12 +1817,7 @@ def test_submitting_a_leave_also_tells_the_work_group(scheduling_http, monkeypat
 
 
 def test_a_leave_that_cannot_be_saved_tells_nobody(scheduling_http, monkeypatch):
-    """提交被拒不该往群里发一条不存在的申请。
-
-    这里用**事由超长**（`MAX_REQUEST_NOTE = 50`）当 400：它是已提交代码里稳定的一条
-    拒绝路径。原来这里用的是「同一天重复提」，而那半条逻辑还没提交，换成它会让这个
-    用例在干净检出上红。
-    """
+    """提交被拒（这里是「同一天已经提过」）不该往群里发一条不存在的申请。"""
     client, _db, accounts = scheduling_http
     _admin, (employee_id,), _day_id = _leave_scene(client, accounts, monkeypatch)
 
@@ -1837,9 +1832,7 @@ def test_a_leave_that_cannot_be_saved_tells_nobody(scheduling_http, monkeypatch)
     assert first.status_code == 200, first.text
     calls.clear()
 
-    rejected = client.post(
-        "/api/scheduling/me/requests", json={"start_date": "2026-09-25", "note": "啊" * 51}
-    )
+    rejected = client.post("/api/scheduling/me/requests", json={"start_date": "2026-09-25"})
 
     assert rejected.status_code == 400
     assert calls == []
@@ -3102,6 +3095,78 @@ def test_reject_reason_is_optional_and_bounded(scheduling_http, monkeypatch):
     assert bare.status_code == 200, bare.text
     assert bare.json()["decision_note"] is None
 
+
+def test_the_same_day_cannot_be_requested_twice(scheduling_http, monkeypatch):
+    """同一天不重复提（2026-11-02 用户要求）。
+
+    判据是**那一天**，不是「开始日期相同」：一条 9/25–9/26 的假再提 9/26 也算重。
+    在等批的与已经批下来的都算占着；驳回 / 撤回的不算 —— 那两条不挡，否则被驳一次
+    就永远请不了那一天。
+    """
+    client, _db, accounts = scheduling_http
+    admin, (leaver, other), _day_id = _leave_scene(
+        client, accounts, monkeypatch, people=((PHONE, NAME), ("13800138001", "李四"))
+    )
+    _skip_lead_time_rule(monkeypatch)
+
+    _staff_cookie(client, accounts)
+    first = client.post("/api/scheduling/me/requests", json={"start_date": "2026-09-25"})
+    assert first.status_code == 200, first.text
+
+    # 1) 同一天再来一条：拒绝，并且点名是哪一天重了。
+    again = client.post("/api/scheduling/me/requests", json={"start_date": "2026-09-25"})
+    assert again.status_code == 400, again.text
+    assert again.headers["X-Error-Code"] == "leave_already_requested"
+    assert "2026-09-25" in again.json()["detail"]
+    assert "已经有你的请假在办了" in again.json()["detail"]
+
+    # 2) 跨日重叠同样算重：另一条 9/24–9/26 与 9/25 相撞。
+    overlap = client.post(
+        "/api/scheduling/me/requests", json={"start_date": "2026-09-24", "end_date": "2026-09-26"}
+    )
+    assert overlap.status_code == 400, overlap.text
+    assert "2026-09-25" in overlap.json()["detail"]
+    # 只有相撞的那天被点名，没撞的 9/24 不出现（文案只说真重了的那几天）。
+    assert "2026-09-24" not in overlap.json()["detail"]
+
+    # 3) 别人同一天照样能提：重复只按本人算。
+    _staff_cookie(client, accounts, phone="13800138001")
+    others = client.post("/api/scheduling/me/requests", json={"start_date": "2026-09-25"})
+    assert others.status_code == 200, others.text
+
+    # 4) 批下来之后仍然占着那天。
+    _as_manager(client, admin)
+    approved = client.post(f"/api/scheduling/inbox/{first.json()['request']['id']}/approve")
+    assert approved.status_code == 200, approved.text
+    _staff_cookie(client, accounts)
+    after_approve = client.post("/api/scheduling/me/requests", json={"start_date": "2026-09-25"})
+    assert after_approve.status_code == 400, after_approve.text
+    assert after_approve.headers["X-Error-Code"] == "leave_already_requested"
+
+
+def test_a_rejected_leave_frees_that_day_again(scheduling_http, monkeypatch):
+    """被驳回 / 自己撤回的那天可以重新提 —— 「已经有你的请假在办了」说的只是还没了结的。"""
+    client, _db, accounts = scheduling_http
+    admin, _ids, _day_id = _leave_scene(client, accounts, monkeypatch)
+    _skip_lead_time_rule(monkeypatch)
+
+    _staff_cookie(client, accounts)
+    request_id = client.post(
+        "/api/scheduling/me/requests", json={"start_date": "2026-09-25"}
+    ).json()["request"]["id"]
+
+    _as_manager(client, admin)
+    assert client.post(f"/api/scheduling/inbox/{request_id}/reject").status_code == 200
+
+    _staff_cookie(client, accounts)
+    again = client.post("/api/scheduling/me/requests", json={"start_date": "2026-09-25"})
+    assert again.status_code == 200, again.text
+
+    # 撤回也一样放开：撤回自己那条之后又能提。
+    second = again.json()["request"]["id"]
+    assert client.delete(f"/api/scheduling/me/requests/{second}").status_code == 200
+    third = client.post("/api/scheduling/me/requests", json={"start_date": "2026-09-25"})
+    assert third.status_code == 200, third.text
 
 
 # ── 审批结果也进群（2026-11-02）──────────────────────────────────────────────

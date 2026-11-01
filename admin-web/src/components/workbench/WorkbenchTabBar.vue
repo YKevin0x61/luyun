@@ -14,9 +14,12 @@
 //
 // 只在手机档渲染（`max-width: 720px`）：桌面空间宽裕，顶栏那一条 tab 更好用；
 // 底栏是移动端范式，不是"两处都放"。
-import { computed } from 'vue'
+import { computed, onMounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
+import { useNudgePull } from '../../composables/useNudgePull'
+import { useSchedulingPendingStore } from '../../stores/schedulingPending'
 import { useWorkbenchIdentityStore } from '../../stores/workbenchIdentity'
+import { IDENTITY_ADMIN } from '../../utils/workbenchIdentity'
 import { workbenchGroupOf, workbenchNavFor } from '../../utils/workbenchNav'
 
 const route = useRoute()
@@ -24,6 +27,46 @@ const identityStore = useWorkbenchIdentityStore()
 
 const identity = computed(() => identityStore.identity)
 const currentGroup = computed(() => workbenchGroupOf(route.path))
+
+// ── 「人事」这一格：有待批就直接落待办页 ────────────────────────────────────
+//
+// 2026-11-02 店长要求「审批入口更便捷」。原来要：底栏「人事」→ 月历 → 滚到底那根
+// 「待批请假影响的日子」→ 待办页（手机上还要滑一整屏）。现在只要**有待批**，点「人事」
+// 就直接到待办列表，角标上写着还剩几条；没有待批时仍旧回月历（那才是这一组平时的落点）。
+//
+// 只有**批得动人**才这么走：管理端会话，或花名册上开了「人事管理」（`schedule`）的员工。
+// 其余员工读 `/inbox` 会被 403 —— 对他们不拉数据、不标角标、落点不变。
+const pendingStore = useSchedulingPendingStore()
+const canApprove = computed(
+  () => identity.value === IDENTITY_ADMIN
+    || (identityStore.staffCaps || []).includes('schedule'),
+)
+const INBOX_PATH = '/workbench/hr/inbox'
+/** 底栏只在手机档渲染（见下面的 `@media`）。桌面上不拉这份数 —— 那里待批入口在
+ *  月历页头（`SchedulingCalendarView` 的「待批 N 条」），不必每个页面都问一次。 */
+const isPhoneWidth = () => typeof window !== 'undefined'
+  && typeof window.matchMedia === 'function'
+  && window.matchMedia('(max-width: 720px)').matches
+
+function refreshPending() {
+  if (!isPhoneWidth() || !canApprove.value) return
+  void pendingStore.refresh()
+}
+
+onMounted(refreshPending)
+// 身份探出来（`null` → 具体身份）之后补一次：`onMounted` 那会儿可能还没探完。
+watch(canApprove, (can) => { if (can) refreshPending() })
+// 别人刚提 / 刚撤一条，这边角标要跟着动。nudge 只发给相关的人，所以这里只是
+// 「本店有人动了排班」时的一次补拉，不指望它覆盖全部情况（切页也会再刷一次，见下）。
+useNudgePull({
+  id: 'workbench-tabbar',
+  topics: ['scheduling'],
+  pull: refreshPending,
+  fallback: false,
+})
+// 换一页就再问一次：手机上切页本来就换上下文，这一次请求很便宜；也把「别人在
+// 另一台设备上提的假」补进来（那件事不会给本机发 nudge）。
+watch(() => route.path, refreshPending)
 
 /** 一格一组（与顶栏同一个抽屉顺序）。表里同 key 的多条链接（后勤两扇门）在这里只留
  *  第一条当落点，标签仍用**组名**。 */
@@ -35,7 +78,12 @@ const cells = computed(() => {
       seen.set(item.key, { key: item.key, label: item.label, to: item.to })
     }
   }
-  return [...seen.values()]
+  const list = [...seen.values()]
+  if (!canApprove.value || !pendingStore.hasPending) return list
+  // 有待批：这一格改成待办页，并带上条数（角标）。
+  return list.map((cell) => (cell.key === 'hr'
+    ? { ...cell, to: INBOX_PATH, badge: pendingStore.count }
+    : cell))
 })
 
 /** 图标：手写的 21px 描边 SVG（同一支笔：1.7 的线宽、圆头圆角）。
@@ -91,18 +139,27 @@ const ICONS = {
       :aria-current="cell.key === currentGroup ? 'page' : undefined"
       :to="cell.to"
     >
-      <svg
-        class="wb-tab-icon"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        stroke-width="1.7"
-        stroke-linecap="round"
-        stroke-linejoin="round"
-        aria-hidden="true"
-      >
-        <path v-for="(d, i) in ICONS[cell.key] || []" :key="i" :d="d" />
-      </svg>
+      <span class="wb-tab-icon-wrap">
+        <svg
+          class="wb-tab-icon"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.7"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          aria-hidden="true"
+        >
+          <path v-for="(d, i) in ICONS[cell.key] || []" :key="i" :d="d" />
+        </svg>
+        <!-- 角标只出现在「人事」：有待批时它就是待办页的入口（见 script 里的说明）。
+             用 `aria-label` 把数字也读出来，不然读屏只知道有个点。 -->
+        <span
+          v-if="cell.badge"
+          class="wb-tab-badge"
+          :aria-label="`${cell.badge} 条待批`"
+        >{{ cell.badge > 99 ? '99+' : cell.badge }}</span>
+      </span>
       <span class="wb-tab-label">{{ cell.label }}</span>
     </router-link>
   </nav>
@@ -151,6 +208,25 @@ const ICONS = {
   }
   .wb-tab-label { white-space: nowrap; }
   .wb-tab-icon { width: 21px; height: 21px; flex: 0 0 auto; }
+  /* 图标 + 角标的定位壳：角标压在图标右上角，不占这一格的布局宽度。 */
+  .wb-tab-icon-wrap { position: relative; display: inline-flex; }
+  .wb-tab-badge {
+    position: absolute;
+    top: -5px;
+    left: 13px;
+    min-width: 15px;
+    height: 15px;
+    padding: 0 4px;
+    border-radius: 999px;
+    background: var(--warn);
+    color: var(--action-ink);
+    font-size: 10px;
+    font-weight: 700;
+    line-height: 15px;
+    text-align: center;
+    /* 底栏底色上压一个描边，数字才不会被图标线条吃进去。 */
+    box-shadow: 0 0 0 1.5px var(--surface-1);
+  }
 
   .wb-tab.is-on { color: var(--hy-mint); font-weight: 700; }
 }

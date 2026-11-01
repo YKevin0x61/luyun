@@ -28,6 +28,7 @@ import { dayLabel, isMe, myDayText, offLabel, rosterSummary } from '../../utils/
 import {
   DAY_VIEW,
   actionsNote,
+  blockingLeaveOnDay,
   candidateLine,
   dayActions,
   incomingOnDay,
@@ -133,7 +134,16 @@ const acts = computed(() => dayActions(props.day, {
   nextDayLocked: props.nextDayLocked,
   leaveLeadDays: props.leaveLeadDays,
 }))
-const whyNote = computed(() => actionsNote(acts.value))
+// 那天已经有一条在办（等批）或已批的假：按钮灰掉，理由优先显示这条 ——
+// 服务端也会挡（`leave_already_requested`），但让人点了再读红字是白跑一趟。
+const leaveTaken = computed(() => blockingLeaveOnDay(requests.value, props.day && props.day.business_date))
+const whyNote = computed(() => (
+  leaveTaken.value
+    ? (leaveTaken.value.status === 'approved'
+      ? '这天已经有批准的假：不用再提'
+      : '这天已经有一条请假在等店长批：不用重复提')
+    : actionsNote(acts.value)
+))
 const mineText = computed(() => myDayText(props.day))
 // 我那天上什么班（休 / 没班都给空串）：换班预览与「你那天」那行都用它。
 const myShiftName = computed(() => (
@@ -571,7 +581,7 @@ useNudgePull({
             <button
               class="btn ds-act"
               type="button"
-              :disabled="!acts.leave.ok"
+              :disabled="!acts.leave.ok || !!leaveTaken"
               @click="startLeave"
             >请这天的假</button>
             <button

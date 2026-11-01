@@ -1964,6 +1964,15 @@ useNudgePull({
           <div class="gTitleRow">
             <h1 class="gTitle">排班</h1>
             <div class="gHeadActions">
+              <!-- 待批入口放到页头（2026-11-02 店长要求「审批更便捷」）：原来只有页面
+                   最底下那根「待批请假影响的日子」，手机上要滑一整屏才看得到；页头这一枚
+                   在首屏，点一下直接到待办。数字与月历角标、底栏角标是同一份 inbox 数据。 -->
+              <button
+                v-if="inboxRequests.length"
+                class="gBtn gLink gTodoHead"
+                type="button"
+                @click="router.push('/workbench/hr/inbox')"
+              ><b>待批 {{ inboxRequests.length }} 条</b> ›</button>
               <button class="gBtn gLink" type="button" @click="router.push('/workbench/hr/shifts')"><b>班次表</b> ›</button>
             </div>
           </div>
@@ -2114,7 +2123,11 @@ useNudgePull({
               <button class="gPend gTodo" type="button" v-if="Object.keys(pendingMarks).length" @click="router.push('/workbench/hr/inbox')">
                 <span class="n">假</span>
                 <b>请假待办</b>
-                <span>{{ Object.keys(pendingMarks).length }} 条申请等着批</span>
+                <!-- 这里原来数的是 `pendingMarks` 的键（**天数**），文案却写「条」：
+                     一条跨三天的假会被说成 3 条，和页头 / 底栏角标的条数对不上
+                     （2026-11-02 页头加了入口之后两处并排看，差 1 很扎眼）。条数是
+                     `inboxRequests` 的长度，天数才用 `pendingMarks`。 -->
+                <span>{{ inboxRequests.length }} 条申请等着批</span>
                 <span class="go">›</span>
               </button>
 
@@ -2899,6 +2912,9 @@ useNudgePull({
   font-weight: 600; letter-spacing: .01em; color: var(--ink);
 }
 .gHeadActions { margin-left: auto; display: flex; align-items: center; gap: var(--sp-2); }
+/* 页头的「待批 N 条」：琥珀是这套东西里「等着人处理」的色，与月历上的待批角标同一支笔。 */
+.gHeadActions .gTodoHead { border-color: var(--warn); color: var(--warn); }
+.gHeadActions .gTodoHead b { font-weight: 700; }
 .gLink { flex: none; min-height: var(--tap); background: transparent; border-color: transparent; color: var(--ink-dim); }
 .gLink b { font-weight: 600; color: var(--ink); }
 .gMetaRow {

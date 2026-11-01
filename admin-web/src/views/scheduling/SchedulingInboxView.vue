@@ -16,6 +16,7 @@ import { useRouter } from 'vue-router'
 import ConfirmDialog from '../../components/admin/ConfirmDialog.vue'
 import { api } from '../../api/client'
 import { useNudgePull } from '../../composables/useNudgePull'
+import { useSchedulingPendingStore } from '../../stores/schedulingPending'
 import { WORKBENCH_HR_HOME, workbenchDocumentTitle } from '../../utils/workbenchCopy'
 // 共享样式表由壳加载（`SchedulingLayout.vue`）：三个子页各加载一份会挂出重复的
 // <link>，壳一层管住就跟卫生管理端一个做法。
@@ -33,6 +34,8 @@ import {
 
 
 const router = useRouter()
+// 底栏「人事」那一格的角标：批完/驳完要跟着掉，不然退回今天页时数字还是旧的。
+const pendingStore = useSchedulingPendingStore()
 
 const state = ref('loading') // 'loading' | 'ready' | 'error'
 const errorText = ref('')
@@ -97,6 +100,8 @@ async function decide(request, action, reason = '') {
       receipt.value = `${request.employee_name} 的${kindText(request.kind)}驳回了，排班没动`
     }
     await load()
+    // 角标（底栏 / 月历页头）与这一页读的是同一份 inbox，动完手就让它们知道。
+    void pendingStore.refresh()
   } catch (err) {
     // 可能是别人先批了/员工自己撤了（`request_not_pending`）：重读一次待办，
     // 别让超级管理员对着一条已经不存在的申请反复点 —— 服务端那句话留到最后说。

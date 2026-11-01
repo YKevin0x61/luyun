@@ -3136,6 +3136,12 @@ class SchedulingStore:
         self._check_apply_window(
             first, last, today, now, days=len(_each_day_between(first, last)),
         )
+        # 同一天不重复提（2026-11-02 用户要求）：**在等批的**和**已经批下来的**都算
+        # 「那天已经说过了」。驳回 / 撤回的不算 —— 那两条已经不占着那天了，不让再提
+        # 等于驳一次就永远请不了那天。
+        blocked = await self._claimed_leave_days(employee_id, first, last)
+        if blocked:
+            raise SchedulingError("leave_already_requested", "、".join(blocked))
         return await self._insert_request(
             employee_id, KIND_LEAVE, first, last, _clean_note(note), STATUS_PENDING_MANAGER
         )
@@ -4063,6 +4069,46 @@ class SchedulingStore:
             await self._rollback_quietly()
             logger.warning("请假标记读不了（0007 未应用？），这天按「休」显示: %s", exc)
             return set()
+
+    async def _claimed_leave_days(self, employee_id: int, first: str, last: str) -> list[str]:
+        """这段时间里**已经提过且还占着**的假（同人多日也不许重复提）。
+
+        「还占着」= `pending_manager`（等店长批）或 `approved`（已经批下来）；
+        `rejected` / `cancelled` 不占 —— 员工被驳回之后应该能改个日期再提，而不是
+        因为上一次被驳就再也请不了那天。
+
+        `start_date` / `end_date` 都是 ISO 文本（见 0007 的建表），字典序就是时间序，
+        所以区间相交直接用字符串比。返回**与这次申请重叠的那几天**，让文案能点名，
+        而不是只说一句「重复了」。
+        """
+        try:
+            cur = await self._conn.execute(
+                """SELECT start_date, end_date FROM scheduling_requests
+                   WHERE employee_id = ? AND kind = ? AND status IN (?, ?)
+                     AND start_date <= ? AND end_date >= ?""",
+                (
+                    int(employee_id),
+                    KIND_LEAVE,
+                    STATUS_PENDING_MANAGER,
+                    STATUS_APPROVED,
+                    last,
+                    first,
+                ),
+            )
+            rows = await cur.fetchall()
+        except (asyncpg.UndefinedTableError, asyncpg.UndefinedColumnError) as exc:
+            # 0009 还没应用：没有申请表，自然也没有「重复」可言（同 `_leave_days` 的口径）。
+            await self._rollback_quietly()
+            logger.warning("请假申请读不了（0009 未应用？），这次不挡重复: %s", exc)
+            return []
+        days: set[str] = set()
+        for row in rows:
+            item = dict(row)
+            low = max(str(item["start_date"]), first)
+            high = min(str(item["end_date"]), last)
+            if low <= high:
+                days.update(_each_day_between(low, high))
+        return sorted(days)
 
     async def _leave_days(self, employee_id: int, first: str, last: str) -> set[str]:
         """某人一段日期里批了请假的那几天（两端都算）。缺 0007 时同 `_leave_ids` 返回空集。"""

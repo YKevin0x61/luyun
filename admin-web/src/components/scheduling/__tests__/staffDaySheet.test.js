@@ -216,6 +216,36 @@ describe('某一天的操作单：点开一天就能把那天的事办掉（票 
     expect(later.wrapper.text()).not.toContain('晚上 10 点过了')
   })
 
+  it('那天已经有假了：按钮灰着，先说明是哪一种（同一天不重复提）', async () => {
+    // 服务端 `submit_leave` 会挡（`leave_already_requested`，2026-11-02 用户要求），
+    // 但这屏先灰掉 —— 让员工点了才读红字是白跑一趟。
+    const pending = await mountSheet({
+      requests: [
+        { id: 9, kind: 'leave', status: 'pending_manager', start_date: '2026-10-08', end_date: '2026-10-08' },
+      ],
+    })
+    expect(buttonByText(pending.wrapper, '请这天的假').attributes('disabled')).toBeDefined()
+    expect(pending.wrapper.text()).toContain('这天已经有一条请假在等店长批：不用重复提')
+
+    // 批下来的换一种说法；换班按钮不受影响（那是另一件事）。
+    const approved = await mountSheet({
+      requests: [
+        { id: 9, kind: 'leave', status: 'approved', start_date: '2026-10-08', end_date: '2026-10-08' },
+      ],
+    })
+    expect(buttonByText(approved.wrapper, '请这天的假').attributes('disabled')).toBeDefined()
+    expect(approved.wrapper.text()).toContain('这天已经有批准的假：不用再提')
+    expect(buttonByText(approved.wrapper, '换这天的班').attributes('disabled')).toBeUndefined()
+
+    // 被驳回 / 自己撤回的那条不占 —— 那天照常能提。
+    const rejected = await mountSheet({
+      requests: [
+        { id: 9, kind: 'leave', status: 'rejected', start_date: '2026-10-08', end_date: '2026-10-08' },
+      ],
+    })
+    expect(buttonByText(rejected.wrapper, '请这天的假').attributes('disabled')).toBeUndefined()
+  })
+
   it('2 天以上的假：日期一改就说「要提前 7 天」，提交按钮同时灰掉', async () => {
     // 2026-10-05 是今天，DAY 是 10-08（单日的假提得了）；把「到哪天」拨到 10-09 就成了 2 天，
     // 而 +7 之后才是 10-12 —— 这一改就得当场说清，别等人填完事由才被打回。

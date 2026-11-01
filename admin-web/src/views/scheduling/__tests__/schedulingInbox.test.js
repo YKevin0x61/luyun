@@ -38,10 +38,13 @@ describe('店长端排班待办（票 08、09）', () => {
   it('只读排班自己那三条待办路由', () => {
     // 店长门：待办列表 + 批准/驳回。身份由管理端 cookie 定，路径上只有申请号。
     expect(view).toMatch(/api\.get\('\/api\/scheduling\/inbox'\)/)
-    expect(view).toMatch(/api\.post\(`\/api\/scheduling\/inbox\/\$\{request\.id\}\/\$\{action\}`, \{\}\)/)
+    // 驳回带一句选填原因（0044）：只有「驳回且写了原因」时 body 才有内容。
+    expect(view).toMatch(/api\.post\(`\/api\/scheduling\/inbox\/\$\{request\.id\}\/\$\{action\}`, body\)/)
+    expect(view).toMatch(/const body = action === 'reject' && reason \? \{ reason \} : \{\}/)
     // 动作名只有服务端有路由的那两个。
     expect(view).toMatch(/decide\(request, 'approve'\)/)
-    expect(view).toMatch(/decide\(target, 'reject'\)/)
+    // 驳回把框里那句原因一起带上（0044，选填）。
+    expect(view).toMatch(/decide\(target, 'reject', \(reason \|\| ''\)\.trim\(\)\)/)
     // 页面上真正的请求就这两条，都在店长那扇门里（员工门那几条只出现在头注释的说明里）。
     const calls = [...view.matchAll(/api\.(?:get|post|put|delete)\(\s*[`']([^`']*)/g)].map((m) => m[1])
     expect(calls.sort()).toEqual([
@@ -111,7 +114,7 @@ describe('店长端排班待办（票 08、09）', () => {
     // 挡得住数据被改坏，挡不住店长看到「点了没反应 / 回执对不上」。
     // 两道保险：模板全灰（上一条钉着），动作开头再挡一次重入（键盘/脚本绕过模板）。
     expect(view).toMatch(
-      /async function decide\(request, action\) \{[\s\S]{0,400}?if \(busyId\.value\) return/,
+      /async function decide\(request, action, reason = ''\) \{[\s\S]{0,400}?if \(busyId\.value\) return/,
     )
     // 只清自己占的那个槽：不是本次请求的 `finally` 不许把在飞那条的保护撤掉。
     expect(view).toMatch(
