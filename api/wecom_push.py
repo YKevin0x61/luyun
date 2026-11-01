@@ -8,6 +8,7 @@
 所以没有脚本会因此断掉（spec「鉴权与审计」）。
 """
 
+import base64
 import json
 import logging
 import re
@@ -35,6 +36,7 @@ from services.wecom_push_service import (
     ALLOWED_PUSH_TYPES,
     DATA_QUALITY_PUSH_TYPE,
     SALES_REPORT_PUSH_TYPE,
+    WECOM_IMAGE_BYTE_LIMIT,
     WECOM_TEXT_BYTE_LIMIT,
     decrypt_webhook_url,
     encrypt_webhook_url,
@@ -1293,25 +1295,50 @@ async def preview_job(
     db: DatabaseManager = Depends(get_db),
     _session: str = Depends(require_session),
 ):
-    """预览这条任务这一刻会发出去的正文。
+    """预览这条任务这一刻会发出去的正文（文字或图片）。
 
     它是 POST（要带任务 id 与参数，且报表类会现算数据）但**不写任何东西**；会话门禁
     与其它写路由同一口径 —— 这一页的调用方只有管理端 SPA。
+
+    图片走 `image_data_url`（`data:image/png;base64,…`，前端直接塞进 `<img>`）：不另开
+    静态端点，是因为这张图是一次性的预览，落盘既多一个要清理的文件、也绕开了本页的会话
+    门禁。`content` 对图片为空串，前端按 `kind` 分支。
     """
     try:
-        rendered_message = await wecom_push_service.preview_job(db, job_id)
+        delivery = await wecom_push_service.preview_job_delivery(db, job_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    parts = list(rendered_message.parts) or [rendered_message.content]
+    if delivery.is_image:
+        return {
+            "success": True,
+            "kind": "image",
+            "content": "",
+            "byte_length": delivery.byte_length,
+            "limit": WECOM_IMAGE_BYTE_LIMIT,
+            "within_limit": delivery.byte_length <= WECOM_IMAGE_BYTE_LIMIT,
+            "chunk_count": 1,
+            "part_count": 1,
+            "image_data_url": (
+                "data:image/png;base64,"
+                + base64.b64encode(delivery.image_bytes or b"").decode("ascii")
+            ),
+        }
+    # 文字分支直接用上面那份 delivery —— 再调一次 preview_job 会把报表类的数据查询
+    # 重算一遍（预览本来就慢），而两份结果必然是同一份正文。
+    content = delivery.text
+    byte_length = len(content.encode("utf-8"))
+    parts = [content]
     chunk_count = len(expand_messages(parts))
     return {
         "success": True,
-        "content": rendered_message.content,
-        "byte_length": rendered_message.byte_length,
-        "limit": rendered_message.limit,
-        "within_limit": rendered_message.byte_length <= rendered_message.limit,
+        "kind": "text",
+        "content": content,
+        "byte_length": byte_length,
+        "limit": WECOM_TEXT_BYTE_LIMIT,
+        "within_limit": byte_length <= WECOM_TEXT_BYTE_LIMIT,
         "chunk_count": chunk_count,
         "part_count": len(parts),
+        "image_data_url": "",
     }
 
 

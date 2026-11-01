@@ -23,6 +23,14 @@ export const WECOM_PUSH_API_VERSION = 'v3'
  */
 export const MATRIX_CHANNEL_LIMIT = 8
 
+/**
+ * 企业微信 image 消息的字节上限（2MB）。
+ *
+ * 与后端 `services/wecom_push_service.py` 的 `WECOM_IMAGE_BYTE_LIMIT` 对齐：预览显示
+ * 「x / 上限 字节」、确认框报大小、发送时后端拒绝，三处必须是同一个数。
+ */
+export const WECOM_IMAGE_LIMIT = 2 * 1024 * 1024
+
 /** 多选列表模式的标识（`matrixViewMode` 的返回值）。 */
 export const MATRIX_VIEW_MULTI_SELECT = 'multi-select'
 
@@ -533,7 +541,13 @@ function targetSummary(targets, targetNames) {
  *   来自预览；`targetNames` 是这一类的收件群名（来自 `sendNowTargetNames`，可为空）。
  * @returns {string}
  */
-export function sendNowConfirmText({ job = null, bytes = 0, content = '', targetNames = [] } = {}) {
+export function sendNowConfirmText({
+  job = null,
+  bytes = 0,
+  content = '',
+  targetNames = [],
+  kind = 'text',
+} = {}) {
   const typeLabel = job?.topic_name || '推送内容'
   const targets = Number(job?.target_count) || 0
   // 收件人来自订阅（票 08）：确认框要说清"发给几个群"，能给出名单时（U7）还要说清发给谁。
@@ -543,24 +557,29 @@ export function sendNowConfirmText({ job = null, bytes = 0, content = '', target
     : [`确定立即发送${typeLabel}吗？当前没有任何群订阅这类内容，发送会被拒绝，请先在「订阅」里勾选收件群。`]
 
   const size = Number(bytes) || 0
+  const isImage = kind === 'image'
   // 预览为空时说清这一点：后端会自己现算一份内容发出去（send-now 不读预览），
-  // 所以"空预览"不等于"发空消息"，但用户必须知道自己没核对过内容。
-  if (!content) {
+  // 所以"空预览"不等于"发空消息"，但用户必须知道自己没核对过内容。图片类的文字
+  // 预览本来就是空的，不能按文字口径说"没有预览"。
+  if (!content && !isImage) {
     lines.push('注意：当前没有预览内容，将按任务配置现算后发送，你没有核对过正文。')
   }
-  lines.push(`消息大小 ${size} / 2048 字节。`)
-
-  const head = String(content || '').split('\n').map((line) => line.trim()).find(Boolean)
-  if (head) {
-    lines.push(`正文首行：${head.length > 40 ? `${head.slice(0, 40)}…` : head}`)
+  if (isImage) {
+    lines.push(`这次发的是一张图片消息，${size} / ${WECOM_IMAGE_LIMIT} 字节。`)
+  } else {
+    lines.push(`消息大小 ${size} / 2048 字节。`)
+    const head = String(content || '').split('\n').map((line) => line.trim()).find(Boolean)
+    if (head) {
+      lines.push(`正文首行：${head.length > 40 ? `${head.slice(0, 40)}…` : head}`)
+    }
   }
   lines.push('消息发出后无法撤回。')
   return lines.join('\n')
 }
 
 /** 预览为空时不允许「立即发送」：没有可核对的内容就外发，是这一页最容易误触的一条。 */
-export function canSendNow({ job = null, content = '' } = {}) {
-  return Boolean(job) && String(content || '').trim().length > 0
+export function canSendNow({ job = null, content = '', hasImage = false } = {}) {
+  return Boolean(job) && (Boolean(hasImage) || String(content || '').trim().length > 0)
 }
 
 /** 订阅的「保存后下一次触发即按新订阅投递」：勾选写哪一行由这里定死。 */
@@ -600,7 +619,9 @@ export function useWecomPush() {
   })
   const selectedJobId = ref(null)
   const previewContent = ref('')
-  const previewMeta = ref({ bytes: 0, chunkCount: 1 })
+  // 图片类内容（下周排班表）预览的 data URL：文本预览框对它是空的，页面按 kind 分支。
+  const previewImage = ref('')
+  const previewMeta = ref({ bytes: 0, chunkCount: 1, kind: 'text', limit: 2048 })
   const loading = ref(false)
   const error = ref('')
   // 加载失败的技术原文（英文 detail / HTTP 状态）：页面上折叠在「详情」里，不进主提示
@@ -1037,8 +1058,17 @@ export function useWecomPush() {
   async function previewSelectedJob() {
     if (!selectedJobId.value) throw new Error('请先选择任务')
     const data = await api.post(`/api/wecom-push/jobs/${selectedJobId.value}/preview`, {})
-    previewContent.value = data.content || ''
-    previewMeta.value = { bytes: data.byte_length || 0, chunkCount: data.chunk_count || 1 }
+    // 预览与实际投递是同一条渲染路径：后端给图就显示图、给文字就显示文字。图片的
+    // `content` 是空串，页面必须按 `kind` 分支，否则会把「一张图」显示成「空内容」。
+    const kind = data.kind === 'image' ? 'image' : 'text'
+    previewImage.value = kind === 'image' ? (data.image_data_url || '') : ''
+    previewContent.value = kind === 'image' ? '' : (data.content || '')
+    previewMeta.value = {
+      bytes: data.byte_length || 0,
+      chunkCount: data.chunk_count || 1,
+      kind,
+      limit: data.limit || (kind === 'image' ? WECOM_IMAGE_LIMIT : 2048),
+    }
   }
 
   async function sendSelectedJob() {
@@ -1052,7 +1082,7 @@ export function useWecomPush() {
 
   return {
     meta, channels, topics, groups, jobs, matrix, deliveries, audit,
-    selectedJobId, previewContent, previewMeta, loading, error, errorDetail,
+    selectedJobId, previewContent, previewImage, previewMeta, loading, error, errorDetail,
     activeTab, channelForm, channelGroupForm, multiSelect,
     contractWarning, zeroSubscriptionTip, viewMode, zeroTopicIds,
     resetChannelForm, resetChannelGroupForm, resetJobForm, jobForm,

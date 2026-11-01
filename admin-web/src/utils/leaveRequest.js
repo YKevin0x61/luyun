@@ -91,8 +91,26 @@ export function requestLine(request) {
   const when = request.start_date === request.end_date || !request.end_date
     ? dayLabel(request.start_date)
     : `${dayLabel(request.start_date)} 起 ${dayLabel(request.end_date)}`
-  if (request.kind === 'swap') return `换班 · ${when} · ${swapStatusText(request)}`
-  return `${kindText(request.kind)} · ${when} · ${statusText(request.status)}`
+  if (request.kind === 'swap') {
+    return `换班 · ${when} · ${swapStatusText(request)}${deciderSuffix(request)}`
+  }
+  return `${kindText(request.kind)} · ${when} · ${statusText(request.status)}${deciderSuffix(request)}`
+}
+
+/** 结果那一行后面那句：**驳回原因**或**谁批的**（0044，2026-11-02 审查的发现 3 / 4）。
+ *
+ *  先看原因：被驳回的人最想知道的是「为什么」，理由比他更该放在最前面。批准没有原因，
+ *  所以落回去说「谁批的」—— 店里不止一个人能批，员工被问起时也得答得上来。
+ *  两个都没有就什么都不加：0044 之前的历史行确实查不出来是谁批的，**不要**编一句
+ *  「店长批的」。
+ */
+function deciderSuffix(request) {
+  const note = String((request && request.decision_note) || '').trim()
+  if (request && request.status === REQUEST_STATUS.rejected && note) return `：${note}`
+  const name = String((request && request.decided_by_name) || '').trim()
+  const decided = request && (request.status === REQUEST_STATUS.approved ||
+    request.status === REQUEST_STATUS.rejected)
+  return name && decided ? `（${name}）` : ''
 }
 
 /** 换班那条现在卡在谁那里（票 09 的验收 7）——「等对方」必须点名，光说「等对方同意」不够。

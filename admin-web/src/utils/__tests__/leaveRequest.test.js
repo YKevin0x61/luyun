@@ -134,6 +134,25 @@ describe('自己那条申请的时间线（票 08 验收 4）', () => {
     expect(requestLine(null)).toBe('')
   })
 
+  it('结果后面补上驳回原因或谁批的；查不出来就不编（0044）', () => {
+    // 被驳回的人最想知道为什么 —— 原因排在最前面。
+    expect(
+      requestLine({ ...PENDING, status: 'rejected', decision_note: '那天早上有两桌预订' }),
+    ).toBe('请假 · 9/25 周五 起 9/26 周六 · 驳回了：那天早上有两桌预订')
+    // 批准没有原因，落回去说谁批的：店里不止一个人能批。
+    expect(
+      requestLine({ ...PENDING, status: 'approved', decided_by_name: '李四' }),
+    ).toBe('请假 · 9/25 周五 起 9/26 周六 · 批了（李四）')
+    // 管理后台批的、或 0044 之前的历史行：没有名字就不加后缀，不写「店长批的」。
+    expect(requestLine({ ...PENDING, status: 'approved' })).toBe(
+      '请假 · 9/25 周五 起 9/26 周六 · 批了',
+    )
+    // 还在等的申请没有结果，也就没有后缀。
+    expect(requestLine({ ...PENDING, decided_by_name: '李四' })).toBe(
+      '请假 · 9/25 周五 起 9/26 周六 · 等店长批',
+    )
+  })
+
   it('换班那条走自己的五个说法，且点名卡在谁那里（票 09 验收 7）', () => {
     expect(requestLine(SWAP)).toBe('换班 · 9/25 周五 · 等 李四 同意')
     expect(requestLine({ ...SWAP, status: 'pending_manager' })).toBe(

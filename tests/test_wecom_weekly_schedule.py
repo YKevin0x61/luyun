@@ -31,6 +31,7 @@ from services.wecom_push_service import (
     render_weekly_schedule_text,
     wecom_push_service,
 )
+from services.scheduling.week_view import KIND_UNSCHEDULED, cell_state
 from services.wecom_push_topics import get_topic
 
 ADMIN_USERNAME = "admin"
@@ -66,14 +67,21 @@ def test_next_week_start_is_always_the_next_monday(business_date, expected):
 
 
 def _grid(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """一份与 `SchedulingStore.week_grid` 同形的返回值（周一 2026-10-26 起 7 天）。"""
+    """一份与 `SchedulingStore.week_grid` 同形的返回值（周一 2026-10-26 起 7 天）。
+
+    日期用真的 `date` 递推，不是字符串拼 ``26+offset``：这一周跨月（10-26…11-01），
+    拼出来的 ``2026-10-32`` 在图片渲染里会被 `date.fromisoformat` 判成非法日期。
+    """
+    from datetime import date, timedelta
+
+    week_start = date(2026, 10, 26)
     days = []
     for offset, weekday in enumerate(range(7)):
-        day = 26 + offset
+        current = week_start + timedelta(days=offset)
         days.append({
-            "business_date": f"2026-10-{day:02d}",
-            "day": day,
-            "month": 10,
+            "business_date": current.isoformat(),
+            "day": current.day,
+            "month": current.month,
             "weekday": weekday,
             "is_today": False,
             "is_weekend": weekday >= 5,
@@ -98,9 +106,12 @@ def _grid(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 def _cells(**overrides: Dict[str, Any]) -> Dict[str, Any]:
     """7 个日期键都在（与 week_grid 的契约一致）。"""
+    from datetime import date, timedelta
+
+    week_start = date(2026, 10, 26)
     cells = {}
     for offset in range(7):
-        cells[f"2026-10-{26 + offset:02d}"] = overrides.get(f"d{offset}") or {
+        cells[(week_start + timedelta(days=offset)).isoformat()] = overrides.get(f"d{offset}") or {
             "scheduled": True,
             "shift_id": 1,
             "shift_name": "白班",
@@ -159,6 +170,44 @@ def test_rest_leave_half_rest_and_unscheduled_read_differently():
     ])).content
 
     assert "一 休 · 二 请假 · 三 未排 · 四 白班（半天） · 五 白班·凉菜间 · 六~日 白班" in content
+
+
+def test_a_blank_shift_name_is_read_as_unscheduled_not_as_a_shift():
+    """空字符串只可能是脏数据：按「上什么班」读会画出一个没有字的块/写出一句空话。"""
+    state = cell_state({"scheduled": True, "shift_id": 1, "shift_name": "  "})
+
+    assert state.kind == KIND_UNSCHEDULED
+
+
+def test_the_image_gives_a_half_day_a_dot_instead_of_a_second_line_of_text():
+    """列宽压到 104 才够清楚，「机动岗 · 半天」写不下：半天改画一个点，含义进页脚。"""
+    import io
+
+    from PIL import Image
+
+    from services.wecom_schedule_image import MIN_DAY_WIDTH, render_weekly_schedule_png
+
+    grid = _grid([
+        {
+            "id": 1,
+            "name": "张三",
+            "job_title": "",
+            "has_rule": True,
+            "cells": _cells(**{
+                "d0": {
+                    "scheduled": True, "shift_id": 1, "shift_name": "白班",
+                    "zone_name": "凉菜间", "half_rest": True,
+                },
+            }),
+        },
+    ])
+    data = render_weekly_schedule_png(grid, generated_at=datetime(2026, 10, 31, 13, 0))
+
+    assert data is not None
+    assert data[:8] == b"\x89PNG\r\n\x1a\n"
+    # 列宽就是清晰度的分母（企业微信按宽度缩到手机屏宽），下限不能被悄悄改回去。
+    width, _ = Image.open(io.BytesIO(data)).size
+    assert width >= 7 * MIN_DAY_WIDTH
 
 
 def test_no_employees_still_says_something():
@@ -421,10 +470,17 @@ def test_the_queued_row_renders_and_sends_through_the_outbox(api):
     assert _dispatch(api, db, datetime(2026, 10, 25, 13, 0, tzinfo=CHINA_TZ)) == 1
 
     sent: List[str] = []
+    sent_images: List[bytes] = []
 
     class FakeSender:
         async def send_text(self, webhook_url: str, content: str):
             sent.append(content)
+            return True, "ok"
+
+        async def send_image(self, webhook_url: str, image_bytes: bytes):
+            # 排班表现在发的是图（用户要求「改成截图」）：只记 send_text 的假发送器
+            # 会让这条链路看起来没发出去。两种都收下，本机有中文字体就走图片分支。
+            sent_images.append(image_bytes)
             return True, "ok"
 
     original = wecom_outbox._sender
@@ -434,7 +490,116 @@ def test_the_queued_row_renders_and_sends_through_the_outbox(api):
     finally:
         wecom_outbox._sender = original
 
-    assert sent, "出站没有发出任何一条"
-    assert "【下周排班】" in sent[0]
+    from services.cjk_font import load_cjk_font
+
+    assert sent or sent_images, "出站没有发出任何一条"
+    # 本机有中文字体时**必须**发图（用户要的就是截图）；没有才允许退文字。
+    if load_cjk_font(20) is not None:
+        assert sent_images, "有中文字体却发了文字版"
+        assert not sent
+    if sent_images:
+        # 图片是投递的正常形态（浅色排班图，PNG 尺寸远小于 2MB）。
+        assert sent_images[0][:8] == b"\x89PNG\r\n\x1a\n"
+    else:
+        # 没有中文字体的机器上会退回文字版，这条分支也要成立。
+        assert "【下周排班】" in sent[0]
     rows = _outbox_rows(api, db)
     assert rows == []
+
+
+# ── 图片版：发到群里的是**一张图**（用户 2026-11-01 要求「改成截图，不要文字」）──
+
+
+def _two_people_grid() -> Dict[str, Any]:
+    return _grid([
+        {"id": 1, "name": "张三", "job_title": "厨师", "has_rule": True, "cells": _cells()},
+        {
+            "id": 2,
+            "name": "李四",
+            "job_title": "服务员",
+            "has_rule": True,
+            "cells": _cells(
+                d5={"scheduled": True, "shift_id": 2, "shift_name": "夜班", "zone_id": None,
+                    "zone_name": None, "overridden": False, "half_rest": False, "leave": False},
+                d6={"scheduled": True, "shift_id": None, "shift_name": None, "zone_id": None,
+                    "zone_name": None, "overridden": False, "half_rest": False, "leave": False},
+            ),
+        },
+    ])
+
+
+def test_the_weekly_schedule_renders_a_png():
+    """真画一张图：PNG 头、尺寸够放下 7 天（不是一张空图）。
+
+    本机没有中文字体时函数按契约返回 ``None``（调用方退文字）—— 那时这条用例跳过，
+    因为「画不出来」不是代码错，而是这台机器没有字体。
+    """
+    import io
+
+    from PIL import Image
+
+    from services.wecom_schedule_image import MIN_DAY_WIDTH, render_weekly_schedule_png
+
+    png = render_weekly_schedule_png(_two_people_grid())
+    if png is None:
+        pytest.skip("本机没有可用中文字体")
+
+    assert png[:8] == b"\x89PNG\r\n\x1a\n"
+    image = Image.open(io.BytesIO(png))
+    # 7 天列 + 姓名列：至少 7 个最小日列宽，否则表头放不下
+    assert image.width >= 7 * MIN_DAY_WIDTH
+    # 2 人：标题 + 表头 + 2 行 + 页脚
+    assert image.height > 2 * 64
+
+
+def test_the_image_renderer_degrades_to_none_without_a_cjk_font(monkeypatch):
+    """没有中文字体时返回 None（不能画一排方块当图发出去）。"""
+    import services.wecom_schedule_image as image_module
+
+    monkeypatch.setattr(image_module, "load_cjk_font", lambda size: None)
+    assert image_module.render_weekly_schedule_png(_two_people_grid()) is None
+
+
+def test_the_delivery_falls_back_to_text_when_drawing_the_image_raises(monkeypatch, api):
+    """出图抛异常不能把当天这条推送丢掉：退文字版照样发。"""
+    import asyncio
+
+    import services.wecom_schedule_image as image_module
+    from services.app_runtime import get_runtime
+
+    def boom(grid, **kwargs):
+        raise RuntimeError("画不出来")
+
+    monkeypatch.setattr(image_module, "render_weekly_schedule_png", boom)
+    db = get_runtime().db
+
+    delivery = asyncio.run(wecom_push_service.render_job_delivery(
+        db, {"topic_id": "weekly_schedule", "params_json": "{}"}
+    ))
+
+    assert delivery.is_image is False
+    assert "【下周排班】" in delivery.text
+
+
+def test_the_preview_endpoint_returns_the_image_as_a_data_url(api):
+    """预览与真发同一条路径：图片类是 `kind=image` + data URL，不是一段空文字。"""
+    job_id = _setup_weekly_job(api)
+    resp = api.request("POST", f"{API_PREFIX}/jobs/{job_id}/preview")
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+
+    from services.cjk_font import load_cjk_font
+
+    assert data["kind"] in {"image", "text"}
+    # 有中文字体的机器上预览必须是图：文字版只是降级路径。
+    if load_cjk_font(20) is not None:
+        assert data["kind"] == "image", data
+    if data["kind"] == "image":
+        assert data["image_data_url"].startswith("data:image/png;base64,")
+        assert data["content"] == ""
+        assert data["chunk_count"] == 1
+        assert data["limit"] == 2 * 1024 * 1024
+    else:
+        # 没有中文字体的机器：退文字版，预览仍要能看到正文。
+        assert data["content"]
+        assert data["image_data_url"] == ""

@@ -23,7 +23,7 @@ const TABS = [
 
 const {
   meta, channels, topics, groups, jobs, matrix, deliveries, audit, selectedJobId,
-  previewContent, previewMeta, loading, error, errorDetail, activeTab, channelForm,
+  previewContent, previewImage, previewMeta, loading, error, errorDetail, activeTab, channelForm,
   channelGroupForm, multiSelect, contractWarning, zeroSubscriptionTip, viewMode,
   zeroTopicIds,
   resetChannelForm, resetChannelGroupForm, resetJobForm, jobForm,
@@ -151,7 +151,12 @@ const selectedJobTopic = computed(
 const sendReady = computed(() => canSendNow({
   job: selectedJob.value,
   content: previewContent.value,
+  // 图片类内容（下周排班表）没有文字正文，预览只给了 data URL：不放行这一项，
+  // 「立即发送」会在预览明明显示了图的情况下一直是灰的。
+  hasImage: Boolean(previewImage.value),
 }))
+// 预览是不是一张图：图片没有正文可复制，字节上限也走 2MB 那条（不是 2048）。
+const previewIsImage = computed(() => previewMeta.value.kind === 'image' && Boolean(previewImage.value))
 // 这次会发给哪些群（U7）：名字从订阅矩阵里取，判据在 composable（名字数与
 // `target_count` 对不上时给空数组，确认框退回只说数量）。
 const sendTargetNames = computed(() => sendNowTargetNames({
@@ -387,6 +392,7 @@ async function handleSend() {
     bytes: previewMeta.value.bytes,
     content: previewContent.value,
     targetNames: sendTargetNames.value,
+    kind: previewMeta.value.kind,
   })
   if (!window.confirm(text)) return
   try {
@@ -882,16 +888,30 @@ onMounted(async () => {
                 :title="sendReady ? '发送前会再确认一次' : '点「刷新预览」后可发送'"
                 @click="handleSend"
               >立即发送</button>
-              <button class="btn btn-sm" @click="copyPreview">复制</button>
+              <button
+                class="btn btn-sm"
+                :disabled="previewIsImage || !previewContent"
+                :title="previewIsImage ? '图片消息没有正文可复制' : ''"
+                @click="copyPreview"
+              >复制</button>
             </div>
           </div>
           <div style="display:flex;justify-content:space-between;color:var(--text-dim);font-size:12px;margin-bottom:8px">
             <span>{{ selectedJob ? `当前任务：${selectedJob.name}` : '请选择任务' }}</span>
             <span :style="previewMeta.chunkCount > 1 ? 'color:var(--yellow)' : ''">
-              {{ previewMeta.bytes }} / 2048 字节{{ previewMeta.chunkCount > 1 ? ` · 发送时拆为 ${previewMeta.chunkCount} 条` : '' }}
+              <template v-if="previewIsImage">{{ previewMeta.bytes }} / {{ previewMeta.limit }} 字节 · 一条图片消息</template>
+              <template v-else>
+                {{ previewMeta.bytes }} / 2048 字节{{ previewMeta.chunkCount > 1 ? ` · 发送时拆为 ${previewMeta.chunkCount} 条` : '' }}
+              </template>
             </span>
           </div>
+          <!-- 预览与实际外发是同一条渲染路径：后端给图就显示图。图片按原比例缩到面板宽，
+               不裁不放大 —— 店长要看的是"这周末谁上班"，不是缩略图本身。 -->
+          <div v-if="previewIsImage" class="wp-preview-image">
+            <img :src="previewImage" alt="消息预览图片（下周排班表）" />
+          </div>
           <textarea
+            v-else
             id="wp-job-preview"
             class="input"
             readonly
@@ -1481,4 +1501,19 @@ onMounted(async () => {
   .wp-card-table tr.wp-delivery-detail { padding: 0 8px 6px; }
   .wp-scroll-hint { display: block; color: var(--text-dim); font-size: 11px; margin: 0 0 6px; }
 }
+/* 图片预览（下周排班表）：浅色底 + 撑满面板宽。深色背景套一张白底排班图会像贴纸，
+   这里给容器白底；高度封顶，长表在面板内滚动而不是把整页顶长。 */
+.wp-preview-image {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: auto;
+  max-height: 620px;
+  background: #fff;
+  /* 网格子项默认 min-width:auto：图片的固有宽度（1242px）会把整列撑宽、顶出卡片，
+     于是「周日」那列被卡片右边界切掉。图片一律按容器缩放。 */
+  min-width: 0;
+  max-width: 100%;
+}
+/* 只缩不放：排班图 880px 比面板窄时按原尺寸显示，放大到面板宽反而会糊。 */
+.wp-preview-image img { display: block; max-width: 100%; height: auto; margin: 0 auto; }
 </style>

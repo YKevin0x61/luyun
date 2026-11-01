@@ -175,10 +175,11 @@ MULTI_DAY_LEAVE_LEAD_DAYS = 7
 # 时申请要照常读得出来，见 `_select_request_rows`。
 _REQUEST_COLUMNS = (
     "id, employee_id, kind, start_date, end_date, status, note, decided_at, created_at, updated_at,"
-    " peer_employee_id"
+    " peer_employee_id, decided_by, decision_note"
 )
 _REQUEST_COLUMNS_NO_PEER = (
-    "id, employee_id, kind, start_date, end_date, status, note, decided_at, created_at, updated_at"
+    "id, employee_id, kind, start_date, end_date, status, note, decided_at, created_at, updated_at,"
+    " decided_by, decision_note"
 )
 
 # 员工「今天」页往后看几天：今天、明天、后天、大后天（原型 A 的「往后三天」）。
@@ -3155,6 +3156,10 @@ class SchedulingStore:
         for row in rows:
             peer_id = row.get("peer_employee_id")
             row["peer_name"] = None if peer_id is None else names.get(int(peer_id), "")
+            # 谁批 / 驳的（0044）：管理后台批的 `decided_by` 是 NULL —— 那一档没有员工
+            # 身份，前端照「管理后台」说，服务层不替它编一个名字。
+            decider = row.get("decided_by")
+            row["decided_by_name"] = None if decider is None else names.get(int(decider), "")
         return {
             "today": self.today(),
             "requests": rows,
@@ -3178,10 +3183,13 @@ class SchedulingStore:
         if row["status"] not in (STATUS_PENDING_PEER, STATUS_PENDING_MANAGER):
             # 批完 / 驳完 / 已撤回都不再动：状态机只往前走（`spec.md` 的状态机）。
             raise SchedulingError("request_not_pending", "request_not_pending")
+        # `decided_by` 记申请人自己（0044）：撤回也是「这一行谁结束的」，
+        # 员工端在「我的申请」里能照它写「你自己撤回的」。
         return await self._decide(
             int(row["id"]),
             STATUS_CANCELLED,
             (STATUS_PENDING_PEER, STATUS_PENDING_MANAGER),
+            decided_by=int(employee_id),
         )
 
     @_needs_migration
@@ -3316,7 +3324,9 @@ class SchedulingStore:
         }
 
     @_needs_migration
-    async def approve_request(self, request_id: int) -> dict:
+    async def approve_request(
+        self, request_id: int, decided_by: Optional[int] = None
+    ) -> dict:
         """批一条申请：请假那几天变成请假，换班两个人那天对调（票 08 / 09 的验收项）。
 
         请假写的是**覆盖行**（`kind=leave`、`shift_id` 空）而不是改结果表的列：结果表里
@@ -3324,6 +3334,12 @@ class SchedulingStore:
         （`kind=swap`）+ 两条结果行：谁的班去了谁那里，见 `_approve_swap`。
 
         两种都只认 `pending_manager`：对方的点头（换班）是进这道门的条件，不是能跳过的一步。
+
+        **自己的申请批不了**（2026-11-02 请假审批全链路审查的发现 1）：`decided_by` 是
+        当前审批人的员工 id（管理后台批时是 None，它没有员工身份，也就谈不上「自己」）。
+        不加这道闸的话，开了「人事管理」的人在自己手机上提一条假、转头在同一页批掉，
+        审批这一环等于不存在。拒绝走 `cannot_decide_own_request`（400），路由层把它翻成
+        一句能照做的话 —— 而**管理后台那条路照常能批**，店长不会因为这道闸永远请不了假。
 
         已经过去的日子**不补写**（批准只写今天与以后）：批得晚了就是晚了，那天当时
         怎么排的就留着。申请照样记成已批准，`applied_days` 说清写了哪几天 ——
@@ -3334,21 +3350,44 @@ class SchedulingStore:
             raise SchedulingError("unknown_request", "unknown_request")
         if row["status"] != STATUS_PENDING_MANAGER:
             raise SchedulingError("request_not_pending", "request_not_pending")
-        return await self._approve(row)
+        self._reject_self_decision(row, decided_by)
+        return await self._approve(row, decided_by=decided_by)
+
+    @staticmethod
+    def _reject_self_decision(row: dict, decided_by: Optional[int]) -> None:
+        """审批人是申请人本人时拒绝（批准与驳回同一道闸）。"""
+        if decided_by is None:
+            return
+        if int(row["employee_id"]) == int(decided_by):
+            raise SchedulingError("cannot_decide_own_request", "cannot_decide_own_request")
 
     @_needs_migration
-    async def reject_request(self, request_id: int) -> dict:
+    async def reject_request(
+        self,
+        request_id: int,
+        decided_by: Optional[int] = None,
+        reason: Optional[str] = None,
+    ) -> dict:
         """驳回一条申请：**排班一个字不改**（票 08 的验收项），只把申请记为驳回。
 
         换班也一样：店长驳的是「这两个人对调」这件事，两人那天的班照旧。对方自己
         拒绝的那一步走的是 `answer_swap`（那条根本不进店长的队列）。
+
+        `reason` 是给申请人看的那句原因（0044 的 `decision_note`，选填）：驳回是唯一
+        **不可逆**的动作（批错了还能去月历把那天改回来，驳了得让员工重提），所以宁可
+        让店长多写一句。自己的申请同样驳不了（`_reject_self_decision`）—— 那等价于
+        撤回，走 `cancel_request` 那条更准确的路。
         """
         row = await self._request_by_id(request_id)
         if row is None:
             raise SchedulingError("unknown_request", "unknown_request")
         if row["status"] != STATUS_PENDING_MANAGER:
             raise SchedulingError("request_not_pending", "request_not_pending")
-        result = await self._decide(int(row["id"]), STATUS_REJECTED, (STATUS_PENDING_MANAGER,))
+        self._reject_self_decision(row, decided_by)
+        result = await self._decide(
+            int(row["id"]), STATUS_REJECTED, (STATUS_PENDING_MANAGER,),
+            decided_by=decided_by, decision_note=reason,
+        )
         # 同上：路由层要照这个 id 广播（被驳回的是**他**那条申请）。
         result["employee_id"] = int(row["employee_id"])
         return result
@@ -3555,7 +3594,7 @@ class SchedulingStore:
         return cards
 
     @serialized_write
-    async def _approve(self, row: dict) -> dict:
+    async def _approve(self, row: dict, decided_by: Optional[int] = None) -> dict:
         """批准一条申请：写覆盖行 + 结果行，最后把申请置成已批准。一次提交。
 
         两种申请在这一层分岔：请假在区间里每一天写成「没有班次」（`kind=leave`），
@@ -3576,10 +3615,13 @@ class SchedulingStore:
         today = self.today()
         last_day = self._window_from(today)[1]
         if row["kind"] == KIND_SWAP:
-            return await self._approve_swap(row, today, last_day)
+            return await self._approve_swap(row, today, last_day, decided_by=decided_by)
         employee_id = int(row["employee_id"])
         stamp = self._now_iso()
-        await self._claim_request(int(row["id"]), STATUS_APPROVED, (STATUS_PENDING_MANAGER,), stamp)
+        await self._claim_request(
+            int(row["id"]), STATUS_APPROVED, (STATUS_PENDING_MANAGER,), stamp,
+            decided_by=decided_by,
+        )
         applied: list[str] = []
         skipped: list[str] = []
         for day in _each_day_between(row["start_date"], row["end_date"]):
@@ -3595,6 +3637,8 @@ class SchedulingStore:
             "employee_id": employee_id,
             "status": STATUS_APPROVED,
             "decided_at": stamp,
+            # 谁批的（0044）：管理后台的调用方没有员工身份，这里是 None。
+            "decided_by": decided_by,
             "applied_days": applied,
             "skipped_days": skipped,
         }
@@ -3613,7 +3657,9 @@ class SchedulingStore:
             raise SchedulingError("not_migrated", 'column "peer_employee_id" does not exist')
         return int(peer_id)
 
-    async def _approve_swap(self, row: dict, today: str, last_day: str) -> dict:
+    async def _approve_swap(
+        self, row: dict, today: str, last_day: str, decided_by: Optional[int] = None
+    ) -> dict:
         """把两个人那天的班对调（票 09 的验收项）。调用方持写锁、负责提交。
 
         写的是**覆盖行**（`kind=swap`）+ 结果行（`source=override`），两个人都写 ——
@@ -3639,7 +3685,10 @@ class SchedulingStore:
         peer_id = self._peer_of_swap(row)
         day = row["start_date"]
         stamp = self._now_iso()
-        await self._claim_request(int(row["id"]), STATUS_APPROVED, (STATUS_PENDING_MANAGER,), stamp)
+        await self._claim_request(
+            int(row["id"]), STATUS_APPROVED, (STATUS_PENDING_MANAGER,), stamp,
+            decided_by=decided_by,
+        )
         applied: list[str] = []
         skipped: list[str] = []
         if day < today or day > last_day:
@@ -3668,6 +3717,8 @@ class SchedulingStore:
             "peer_employee_id": peer_id,
             "status": STATUS_APPROVED,
             "decided_at": stamp,
+            # 谁批的（0044）：管理后台的调用方没有员工身份，这里是 None。
+            "decided_by": decided_by,
             "applied_days": applied,
             "skipped_days": skipped,
         }
@@ -3752,13 +3803,23 @@ class SchedulingStore:
         }
 
     async def _claim_request(
-        self, request_id: int, status: str, expect: tuple[str, ...], stamp: str
+        self,
+        request_id: int,
+        status: str,
+        expect: tuple[str, ...],
+        stamp: str,
+        decided_by: Optional[int] = None,
+        decision_note: Optional[str] = None,
     ) -> None:
         """把申请从 `expect` 里的某个状态改成 `status`；没抢到就报「已经处理过了」。
 
         **状态谓词落在写锁里**：调用方那次「读出来是待批 / 是等我回应」的判断在锁外，
         双击、两个标签页、网关重试会双双通过那道判断。到这儿再比一次状态，只有第一个
         改得动这一行 —— 后面那个连它要写的排班都不写。
+
+        `decided_by` 记「谁批的」（0044）：员工会话批的记员工 id，**管理后台批的是
+        None** —— 那一档没有员工身份，NULL 就是它的记号。撤回自己那条时记的是申请人
+        自己（`cancel_request`）：谁结束的这一行，这一列就写谁。
 
         不提交：调用方把这条 UPDATE 与排班写入放在同一个事务里，要么都成要么都不成。
 
@@ -3769,9 +3830,12 @@ class SchedulingStore:
         marks = ", ".join("?" for _ in expect)
         cur = await self._conn.execute(
             f"""UPDATE scheduling_requests
-                SET status = ?, decided_at = ?, updated_at = ?
+                SET status = ?, decided_at = ?, updated_at = ?,
+                    decided_by = ?, decision_note = ?
                 WHERE id = ? AND status IN ({marks})""",
-            (status, stamp, stamp, int(request_id), *expect),
+            (
+                status, stamp, stamp, decided_by, decision_note, int(request_id), *expect,
+            ),
         )
         if cur.rowcount != 1:
             # 0 = 状态已经被人改了；-1 = command tag 没解析出来（`rowcount_from_status`），
@@ -3779,15 +3843,32 @@ class SchedulingStore:
             raise SchedulingError("request_not_pending", "request_not_pending")
 
     @serialized_write
-    async def _decide(self, request_id: int, status: str, expect: tuple[str, ...]) -> dict:
+    async def _decide(
+        self,
+        request_id: int,
+        status: str,
+        expect: tuple[str, ...],
+        decided_by: Optional[int] = None,
+        decision_note: Optional[str] = None,
+    ) -> dict:
         """把申请从 `expect` 置成 `status` 并记下时间（驳回 / 撤回 / 对方回应共用）。
 
-        排班一个字不改；状态谓词在锁里，见 `_claim_request`。
+        排班一个字不改；状态谓词在锁里，见 `_claim_request`。`decided_by` /
+        `decision_note` 的语义同那里（0044）：驳回是审批人 + 原因，撤回是申请人自己。
         """
         stamp = self._now_iso()
-        await self._claim_request(request_id, status, expect, stamp)
+        await self._claim_request(
+            request_id, status, expect, stamp, decided_by=decided_by,
+            decision_note=decision_note,
+        )
         await self._conn.commit()
-        return {"id": int(request_id), "status": status, "decided_at": stamp}
+        return {
+            "id": int(request_id),
+            "status": status,
+            "decided_at": stamp,
+            "decided_by": decided_by,
+            "decision_note": decision_note,
+        }
 
     async def _select_request_rows(
         self, clause: str, params: tuple, order: str = ""
@@ -3807,7 +3888,12 @@ class SchedulingStore:
             )
         except asyncpg.UndefinedColumnError as exc:
             await self._rollback_quietly()
-            if not self._requests_have_peer:
+            # 只有**换班那一列**缺失才降级（0009 没应用，换班整块不可用）。缺的是别的列
+            # （0044 的 `decided_by` / `decision_note`）说明这台机器还没升级完，原样抛上去
+            # —— `_needs_migration` 会翻成点名迁移文件的 503。把「没升级完」当成「没有
+            # 换班」处理，改动 `_requests_have_peer` 之后即使补跑了迁移，这个进程也回不
+            # 到有换班的读路径上。
+            if not self._requests_have_peer or "peer_employee_id" not in str(exc):
                 raise
             self._requests_have_peer = False
             logger.warning("换班列读不了（0009 未应用？），申请按没有换班处理: %s", exc)

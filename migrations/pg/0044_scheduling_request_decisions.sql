@@ -1,0 +1,31 @@
+-- 0044_scheduling_request_decisions.sql
+--
+-- 请假 / 换班申请的两处收口（2026-11-02 请假审批全链路审查的发现 1 与 3）：
+--
+-- 1) `decided_by`：这条申请最后是谁批 / 驳的。以前只有 `decided_at`（时间），
+--    而店里**不止一个人**能处理待办（管理端会话，以及花名册上开了「人事管理」
+--    (`schedule`) 的员工 —— 见 `api/scheduling.py` 的 `_require_scheduler`）。
+--    批完之后「谁批的」查不到，对不上账。
+--    口径：员工会话批的记 `hygiene_employees.id`；**管理后台批的留 NULL**
+--    （管理端会话没有员工 id）。读的一侧按「NULL = 管理后台」解释即可，
+--    0044 之前的历史行同样落在 NULL 这一档 —— 那几条确实查不出来是谁批的，
+--    不要假装知道。
+--
+-- 2) `decision_note`：驳回时写的那一句原因（选填）。员工端要能看见「为什么驳回」，
+--    否则他只知道被驳了，改什么全靠猜。批准不写这一列。
+--
+-- 为什么不是把原因塞进 `note`：`note` 是**申请人**写的事由，两个方向的内容混在
+-- 一列里，员工端分不清哪句是谁说的。
+--
+-- 幂等：IF NOT EXISTS，可重复执行。纯加成性变更（两列都带 NULL 默认值），应用前后
+-- 读接口的既有行为完全一样 —— 没有这两列的值时，界面只说「已驳回」，不多印一句话。
+--
+-- 谁写它：`services/scheduling/store.py` 的 `_claim_request`（状态迁移时一并写，
+-- 见 `approve_request` / `reject_request` / `cancel_request`）。
+-- 谁读它：`my_requests`（员工端「我的申请」）与店长待办卡片。
+--
+-- 注意：这份脚本没应用时，排班相关的读接口会按仓库既有口径报
+-- `not_migrated`（503，点名去 Admin 应用迁移），不会静默降级。
+
+ALTER TABLE scheduling_requests ADD COLUMN IF NOT EXISTS "decided_by" INTEGER;
+ALTER TABLE scheduling_requests ADD COLUMN IF NOT EXISTS "decision_note" TEXT;

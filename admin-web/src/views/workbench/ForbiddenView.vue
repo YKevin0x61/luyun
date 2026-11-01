@@ -11,6 +11,7 @@
 // 再写一份路径正则。
 import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { ADMIN_CAP_LABELS, hasCap } from '../../utils/adminCaps.js'
 import { pageRow, pageTitle } from '../../router/pageRoutes.js'
 import { isLoggedIn } from '../../utils/authStatus'
 import { hygieneDocumentTitle } from '../../utils/hygieneCopy'
@@ -39,6 +40,15 @@ const owner = computed(() => {
   const row = pageRow(target.value)
   if (!row) return '这个地址不是工作台里的页面。'
   if (row.audience === 'admin') {
+    // 这一页靠**一项管理能力**放行的（`staffCap`，见页面清单里那一行的说明）：员工会话
+    // 勾了那一项就进得来，没勾就落在这儿 —— 拦住的是「没勾」，不是「身份不对」。
+    // 旧文案（2026-11-02 请假审批全链路审查的发现 2）写「这是店长（超级管理员）用的
+    // 页面 / 你当前的身份：员工」，可隔壁同样是员工的同事却能进：按这句，员工会去申请
+    // 「把我升成店长」，而管理员该做的是在花名册里勾一个能力。
+    const cap = capLabel.value
+    if (cap && (identity.value === 'staff' || identity.value === 'staff-admin')) {
+      return `「${row.title}」要「${cap}」权限。你的账号还没开这一项 —— 请找超级管理员在花名册里勾上。`
+    }
     // 店里那个「管理员」（员工账号 + 卫生权限=管理员）能调验收与整改单的接口，但这一页
     // 是店长在电脑端的全店面板 —— 两边都对，所以别对他说"你是员工、没你的事"
     // （角色审查 F-03：旧文案正是这么说的）。把他该去哪儿说清楚。
@@ -52,10 +62,20 @@ const owner = computed(() => {
   return `「${row.title}」这一页需要的身份和当前会话对不上。`
 })
 
+/** 目标页靠哪一项管理能力放行（页面清单的 `staffCap`）；没有就是空串。
+ *  显示名从 `ADMIN_CAP_LABELS` 取，跟花名册上那个勾选框同一份字。 */
+const capLabel = computed(() => {
+  const row = pageRow(target.value)
+  if (!row || !row.staffCap) return ''
+  return ADMIN_CAP_LABELS[row.staffCap] || row.staffCap
+})
+
 /** 我此刻是什么身份 —— 与守卫同一套口径（管理端会话优先，再看员工会话）。
  *  `staff-admin` 不是第四种会话，是**员工会话里的卫生权限档**（现场复核档）：界面层一直
  *  看不见它（角色审查 F-01），而这个页面恰好是"必须解释身份"的地方，所以在这里问一次。 */
 const identity = ref(null) // null | 'admin' | 'staff' | 'staff-admin'
+/** 员工会话的能力键（守卫用的那一份）：文案要据此说「还没开哪一项」。 */
+const myCaps = ref([])
 
 onMounted(async () => {
   if (await isLoggedIn()) {
@@ -79,11 +99,18 @@ onMounted(async () => {
   // 判据是**管理权限开关**（2026-10-05 起）：`permission` 那个标签不再代表能力，
   // 只看它会把"标签是管理员、一个勾都没给"的人说成有复核工作（正好说反）。
   const caps = (session && session.employee && session.employee.admin_caps) || []
-  if (Array.isArray(caps) && caps.length > 0) identity.value = 'staff-admin'
+  myCaps.value = Array.isArray(caps) ? caps : []
+  if (myCaps.value.length > 0) identity.value = 'staff-admin'
 })
 
 const identityLabel = computed(() => {
   if (identity.value === 'admin') return '超级管理员'
+  // 员工会话：把「此刻缺的是哪一项能力」说出来 —— 身份没错，是权限没开。
+  const cap = capLabel.value
+  const staffish = identity.value === 'staff' || identity.value === 'staff-admin'
+  if (staffish && cap && !hasCap(myCaps.value, pageRow(target.value)?.staffCap)) {
+    return `员工账号（还没开「${cap}」）`
+  }
   if (identity.value === 'staff-admin') return '管理员（员工账号 · 现场复核）'
   if (identity.value === 'staff') return '员工'
   return '未登录'

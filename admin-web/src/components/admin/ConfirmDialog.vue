@@ -160,6 +160,11 @@ onBeforeUnmount(() => {
   font: inherit;
   font-size: 13px;
   color: var(--text-primary, #111827);
+  /* 页面带 `<meta name="color-scheme" content="dark">`，不写背景的话浏览器把这块输入框
+     画成黑底白字 —— 亮色弹窗里嵌一个黑框，看着像坏了（2026-11-02 驳回请假时发现）。
+     背景跟主题卡片走，`color-scheme: light` 管住浏览器自绘的滚动条/选区。 */
+  background: var(--card2, #fff);
+  color-scheme: light;
   resize: vertical;
 }
 </style>

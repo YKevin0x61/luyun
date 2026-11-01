@@ -22,6 +22,7 @@ from database import CHINA_TZ, DatabaseManager
 from services.business_day import business_date_of, previous_business_date
 from services.credentials_store import _fernet
 from services.dish_normalize import normalize_dish_name
+from services.scheduling.week_view import cell_caption, cell_state
 from services.wecom_push_topics import (
     TOPIC_RECONCILE_DIFF,
     TOPIC_SALES_REPORT,
@@ -237,23 +238,12 @@ def next_week_start(business_date: str) -> str:
 
 
 def _schedule_cell_text(cell: Mapping[str, Any]) -> str:
-    """周表一格在消息里的写法：班次 / 休 / 请假 / 未排。
+    """周表一格在消息里的写法（班次 / 休 / 请假 / 未排）。
 
-    「未排」与「休」必须分得开（`week_grid` 的 `scheduled=False` 是这一行还没写）：
-    把没排的格子写成「休」，店长会以为那个人下周不用来。
+    判定在 `services/scheduling/week_view.py`（图片推送读同一份，两边不会对同一格
+    各说各话），这里只负责文字版的样子。
     """
-    if not cell.get("scheduled"):
-        return "未排"
-    shift_name = cell.get("shift_name")
-    if shift_name is None:
-        return "请假" if cell.get("leave") else "休"
-    text = str(shift_name)
-    if cell.get("half_rest"):
-        text += "（半天）"
-    zone_name = cell.get("zone_name")
-    if zone_name:
-        text += f"·{zone_name}"
-    return text
+    return cell_caption(cell_state(cell))
 
 
 def _format_person_schedule(
@@ -501,21 +491,19 @@ class WeComPushService:
         )
         return RenderedMessage(content=content, byte_length=len(content.encode("utf-8")))
 
-    async def build_weekly_schedule_message(
+    async def _weekly_grid(
         self,
         db: DatabaseManager,
         *,
         business_date: str = "",
         now: Optional[datetime] = None,
-    ) -> RenderedMessage:
-        """「下一周」排班表正文（`business_date` = 投递那一刻的营业日）。
+    ) -> Dict[str, Any]:
+        """投递那一刻的「下一周」周表（文字版与图片版共用这一份数据）。
 
-        值来自排班自己的周表（`SchedulingStore.week_grid`）—— 与页面「工作台 → 班次表」
-        同一份数据、同一套行序，推送里看到的和店里看到的不会是两件事。
-
-        进门先补未来 90 天（`expand`，与周表接口一致）：没人打开过月历的那一周本来
-        可能还没有行，不补的话推出去是一张「未排」表。补排失败只记一条警告、继续用
-        已有行 —— 渲染阶段抛异常会让这条投递直接落终态（出站对渲染失败不重试）。
+        `business_date` 是投递那一刻的营业日；不给就取现在。进门先补未来 90 天
+        （`expand`，与周表接口一致）：没人打开过月历的那一周本来可能还没有行，不补的话
+        推出去是一张「未排」表。补排失败只记一条警告、继续用已有行 —— 渲染阶段抛异常
+        会让这条投递直接落终态（出站对渲染失败不重试）。
         """
         from services.scheduling.store import SchedulingStore
 
@@ -525,8 +513,40 @@ class WeComPushService:
             await store.expand()
         except Exception as exc:  # noqa: BLE001 —— 补排失败不该让整条推送发不出去
             logger.warning("下周排班推送前补排失败（继续用已有行）：%s", exc)
-        grid = await store.week_grid(start=next_week_start(base))
+        return await store.week_grid(start=next_week_start(base))
+
+    async def build_weekly_schedule_message(
+        self,
+        db: DatabaseManager,
+        *,
+        business_date: str = "",
+        now: Optional[datetime] = None,
+    ) -> RenderedMessage:
+        """「下一周」排班表的**文字**版（字体缺失时的降级、以及老的调用方）。
+
+        群机器人正常收到的是图片版（见 `build_weekly_schedule_image`）：文字版在
+        20 人的店也要一百多行，群里要往下翻。
+        """
+        grid = await self._weekly_grid(db, business_date=business_date, now=now)
         return render_weekly_schedule_text(grid)
+
+    async def build_weekly_schedule_image(
+        self,
+        db: DatabaseManager,
+        *,
+        business_date: str = "",
+        now: Optional[datetime] = None,
+    ) -> Optional[bytes]:
+        """「下一周」排班表的**图片**版；本机没有中文字体时返回 ``None``（调用方退文字）。
+
+        画图是纯 CPU：实测 19 人约 0.18 秒、40 人约 0.35 秒（本机），一天一次可以接受，
+        但它会占住事件循环，所以不放在调度循环的主路径上白画 —— 只有真到发送那一步才会
+        调到这里。
+        """
+        from services.wecom_schedule_image import render_weekly_schedule_png
+
+        grid = await self._weekly_grid(db, business_date=business_date, now=now)
+        return render_weekly_schedule_png(grid)
 
     async def render_job_message(
         self, db: DatabaseManager, job: Mapping[str, Any], *, now: Optional[datetime] = None
@@ -560,11 +580,46 @@ class WeComPushService:
             f"「{topic_display_name(topic_id)}」的正文由触发点产出，这里没有可预览的内容"
         )
 
+    async def render_job_delivery(
+        self, db: DatabaseManager, job: Mapping[str, Any], *, now: Optional[datetime] = None
+    ) -> "RenderedDelivery":
+        """按任务渲染**这次要发出去的东西**（文字或图片，二选一）。
+
+        预览、立即发送、定时投递都从这里取：三处必须拿到同一份东西，否则「预览看到文字、
+        发出去的却是图」这种错位没法在页面上被看出来。
+
+        下周排班表优先出图（用户要的就是截图）。出图失败（本机没有中文字体、图超 2MB、
+        画图抛异常）都**退回文字** —— 宁可推一条不那么好看的文字，也不要当天一条都不发。
+        """
+        from services.wecom_outbox import RenderedDelivery
+
+        topic_id = str(job.get("topic_id") or "")
+        if topic_id == TOPIC_WEEKLY_SCHEDULE:
+            try:
+                image = await self.build_weekly_schedule_image(db, now=now)
+            except Exception as exc:  # noqa: BLE001 —— 出图失败退文字，不让推送整条落空
+                logger.warning("下周排班表出图失败，改发文字版：%s", exc)
+                image = None
+            if image:
+                return RenderedDelivery(image_bytes=image)
+            logger.warning("下周排班表没有可用的图片，改发文字版（中文字体缺失或图太大）")
+        message = await self.render_job_message(db, job, now=now)
+        return RenderedDelivery(text=message.content)
+
     async def preview_job(self, db: DatabaseManager, job_id: int) -> RenderedMessage:
         job = await db.wecom_job_get(job_id)
         if not job:
             raise ValueError("推送任务不存在")
         return await self.render_job_message(db, job)
+
+    async def preview_job_delivery(
+        self, db: DatabaseManager, job_id: int
+    ) -> "RenderedDelivery":
+        """预览：与真发同一份 delivery（下周排班表在这里就是那张图）。"""
+        job = await db.wecom_job_get(job_id)
+        if not job:
+            raise ValueError("推送任务不存在")
+        return await self.render_job_delivery(db, job)
 
     async def enqueue_job(
         self,
@@ -622,7 +677,9 @@ class WeComPushService:
         if topic is None:
             raise ValueError(f"未知的推送内容类型: {topic_id}")
 
-        rendered_message = await self.render_job_message(db, job)
+        moment = now or datetime.now(CHINA_TZ)
+        # 与定时投递走同一个 delivery：预览看到的（图或文字）就是这一次要发的东西。
+        delivery = await self.render_job_delivery(db, job, now=moment)
         targets = await resolve_targets(db, topic_id)
         if not targets:
             # 静默成功会让店长以为发出去了：零订阅必须当场说清（用户故事 9）。
@@ -631,7 +688,6 @@ class WeComPushService:
                 "请先在「订阅」里勾选收件群"
             )
 
-        moment = now or datetime.now(CHINA_TZ)
         # 手工发送每次都是新的一次外发（连点两次就是两封），所以引用里带时刻；定时投递
         # 用的是营业日，两者不会撞在同一个幂等键上。
         outbox_ids = await self.enqueue_job(
@@ -641,14 +697,15 @@ class WeComPushService:
             targets=targets,
             now=moment,
         )
-        parts = list(rendered_message.parts) or [rendered_message.content]
         return {
             "success": True,
             "status": "queued",
             "queued": len(outbox_ids),
             "target_count": len(targets),
-            "message_bytes": rendered_message.byte_length,
-            "chunk_count": len(expand_messages(parts)),
+            "kind": "image" if delivery.is_image else "text",
+            "message_bytes": delivery.byte_length,
+            # 图片一条就是一封，不像文字要按 2048 字节拆条。
+            "chunk_count": 1 if delivery.is_image else len(expand_messages([delivery.text])),
         }
 
     async def send_test_message(self, db: DatabaseManager, webhook_id: int) -> Dict[str, Any]:
@@ -903,6 +960,16 @@ class WeeklyScheduleRenderer:
             moment = datetime.now(CHINA_TZ)
         if moment.tzinfo is None:
             moment = moment.replace(tzinfo=CHINA_TZ)
+        # 优先发图（用户要的就是截图）；出图失败退文字，别让当天一条都不发。
+        try:
+            image = await self._service.build_weekly_schedule_image(
+                self._db, business_date=business_date_of(moment)
+            )
+        except Exception as exc:  # noqa: BLE001 —— 出图失败退文字
+            logger.warning("下周排班表出图失败，改发文字版：%s", exc)
+            image = None
+        if image:
+            return RenderedDelivery(image_bytes=image)
         message = await self._service.build_weekly_schedule_message(
             self._db, business_date=business_date_of(moment)
         )

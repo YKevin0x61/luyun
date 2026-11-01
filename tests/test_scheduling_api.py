@@ -2925,3 +2925,122 @@ def test_schedule_cap_does_not_leak_colleagues_phone_numbers(scheduling_http, mo
     admin_resp = client.get("/api/scheduling/roster")
     assert admin_resp.status_code == 200, admin_resp.text
     assert all(row.get("phone") for row in admin_resp.json()["employees"])
+
+
+def test_own_leave_cannot_be_approved_by_its_owner(scheduling_http, monkeypatch):
+    """自己的假自己批不了（2026-11-02 请假审批全链路审查的发现 1）。
+
+    店里不止一个能批假的人（勾了「人事管理」的员工 + 管理后台），所以「谁批的」不能瞎猜：
+    申请人自己那条在待办里**照样列出来**（不然会以为没提上来），但按钮不给、接口也拦。
+    管理后台（没有员工身份，`decided_by` 是 NULL）照常能批 —— 这道闸不该让店长永远请不了假。
+    """
+    client, _db, accounts = scheduling_http
+    admin, (leaver,), _day_id = _leave_scene(client, accounts, monkeypatch)
+
+    request_id = client.post(
+        "/api/scheduling/me/requests", json={"start_date": "2026-09-25", "note": "家里有事"}
+    ).json()["request"]["id"]
+
+    # 申请人自己勾上「人事管理」：待办进得去，自己那条标成 is_own。
+    _run(accounts.set_admin_caps(leaver, ["schedule"]))
+    _staff_cookie(client, accounts)
+    inbox = client.get("/api/scheduling/inbox")
+    assert inbox.status_code == 200, inbox.text
+    assert len(inbox.json()["requests"]) == 1
+    assert inbox.json()["requests"][0]["is_own"] is True
+
+    own = client.post(f"/api/scheduling/inbox/{request_id}/approve")
+    assert own.status_code == 400
+    assert own.json()["detail"] == (
+        "这是你自己的申请：请另一位开了「人事管理」的人批，或到电脑上的管理后台批"
+    )
+    # 驳回也一样：自批自驳都是「自己给自己判」。
+    own_reject = client.post(f"/api/scheduling/inbox/{request_id}/reject", json={"reason": "不批"})
+    assert own_reject.status_code == 400
+    assert own_reject.json()["detail"] == (
+        "这是你自己的申请：请另一位开了「人事管理」的人批，或到电脑上的管理后台批"
+    )
+    # 拦下来之后那条还停在待批，没有半截写入。
+    statuses = [row["status"] for row in client.get("/api/scheduling/me/requests").json()["requests"]]
+    assert statuses == ["pending_manager"]
+
+    # 管理后台照常能批：没有员工身份，decided_by 记 NULL。
+    _as_manager(client, admin)
+    ok = client.post(f"/api/scheduling/inbox/{request_id}/approve")
+    assert ok.status_code == 200, ok.text
+    assert ok.json()["status"] == "approved"
+    assert ok.json()["decided_by"] is None
+
+
+def test_decisions_record_who_decided_and_why(scheduling_http, monkeypatch):
+    """0044：批 / 驳都记下是谁做的，驳回还记下那句原因（2026-11-02 审查的发现 3 / 4）。
+
+    判据在数据面（`decided_by` / `decision_note`）与员工端的读口（`my_requests` 带回
+    `decided_by_name`）。管理后台没有员工身份 → `decided_by` 是 NULL，这时**不编一个
+    名字出来**（0044 之前的历史行也长这样）。
+    """
+    client, _db, accounts = scheduling_http
+    admin, (leaver, decider), _day_id = _leave_scene(
+        client, accounts, monkeypatch, people=((PHONE, NAME), ("13800138001", "李四"))
+    )
+
+    # 张三提两条假：一条要被驳回（带原因），一条要被批准。
+    for day in ("2026-09-29", "2026-09-30"):
+        client.post("/api/scheduling/me/requests", json={"start_date": day})
+    rows = client.get("/api/scheduling/me/requests").json()["requests"]
+    by_day = {row["start_date"]: row["id"] for row in rows}
+
+    # 管理后台驳 9/29：原因要留住，审批人记 NULL。
+    _as_manager(client, admin)
+    rejected = client.post(
+        f"/api/scheduling/inbox/{by_day['2026-09-29']}/reject",
+        json={"reason": "那天早上有两桌预订，人手不够"},
+    )
+    assert rejected.status_code == 200, rejected.text
+    assert rejected.json()["decision_note"] == "那天早上有两桌预订，人手不够"
+    assert rejected.json()["decided_by"] is None
+
+    # 李四（勾了人事管理的员工）批 9/30：员工会话的 id 记进 decided_by。
+    _run(accounts.set_admin_caps(decider, ["schedule"]))
+    _staff_cookie(client, accounts, phone="13800138001")
+    approved = client.post(f"/api/scheduling/inbox/{by_day['2026-09-30']}/approve")
+    assert approved.status_code == 200, approved.text
+    assert approved.json()["decided_by"] == decider
+
+    # 申请人自己读回来：驳回那句原因 + 谁批的都看得到。
+    _staff_cookie(client, accounts)
+    mine = {
+        row["start_date"]: row
+        for row in client.get("/api/scheduling/me/requests").json()["requests"]
+    }
+    assert mine["2026-09-29"]["decision_note"] == "那天早上有两桌预订，人手不够"
+    assert mine["2026-09-29"]["decided_by_name"] is None
+    assert mine["2026-09-30"]["decided_by"] == decider
+    assert mine["2026-09-30"]["decided_by_name"] == "李四"
+
+
+def test_reject_reason_is_optional_and_bounded(scheduling_http, monkeypatch):
+    """驳回理由选填：不写照样驳得掉；太长按 400 拦（不悄悄截断，员工会看到半句话）。"""
+    client, _db, accounts = scheduling_http
+    admin, _ids, _day_id = _leave_scene(client, accounts, monkeypatch)
+
+    request_id = client.post(
+        "/api/scheduling/me/requests", json={"start_date": "2026-09-25"}
+    ).json()["request"]["id"]
+
+    _as_manager(client, admin)
+    too_long = client.post(
+        f"/api/scheduling/inbox/{request_id}/reject", json={"reason": "太" * 51}
+    )
+    assert too_long.status_code == 400
+    assert too_long.json()["detail"] == "驳回理由最多 50 个字：请缩短一点"
+    # 长度那句没拦住的话，状态也不该被提前改掉。
+    _staff_cookie(client, accounts)
+    assert [
+        row["status"] for row in client.get("/api/scheduling/me/requests").json()["requests"]
+    ] == ["pending_manager"]
+    _as_manager(client, admin)
+
+    bare = client.post(f"/api/scheduling/inbox/{request_id}/reject")
+    assert bare.status_code == 200, bare.text
+    assert bare.json()["decision_note"] is None

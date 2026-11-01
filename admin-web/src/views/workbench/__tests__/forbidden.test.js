@@ -108,6 +108,19 @@ describe('「无权访问」页：说清这页是谁的，给一颗回自己首�
     expect(router.currentRoute.value.path).toBe('/workbench')
   })
 
+  it('员工进要「人事管理」能力的页：说没开这一项，不说「这是店长用的页」', async () => {
+    // 2026-11-02 请假审批全链路审查的发现 2：`/workbench/hr/inbox` 靠 `staffCap: schedule`
+    // 放行，隔壁同样是员工的同事勾了这一项就进得来 —— 拦住的是「没勾」，不是「身份不对」。
+    const { wrapper } = await mountForbidden('/workbench/hr/inbox')
+
+    expect(wrapper.text()).toContain('无权访问')
+    expect(wrapper.text()).toContain('要「人事管理」权限')
+    expect(wrapper.text()).toContain('请找超级管理员在花名册里勾上')
+    expect(wrapper.text()).toContain('还没开「人事管理」')
+    // 旧的「这是店长（超级管理员）用的页面」不再出现：按那句员工会去申请升成店长。
+    expect(wrapper.text()).not.toContain('是店长（超级管理员）用的页面')
+  })
+
   it('票 04：员工进印码页同理 —— 说清那是店长的页，仍留一条回自己首页的路', async () => {
     // 印码页（生成岗位二维码、印出来贴到岗位上）票 04 起是 `admin` 那一档：员工手输 URL
     // 被守卫拦到这里，看到的是**解释**（不是静默改道），按钮回自己的首页。

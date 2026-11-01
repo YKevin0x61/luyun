@@ -93,6 +93,13 @@ _ERROR_DETAILS = {
     # 「不存在」也用在「这条是别人的」上：不告诉员工「它在，但不是你的」。
     "unknown_request": "这条申请不存在：可能已经被撤回，刷新看看",
     "request_not_pending": "这条申请已经处理过了：刷新看看它现在到哪一步",
+    # 自己的假自己批不了（2026-11-02 审查的发现 1）：这句话要能照做 —— 员工会话里
+    # 除了自己没别人能批，所以两个出口都点出来（另一位「人事管理」/ 管理后台）。
+    "cannot_decide_own_request": (
+        "这是你自己的申请：请另一位开了「人事管理」的人批，或到电脑上的管理后台批"
+    ),
+    # 驳回理由跟事由同一个上限（员工端要原样显示，长到刷屏就读不下去了）。
+    "decision_note_too_long": "驳回理由最多 {} 个字：请缩短一点",
     # 换班（票 09）：找谁换、哪天换、那天有没有班换，各说各的。跟请假一样，字段整个没给
     # （`{}`）也落到服务层那道闸上，不变成 pydantic 的英文 422。
     "swap_with_self": "换班得找别人：不能跟自己换",
@@ -150,8 +157,8 @@ _ERROR_DETAILS = {
         "0007_scheduling_overrides.sql、0008_scheduling_requests.sql、"
         "0009_scheduling_swap.sql、0010_shift_duty_slot.sql、"
         "0028_staff_assignments_half_rest.sql、"
-        "0040_scheduling_overrides_voided.sql 与 "
-        "0043_shift_color.sql，然后刷新本页"
+        "0040_scheduling_overrides_voided.sql、"
+        "0043_shift_color.sql 与 0044_scheduling_request_decisions.sql，然后刷新本页"
     ),
 }
 
@@ -164,6 +171,16 @@ _ERROR_STATUS = {
     # `not_migrated` 不是「参数写错了」，是这台机器还没升级完 —— 503 比 400 诚实。
     "not_migrated": 503,
 }
+
+
+class RejectRequest(BaseModel):
+    """驳一条申请时带的那句原因（0044 的 `decision_note`，选填）。
+
+    选填是有意的：**没写就不显示**（员工端只看到「已驳回」），店长想省这一步不会被拦；
+    写了就给员工看到 —— 驳回是唯一不可回退的动作，一句原因能省一次重提。
+    """
+
+    reason: Optional[str] = None
 
 
 class SetRuleRequest(BaseModel):
@@ -361,6 +378,19 @@ async def _require_scheduler(identity: dict = Depends(require_any_identity_sessi
             detail="只有开了「人事管理」权限的人能改排班与考勤：请找超级管理员在花名册里开通",
         )
     return identity
+
+
+def _decider_id(identity: dict) -> Optional[int]:
+    """当前审批人的员工 id；**管理后台那条路是 None**（它没有员工身份）。
+
+    `None` 在服务层是两个意思，别混：批准 / 驳回时它是「管理后台批的」（不受自批那道闸
+    约束，也记不成某个员工）；撤回时它是「没记」。见 `store._claim_request` 的 docstring。
+    """
+    if identity.get("kind") == "admin":
+        return None
+    employee = identity.get("employee") or {}
+    raw = employee.get("id")
+    return None if raw is None else int(raw)
 
 
 @router.get("/me")
@@ -947,8 +977,29 @@ async def clear_override(
     return result
 
 
+async def _inbox_payload(db, identity: dict) -> dict:
+    """待办 + 「这条是不是我自己的申请」标记（2026-11-02 审查的发现 1）。
+
+    服务层不认人（它只知道申请是谁提的），「我」是会话的事，所以这一笔在这里标：
+    员工会话那一档才有 `is_own`（管理后台不是某个员工，它的待办里没有「自己的申请」）。
+    前端照它**不给**自己那条放假批按钮 —— 光靠接口 400 拦，店长点下去才发现点不动。
+    """
+    store = SchedulingStore(db)
+    try:
+        data = await store.inbox()
+    except SchedulingError as exc:
+        raise _bad_request(exc) from exc
+    decider = _decider_id(identity)
+    if decider is not None:
+        for row in data.get("requests") or []:
+            row["is_own"] = int(row.get("employee_id") or 0) == decider
+    return data
+
+
 @router.get("/inbox")
-async def inbox(db=Depends(get_db), _: dict = Depends(_require_scheduler)) -> dict:
+async def inbox(
+    db=Depends(get_db), identity: dict = Depends(_require_scheduler)
+) -> dict:
     """店长待办：等他批的申请 + 还没配规则的人（票 08 的待办页，票 09 起也收换班）。
 
     每条请假带一份预览（`days[*].after`：批了之后那天每个班次还剩几个人）。人手够不够
@@ -957,18 +1008,15 @@ async def inbox(db=Depends(get_db), _: dict = Depends(_require_scheduler)) -> di
     换班那张卡摊开两个人那天的班（`peer_*`），批了就是对调 —— 对调走两个人、来两个人，
     哪个班次的人数都不变，所以没有「剩几个人」这一项。**对方还没点头的换班不在这里**。
     """
-    store = SchedulingStore(db)
-    try:
-        return await store.inbox()
-    except SchedulingError as exc:
-        raise _bad_request(exc) from exc
+    data = await _inbox_payload(db, identity)
+    return data
 
 
 @router.post("/inbox/{request_id}/approve")
 async def approve_request(
     request_id: int,
     db=Depends(get_db),
-    _: dict = Depends(_require_scheduler),
+    identity: dict = Depends(_require_scheduler),
 ) -> dict:
     """批一条申请：请假那几天变成请假，换班两个人那天对调。
 
@@ -979,7 +1027,7 @@ async def approve_request(
     """
     store = SchedulingStore(db)
     try:
-        result = await store.approve_request(request_id)
+        result = await store.approve_request(request_id, decided_by=_decider_id(identity))
     except SchedulingError as exc:
         raise _bad_request(exc) from exc
     # 批完两个人都要知道：申请人（他那几天变了）、换班的对方（两个人的班对调了）。
@@ -992,13 +1040,28 @@ async def approve_request(
 @router.post("/inbox/{request_id}/reject")
 async def reject_request(
     request_id: int,
+    payload: Optional[RejectRequest] = None,
     db=Depends(get_db),
-    _: dict = Depends(_require_scheduler),
+    identity: dict = Depends(_require_scheduler),
 ) -> dict:
-    """驳回一条申请：排班一个字不改，只把申请记为驳回（票 08 的验收项；换班同理）。"""
+    """驳回一条申请：排班一个字不改，只把申请记为驳回（票 08 的验收项；换班同理）。
+
+    `reason`（选填，0044）：写给申请人看的那句原因，跟审批人一起记在申请行上。超长按
+    400 拦（跟「事由太长」同一句口径），不悄悄截断 —— 截断会让员工看到半句话。
+    """
+    reason = (payload.reason if payload else None) or None
+    if reason is not None:
+        reason = reason.strip() or None
+    if reason is not None and len(reason) > MAX_REQUEST_NOTE:
+        raise HTTPException(
+            status_code=400,
+            detail=_ERROR_DETAILS["decision_note_too_long"].format(MAX_REQUEST_NOTE),
+        )
     store = SchedulingStore(db)
     try:
-        result = await store.reject_request(request_id)
+        result = await store.reject_request(
+            request_id, decided_by=_decider_id(identity), reason=reason
+        )
     except SchedulingError as exc:
         raise _bad_request(exc) from exc
     # 驳回也要让申请人知道（他提的那条有结果了）。

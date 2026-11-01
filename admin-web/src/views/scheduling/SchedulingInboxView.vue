@@ -78,7 +78,7 @@ async function reportFailure(err, fallback) {
   errorText.value = message
 }
 
-async function decide(request, action) {
+async function decide(request, action, reason = '') {
   // 单槽 busyId 表示「有动作在飞」，所以这里必须挡住重入：放两条同时飞，先回来的
   // 那条会在 `finally` 里把槽清零，后一条的按钮就全部恢复可点、能对同一条再发一次；
   // 后回来的回执还会顶掉前一条（回执说的是 A，而 A 已经从列表上消失了）。服务端的
@@ -88,7 +88,9 @@ async function decide(request, action) {
   errorText.value = ''
   receipt.value = ''
   try {
-    const data = await api.post(`/api/scheduling/inbox/${request.id}/${action}`, {})
+    // 驳回把那句原因送上去（0044，选填）：员工端会原样看到它。
+    const body = action === 'reject' && reason ? { reason } : {}
+    const data = await api.post(`/api/scheduling/inbox/${request.id}/${action}`, body)
     if (action === 'approve') {
       receipt.value = request.kind === 'swap' ? swapApproveReceipt(data) : approveReceipt(data)
     } else {
@@ -105,10 +107,10 @@ async function decide(request, action) {
   }
 }
 
-async function confirmReject() {
+async function confirmReject(reason) {
   const target = rejectTarget.value
   rejectTarget.value = null
-  if (target) await decide(target, 'reject')
+  if (target) await decide(target, 'reject', (reason || '').trim())
 }
 
 /** 「批准」确认框里那句「批了会怎样」：从卡片第二行已经摊开的预览数据里挑一天说。
@@ -215,8 +217,14 @@ useNudgePull({ id: 'workbench-inbox', topics: ['scheduling'], pull: load })
               <span v-if="request.kind === 'swap'" class="iPeer">⇄ {{ request.peer_name || '（对方）' }}</span>
               <span class="iWhen">{{ requestRangeText(request.start_date, request.end_date) }}</span>
               <span class="iDays">{{ (request.days || []).length }} 天</span>
-              <span class="iPend"><i class="iLed warn"></i>等你批</span>
-              <div class="iAct">
+              <!-- 自己的申请自己批不了（2026-11-02 审查的发现 1）：按钮干脆不出现，
+                   光靠接口 400 拦，店长点下去才发现点不动。 -->
+              <span v-if="request.is_own" class="iPend iOwn">你自己的申请</span>
+              <span v-else class="iPend"><i class="iLed warn"></i>等你批</span>
+              <p v-if="request.is_own" class="iOwnHint">
+                自己的假自己批不了：请另一位开了「人事管理」的人批，或到电脑上的管理后台批。
+              </p>
+              <div v-else class="iAct">
                 <button
                   class="btn btn-primary"
                   type="button"
@@ -284,6 +292,12 @@ useNudgePull({ id: 'workbench-inbox', topics: ['scheduling'], pull: load })
       v-if="rejectTarget"
       :title="`驳回这次${kindText(rejectTarget.kind)}`"
       :message="`驳回「${rejectTarget.employee_name || '这位员工'}」的${kindText(rejectTarget.kind)}后，这条申请就结束了（员工看得到）。排班一个字不改。`"
+      :prompt="{
+        label: '驳回原因（选填，员工能看到）',
+        placeholder: '比如：那天早上有两桌预订，人手不够',
+        maxlength: 50,
+        rows: 2,
+      }"
       confirm-label="驳回"
       danger
       @confirm="confirmReject"
@@ -383,6 +397,12 @@ useNudgePull({ id: 'workbench-inbox', topics: ['scheduling'], pull: load })
 .iPend {
   display: inline-flex; align-items: center; gap: 5px;
   font-size: 9px; letter-spacing: .06em; color: var(--warn); white-space: nowrap;
+}
+/* 「你自己的申请」（2026-11-02）：中性色，不用等待批那一档的琥珀 —— 它不是一个待办，
+   是一条提醒。提示语单独一行，跟在排队标记后面。 */
+.iPend.iOwn { color: var(--ink-dim); }
+.iOwnHint {
+  margin: 2px 0 0; font-size: 10.5px; line-height: 1.6; color: var(--ink-dim);
 }
 .iAct { margin-left: auto; display: flex; gap: var(--sp-2); }
 .iAct .btn { border-radius: var(--r-1); min-height: var(--tap); }

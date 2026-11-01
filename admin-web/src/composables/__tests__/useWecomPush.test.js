@@ -173,6 +173,25 @@ describe('立即发送的确认文案与可点条件', () => {
     expect(text).not.toContain('甲'.repeat(41))
   })
 
+  // 图片类内容（下周排班表）没有文字正文：原来「正文为空就不许发送」的判据会把
+  // 一张已经画好的排班图判成「没有预览内容」，页面上的「立即发送」永远是灰的。
+  it('图片预览没有文字正文也算核对过，可以立即发送', () => {
+    expect(canSendNow({ job: JOB, content: '', hasImage: true })).toBe(true)
+    expect(canSendNow({ job: JOB, content: '', hasImage: false })).toBe(false)
+  })
+
+  it('图片消息的确认文案报 2MB 上限，不说"2048 字节"、也不说"没有预览内容"', () => {
+    const text = sendNowConfirmText({
+      job: JOB, bytes: 48000, content: '', kind: 'image',
+    })
+
+    expect(text).toContain('图片消息')
+    expect(text).toContain(`48000 / ${2 * 1024 * 1024} 字节`)
+    expect(text).not.toContain('没有预览内容')
+    expect(text).not.toContain('2048 字节')
+    expect(text).toContain('无法撤回')
+  })
+
   it('没有预览内容就不允许点「立即发送」', () => {
     expect(canSendNow({ job: JOB, content: '有内容' })).toBe(true)
     expect(canSendNow({ job: JOB, content: '' })).toBe(false)
