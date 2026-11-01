@@ -30,6 +30,7 @@ from db_core.schema import ADMIN_READ_ONLY_TABLES, OVERTIME_TABLES
 from services.app_runtime import AppRuntime, set_runtime
 from services.business_day import current_business_date
 from services.hygiene.accounts import EmployeeAccounts
+import services.wecom_request_notice as notice_module
 from services.overtime.ledger import (
     MAX_REASON,
     EntryActor,
@@ -850,6 +851,63 @@ def test_staff_submits_sees_and_cancels(overtime_http):
     assert cancelled.status_code == 200, cancelled.text
     assert cancelled.json()["entry"]["status"] == "cancelled"
     assert client.delete("/api/overtime/me/999999").status_code == 404
+
+
+def test_submitting_an_entry_also_tells_the_work_group(overtime_http, monkeypatch):
+    """登记了加班 / 补钟 → 顺手把一条群通知交给统一出站（订阅了那类内容的群才发）。
+
+    这里挡掉真正的出站：测的是「业务提交点接上了没有、带没带上员工名与那一笔」。
+    文案在 `tests/test_wecom_request_notice.py` 里单独测。
+    """
+    client, _db, accounts = overtime_http
+    _employee_id(accounts)
+    _staff_cookie(client, accounts)
+
+    calls = []
+
+    async def _record(db, entry, *, employee_name="", base_url=None, outbox=None):
+        calls.append({"entry": entry, "employee_name": employee_name})
+
+    monkeypatch.setattr(overtime_module, "notify_overtime_entry", _record)
+
+    submitted = client.post(
+        "/api/overtime/me", json={"entry_date": TODAY, "half_hours": 5, "reason": "盘点到九点"}
+    )
+
+    assert submitted.status_code == 200, submitted.text
+    (call,) = calls
+    assert call["employee_name"] == NAME
+    # 拿到的是台账那一行：小时数与加班/补钟的方向都已经是派生好的。
+    assert call["entry"]["id"] == submitted.json()["entry"]["id"]
+    assert (call["entry"]["half_hours"], call["entry"]["hours"], call["entry"]["kind"]) == (
+        5,
+        2.5,
+        "overtime",
+    )
+
+
+def test_a_broken_group_notice_never_fails_the_entry(overtime_http, monkeypatch):
+    """群通知炸了也不能让员工看到「登记失败」——登记已经落库了。
+
+    这里**不**替换 `notify_overtime_entry` 本身，只把它手里的出站换成一个必炸的：
+    走的是真实的「拼文案 → 入队 → 吞错误」那条路，挡住的是最外层接口不该被带走。
+    """
+    client, _db, accounts = overtime_http
+    _employee_id(accounts)
+    _staff_cookie(client, accounts)
+
+    class _Boom:
+        async def enqueue_topic(self, *args, **kwargs):
+            raise RuntimeError("企微出站表写不进去")
+
+    monkeypatch.setattr(notice_module, "wecom_outbox", _Boom())
+
+    submitted = client.post(
+        "/api/overtime/me", json={"entry_date": TODAY, "half_hours": 2, "reason": "加班"}
+    )
+
+    assert submitted.status_code == 200, submitted.text
+    assert submitted.json()["entry"]["status"] == "pending"
 
 
 def test_staff_responses_carry_no_money(overtime_http):

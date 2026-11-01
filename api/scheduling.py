@@ -16,6 +16,7 @@ from services.identity.capabilities import CAP_SCHEDULE, has_cap
 from services.realtime.hub import realtime_hub
 from services.scheduling import MAX_CYCLE_DAYS, MAX_REQUEST_NOTE, MAX_SHIFT_NAME
 from services.scheduling.store import SchedulingError, SchedulingStore
+from services.wecom_request_notice import notify_leave_request
 
 logger = logging.getLogger(__name__)
 
@@ -530,6 +531,9 @@ async def submit_leave(
         raise _bad_request(exc) from exc
     # 店长那边等着批：叫他自己来拉一次（nudge 不带数据，只说「有你的事」）。
     await _scheduling_nudge("leave_submitted", employee["id"])
+    # 群里也知会一声（只有订阅了「请假申请」的群会发；文案里的审批链接见 ADMIN_BASE_URL）。
+    # 放在 nudge 之后：推送是附带的一步，它失败不该让员工看到「提交失败」。
+    await notify_leave_request(db, request, employee_name=employee.get("name") or "")
     return {
         "employee": {"id": employee["id"], "name": employee["name"]},
         "request": request,

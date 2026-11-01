@@ -1788,6 +1788,56 @@ def test_staff_asks_for_leave_and_takes_it_back(scheduling_http, monkeypatch):
     assert again.json()["detail"] == "这条申请已经处理过了：刷新看看它现在到哪一步"
 
 
+def test_submitting_a_leave_also_tells_the_work_group(scheduling_http, monkeypatch):
+    """提了请假 → 顺手把一条群通知交给统一出站（订阅了「请假申请」的群才发）。
+
+    这里挡掉真正的出站：测的是「业务提交点接上了没有、带没带上员工名与那条申请」，
+    文案与入队本身在 `tests/test_wecom_request_notice.py` 里各测各的。
+    """
+    client, _db, accounts = scheduling_http
+    _admin, (employee_id,), _day_id = _leave_scene(client, accounts, monkeypatch)
+
+    calls = []
+
+    async def _record(db, request, *, employee_name="", base_url=None, outbox=None):
+        calls.append({"request": request, "employee_name": employee_name})
+
+    monkeypatch.setattr(scheduling_module, "notify_leave_request", _record)
+
+    submitted = client.post(
+        "/api/scheduling/me/requests", json={"start_date": "2026-09-25", "note": "家里有事"}
+    )
+
+    assert submitted.status_code == 200, submitted.text
+    (call,) = calls
+    # 员工名给群里看，id 给去重用：两者都得是这一条申请自己的。
+    assert call["employee_name"] == NAME
+    assert call["request"]["id"] == submitted.json()["request"]["id"]
+    assert call["request"]["start_date"] == "2026-09-25"
+
+
+def test_a_leave_that_cannot_be_saved_tells_nobody(scheduling_http, monkeypatch):
+    """提交被拒（这里是「同一天已经提过」）不该往群里发一条不存在的申请。"""
+    client, _db, accounts = scheduling_http
+    _admin, (employee_id,), _day_id = _leave_scene(client, accounts, monkeypatch)
+
+    calls = []
+
+    async def _record(db, request, *, employee_name="", base_url=None, outbox=None):
+        calls.append(request)
+
+    monkeypatch.setattr(scheduling_module, "notify_leave_request", _record)
+
+    first = client.post("/api/scheduling/me/requests", json={"start_date": "2026-09-25"})
+    assert first.status_code == 200, first.text
+    calls.clear()
+
+    rejected = client.post("/api/scheduling/me/requests", json={"start_date": "2026-09-25"})
+
+    assert rejected.status_code == 400
+    assert calls == []
+
+
 def test_manager_inbox_previews_the_headcount_after_approval(scheduling_http, monkeypatch):
     """验收 2：卡片上直接写着「批了之后那天每个班次还剩几个人」，还有没配规则的新人。"""
     client, _db, accounts = scheduling_http
@@ -3044,3 +3094,4 @@ def test_reject_reason_is_optional_and_bounded(scheduling_http, monkeypatch):
     bare = client.post(f"/api/scheduling/inbox/{request_id}/reject")
     assert bare.status_code == 200, bare.text
     assert bare.json()["decision_note"] is None
+

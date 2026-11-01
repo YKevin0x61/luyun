@@ -29,6 +29,10 @@ from services.overtime.ledger import (
     OvertimeLedger,
 )
 from services.realtime.hub import realtime_hub
+from services.wecom_request_notice import (
+    notify_overtime_deduction,
+    notify_overtime_entry,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -260,6 +264,9 @@ async def submit_entry(
         raise _bad_request(exc) from exc
     # 提上去了：他自己那台设备（另一部手机 / 另一个标签页）与管理端的待办都该刷新。
     await _overtime_nudge("entry_submitted", entry["employee_id"])
+    # 群里也知会一声（只有订阅了「加班/补钟申请」的群会发）。失败只记日志：登记已经落库，
+    # 不该因为群通知发不出去而让员工看到「提交失败」。
+    await notify_overtime_entry(db, entry, employee_name=employee.get("name") or "")
     return {"employee": _who(employee), "entry": entry}
 
 
@@ -330,6 +337,10 @@ async def submit_deduction(
     except OvertimeError as exc:
         raise _bad_request(exc) from exc
     await _overtime_nudge("deduction_submitted", deduction["employee_id"])
+    # 抵扣单走的是同一条审批线（人事「加班统计」），所以也归「加班/补钟申请」这一类订阅。
+    await notify_overtime_deduction(
+        db, deduction, employee_name=employee.get("name") or ""
+    )
     return {"employee": _who(employee), "deduction": deduction}
 
 

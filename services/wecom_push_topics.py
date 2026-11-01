@@ -79,6 +79,11 @@ WEEKDAY_SHORT_LABELS = {value: label.replace("周", "") for value, label in WEEK
 # v5（群组整体订阅）：`/subscriptions` 多了 `groups`（群组与成员），`topics[]` 每行多了
 # `groups`（整组订了这一行的群组），`topics[].channels[]` 每项多了 `via_group`。加法，
 # 但页面要靠它们才画得出「群组」那一行、并把「经群组订阅」的格子画成只读，所以 +1。
+#
+# **加内容类型不改版本号**（「请假申请」「加班/补钟申请」就是纯加行）：矩阵的行、横幅里
+# 点名的那几类、任务的「内容类型」下拉都是遍历注册表渲染的，页面一个字都不用改也显示得
+# 出来。版本的判据是「前端不改就显示不对」，不是「数据多了一行」。
+#
 # 前端那一半在 `admin-web/src/composables/useWecomPush.js`（`WECOM_PUSH_API_VERSION`），
 # 两处由 `admin-web/src/composables/__tests__/useWecomPushSubscriptions.test.js` 钉住。
 WECOM_PUSH_API_VERSION = "v5"
@@ -288,6 +293,32 @@ class ResourceWatermarkParams(_EventParams):
     """磁盘与内存水位：等级变化时即时投递（同一等级有静默期）。"""
 
 
+class LeaveRequestParams(_EventParams):
+    """请假申请：员工提交后推给店长，正文在 ``text``。
+
+    正文整段由触发点拼好（与卫生提醒同一条路：参数即正文）。这里只钉住「必须有正文」，
+    不把中文句子搬进 schema —— 改文案时不该动注册表。
+    """
+
+    text: str = Field(
+        ...,
+        min_length=1,
+        title="正文",
+        json_schema_extra={"x-ui-control": CONTROL_TEXT},
+    )
+
+
+class OvertimeRequestParams(_EventParams):
+    """加班 / 补钟申请：员工提交后推给店长。形状同 ``LeaveRequestParams``。"""
+
+    text: str = Field(
+        ...,
+        min_length=1,
+        title="正文",
+        json_schema_extra={"x-ui-control": CONTROL_TEXT},
+    )
+
+
 # ── 注册表 ──────────────────────────────────────────────────────────────────
 
 TOPIC_SALES_REPORT = "sales_report"
@@ -299,6 +330,8 @@ TOPIC_HYGIENE_PHOTO = "hygiene_photo"
 TOPIC_UPDATE_BACKUP = "update_backup"
 TOPIC_RESOURCE_WATERMARK = "resource_watermark"
 TOPIC_WEEKLY_SCHEDULE = "weekly_schedule"
+TOPIC_LEAVE_REQUEST = "leave_request"
+TOPIC_OVERTIME_REQUEST = "overtime_request"
 
 
 def _format_errors(exc: ValidationError) -> str:
@@ -592,4 +625,18 @@ register_topic(PushTopic(
     name="磁盘与内存水位",
     triggers=frozenset({PushTrigger.EVENT}),
     event_params_model=ResourceWatermarkParams,
+))
+# 员工提了申请 → 群里知会店长一声。这两类只支持事件触发：没有「每天定时发一次申请」
+# 这种东西，进订阅矩阵是为了让店长决定「这几类通知发到哪几个群」。
+register_topic(PushTopic(
+    id=TOPIC_LEAVE_REQUEST,
+    name="请假申请",
+    triggers=frozenset({PushTrigger.EVENT}),
+    event_params_model=LeaveRequestParams,
+))
+register_topic(PushTopic(
+    id=TOPIC_OVERTIME_REQUEST,
+    name="加班/补钟申请",
+    triggers=frozenset({PushTrigger.EVENT}),
+    event_params_model=OvertimeRequestParams,
 ))

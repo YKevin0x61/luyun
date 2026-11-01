@@ -169,6 +169,13 @@ class Settings(BaseSettings):
     # 见 services/runtime_settings.py，可在「配置 → 运行配置」页面在线修改并热生效。
     RESTAURANT_BASE_URL: str = "https://restaurant.sealosgzg.site"
 
+    # 本系统（厨务管家）自己的对外地址，只用于**拼推送里的链接**（请假 / 加班申请通知
+    # 里那个「去审批」）。必须带 scheme 与域名或局域网 IP，末尾不带 ``/`` 也行。
+    #
+    # 留空 = 推送里**不带链接**（只发文字）：链接要能在手机上点开，猜不出正确地址就
+    # 不猜——发一个点不开的链接比不发更糟（店长会以为系统坏了）。门店地址改了就改这一项。
+    ADMIN_BASE_URL: str = ""
+
     # 采集数据源：``cy7mm``（Playwright + cy7mm 报表接口，默认）或
     # ``yintai``（移动银台 Pro 门店服务器 HTTP 接口，无需浏览器）。
     # 注意：yintai 依赖门店 App 登录后下发的 accesskey，该值随登录轮换，

@@ -58,7 +58,8 @@ class FakeOpsParams(BaseModel):
 
 
 # 九类内容类型：id / 显示名 / 触发方式（按声明顺序）。前八类的来源是票面与迁移 0016
-# 的头注释，第九类「下周排班表」是后加的（同一张订阅矩阵，不需要新迁移）。
+# 的头注释，第九类「下周排班表」是后加的（同一张订阅矩阵，不需要新迁移）；最后两类
+# 「请假申请」「加班/补钟申请」也是纯注册表新增（员工提交时入队，同样不需要迁移）。
 # 只有对账差异告警两种触发方式都支持。
 EXPECTED_TOPICS = [
     ("sales_report", "销售报表", ("scheduled",)),
@@ -70,6 +71,8 @@ EXPECTED_TOPICS = [
     ("hygiene_photo", "验收照片", ("event",)),
     ("update_backup", "系统更新与备份结果", ("event",)),
     ("resource_watermark", "磁盘与内存水位", ("event",)),
+    ("leave_request", "请假申请", ("event",)),
+    ("overtime_request", "加班/补钟申请", ("event",)),
 ]
 
 TOPIC_IDS = [row[0] for row in EXPECTED_TOPICS]
@@ -112,6 +115,10 @@ EXPECTED_PARAMS = {
     "hygiene_reminder": {},
     "update_backup": {},
     "resource_watermark": {},
+    # 这两类的正文整段由触发点拼好（与卫生提醒同一条路：参数即正文）；注册表只钉住
+    # 「必须有正文」，所以 schema 里只有这一个字段。
+    "leave_request": {"text": ("text", True)},
+    "overtime_request": {"text": ("text", True)},
 }
 
 CONTROL_TYPES = {"time", "select", "text"}
