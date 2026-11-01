@@ -634,6 +634,11 @@ class OvertimeLedger:
         await self._conn.commit()
         entry = await self._entry_by_id(int(entry_id))
         assert entry is not None  # 刚改过的那一行
+        # 名字跟着结果回去：批完要往群里推一条「批没批」，调用方不该为了一个名字再查
+        # 一次花名册（2026-11-02 的审批结果通知）。同 `SchedulingStore._approve`。
+        entry["employee_name"] = (await self._name_index()).get(
+            int(entry["employee_id"]), ""
+        )
         return entry
 
     @_needs_migration
@@ -962,6 +967,10 @@ class OvertimeLedger:
         await self._conn.commit()
         deduction = await self._deduction_by_id(int(deduction_id))
         assert deduction is not None  # 刚改过的那一行
+        # 同 `_decide_locked`：批完要往群里推一条，名字一起带回去。
+        deduction["employee_name"] = (await self._name_index()).get(
+            int(deduction["employee_id"]), ""
+        )
         return deduction
 
     @_needs_migration

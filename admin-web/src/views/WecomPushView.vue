@@ -1501,7 +1501,19 @@ onMounted(async () => {
                   <span v-if="!item.finished_at" style="color:var(--text-dim);font-size:11px">（未完成，这是入队时间）</span>
                 </td>
                 <td data-label="目标渠道">{{ item.channel_name || (item.channel_id ? `#${item.channel_id}` : '渠道已删除') }}</td>
-                <td data-label="内容类型">{{ item.topic_name }}</td>
+                <!-- 内容类型 + 正文首行：同一个内容类型可以有完全不同的几封信
+                     （「请假申请」与「请假已批」都挂在 `leave_request` 上），只写类型名，
+                     这一列就全长得一样，店长得逐条点开才知道哪条是批准。`content_summary`
+                     后端本来就存了（`services/wecom_outbox.py:209` 的 `default_summary`，
+                     注释写着「发送记录页要能一眼认出这是哪一封」），前端之前没显示。 -->
+                <td data-label="内容类型">
+                  <div>{{ item.topic_name }}</div>
+                  <div
+                    v-if="item.content_summary"
+                    class="wp-delivery-summary"
+                    :title="item.content_summary"
+                  >{{ item.content_summary }}</div>
+                </td>
                 <!-- 第 4 列（票 03）：这封信是哪条任务、怎么发出去的。「去这条任务」只给
                      失败行 —— 成功的那一行没有什么要处理的；任务被删了也点得到，会如实说。 -->
                 <td data-label="任务">
@@ -2019,6 +2031,21 @@ onMounted(async () => {
   overflow-wrap: anywhere;
 }
 .wp-delivery-error__toggle { margin-top: 4px; }
+
+/* 内容类型格里的正文首行：同一个内容类型的几封信（申请 / 已批 / 被驳）靠它分开。
+   最多两行 + 省略号，200 字的报表标题也不会把行撑成半屏。 */
+.wp-delivery-summary {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  margin-top: 2px;
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--text-dim);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
 .wp-error-full__title { color: var(--text-dim); font-size: 11px; margin-bottom: 4px; }
 .wp-error-full__raw {
   margin: 0;

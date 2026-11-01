@@ -30,7 +30,9 @@ from services.overtime.ledger import (
 )
 from services.realtime.hub import realtime_hub
 from services.wecom_request_notice import (
+    notify_overtime_decision,
     notify_overtime_deduction,
+    notify_overtime_deduction_decision,
     notify_overtime_entry,
 )
 
@@ -526,6 +528,9 @@ async def admin_approve(
     except OvertimeError as exc:
         raise _bad_request(exc) from exc
     await _overtime_nudge("entry_approved", entry["employee_id"])
+    # 群里也知会一声「批了」：店长勾了「加班/补钟申请」订阅，就该同时看到「谁提了」
+    # 与「批没批」（2026-11-02 的审批结果通知）。
+    await notify_overtime_decision(db, entry, approved=True)
     return {"entry": entry}
 
 
@@ -544,6 +549,8 @@ async def admin_reject(
         raise _bad_request(exc) from exc
     # 驳回的理由就在这条登记上：员工端重读一次才看得到为什么。
     await _overtime_nudge("entry_rejected", entry["employee_id"])
+    # 群里也带上那句理由 —— 「没批」不写为什么，员工只能来问人。
+    await notify_overtime_decision(db, entry, approved=False, note=payload.reason)
     return {"entry": entry}
 
 
@@ -667,6 +674,9 @@ async def review_approve(
     except OvertimeError as exc:
         raise _bad_request(exc) from exc
     await _overtime_nudge("entry_approved", entry["employee_id"])
+    # 群里也知会一声「批了」：店长勾了「加班/补钟申请」订阅，就该同时看到「谁提了」
+    # 与「批没批」（2026-11-02 的审批结果通知）。
+    await notify_overtime_decision(db, entry, approved=True)
     return {"entry": entry}
 
 
@@ -684,6 +694,8 @@ async def review_reject(
     except OvertimeError as exc:
         raise _bad_request(exc) from exc
     await _overtime_nudge("entry_rejected", entry["employee_id"])
+    # 群里也带上那句理由 —— 「没批」不写为什么，员工只能来问人。
+    await notify_overtime_decision(db, entry, approved=False, note=payload.reason)
     return {"entry": entry}
 
 
@@ -726,6 +738,7 @@ async def admin_approve_deduction(
     except OvertimeError as exc:
         raise _bad_request(exc) from exc
     await _overtime_nudge("deduction_approved", deduction["employee_id"])
+    await notify_overtime_deduction_decision(db, deduction, approved=True)
     return {"deduction": deduction}
 
 
@@ -745,6 +758,9 @@ async def admin_reject_deduction(
     except OvertimeError as exc:
         raise _bad_request(exc) from exc
     await _overtime_nudge("deduction_rejected", deduction["employee_id"])
+    await notify_overtime_deduction_decision(
+        db, deduction, approved=False, note=payload.reason
+    )
     return {"deduction": deduction}
 
 
@@ -793,6 +809,7 @@ async def review_approve_deduction(
     except OvertimeError as exc:
         raise _bad_request(exc) from exc
     await _overtime_nudge("deduction_approved", deduction["employee_id"])
+    await notify_overtime_deduction_decision(db, deduction, approved=True)
     return {"deduction": deduction}
 
 
@@ -811,4 +828,7 @@ async def review_reject_deduction(
     except OvertimeError as exc:
         raise _bad_request(exc) from exc
     await _overtime_nudge("deduction_rejected", deduction["employee_id"])
+    await notify_overtime_deduction_decision(
+        db, deduction, approved=False, note=payload.reason
+    )
     return {"deduction": deduction}

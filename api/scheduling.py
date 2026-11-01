@@ -15,8 +15,8 @@ from database import get_db
 from services.identity.capabilities import CAP_SCHEDULE, has_cap
 from services.realtime.hub import realtime_hub
 from services.scheduling import MAX_CYCLE_DAYS, MAX_REQUEST_NOTE, MAX_SHIFT_NAME
-from services.scheduling.store import SchedulingError, SchedulingStore
-from services.wecom_request_notice import notify_leave_request
+from services.scheduling.store import KIND_LEAVE, SchedulingError, SchedulingStore
+from services.wecom_request_notice import notify_leave_decision, notify_leave_request
 
 logger = logging.getLogger(__name__)
 
@@ -1038,6 +1038,10 @@ async def approve_request(
     await _scheduling_nudge(
         "request_approved", result.get("employee_id"), result.get("peer_employee_id")
     )
+    # 群里也知会一声「批了」。换班走同一条路但换班不是「请假被批」，只推请假那一条
+    # （2026-11-02 的审批结果通知）。
+    if result.get("kind") == KIND_LEAVE:
+        await notify_leave_decision(db, result, approved=True)
     return result
 
 
@@ -1070,4 +1074,8 @@ async def reject_request(
         raise _bad_request(exc) from exc
     # 驳回也要让申请人知道（他提的那条有结果了）。
     await _scheduling_nudge("request_rejected", result.get("employee_id"))
+    # 群里也说一声，把店长写的那句原因带上 —— 员工看到「没批」却不知道为什么，
+    # 只会来问人，下一笔还会照原样提上来。
+    if result.get("kind") == KIND_LEAVE:
+        await notify_leave_decision(db, result, approved=False, note=reason or "")
     return result

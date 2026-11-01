@@ -490,3 +490,28 @@ def test_admin_pending_lists_deductions_and_approves(deduction_http):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_approving_a_deduction_carries_the_name_back(deduction_http):
+    """批完一张抵扣单，台账把申请人名字一起返回（2026-11-02 的审批结果通知）。
+
+    路由层拿这个名字拼群文案，不必为了一个名字再翻一次花名册 —— 同加班登记那边
+    （`tests/test_overtime.py::test_approving_an_entry_also_tells_the_work_group`）。
+    """
+    client, db, accounts = deduction_http
+    employee_id = _employee_id(accounts)
+    attendance = AttendanceStore(db, now=lambda: FIXED_NOW)
+    _run(attendance.set_manual_columns(employee_id, {"opening_balance": 35.0}))
+    ledger = OvertimeLedger(db, now=lambda: FIXED_NOW)
+    entry = _run(
+        ledger.submit(EntryActor(), TODAY, -17, "补钟", target_employee_id=employee_id)
+    )
+    _run(ledger.approve(EntryActor(), entry["id"]))
+    deduction = _run(
+        ledger.submit_deduction(EntryActor(employee_id=employee_id), "2026-09", 1)
+    )
+
+    approved = _run(ledger.approve_deduction(EntryActor(), deduction["id"]))
+
+    assert approved["status"] == "approved"
+    assert approved["employee_name"] == NAME

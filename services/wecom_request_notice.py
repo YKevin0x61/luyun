@@ -41,6 +41,11 @@ logger = logging.getLogger(__name__)
 LEAVE_REVIEW_PATH = "/workbench/hr/inbox"
 OVERTIME_REVIEW_PATH = "/workbench/hr/overtime"
 
+# 员工那边的落点：驳回之后他得回去重提，所以驳回那条要带员工页的链接（批准不带 ——
+# 批完了没什么可点的，多一句链接只是噪音）。
+STAFF_MONTH_PATH = "/workbench/staff/month"
+STAFF_OVERTIME_PATH = "/workbench/staff/overtime"
+
 # 一行的最大长度：企微群文本消息上限 2048 字节，两条申请各占一行绰绰有余，
 # 但理由/备注是用户填的自由文本，长起来能顶满整条消息——截断留出链接与标题的位置。
 _MAX_REASON_CHARS = 120
@@ -243,5 +248,171 @@ async def notify_overtime_deduction(
         TOPIC_OVERTIME_REQUEST,
         text,
         _reference("deduction", deduction, text),
+        outbox=outbox,
+    )
+
+
+# ── 审批结果 ────────────────────────────────────────────────────────────────
+#
+# 走**同一类订阅**，不新开内容类型：店长勾「请假申请」订阅的是「请假这件事」，知道
+# 「谁请了」和知道「批没批」是同一件事的两段，不该让他去矩阵里勾第二遍。文案前缀
+# （``【请假已批】`` / ``【请假被驳】``）把两段分开，同一条时间线上读起来是连贯的。
+#
+# 三条规矩：
+#
+# * **批准不带链接**：批完了没有可点的下一步，多一句只是噪音。
+# * **驳回带员工页链接**：他得回去重提，那句「去哪」要能点开。
+# * **理由写全**：驳回是唯一不可逆的动作，员工看到「没批」却不知道为什么，只会来问人。
+
+
+def _decision_headline(kind_label: str, approved: bool) -> str:
+    return f"【{kind_label}已批】" if approved else f"【{kind_label}被驳】"
+
+
+def leave_decision_text(
+    request: Mapping[str, Any],
+    *,
+    approved: bool,
+    employee_name: str = "",
+    note: str = "",
+    base_url: Optional[str] = None,
+) -> str:
+    """一条请假申请的审批结果。``request`` 要带 ``start_date`` / ``end_date``。"""
+    first = str(request.get("start_date") or "").strip()
+    last = str(request.get("end_date") or first).strip()
+    days = _days_between(first, last)
+    who = str(employee_name or request.get("employee_name") or "").strip() or "有员工"
+    span = first if first == last else f"{first} 至 {last}"
+
+    lines = [f"{_decision_headline('请假', approved)}{who} {span}（{days} 天）"]
+    if not approved:
+        reason = _clip(note or request.get("decision_note"))
+        if reason:
+            lines.append(f"原因：{reason}")
+        url = admin_url(STAFF_MONTH_PATH, base_url)
+        if url:
+            lines.append(f"去重提：{url}")
+    return "\n".join(lines)
+
+
+def overtime_decision_text(
+    entry: Mapping[str, Any],
+    *,
+    approved: bool,
+    employee_name: str = "",
+    note: str = "",
+    base_url: Optional[str] = None,
+) -> str:
+    """一笔加班 / 补钟登记的审批结果。"""
+    kind = _OVERTIME_LABELS.get(str(entry.get("kind") or ""), "加班/补钟")
+    who = str(employee_name or entry.get("employee_name") or "").strip() or "有员工"
+    day = str(entry.get("entry_date") or "").strip()
+    hours = _hours_text(entry.get("hours"))
+
+    lines = [f"{_decision_headline(kind, approved)}{who} {day} {kind} {hours} 小时"]
+    if not approved:
+        reason = _clip(note or entry.get("reject_reason"))
+        if reason:
+            lines.append(f"原因：{reason}")
+        url = admin_url(STAFF_OVERTIME_PATH, base_url)
+        if url:
+            lines.append(f"去重记：{url}")
+    return "\n".join(lines)
+
+
+def overtime_deduction_decision_text(
+    deduction: Mapping[str, Any],
+    *,
+    approved: bool,
+    employee_name: str = "",
+    note: str = "",
+    base_url: Optional[str] = None,
+) -> str:
+    """一张「用存假抵扣补钟」单据的审批结果。"""
+    who = str(employee_name or deduction.get("employee_name") or "").strip() or "有员工"
+    month = str(deduction.get("month") or "").strip()
+    days = deduction.get("days")
+    days_text = f"{int(days)} 天" if isinstance(days, int) or str(days or "").isdigit() else "若干天"
+
+    lines = [f"{_decision_headline('抵扣单', approved)}{who} 用存假抵扣 {month} 的补钟 {days_text}"]
+    if not approved:
+        reason = _clip(note or deduction.get("reject_reason"))
+        if reason:
+            lines.append(f"原因：{reason}")
+        url = admin_url(STAFF_OVERTIME_PATH, base_url)
+        if url:
+            lines.append(f"去重提：{url}")
+    return "\n".join(lines)
+
+
+async def notify_leave_decision(
+    db,
+    request: Mapping[str, Any],
+    *,
+    approved: bool,
+    employee_name: str = "",
+    note: str = "",
+    base_url: Optional[str] = None,
+    outbox=None,
+) -> None:
+    """请假批了 / 驳了 → 群里知会（同一条订阅，不新开内容类型）。"""
+    text = leave_decision_text(
+        request, approved=approved, employee_name=employee_name, note=note, base_url=base_url
+    )
+    await _push_text(
+        db,
+        TOPIC_LEAVE_REQUEST,
+        text,
+        _reference("leave_decision", request, text),
+        outbox=outbox,
+    )
+
+
+async def notify_overtime_decision(
+    db,
+    entry: Mapping[str, Any],
+    *,
+    approved: bool,
+    employee_name: str = "",
+    note: str = "",
+    base_url: Optional[str] = None,
+    outbox=None,
+) -> None:
+    """加班 / 补钟批了或驳了 → 群里知会。"""
+    text = overtime_decision_text(
+        entry, approved=approved, employee_name=employee_name, note=note, base_url=base_url
+    )
+    await _push_text(
+        db,
+        TOPIC_OVERTIME_REQUEST,
+        text,
+        _reference("overtime_decision", entry, text),
+        outbox=outbox,
+    )
+
+
+async def notify_overtime_deduction_decision(
+    db,
+    deduction: Mapping[str, Any],
+    *,
+    approved: bool,
+    employee_name: str = "",
+    note: str = "",
+    base_url: Optional[str] = None,
+    outbox=None,
+) -> None:
+    """抵扣单批了或驳了 → 群里知会。"""
+    text = overtime_deduction_decision_text(
+        deduction,
+        approved=approved,
+        employee_name=employee_name,
+        note=note,
+        base_url=base_url,
+    )
+    await _push_text(
+        db,
+        TOPIC_OVERTIME_REQUEST,
+        text,
+        _reference("deduction_decision", deduction, text),
         outbox=outbox,
     )

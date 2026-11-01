@@ -1817,7 +1817,12 @@ def test_submitting_a_leave_also_tells_the_work_group(scheduling_http, monkeypat
 
 
 def test_a_leave_that_cannot_be_saved_tells_nobody(scheduling_http, monkeypatch):
-    """提交被拒（这里是「同一天已经提过」）不该往群里发一条不存在的申请。"""
+    """提交被拒不该往群里发一条不存在的申请。
+
+    这里用**事由超长**（`MAX_REQUEST_NOTE = 50`）当 400：它是已提交代码里稳定的一条
+    拒绝路径。原来这里用的是「同一天重复提」，而那半条逻辑还没提交，换成它会让这个
+    用例在干净检出上红。
+    """
     client, _db, accounts = scheduling_http
     _admin, (employee_id,), _day_id = _leave_scene(client, accounts, monkeypatch)
 
@@ -1832,7 +1837,9 @@ def test_a_leave_that_cannot_be_saved_tells_nobody(scheduling_http, monkeypatch)
     assert first.status_code == 200, first.text
     calls.clear()
 
-    rejected = client.post("/api/scheduling/me/requests", json={"start_date": "2026-09-25"})
+    rejected = client.post(
+        "/api/scheduling/me/requests", json={"start_date": "2026-09-25", "note": "啊" * 51}
+    )
 
     assert rejected.status_code == 400
     assert calls == []
@@ -3095,3 +3102,97 @@ def test_reject_reason_is_optional_and_bounded(scheduling_http, monkeypatch):
     assert bare.status_code == 200, bare.text
     assert bare.json()["decision_note"] is None
 
+
+
+# ── 审批结果也进群（2026-11-02）──────────────────────────────────────────────
+#
+# 提交那次的通知测在 `test_submitting_a_leave_also_tells_the_work_group`；这里测
+# **批与驳**：勾了「请假申请」订阅的群，批完 / 驳完也该知道结果 —— 不然群里只有
+# 「张三请了假」，没有下文，店长以为还挂着。文案在
+# `tests/test_wecom_request_notice.py` 里各测各的，这里只看接线有没有断。
+
+
+def test_approving_a_leave_also_tells_the_work_group(scheduling_http, monkeypatch):
+    client, _db, accounts = scheduling_http
+    admin, _ids, _day_id = _leave_scene(client, accounts, monkeypatch)
+
+    request_id = client.post(
+        "/api/scheduling/me/requests", json={"start_date": "2026-09-25"}
+    ).json()["request"]["id"]
+
+    calls = []
+
+    async def _record(db, request, *, approved, employee_name="", note="", **kwargs):
+        calls.append({"request": request, "approved": approved, "note": note})
+
+    monkeypatch.setattr(scheduling_module, "notify_leave_decision", _record)
+
+    _as_manager(client, admin)
+    approved = client.post(f"/api/scheduling/inbox/{request_id}/approve")
+
+    assert approved.status_code == 200, approved.text
+    (call,) = calls
+    assert call["approved"] is True
+    # 群里要能对上「批的是谁的哪一条」：名字与申请 id 都得是这一条的。
+    assert call["request"]["id"] == request_id
+    assert call["request"]["employee_name"] == NAME
+    assert call["request"]["kind"] == "leave"
+
+
+def test_rejecting_a_leave_carries_the_reason_to_the_group(scheduling_http, monkeypatch):
+    """驳回要带店长写的那句原因 —— 群里只说「没批」，员工只能来问人。"""
+    client, _db, accounts = scheduling_http
+    admin, _ids, _day_id = _leave_scene(client, accounts, monkeypatch)
+
+    request_id = client.post(
+        "/api/scheduling/me/requests", json={"start_date": "2026-09-25"}
+    ).json()["request"]["id"]
+
+    calls = []
+
+    async def _record(db, request, *, approved, employee_name="", note="", **kwargs):
+        calls.append({"request": request, "approved": approved, "note": note})
+
+    monkeypatch.setattr(scheduling_module, "notify_leave_decision", _record)
+
+    _as_manager(client, admin)
+    rejected = client.post(
+        f"/api/scheduling/inbox/{request_id}/reject", json={"reason": "这周人手不够"}
+    )
+
+    assert rejected.status_code == 200, rejected.text
+    (call,) = calls
+    assert call["approved"] is False
+    assert call["note"] == "这周人手不够"
+    assert call["request"]["id"] == request_id
+
+
+def test_approving_a_swap_does_not_speak_as_a_leave(scheduling_http, monkeypatch):
+    """换班批了不是「请假被批」：群通知只发请假那一条，换班不能借这条文案出门。"""
+    client, _db, accounts = scheduling_http
+    admin, ids, _day_id = _leave_scene(
+        client, accounts, monkeypatch, people=((PHONE, NAME), ("13800138001", "李四"))
+    )
+    leaver, peer = ids
+
+    # 员工 A 指 B 换他那天的班；B 点头之后才进店长待办。
+    request_id = client.post(
+        "/api/scheduling/me/swaps",
+        json={"business_date": "2026-09-25", "peer_employee_id": peer},
+    ).json()["request"]["id"]
+    _staff_cookie(client, accounts, phone="13800138001")
+    assert client.post(f"/api/scheduling/me/swaps/{request_id}/accept").status_code == 200
+
+    calls = []
+
+    async def _record(db, request, *, approved, employee_name="", note="", **kwargs):
+        calls.append(request)
+
+    monkeypatch.setattr(scheduling_module, "notify_leave_decision", _record)
+
+    _as_manager(client, admin)
+    approved = client.post(f"/api/scheduling/inbox/{request_id}/approve")
+
+    assert approved.status_code == 200, approved.text
+    assert approved.json()["kind"] == "swap"
+    assert calls == []

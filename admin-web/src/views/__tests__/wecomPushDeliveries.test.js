@@ -178,7 +178,10 @@ describe('发送记录 tab 的列表', () => {
     // 已完成的行显示**完成时间**：入队时间与「到底发出去没有」不是一回事
     expect(cells[0]).toContain('2026-10-05 21:30:13')
     expect(cells[1]).toBe('门店群')
-    expect(cells[2]).toBe('销售报表')
+    // 第 3 列是「类型名 + 正文首行」：同一个内容类型可以有好几封不同的信（「请假申请」
+    // 与「请假已批」都挂在 `leave_request` 上），只写类型名就全长得一样。
+    expect(cells[2]).toContain('销售报表')
+    expect(cells[2]).toContain('【销售报表】2026-10-05')
     // 第 4 列（票 03）：哪条任务 + 怎么发出去的
     expect(cells[3]).toContain('每日销售报表')
     expect(cells[3]).toContain('定时')

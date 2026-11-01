@@ -3390,6 +3390,12 @@ class SchedulingStore:
         )
         # 同上：路由层要照这个 id 广播（被驳回的是**他**那条申请）。
         result["employee_id"] = int(row["employee_id"])
+        # 同 `_approve`：驳回之后也要往群里推一条「没批 + 原因」，字段与批准那份对齐，
+        # 路由层只判 approved，不用两条路各写一套取值。
+        result["employee_name"] = (await self._name_index()).get(int(row["employee_id"]), "")
+        result["kind"] = row["kind"]
+        result["start_date"] = row["start_date"]
+        result["end_date"] = row["end_date"]
         return result
 
     # ── 换班（票 09） ───────────────────────────────────────────────────
@@ -3635,6 +3641,14 @@ class SchedulingStore:
         return {
             "id": int(row["id"]),
             "employee_id": employee_id,
+            # 申请人、申请类别与区间跟着结果一起回去：批完之后要往群里推一条
+            # 「批没批」，路由层不该为了一个名字再查一次库；`kind` 用来说清
+            # 「这条到底是请假还是换班」—— 换班批了也要广播，但那句话不是
+            # 「请假被批」（2026-11-02 的审批结果通知）。
+            "employee_name": (await self._name_index()).get(employee_id, ""),
+            "kind": row["kind"],
+            "start_date": row["start_date"],
+            "end_date": row["end_date"],
             "status": STATUS_APPROVED,
             "decided_at": stamp,
             # 谁批的（0044）：管理后台的调用方没有员工身份，这里是 None。
@@ -3715,6 +3729,11 @@ class SchedulingStore:
             "id": int(row["id"]),
             "employee_id": employee_id,
             "peer_employee_id": peer_id,
+            # 同 `_approve`：调用方要拿这几个字段拼群通知（换班也是「申请有结果了」）。
+            "employee_name": (await self._name_index()).get(employee_id, ""),
+            "kind": row["kind"],
+            "start_date": row["start_date"],
+            "end_date": row["end_date"],
             "status": STATUS_APPROVED,
             "decided_at": stamp,
             # 谁批的（0044）：管理后台的调用方没有员工身份，这里是 None。

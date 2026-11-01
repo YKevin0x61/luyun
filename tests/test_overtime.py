@@ -1538,3 +1538,62 @@ def test_the_cap_takes_effect_immediately(overtime_http):
 
     _run(accounts.set_admin_caps(supervisor_id, ["overtime"]))
     assert client.get("/api/overtime/review/pending").status_code == 200
+
+
+# ── 审批结果也进群（2026-11-02）──────────────────────────────────────────────
+#
+# 提交那次的通知测在 `test_submitting_an_entry_also_tells_the_work_group`；这里测
+# **批与驳**：勾了「加班/补钟申请」订阅的群，批完也该知道结果。
+
+
+def test_approving_an_entry_also_tells_the_work_group(overtime_http, monkeypatch):
+    client, _db, accounts = overtime_http
+    _employee_id(accounts)
+    _staff_cookie(client, accounts)
+    entry = _submit(client, TODAY, 5, "盘点到九点")
+
+    calls = []
+
+    async def _record(db, row, *, approved, employee_name="", note="", **kwargs):
+        calls.append({"entry": row, "approved": approved, "note": note})
+
+    monkeypatch.setattr(overtime_module, "notify_overtime_decision", _record)
+
+    _admin_login(client)
+    approved = client.post(f"/api/overtime/admin/entries/{entry['id']}/approve")
+
+    assert approved.status_code == 200, approved.text
+    (call,) = calls
+    assert call["approved"] is True
+    # 台账那一行已经把小时数与方向算好，通知直接拿去拼文案。
+    assert call["entry"]["id"] == entry["id"]
+    assert (call["entry"]["half_hours"], call["entry"]["kind"]) == (5, "overtime")
+    # 名字跟着结果一起回来：调用方不必为了一个名字再去翻花名册。
+    assert call["entry"]["employee_name"] == NAME
+
+
+def test_rejecting_an_entry_carries_the_reason_to_the_group(overtime_http, monkeypatch):
+    """驳回要带理由 —— 群里只说「没批」，员工还得来问人。"""
+    client, _db, accounts = overtime_http
+    _employee_id(accounts)
+    _staff_cookie(client, accounts)
+    entry = _submit(client, TODAY, 5, "盘点到九点")
+
+    calls = []
+
+    async def _record(db, row, *, approved, employee_name="", note="", **kwargs):
+        calls.append({"entry": row, "approved": approved, "note": note})
+
+    monkeypatch.setattr(overtime_module, "notify_overtime_decision", _record)
+
+    _admin_login(client)
+    rejected = client.post(
+        f"/api/overtime/admin/entries/{entry['id']}/reject",
+        json={"reason": "那半小时是排班内的收尾"},
+    )
+
+    assert rejected.status_code == 200, rejected.text
+    (call,) = calls
+    assert call["approved"] is False
+    assert call["note"] == "那半小时是排班内的收尾"
+    assert call["entry"]["id"] == entry["id"]
