@@ -193,7 +193,7 @@ describe('订阅矩阵的整格热区（U3）', () => {
 describe('窄屏宽表改卡片式与矩阵冻结列（U2）', () => {
   it('发送记录 / 变更历史两张表都带卡片式用的 data-label', () => {
     const src = compact(view)
-    for (const label of ['时间', '目标渠道', '内容类型', '状态', '字节数', '尝试次数', '最后一次错误']) {
+    for (const label of ['时间', '目标渠道', '内容类型', '任务', '状态', '字节数', '尝试次数', '最后一次错误']) {
       expect(src, `发送记录少了 data-label="${label}"`).toContain(`data-label="${label}"`)
     }
     for (const label of ['操作人', '操作', '对象', '变更内容']) {

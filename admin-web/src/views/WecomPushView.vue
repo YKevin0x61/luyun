@@ -5,7 +5,9 @@ import {
   channelDeleteConfirmText, channelGroupNames, channelTopicNames, formatSentAt,
   canSendNow, sendNowConfirmText, sendNowTargetNames, testChannelConfirmText,
   DELIVERY_STATUS_OPTIONS,
-  deliveryStatusLabel, deliveryErrorSummary, formatDeliveryTime, auditActionLabel,
+  deliveryStatusLabel, deliveryErrorSummary, formatDeliveryTime,
+  deliveryTriggerLabel, deliveryTaskLabel,
+  auditActionLabel,
   auditObjectLabel, auditVisibleFields, auditChangeText,
 } from '../composables/useWecomPush'
 import SvgIcon from '../components/SvgIcon.vue'
@@ -135,6 +137,28 @@ function handleRefreshDeliveries() {
   // 渠道名是服务端配在记录里的：新建渠道后刷新记录顺带把渠道列表拉一遍，
   // 下拉里立刻能按新渠道筛（不然要整页刷新才看得到）。
   loadChannels().catch(() => {})
+}
+
+/**
+ * 「去这条任务」（票 03）：某一封投递失败了，店长真正要处理的是**那条任务**（它下一次
+ * 还会按同一个时间发）。带着 `schedule_id` 切到「定时任务」并打开它。
+ *
+ * 任务已经删掉时如实说，不要静默跳到一个空表单 —— 那看起来像「任务还在、只是没铺上参数」。
+ */
+function handleDeliveryTask(item) {
+  const raw = item && item.schedule_id
+  const jobId = raw === 0 || raw ? Number(raw) : 0
+  if (!jobId) {
+    flash('这条记录没有关联的定时任务（事件触发或历史记录）')
+    return
+  }
+  const job = jobs.value.find((row) => Number(row.id) === jobId)
+  if (!job) {
+    flash(`任务 #${jobId} 已被删除，这条记录只剩历史`)
+    return
+  }
+  handleSwitchTab('jobs')
+  editJob(job)
 }
 
 const isEditingChannel = computed(() => !!channelForm.id)
@@ -978,7 +1002,7 @@ onMounted(async () => {
         </div>
       </div>
 
-      <!-- ≤700px 这张七列表格会切成一行一卡（U2）：`data-label` 就是卡片里的字段名。 -->
+      <!-- ≤700px 这张八列表格会切成一行一卡（U2）：`data-label` 就是卡片里的字段名。 -->
       <div class="data-table-wrap wp-card-table-wrap luyun-scrollbar" style="max-height:420px">
         <table class="data-table wp-card-table wp-delivery-table">
           <thead>
@@ -986,6 +1010,7 @@ onMounted(async () => {
               <th style="cursor:default">时间</th>
               <th style="cursor:default">目标渠道</th>
               <th style="cursor:default">内容类型</th>
+              <th style="cursor:default">任务</th>
               <th style="cursor:default">状态</th>
               <th style="cursor:default">字节数</th>
               <th style="cursor:default">尝试次数</th>
@@ -994,7 +1019,7 @@ onMounted(async () => {
           </thead>
           <tbody>
             <tr v-if="!deliveries.rows.length">
-              <td colspan="7" class="empty-state">
+              <td colspan="8" class="empty-state">
                 {{ deliveryFiltered ? '没有符合条件的记录，可换个筛选条件或清空筛选' : '暂无发送记录' }}
               </td>
             </tr>
@@ -1008,6 +1033,20 @@ onMounted(async () => {
                 </td>
                 <td data-label="目标渠道">{{ item.channel_name || (item.channel_id ? `#${item.channel_id}` : '渠道已删除') }}</td>
                 <td data-label="内容类型">{{ item.topic_name }}</td>
+                <!-- 第 4 列（票 03）：这封信是哪条任务、怎么发出去的。「去这条任务」只给
+                     失败行 —— 成功的那一行没有什么要处理的；任务被删了也点得到，会如实说。 -->
+                <td data-label="任务">
+                  <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+                    <span>{{ deliveryTaskLabel(item) }}</span>
+                    <span class="badge" style="font-size:11px">{{ deliveryTriggerLabel(item.trigger) }}</span>
+                    <button
+                      v-if="item.status === 'failed' && item.schedule_id"
+                      class="btn btn-sm"
+                      type="button"
+                      @click.stop="handleDeliveryTask(item)"
+                    >去这条任务</button>
+                  </div>
+                </td>
                 <td data-label="状态">
                   <span
                     class="badge"
@@ -1018,7 +1057,7 @@ onMounted(async () => {
                 </td>
                 <td data-label="字节数">{{ item.message_bytes }}</td>
                 <td data-label="尝试次数">{{ item.attempts }}</td>
-                <!-- 第 7 列（U16）：这里原来 `overflow:hidden` 硬裁、没有展开入口，而失败原因
+                <!-- 第 8 列（U16）：这里原来 `overflow:hidden` 硬裁、没有展开入口，而失败原因
                      正是这一页最需要读的东西。现在显示人话版摘要，「详情」展开完整原文，
                      触屏（没有 hover）也读得到。 -->
                 <td data-label="最后一次错误" class="wp-delivery-error">
@@ -1035,7 +1074,7 @@ onMounted(async () => {
                 </td>
               </tr>
               <tr v-if="expandedDeliveryId === item.id" class="wp-delivery-detail">
-                <td colspan="7">
+                <td colspan="8">
                   <div class="wp-error-full">
                     <div class="wp-error-full__title">最后一次错误（原文）</div>
                     <pre class="wp-error-full__raw">{{ item.last_error }}</pre>

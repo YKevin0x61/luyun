@@ -630,9 +630,10 @@ class _WecomSubscriptionsRepoMixin:
         page_size: int = OUTBOX_PAGE_SIZE_DEFAULT,
         topic_id: Optional[str] = None,
         channel_id: Optional[int] = None,
+        job_id: Optional[int] = None,
         status: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """发送记录的一页（票 07）：按时间倒序 + 内容类型 / 渠道 / 状态筛选 + 总数。
+        """发送记录的一页（票 07 / 03）：按时间倒序 + 内容类型 / 渠道 / 任务 / 状态筛选 + 总数。
 
         与 ``wecom_outbox_recent`` 分开而不是改它：那条是「最近 N 条」的口径，被页面
         首屏与调度侧读着，加了 offset / 总数就换了语义。这一条专门服务于带筛选的
@@ -641,6 +642,9 @@ class _WecomSubscriptionsRepoMixin:
         页大小与页码一律收进安全区间（外部输入不进 SQL 的 ``LIMIT`` / ``OFFSET``）：
         ``page_size`` 收进 1..200，``page`` 不小于 1。``total`` 是**筛选之后**的总数，
         页面据此算得出还有没有下一页。
+
+        ``job_id``（票 03）按 ``schedule_id`` 筛：任务被删之后那些历史行的
+        ``schedule_id`` 仍然留着（这一列没有外键），所以按 id 也查得到。
         """
         try:
             safe_size = max(1, min(int(page_size), OUTBOX_PAGE_SIZE_MAX))
@@ -653,6 +657,9 @@ class _WecomSubscriptionsRepoMixin:
             if channel_id is not None:
                 conditions.append("target_channel_id = ?")
                 params.append(int(channel_id))
+            if job_id is not None:
+                conditions.append("schedule_id = ?")
+                params.append(int(job_id))
             if status:
                 conditions.append("status = ?")
                 params.append(str(status))

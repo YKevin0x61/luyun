@@ -23,6 +23,7 @@ from services import auth_service, wecom_audit
 from services.wecom_outbox import ResolvedTarget, resolve_targets, wecom_outbox
 from services.wecom_push_topics import (
     TOPIC_MANUAL_SEND,
+    TOPIC_TEST_MESSAGE,
     WEEKDAY_LABELS,
     WECOM_PUSH_API_VERSION,
     PushTopic,
@@ -401,16 +402,53 @@ def _safe_webhook(row: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _delivery_row(row: Dict[str, Any], channels: Dict[int, Dict[str, Any]]) -> Dict[str, Any]:
-    """一条发送记录回给页面的形状（票 07）。
+def _delivery_trigger(topic_id: str, idempotency_key: str, schedule_id: Any) -> str:
+    """这条投递是怎么发起的：页面那一列要在一屏内回答「手动还是定时」。
 
-    字段就是页面表格的那七列（时间 / 目标渠道 / 内容类型 / 状态 / 字节数 / 尝试次数 /
-    最后一次错误）加上 `content_summary`（鼠标悬停能认出这是哪一封）与
+    出站表没有 trigger 列（迁移 0016 只加了 ``schedule_id`` 与幂等键），但发起方式
+    全都留在这三样里，所以判据只用已有数据、不为了显示加列：
+
+    - ``legacy:`` 开头是迁移搬进来的历史行：当时没有这套语义，如实回 ``legacy``，
+      不猜成「定时」；
+    - 测试发送与销售报表页的「推送」各有自己的内部内容类型（它们不进订阅矩阵）；
+    - 定时任务的「立即发送」与到点投递走同一条 ``enqueue_job``，差异只在幂等键里那段
+      ``#manual#``（``services/wecom_push_service.py`` 的 ``send_job_now``）；
+    - 剩下带 ``schedule_id`` 的是定时投递，不带的是事件触发（未映射菜品、采集失败…）。
+      事件行没有任务，把它算成「定时」是错的 —— 票面只列了三种，这里是它的超集。
+    """
+    key = str(idempotency_key or "")
+    if key.startswith("legacy:"):
+        return "legacy"
+    if topic_id == TOPIC_TEST_MESSAGE:
+        return "test"
+    if topic_id == TOPIC_MANUAL_SEND or "#manual#" in key:
+        return "manual"
+    if schedule_id is not None:
+        return "scheduled"
+    return "event"
+
+
+def _delivery_row(
+    row: Dict[str, Any],
+    channels: Dict[int, Dict[str, Any]],
+    jobs: Optional[Dict[int, Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """一条发送记录回给页面的形状（票 07 / 03）。
+
+    字段就是页面表格的那几列（时间 / 目标渠道 / 内容类型 / 任务 / 状态 / 字节数 /
+    尝试次数 / 最后一次错误）加上 `content_summary`（鼠标悬停能认出这是哪一封）与
     `finished_at`（终态时间；没完成的行没有）。
+
+    「哪条任务」= `schedule_id` + `job_name` + `trigger`：`schedule_id` 早就在表里
+    （`migrations/pg/0016`），只是以前没投影出来。任务被删之后名字取不到，`job_name`
+    回空串而 `schedule_id` 仍然留着 —— 页面据此写「任务 #12（已删除）」，历史投递不会
+    变成空行。
     """
     channel_id = row.get("target_channel_id")
     channel = channels.get(int(channel_id)) if channel_id is not None else None
     topic_id = str(row.get("topic_id") or "")
+    schedule_id = row.get("schedule_id")
+    job = (jobs or {}).get(int(schedule_id)) if schedule_id is not None else None
     return {
         "id": int(row["id"]),
         "created_at": row.get("created_at") or "",
@@ -421,6 +459,11 @@ def _delivery_row(row: Dict[str, Any], channels: Dict[int, Dict[str, Any]]) -> D
         "topic_id": topic_id,
         # 注册表里没有这个 id（内容类型下过线）就退回 id：页面要看得见这一行。
         "topic_name": _topic_name(topic_id),
+        "schedule_id": int(schedule_id) if schedule_id is not None else None,
+        "job_name": str(job.get("name") or "") if job else "",
+        "trigger": _delivery_trigger(
+            topic_id, row.get("idempotency_key", ""), schedule_id
+        ),
         "status": str(row.get("status") or ""),
         "message_bytes": int(row.get("message_bytes") or 0),
         "attempts": int(row.get("attempts") or 0),
@@ -1366,15 +1409,20 @@ async def list_logs(
     page_size: Optional[int] = Query(None, ge=1),
     topic_id: Optional[str] = Query(None, max_length=60),
     channel_id: Optional[int] = Query(None, gt=0),
+    job_id: Optional[int] = Query(None, gt=0),
     status: Optional[str] = Query(None, max_length=20),
     db: DatabaseManager = Depends(get_db),
 ):
-    """发送记录（票 07）：读的是**统一出站表**（ADR 0095：队列表与发送记录是同一张表）。
+    """发送记录（票 07 / 03）：读的是**统一出站表**（ADR 0095：队列表与发送记录是同一张表）。
 
-    每行带上页面要显示的七样：时间、目标渠道、内容类型、状态、字节数、尝试次数、
-    最后一次错误。渠道名与内容类型名在服务端配好（`channel_name` / `topic_name`），
-    页面不必拿 id 去两张表里对照；渠道被删之后那一行的 `channel_id` 是 null、名字退回
-    空串，行本身仍然读得出来（外键 ON DELETE SET NULL，历史不该跟着渠道消失）。
+    每行带上页面要显示的几样：时间、目标渠道、内容类型、任务与发起方式、状态、字节数、
+    尝试次数、最后一次错误。渠道名、内容类型名与任务名在服务端配好
+    （`channel_name` / `topic_name` / `job_name`），页面不必拿 id 去三张表里对照；渠道
+    被删之后那一行的 `channel_id` 是 null、名字退回空串，任务被删之后 `job_name` 是
+    空串而 `schedule_id` 还在，行本身仍然读得出来（历史不该跟着渠道或任务消失）。
+
+    ``job_id``（票 03）按任务筛：排障时「这条任务最近发成了什么样」不用横跨两个 tab
+    人肉拼。``trigger`` 见 ``_delivery_trigger``。
 
     ``logs`` 那一份是**旧表**的镜像，只为缓存着旧 bundle 的浏览器留着（新页面读
     `rows`）：它不是数据源，也不会再有这一页产生的新行。
@@ -1389,13 +1437,15 @@ async def list_logs(
         page_size=size,
         topic_id=topic_id,
         channel_id=channel_id,
+        job_id=job_id,
         status=status,
     )
     channels = {int(row["id"]): row for row in await db.wecom_webhooks_all()}
+    jobs = {int(row["id"]): row for row in await db.wecom_jobs_all()}
     return {
         "success": True,
         "api_version": WECOM_PUSH_API_VERSION,
-        "rows": [_delivery_row(row, channels) for row in result["rows"]],
+        "rows": [_delivery_row(row, channels, jobs) for row in result["rows"]],
         "total": result["total"],
         "page": result["page"],
         "page_size": result["page_size"],

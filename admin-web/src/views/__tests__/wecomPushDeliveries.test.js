@@ -62,6 +62,10 @@ function delivery(overrides = {}) {
     attempts: 1,
     last_error: '',
     content_summary: '【销售报表】2026-10-05',
+    // 票 03 新增的三样：哪条任务、任务名、怎么发出去的。
+    schedule_id: 12,
+    job_name: '每日销售报表',
+    trigger: 'scheduled',
     ...overrides,
   }
 }
@@ -76,7 +80,9 @@ function jsonResponse(data, status = 200) {
 }
 
 /** 记录每一次请求；`deliveriesFor` 让每一档夹具自己决定按什么筛选返回哪几行。 */
-function probeFetch({ channels = [], topics = [], groups = [], deliveriesFor = null } = {}) {
+function probeFetch({
+  channels = [], topics = [], groups = [], jobs = [], deliveriesFor = null,
+} = {}) {
   const calls = []
   const fetchMock = vi.fn(async (url, options = {}) => {
     const path = String(url)
@@ -95,7 +101,7 @@ function probeFetch({ channels = [], topics = [], groups = [], deliveriesFor = n
     if (path.includes('/api/wecom-push/webhooks')) {
       return jsonResponse({ success: true, webhooks: [], channels, topics, groups })
     }
-    if (path.includes('/api/wecom-push/jobs')) return jsonResponse({ success: true, jobs: [] })
+    if (path.includes('/api/wecom-push/jobs')) return jsonResponse({ success: true, jobs })
     if (path.includes('/api/wecom-push/logs')) {
       if (deliveriesFor) return jsonResponse(deliveriesFor(new URL(path, 'http://x').searchParams))
       return jsonResponse({
@@ -147,7 +153,7 @@ afterEach(() => {
 })
 
 describe('发送记录 tab 的列表', () => {
-  it('每行显示时间 / 目标渠道 / 内容类型 / 状态 / 字节数 / 尝试次数 / 最后一次错误', async () => {
+  it('每行显示时间 / 目标渠道 / 内容类型 / 任务 / 状态 / 字节数 / 尝试次数 / 最后一次错误', async () => {
     const { wrapper } = await mountView({
       channels: [channel(1, '门店群')],
       topics: [topic('sales_report', '销售报表', [1])],
@@ -166,19 +172,22 @@ describe('发送记录 tab 的列表', () => {
     const table = deliveryTable(wrapper)
     expect(table, '找不到发送记录表').toBeTruthy()
     expect(table.findAll('thead th').map((cell) => cell.text())).toEqual([
-      '时间', '目标渠道', '内容类型', '状态', '字节数', '尝试次数', '最后一次错误',
+      '时间', '目标渠道', '内容类型', '任务', '状态', '字节数', '尝试次数', '最后一次错误',
     ])
     const cells = table.findAll('tbody tr')[0].findAll('td').map((cell) => cell.text())
     // 已完成的行显示**完成时间**：入队时间与「到底发出去没有」不是一回事
     expect(cells[0]).toContain('2026-10-05 21:30:13')
     expect(cells[1]).toBe('门店群')
     expect(cells[2]).toBe('销售报表')
-    expect(cells[3]).toContain('失败')
-    expect(cells[4]).toBe('118')
-    expect(cells[5]).toBe('4')
-    // 第 7 列是**人话版**摘要（U16）：`invalid webhook url` 这种企微原文翻成中文，
+    // 第 4 列（票 03）：哪条任务 + 怎么发出去的
+    expect(cells[3]).toContain('每日销售报表')
+    expect(cells[3]).toContain('定时')
+    expect(cells[4]).toContain('失败')
+    expect(cells[5]).toBe('118')
+    expect(cells[6]).toBe('4')
+    // 第 8 列是**人话版**摘要（U16）：`invalid webhook url` 这种企微原文翻成中文，
     // 原文一个字不丢、进「详情」（见下面「最后一次错误」那一组用例）。
-    expect(cells[6]).toContain('webhook 地址无效')
+    expect(cells[7]).toContain('webhook 地址无效')
   })
 
   it('还没完成的行显示入队时间并标注「未完成」，不会被读成已发送', async () => {
@@ -314,6 +323,134 @@ describe('发送记录 tab 的筛选', () => {
   })
 })
 
+// 票 03：发送记录要回答「这是哪条任务发的」—— 定时任务的「立即发送」与到点投递在
+// 这张表里长得一模一样，失败之后要能回到那条任务去处理。
+describe('发送记录的任务列（票 03）', () => {
+  const JOB = {
+    id: 12,
+    name: '每日销售报表',
+    topic_id: 'sales_report',
+    params: { schedule_time: '21:30', date_range_mode: 'today', station: '' },
+    schedule_time: '21:30',
+    enabled: true,
+    notes: '',
+  }
+
+  function taskCell(wrapper) {
+    return deliveryTable(wrapper).findAll('tbody tr')[0].findAll('td')[3]
+  }
+
+  it('定时投递显示任务名与发起方式', async () => {
+    const { wrapper } = await mountView({
+      channels: [channel(1, '门店群')],
+      topics: [topic('sales_report', '销售报表', [1])],
+      deliveriesFor: () => ({
+        success: true, rows: [delivery()], total: 1, page: 1, page_size: 50, pages: 1,
+      }),
+    })
+    await openTab(wrapper, '发送记录')
+
+    const cell = taskCell(wrapper)
+    expect(cell.text()).toContain('每日销售报表')
+    expect(cell.text()).toContain('定时')
+  })
+
+  it('任务被删之后历史记录仍显示编号，不空白', async () => {
+    const { wrapper } = await mountView({
+      channels: [channel(1, '门店群')],
+      topics: [topic('sales_report', '销售报表', [1])],
+      deliveriesFor: () => ({
+        success: true,
+        rows: [delivery({ schedule_id: 12, job_name: '', trigger: 'scheduled' })],
+        total: 1, page: 1, page_size: 50, pages: 1,
+      }),
+    })
+    await openTab(wrapper, '发送记录')
+
+    const cell = taskCell(wrapper)
+    expect(cell.text()).toContain('任务 #12')
+    expect(cell.text()).toContain('已删除')
+  })
+
+  it('没有任务的行按发起方式说清楚，不留白', async () => {
+    const { wrapper } = await mountView({
+      channels: [channel(1, '门店群')],
+      topics: [topic('sales_report', '销售报表', [1])],
+      deliveriesFor: () => ({
+        success: true,
+        rows: [
+          delivery({ id: 3, schedule_id: null, job_name: '', trigger: 'legacy' }),
+          delivery({ id: 2, schedule_id: null, job_name: '', trigger: 'event' }),
+        ],
+        total: 2, page: 1, page_size: 50, pages: 1,
+      }),
+    })
+    await openTab(wrapper, '发送记录')
+
+    const cells = deliveryTable(wrapper).findAll('tbody tr')
+      .map((row) => row.findAll('td')[3].text())
+    expect(cells[0]).toContain('历史记录')
+    expect(cells[1]).toContain('事件触发')
+  })
+
+  it('失败行的「去这条任务」切到定时任务并打开它', async () => {
+    const { wrapper } = await mountView({
+      channels: [channel(1, '门店群')],
+      topics: [topic('sales_report', '销售报表', [1])],
+      jobs: [JOB],
+      deliveriesFor: () => ({
+        success: true,
+        rows: [delivery({ status: 'failed', attempts: 4, last_error: 'boom' })],
+        total: 1, page: 1, page_size: 50, pages: 1,
+      }),
+    })
+    await openTab(wrapper, '发送记录')
+
+    const go = wrapper.findAll('button').find((node) => node.text() === '去这条任务')
+    expect(go, '失败行没有「去这条任务」').toBeTruthy()
+    await go.trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('.view-tab.active').text()).toBe('定时任务')
+    expect(wrapper.find('#wp-job-name').element.value).toBe('每日销售报表')
+  })
+
+  it('任务已经删掉时只说一声，不跳到空表单', async () => {
+    const { wrapper } = await mountView({
+      channels: [channel(1, '门店群')],
+      topics: [topic('sales_report', '销售报表', [1])],
+      jobs: [],
+      deliveriesFor: () => ({
+        success: true,
+        rows: [delivery({ status: 'failed', attempts: 4, last_error: 'boom' })],
+        total: 1, page: 1, page_size: 50, pages: 1,
+      }),
+    })
+    await openTab(wrapper, '发送记录')
+
+    const go = wrapper.findAll('button').find((node) => node.text() === '去这条任务')
+    await go.trigger('click')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('任务 #12 已被删除')
+    expect(wrapper.find('.view-tab.active').text()).toBe('发送记录')
+  })
+
+  it('成功行不给「去这条任务」（没有什么要处理的）', async () => {
+    const { wrapper } = await mountView({
+      channels: [channel(1, '门店群')],
+      topics: [topic('sales_report', '销售报表', [1])],
+      deliveriesFor: () => ({
+        success: true, rows: [delivery()], total: 1, page: 1, page_size: 50, pages: 1,
+      }),
+    })
+    await openTab(wrapper, '发送记录')
+
+    expect(wrapper.findAll('button').map((node) => node.text()))
+      .not.toContain('去这条任务')
+  })
+})
+
 describe('发送记录 tab 的分页', () => {
   it('显示第几页 / 共几页与总数，翻页请求目标页且筛选跟着走', async () => {
     const { wrapper, fetchMock } = await mountView({
@@ -400,10 +537,10 @@ describe('发送记录 tab 的分页', () => {
 
 // D2：这张卡以前和「定时任务」共用一个两列 grid，而左列自己带
 // `v-if="activeTab === 'jobs'"` —— 切到发送记录时左列不渲染，卡片被 grid 自动放进
-// 第一列 `minmax(280px, 420px)`，1440 下 7 列表格只有 388px 可视宽（要横向滚动），
+// 第一列 `minmax(280px, 420px)`，1440 下这张宽表只有 388px 可视宽（要横向滚动），
 // 右边 1000px 空白。结构上钉死：发送记录卡不在任何两列 grid 里。
 describe('发送记录 tab 的整行布局（D2）', () => {
-  it('发送记录卡不嵌在两列 grid 里（1440 下左列 420px 会把 7 列表格裁掉）', async () => {
+  it('发送记录卡不嵌在两列 grid 里（1440 下左列 420px 会把宽表格裁掉）', async () => {
     const { wrapper } = await mountView({
       channels: [channel(1, '门店群')],
       topics: [topic('sales_report', '销售报表', [1])],
@@ -434,9 +571,9 @@ describe('发送记录 tab 的整行布局（D2）', () => {
   })
 })
 
-// U16：第 7 列「最后一次错误」被 `overflow:hidden` 硬裁、没有展开入口，内容还是英文原文。
+// U16：第 8 列「最后一次错误」被 `overflow:hidden` 硬裁、没有展开入口，内容还是英文原文。
 // 现在：行内显示人话摘要，点「详情」展开完整原文（触屏没有 hover，`title` 等于没有）。
-describe('发送记录第 7 列的错误详情（U16）', () => {
+describe('发送记录第 8 列的错误详情（U16）', () => {
   const RAW = "HTTPSConnectionPool(host='qyapi.weixin.qq.com', port=443): Read timed out. (read timeout=10)"
 
   async function mountWithError(raw, extra = {}) {
@@ -460,7 +597,7 @@ describe('发送记录第 7 列的错误详情（U16）', () => {
     // 原文只在展开后才出现：默认一行摘要，不是把整段异常栈塞进格子
     expect(table.text()).not.toContain('HTTPSConnectionPool')
     const toggle = table.findAll('button').find((node) => node.text() === '详情')
-    expect(toggle, '第 7 列没有展开入口').toBeTruthy()
+    expect(toggle, '第 8 列没有展开入口').toBeTruthy()
     expect(toggle.attributes('aria-expanded')).toBe('false')
   })
 
@@ -491,7 +628,7 @@ describe('发送记录第 7 列的错误详情（U16）', () => {
     )
     await openTab(wrapper, '发送记录')
 
-    const cell = deliveryTable(wrapper).findAll('tbody tr')[0].findAll('td')[6]
+    const cell = deliveryTable(wrapper).findAll('tbody tr')[0].findAll('td')[7]
     expect(cell.text()).toContain('触发企业微信调用频率上限')
     expect(cell.text()).not.toContain('freq out of limit')
   })
@@ -500,7 +637,7 @@ describe('发送记录第 7 列的错误详情（U16）', () => {
     const { wrapper } = await mountWithError('某种从没见过的新失败')
     await openTab(wrapper, '发送记录')
 
-    expect(deliveryTable(wrapper).findAll('tbody tr')[0].findAll('td')[6].text())
+    expect(deliveryTable(wrapper).findAll('tbody tr')[0].findAll('td')[7].text())
       .toContain('某种从没见过的新失败')
   })
 
@@ -521,7 +658,7 @@ describe('发送记录第 7 列的错误详情（U16）', () => {
   })
 })
 
-// U2：390 下这张七列表格只能横向拖、关键列被卡片边缘硬切，也没有任何滚动提示。
+// U2：390 下这张八列表格只能横向拖、关键列被卡片边缘硬切，也没有任何滚动提示。
 // 改法是 ≤700px 时把它切成一行一卡 —— 卡片里的字段名就来自 `data-label`。
 describe('发送记录的卡片式标记（U2）', () => {
   it('每个值格子都带 data-label，且表格挂上了卡片式类名', async () => {
@@ -540,7 +677,7 @@ describe('发送记录的卡片式标记（U2）', () => {
     expect(table.classes()).toContain('wp-card-table')
     const labels = table.findAll('tbody tr')[0].findAll('td').map((cell) => cell.attributes('data-label'))
     expect(labels).toEqual([
-      '时间', '目标渠道', '内容类型', '状态', '字节数', '尝试次数', '最后一次错误',
+      '时间', '目标渠道', '内容类型', '任务', '状态', '字节数', '尝试次数', '最后一次错误',
     ])
     expect(table.element.closest('.wp-card-table-wrap'), '滚动容器没挂卡片式的类').toBeTruthy()
   })

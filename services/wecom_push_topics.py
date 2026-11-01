@@ -73,9 +73,12 @@ WEEKDAY_SHORT_LABELS = {value: label.replace("周", "") for value, label in WEEK
 # `schedule_text`（「每周日 13:00」，页面那枚时间徽章读它）；`weekly_schedule` 这一类
 # 的定时侧参数多了 `weekday`。纯加法，但页面的时间徽章要换字段才显示得出「每周」，所以
 # 版本照规矩 +1。
+# v4（发送记录补「哪条任务」）：`/logs` 的每一行多了 `schedule_id` / `job_name` /
+# `trigger`，`/logs` 多了 `job_id` 筛选。加法，但页面要加一列才回答得出「这是哪条任务
+# 发的」，所以 +1。
 # 前端那一半在 `admin-web/src/composables/useWecomPush.js`（`WECOM_PUSH_API_VERSION`），
 # 两处由 `admin-web/src/composables/__tests__/useWecomPushSubscriptions.test.js` 钉住。
-WECOM_PUSH_API_VERSION = "v3"
+WECOM_PUSH_API_VERSION = "v4"
 
 
 

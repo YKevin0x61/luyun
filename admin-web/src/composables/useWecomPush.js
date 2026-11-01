@@ -12,7 +12,7 @@ import { api } from '../api/client'
  * `admin-web/src/composables/__tests__/useWecomPushSubscriptions.test.js`
  * 与 `tests/test_wecom_push_channels_api.py`。
  */
-export const WECOM_PUSH_API_VERSION = 'v3'
+export const WECOM_PUSH_API_VERSION = 'v4'
 
 /**
  * 订阅视图切「多选列表」的渠道数阈值。
@@ -129,6 +129,58 @@ export function formatDeliveryTime(value) {
   const raw = String(value || '')
   if (!raw) return '—'
   return raw.replace('T', ' ').slice(0, 19)
+}
+
+/**
+ * 一条发送记录是**怎么发出去的**（票 03）。
+ *
+ * 值域与后端 `api/wecom_push.py` 的 `_delivery_trigger` 一致：`scheduled` / `manual` /
+ * `test`，以及它多出来的 `event`（未映射菜品、采集失败那类自动触发，没有任务）与
+ * `legacy`（迁移搬进来的历史行，当时没有这套语义）。票面只列了前三种，但把事件行写成
+ * 「定时」、把历史行写成「定时」都是在骗人，所以页面照实显示。
+ */
+export const DELIVERY_TRIGGER_OPTIONS = [
+  { id: 'scheduled', name: '定时' },
+  { id: 'manual', name: '手动' },
+  { id: 'test', name: '测试' },
+  { id: 'event', name: '事件' },
+  { id: 'legacy', name: '历史' },
+]
+
+/** 触发方式的显示名；认不出的退回原值（不吞掉这一行）。 */
+export function deliveryTriggerLabel(trigger) {
+  const matched = DELIVERY_TRIGGER_OPTIONS.find((item) => item.id === trigger)
+  return matched ? matched.name : String(trigger || '')
+}
+
+/**
+ * 「任务」那一列的一句话（票 03）：这条投递属于哪条推送任务。
+ *
+ * 空着是不行的 —— 验收里那两种行（旧行 `schedule_id` 为空、任务被删之后 `schedule_id`
+ * 还留着）正是最需要一眼看懂的行：
+ * - 有任务名 → 就是它；
+ * - 有 `schedule_id` 但名字取不到 → 任务已经删了，「任务 #12（已删除）」；
+ * - 没有任务 → 按触发方式说清楚它为什么没有，而不是留白。
+ */
+export function deliveryTaskLabel(row) {
+  const item = row || {}
+  const jobName = String(item.job_name || '').trim()
+  if (jobName) return jobName
+  const scheduleId =
+    item.schedule_id === 0 || item.schedule_id ? Number(item.schedule_id) : 0
+  if (scheduleId) return `任务 #${scheduleId}（已删除）`
+  switch (item.trigger) {
+    case 'legacy':
+      return '历史记录（未知任务）'
+    case 'event':
+      return '事件触发（无任务）'
+    case 'manual':
+      return '手动发送（无任务）'
+    case 'test':
+      return '测试发送（无任务）'
+    default:
+      return '未知任务'
+  }
 }
 
 /**

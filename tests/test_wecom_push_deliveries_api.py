@@ -124,6 +124,7 @@ def _seed(rows, *, clock=CLOCK):
                     "topic_id": item.get("topic_id", "sales_report"),
                     "params_json": json.dumps({"text": item.get("text", "一行正文")}),
                     "target_channel_id": item["channel_id"],
+                    "schedule_id": item.get("schedule_id"),
                     "content_summary": item.get("text", "一行正文"),
                     "message_bytes": item.get("message_bytes", 42),
                     "idempotency_key": item["key"],
@@ -298,6 +299,142 @@ def test_records_are_still_readable_after_the_channel_is_deleted(api, channels):
     assert [row["id"] for row in payload["rows"]] == ids
     assert payload["rows"][0]["channel_id"] is None
     assert payload["rows"][0]["topic_name"] == "未映射菜品提醒"
+
+
+def _create_job(api: WecomAdmin, name="每日销售报表") -> dict:
+    """建一条销售报表任务，返回任务行（只写配置，不发送 —— 没有任何外发）。"""
+    resp = api.as_session("POST", f"{API_PREFIX}/jobs", json={
+        "name": name,
+        "topic_id": "sales_report",
+        "params": {"schedule_time": "21:30", "date_range_mode": "today", "station": ""},
+        "schedule_time": "21:30",
+        "enabled": True,
+        "notes": "",
+    })
+    assert resp.status_code == 200, resp.text
+    return resp.json()["job"]
+
+
+def test_a_record_says_which_job_sent_it(api, channels):
+    """票 03：每行带上「哪条任务」——`schedule_id` + 名字 + 发起方式。
+
+    出站表本来就有 `schedule_id`（迁移 0016），只是没投影出来；名字由服务端连任务表配好，
+    页面不必自己去对 id。
+    """
+    job = _create_job(api)
+    _seed([{
+        "key": f"sales_report:2026-10-05:{channels['a']['id']}",
+        "channel_id": channels["a"]["id"],
+        "schedule_id": job["id"],
+        "status": "failed", "error": "boom",
+    }])
+
+    row = api.as_session("GET", f"{API_PREFIX}/logs").json()["rows"][0]
+
+    assert row["schedule_id"] == job["id"]
+    assert row["job_name"] == "每日销售报表"
+    assert row["trigger"] == "scheduled"
+
+
+def test_manual_and_test_sends_are_told_apart(api, channels):
+    """「手动」与「测试」没有自己的列，靠内容类型与幂等键认（口径见 `_delivery_trigger`）。
+
+    定时任务页的「立即发送」与到点投递走同一条入队路径，差异只在幂等键里那段
+    `#manual#`；销售报表页的「推送」与「测试」各有自己的内部内容类型。
+    """
+    _seed([
+        {
+            "key": f"sales_report:2026-10-05#manual#2026-10-05T21:30:00+08:00:"
+                   f"{channels['a']['id']}",
+            "channel_id": channels["a"]["id"],
+        },
+        {
+            "key": f"test_message:manual:abc:{channels['a']['id']}",
+            "channel_id": channels["a"]["id"],
+            "topic_id": "test_message",
+        },
+    ])
+
+    rows = {
+        row["topic_id"]: row
+        for row in api.as_session("GET", f"{API_PREFIX}/logs").json()["rows"]
+    }
+    assert rows["sales_report"]["trigger"] == "manual"
+    assert rows["test_message"]["trigger"] == "test"
+    for row in rows.values():
+        assert row["schedule_id"] is None, "手动 / 测试发送没有任务"
+
+
+def test_records_from_before_there_were_jobs_still_read(api, channels):
+    """旧行与事件行都没有任务：如实说，不能装成「定时」。
+
+    迁移 0016 搬进来的历史行幂等键是 `legacy:log:*` / `legacy:share:*`（定时日志那批还
+    带着当时的 `job_id`，但那时没有这套语义）；事件触发（未映射菜品、采集失败…）根本没
+    有任务。两类都不该显示成空白，也不该被写成「定时」。
+    """
+    _seed([
+        {"key": "legacy:log:7", "channel_id": channels["a"]["id"]},
+        {
+            "key": f"unmapped_dish:2026-10-05:{channels['a']['id']}",
+            "channel_id": channels["a"]["id"],
+            "topic_id": "unmapped_dish",
+        },
+    ])
+
+    rows = {
+        row["trigger"]: row
+        for row in api.as_session("GET", f"{API_PREFIX}/logs").json()["rows"]
+    }
+    assert set(rows) == {"legacy", "event"}
+    for row in rows.values():
+        assert row["schedule_id"] is None
+        assert row["job_name"] == ""
+
+
+def test_a_record_outlives_its_job(api, channels):
+    """任务删掉之后历史投递还在：`schedule_id` 留着（这一列没有外键），名字取不到。
+
+    页面据此写「任务 #id（已删除）」—— 整行消失才是真的把历史弄丢了。
+    """
+    job = _create_job(api, name="周末报表")
+    ids = _seed([{
+        "key": f"sales_report:2026-10-05:{channels['a']['id']}",
+        "channel_id": channels["a"]["id"],
+        "schedule_id": job["id"],
+    }])
+    deleted = api.as_session("DELETE", f"{API_PREFIX}/jobs/{job['id']}")
+    assert deleted.status_code == 200, deleted.text
+
+    row = api.as_session("GET", f"{API_PREFIX}/logs").json()["rows"][0]
+
+    assert row["id"] == ids[0]
+    assert row["schedule_id"] == job["id"], "任务删了，这一列仍指向当初那条任务"
+    assert row["job_name"] == "", "名字取不到是页面写「已删除」的依据"
+    assert row["trigger"] == "scheduled"
+
+
+def test_filter_by_job_returns_only_that_jobs_records(api, channels):
+    """票 03：`/logs?job_id=` —— 排障时「这条任务最近发成了什么样」不用横跨两个 tab。"""
+    first = _create_job(api, name="早班报表")
+    second = _create_job(api, name="晚班报表")
+    _seed([
+        {"key": f"first:{channels['a']['id']}", "channel_id": channels["a"]["id"],
+         "schedule_id": first["id"]},
+        {"key": f"second:{channels['a']['id']}", "channel_id": channels["a"]["id"],
+         "schedule_id": second["id"]},
+        {"key": f"nojob:{channels['a']['id']}", "channel_id": channels["a"]["id"]},
+    ])
+
+    only_first = api.as_session(
+        "GET", f"{API_PREFIX}/logs?job_id={first['id']}"
+    ).json()
+
+    assert only_first["total"] == 1, "只算这条任务的记录"
+    assert [row["schedule_id"] for row in only_first["rows"]] == [first["id"]]
+
+    missing = api.as_session("GET", f"{API_PREFIX}/logs?job_id=999999").json()
+    assert missing["total"] == 0
+    assert missing["rows"] == []
 
 
 def test_a_legacy_request_still_gets_the_plain_recent_list(api, channels):
