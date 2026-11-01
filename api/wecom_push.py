@@ -714,6 +714,10 @@ def _job_payload(row: Dict[str, Any], targets: List[ResolvedTarget]) -> Dict[str
         "schedule_text": _job_schedule_text(topic_id, params, schedule_time),
         "enabled": bool(row.get("enabled")),
         "last_sent_date": row.get("last_sent_date", ""),
+        # 今天这一次到点了没发：`sent` / `pending` / `missed` / `off`。
+        # 只读判断，与调度循环用同一把尺子（`WecomPushService.today_state`）—— 页面自己
+        # 算营业日会与调度器各说一套。
+        "today_state": wecom_push_service.today_state(row),
         "notes": row.get("notes", ""),
         "created_at": row.get("created_at"),
         "updated_at": row.get("updated_at"),

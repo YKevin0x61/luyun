@@ -284,6 +284,27 @@ def test_a_job_card_counts_the_subscribed_targets(api):
     assert _jobs(api)[0]["target_count"] == 1
 
 
+def test_a_job_card_says_whether_today_fired(api):
+    """任务卡上的「今天发没发」（票 10）。
+
+    判据是后端算的（`WeComPushService.today_state`，营业日 06:00 切 + 每周规则 +
+    `last_sent_date`），页面只显示。这里只钉「列表里带这个字段、取值是约定的那几个」——
+    具体哪天算漏由 `tests/test_wecom_push_today_state.py` 覆盖。
+    """
+    job = _create_job(api)
+    listed = _jobs(api)[0]
+    assert job["today_state"] in {"sent", "pending", "missed", "off"}
+    assert listed["today_state"] == job["today_state"]
+
+    # 停用之后一律是 off：停用的任务本来就不该发，报「漏发」会让人去查不存在的故障。
+    api.as_session(
+        "PUT",
+        f"{API_PREFIX}/jobs/{job['id']}",
+        json={**_job_payload(), "enabled": False},
+    )
+    assert _jobs(api)[0]["today_state"] == "off"
+
+
 def test_another_topic_counts_its_own_targets(api):
     channel = _create_channel(api, "门店群")
     _subscribe(api, "reconcile_diff", channel)

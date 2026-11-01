@@ -23,7 +23,7 @@ vi.mock('../../api/client', () => ({
 
 const {
   useWecomPush, scheduledTopics, defaultJobParams, jobPayload,
-  sendNowConfirmText, canSendNow,
+  sendNowConfirmText, canSendNow, jobTodayStateLabel,
 } = await import('../useWecomPush.js')
 
 /** 注册表（`/meta` 的 topics）：页面只认这一份，不自己维护名字表与参数形状。 */
@@ -303,5 +303,26 @@ describe('立即发送的确认文案', () => {
     // 只有空白字符同样不算"核对过内容"
     expect(canSendNow({ job: JOB, content: '   \n  ' })).toBe(false)
     expect(canSendNow({ job: null, content: '有内容' })).toBe(false)
+  })
+})
+
+// 票 10：任务卡上「今天这一次到点了没发」。
+//
+// 判断在后端（`WeComPushService.today_state`，营业日 06:00 切、周规则、`last_sent_date`
+// 都用调度循环同一把尺子），前端只负责把它说成一句人话 —— 所以这里钉的是文案与
+// 「未知值一律留白」，不重复测营业日。
+describe('任务卡上的「今天发没发」（票 10）', () => {
+  it('漏了、还没到点、已发各有各的说法', () => {
+    expect(jobTodayStateLabel('missed')).toBe('今日未发送')
+    expect(jobTodayStateLabel('pending')).toBe('今天还没到点')
+    expect(jobTodayStateLabel('sent')).toBe('今天已发送')
+  })
+
+  it('停用与未知值留白（停用的任务卡片上已经有一枚「停用」徽章）', () => {
+    expect(jobTodayStateLabel('off')).toBe('')
+    expect(jobTodayStateLabel('')).toBe('')
+    expect(jobTodayStateLabel(null)).toBe('')
+    expect(jobTodayStateLabel(undefined)).toBe('')
+    expect(jobTodayStateLabel('未来的新状态')).toBe('')
   })
 })

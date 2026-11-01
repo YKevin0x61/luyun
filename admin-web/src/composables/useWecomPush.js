@@ -704,6 +704,25 @@ export function topicTriggerLabel(topic) {
 }
 
 /**
+ * 任务卡上「今天这一次到点了没发」（票 10）。
+ *
+ * 判断**不在前端**：营业日（06:00 切）、周规则、`last_sent_date` 都由后端用调度循环
+ * 同一把尺子算好（`WeComPushService.today_state`）。前端自己算会出现「页面说有漏、
+ * 调度说没漏」这种最难查的分歧。这里只决定怎么把它说出来。
+ *
+ * `pending` 也给一句话而不是留白：只看「上次发送日期」时，今天还没到点与今天漏了
+ * 长得一模一样（都是昨天那个日期），店长分不出来。
+ */
+export function jobTodayStateLabel(state) {
+  switch (String(state || '')) {
+    case 'missed': return '今日未发送'
+    case 'pending': return '今天还没到点'
+    case 'sent': return '今天已发送'
+    default: return ''
+  }
+}
+
+/**
  * 某类内容类型的参数默认值：直接取它的 JSON Schema 里每个字段的 `default`。
  *
  * 切换内容类型时用它把参数区铺满（下拉要有选中项），所以**字段名一个都不写死** ——

@@ -833,6 +833,37 @@ class WeComPushService:
             return False
         return date.fromisoformat(business_date).weekday() == weekday
 
+    @staticmethod
+    def today_state(job: Mapping[str, Any], now: Optional[datetime] = None) -> str:
+        """这条任务**今天这一次**到点了没发 —— 只读判断，不参与任何投递逻辑。
+
+        `missed` 是给页面用的：调度器在 `schedule_time == current_minute` 那一分钟没跑到，
+        当天就漏了，第二天自动恢复（重启、部署、出站一轮吃满超时都会让那一分钟错过）。
+        页面上原本只有一行 12px 灰字「上次定时发送日期」，店长看不出「今天到点没发」。
+
+        取值：
+        - `sent`    —— 今天（营业日）已经发过；
+        - `pending` —— 今天还没到点；
+        - `missed`  —— 到点了，但今天没发（或发了没成功入队）；
+        - `off`     —— 任务停用，或按周规则今天本来就不该发。
+
+        尺子与调度循环完全一致：营业日（06:00 切）来自 `business_date_of`，周规则复用
+        `_weekly_due`，`last_sent_date` 也是营业日（CORR-05）。页面与调度器各算一套就会
+        出现「页面说有漏、调度说没漏」。
+        """
+        if not job.get("enabled"):
+            return "off"
+        schedule = str(job.get("schedule_time") or "").strip()
+        if not schedule:
+            return "off"
+        moment = now or datetime.now(CHINA_TZ)
+        business_date = business_date_of(moment)
+        if str(job.get("last_sent_date") or "") == business_date:
+            return "sent"
+        if not WeComPushService._weekly_due(job, business_date):
+            return "off"
+        return "missed" if moment.strftime("%H:%M") >= schedule else "pending"
+
     async def scheduler_loop(self, db: DatabaseManager) -> None:
         """30 秒一轮：定时任务到点就推 + 运维事件 + 统一出站的兜底、派发与保留清理。
 

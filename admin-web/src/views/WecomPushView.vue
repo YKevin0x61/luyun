@@ -2,7 +2,7 @@
 import { computed, getCurrentInstance, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import {
   useWecomPush, WECOM_PUSH_API_VERSION, MATRIX_CHANNEL_LIMIT, scheduledTopics,
-  unschedulableTopics, topicTriggerLabel,
+  unschedulableTopics, topicTriggerLabel, jobTodayStateLabel,
   channelDeleteConfirmText, channelGroupNames, channelTopicNames, formatSentAt,
   canSendNow, sendNowConfirmText, sendNowTargetNames, testChannelConfirmText,
   DELIVERY_STATUS_OPTIONS,
@@ -1297,7 +1297,17 @@ onMounted(async () => {
               <div style="color:var(--text-dim);font-size:12px">
                 订阅目标：{{ item.target_count ? `${item.target_count} 个群` : '暂无群订阅，不会投递' }}
               </div>
-              <div style="color:var(--text-dim);font-size:12px">上次定时发送日期：{{ item.last_sent_date || '未发送' }}</div>
+              <div style="color:var(--text-dim);font-size:12px;display:flex;align-items:center;gap:6px">
+                <span>上次定时发送日期：{{ item.last_sent_date || '未发送' }}</span>
+                <!-- 今天这一次到点了没发（票 10）：调度器在那一分钟没跑到，当天就漏了，
+                     第二天才自动恢复。只看「上次发送日期」时，今天还没到点与今天漏了
+                     长得一模一样，所以两种都说一句；真漏了才用警示色。 -->
+                <span
+                  v-if="jobTodayStateLabel(item.today_state)"
+                  class="badge"
+                  :style="item.today_state === 'missed' ? 'color:var(--yellow);border-color:var(--yellow)' : ''"
+                >{{ jobTodayStateLabel(item.today_state) }}</span>
+              </div>
               <div style="display:flex;gap:6px;margin-top:8px" @click.stop>
                 <button class="btn btn-sm" @click="editJob(item)">编辑</button>
                 <button class="btn btn-sm" @click="selectedJobId = item.id; handlePreview()">预览</button>
