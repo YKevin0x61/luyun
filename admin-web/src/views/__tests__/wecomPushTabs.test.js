@@ -33,7 +33,7 @@ function topic(id, name, subscribed = []) {
   return {
     id,
     name,
-    triggers: ['cron'],
+    triggers: ['scheduled'],
     contains_employee_photos: false,
     default_schedule_time: '09:00',
     channels: subscribed.map((channelId) => ({ id: channelId, enabled: true })),

@@ -31,7 +31,7 @@ const JOBS = [{
 const TOPICS = [{
   id: 'sales_report',
   name: '销售报表',
-  triggers: ['cron'],
+  triggers: ['scheduled'],
   contains_employee_photos: false,
   default_schedule_time: '09:00',
   channels: [{ id: 1, enabled: true }],

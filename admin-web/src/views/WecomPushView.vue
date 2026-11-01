@@ -73,7 +73,10 @@ function currentQuery() {
 function writeTabQuery(tabId) {
   if (!router || String(currentQuery().tab || '') === tabId) return
   // `replace` 而不是 `push`：切五个 tab 不该留下五条历史。
-  router.replace({ query: { ...currentQuery(), tab: tabId } }).catch(() => {})
+  // 导航被拒（重复导航 / 组件已卸载）不影响页面已经切过去，但要留一条痕：
+  // 静默吞掉的话，「点了 tab 但地址栏没变」这种问题在控制台里查不到任何线索。
+  router.replace({ query: { ...currentQuery(), tab: tabId } })
+    .catch((err) => console.warn('[wecom-push] tab 没写进地址栏:', tabId, err))
 }
 
 /** URL 里写得明明白白要哪个 tab 就用哪个；没写 / 名字不认识都当没写。 */
@@ -652,7 +655,13 @@ function stopSendPolling() {
 
 async function pollSendOutcome() {
   // 轮询失败不动卡上的旧内容：下一次再来，别把「刚才确实入队了」这条信息抹掉。
-  try { await loadDeliveries() } catch (e) { /* 见上 */ }
+  // 但要留痕 —— 连续几轮都失败时，卡上显示的还是「发送中」，没有日志就查不出
+  // 是后端慢还是请求打不通。
+  try {
+    await loadDeliveries()
+  } catch (err) {
+    console.warn('[wecom-push] 发送结果轮询失败，保留上一轮结果:', err)
+  }
   sendPollRounds += 1
   if (sendPollRounds >= SEND_POLL_MAX_ROUNDS) {
     stopSendPolling()
