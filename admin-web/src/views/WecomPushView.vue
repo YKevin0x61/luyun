@@ -1,5 +1,5 @@
 <script setup>
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, getCurrentInstance, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import {
   useWecomPush, WECOM_PUSH_API_VERSION, MATRIX_CHANNEL_LIMIT, scheduledTopics,
   unschedulableTopics, topicTriggerLabel,
@@ -18,7 +18,8 @@ import SvgIcon from '../components/SvgIcon.vue'
 import PushParamsForm from '../components/wecom/PushParamsForm.vue'
 import LuyunCheckbox from '../components/ui/LuyunCheckbox.vue'
 
-// 页内 tab：不改路由（页面清单契约保持绿）。「变更历史」是票 11 的第五个 tab。
+// 页内 tab：**路径不变**（页面清单契约保持绿），只把当前 tab 记进 URL 的 `?tab=`（票 02）。
+//「变更历史」是票 11 的第五个 tab。
 const TABS = [
   { id: 'channels', name: '渠道' },
   { id: 'subscriptions', name: '订阅' },
@@ -29,7 +30,8 @@ const TABS = [
 
 const {
   meta, channels, topics, groups, jobs, matrix, deliveries, audit, selectedJobId,
-  previewContent, previewImage, previewMeta, loading, error, errorDetail, activeTab, channelForm,
+  previewContent, previewImage, previewMeta, previewStaleReason, loading, error, errorDetail,
+  activeTab, channelForm,
   channelGroupForm, multiSelect, contractWarning, zeroSubscriptionTip, viewMode,
   zeroTopicIds,
   resetChannelForm, resetChannelGroupForm, resetJobForm, jobForm,
@@ -43,6 +45,59 @@ const {
   editJob, pickJobTopic, applyJobPreset, saveJob, deleteJob, previewSelectedJob,
   sendSelectedJob,
 } = useWecomPush()
+
+// ── 页内 tab 的落点与 URL（票 02）────────────────────────────────────────────
+// 只动 query：路径仍是 `/wecom-push`，`pageRoutes.json` / `main.py` / 反代一个字不用碰。
+// 刷新、分享、从浏览器历史回来都还停在同一个 tab。
+//
+// 这里**不用** `useRoute()` / `useRouter()`：这一页的视图测试大多不装 router，缺注入时
+// vue-router 会为每个用例打一条 injection 警告 —— 几十个文件的输出全被它淹了。改成从
+// `appContext` 取（装了才有），没装时 tab 照常切、只是读写不到 URL：生产环境这一页一定
+// 在 SPA 里，而单测里退回 window.location 反而会让同一文件里的用例互相污染（jsdom 共用
+// 一个 window，前一个用例写进去的 `?tab=` 会变成后一个用例的深链）。
+const router = (() => {
+  const instance = getCurrentInstance()
+  const injected = instance && instance.appContext.config.globalProperties.$router
+  return injected && typeof injected.replace === 'function' ? injected : null
+})()
+const VALID_TABS = new Set(TABS.map((tab) => tab.id))
+// 用户已经自己点过 tab：首屏数据回来后不要再拿默认落点覆盖他的选择。
+let userPickedTab = false
+
+/** 当前路由的 query（没装 router 就没有，当空对象）。 */
+function currentQuery() {
+  return (router && router.currentRoute.value.query) || {}
+}
+
+/** 把 tab 写进 URL（只动 query 里的 `tab`，路径与其它 query 不动）。 */
+function writeTabQuery(tabId) {
+  if (!router || String(currentQuery().tab || '') === tabId) return
+  // `replace` 而不是 `push`：切五个 tab 不该留下五条历史。
+  router.replace({ query: { ...currentQuery(), tab: tabId } }).catch(() => {})
+}
+
+/** URL 里写得明明白白要哪个 tab 就用哪个；没写 / 名字不认识都当没写。 */
+function tabFromQuery() {
+  const raw = currentQuery().tab
+  const name = Array.isArray(raw) ? raw[0] : raw
+  return VALID_TABS.has(String(name || '')) ? String(name) : ''
+}
+
+/**
+ * 默认落点随状态走（票 02）。原来固定落在「渠道」——那是几个月才配一次的事，而店长每天
+ * 打开这一页想知道的是「今天的推送发出去没有」。三档按打开这一页要做的事排：
+ *   一个渠道都没有 → 新装引导，先建渠道；
+ *   有渠道、没任务   → 去建任务；
+ *   常规环境         → 发送记录。
+ */
+function defaultTabForState() {
+  if (!channels.value.length) return 'channels'
+  if (!jobs.value.length) return 'jobs'
+  return 'logs'
+}
+
+// 深链先落地：数据还没回来时就已经停在请求的 tab 上，不会先闪一下别的 tab。
+if (tabFromQuery()) activeTab.value = tabFromQuery()
 
 const toastMsg = ref('')
 const toastType = ref('info')
@@ -111,7 +166,11 @@ function handleRefreshAudit() {
  * 历史没有意义。切过去的那一刻拉一次，之后靠「刷新」与翻页。
  */
 function handleSwitchTab(tabId) {
+  if (!VALID_TABS.has(tabId)) return
+  userPickedTab = true
   activeTab.value = tabId
+  // tab 进 URL（票 02）：`?tab=logs` 能直达，刷新不丢。
+  writeTabQuery(tabId)
   if (tabId === 'audit') handleRefreshAudit()
 }
 
@@ -479,6 +538,8 @@ function flashSavedJob(id) {
 onBeforeUnmount(() => {
   clearTimeout(flashTimer)
   jobCards.clear()
+  // 离开页面时停掉「本次发送」的轮询（票 05）：组件没了还留着定时器只会白发请求。
+  stopSendPolling()
 })
 
 // 发送记录的「最后一次错误」：展开看完整原文（U16）。一次只展开一行 —— 一屏几十行里
@@ -524,16 +585,95 @@ async function handleSend() {
     content: previewContent.value,
     targetNames: sendTargetNames.value,
     kind: previewMeta.value.kind,
+    // 预览失效时确认框不能给出正文首行（票 01）：那一行属于上一条任务 / 上一版参数。
+    staleReason: previewStaleReason.value,
   })
   if (!window.confirm(text)) return
+  const job = selectedJob.value
+  const topicId = String((job && job.topic_id) || '')
+  const jobName = (job && job.name) || ''
+  // 发送结果留在原地（票 05）：`send-now` 只是**入队**，真正发出去由出站做（30 秒一轮）。
+  // 3 秒 toast 一闪，店长还得自己去「发送记录」里翻哪几条是刚才发的 —— 所以这里落一张
+  // 卡，下面按上限轮询它。
   try {
     const result = await sendSelectedJob()
-    flash(
-      result.success
-        ? `已加入发送队列：将发给 ${result.target_count} 个群，结果见「发送记录」`
-        : `发送失败：${result.error || result.response_text}`,
-      result.success ? 'success' : 'error',
-    )
+    stopSendPolling()
+    const ok = Boolean(result && result.success)
+    sendOutcome.value = {
+      jobName,
+      topicId,
+      targetCount: Number(result && result.target_count) || 0,
+      error: ok ? '' : String((result && (result.error || result.response_text)) || '发送失败'),
+      exhausted: false,
+    }
+    if (ok) {
+      startSendPolling()
+      // toast 降成辅助：真正的结果与逐条状态在「本次发送」卡上。
+      flash('已加入发送队列，约半分钟内出结果（见「本次发送」）', 'success')
+    } else {
+      flash('发送失败，原因见「本次发送」', 'error')
+    }
+  } catch (e) {
+    stopSendPolling()
+    sendOutcome.value = {
+      jobName, topicId, targetCount: 0, error: e.message || '发送失败', exhausted: false,
+    }
+    flash(e.message, 'error')
+  }
+}
+
+// ── 「本次发送」结果卡（票 05）────────────────────────────────────────────────
+// 出站每 30 秒一轮，所以这里只能承诺「约半分钟内出结果」，不能写「已发送」。轮询有
+// 上限（12 轮 × 10 秒 = 2 分钟）：一次投递可能因为退避重试几分钟后才落定，页面无限
+// 轮询既没有意义，也会让一个开着不动的后台标签页一直发请求。
+const SEND_POLL_INTERVAL_MS = 10000
+const SEND_POLL_MAX_ROUNDS = 12
+
+const sendOutcome = ref(null)
+let sendPollTimer = null
+let sendPollRounds = 0
+
+/** 卡上列「最近 3 条」：刚入队的投递就在发送记录第一页的最前面（按创建时间倒序）。 */
+const sendOutcomeRows = computed(() => {
+  const rows = deliveries.rows || []
+  const outcome = sendOutcome.value
+  const scoped = outcome && outcome.topicId
+    ? rows.filter((row) => String(row.topic_id || '') === outcome.topicId)
+    : rows
+  return scoped.slice(0, 3)
+})
+
+function stopSendPolling() {
+  if (sendPollTimer) {
+    clearInterval(sendPollTimer)
+    sendPollTimer = null
+  }
+}
+
+async function pollSendOutcome() {
+  // 轮询失败不动卡上的旧内容：下一次再来，别把「刚才确实入队了」这条信息抹掉。
+  try { await loadDeliveries() } catch (e) { /* 见上 */ }
+  sendPollRounds += 1
+  if (sendPollRounds >= SEND_POLL_MAX_ROUNDS) {
+    stopSendPolling()
+    if (sendOutcome.value) sendOutcome.value = { ...sendOutcome.value, exhausted: true }
+  }
+}
+
+function startSendPolling() {
+  stopSendPolling()
+  sendPollRounds = 0
+  sendPollTimer = setInterval(() => { pollSendOutcome() }, SEND_POLL_INTERVAL_MS)
+}
+
+/** 「查看全部 →」：落到**已经按这条任务的内容类型筛过**的发送记录，而不是全表。 */
+async function handleViewSendResults() {
+  stopSendPolling()
+  const topicId = (sendOutcome.value && sendOutcome.value.topicId) || ''
+  deliveryFilterForm.value = { topicId, channelId: '', status: '' }
+  handleSwitchTab('logs')
+  try {
+    await applyDeliveryFilters(deliveryFilterForm.value)
   } catch (e) { flash(e.message, 'error') }
 }
 async function copyPreview() {
@@ -556,6 +696,9 @@ onMounted(async () => {
   // 首屏三份数据（meta / 渠道 / 任务）+ 发送记录一页一起拉；失败的落点与「重试」按钮
   // 走同一条路（composable 的 reloadAll），页面只管展示 `error` / `errorDetail`。
   await reloadAll()
+  // 默认落点要等数据回来才知道（有没有渠道 / 任务），所以放在 reloadAll 之后；URL 深链
+  // 已经先落了地，用户自己也点过 tab 的话不再覆盖。
+  if (!userPickedTab && !tabFromQuery()) activeTab.value = defaultTabForState()
 })
 </script>
 
@@ -574,9 +717,22 @@ onMounted(async () => {
     </div>
     <!-- 接口版本不匹配：只提示，不阻断操作（旧页面照样能读，写接口由后端把关） -->
     <div v-if="contractWarning" class="dash-error-banner"><SvgIcon name="alert-triangle" :size="14" /> {{ contractWarning }}</div>
-    <!-- 零订阅：这类内容当前一条都不发，页面上不写出来店长只会以为"今天没有" -->
-    <div v-if="zeroSubscriptionTip" class="dash-error-banner"><SvgIcon name="alert-triangle" :size="14" /> {{ zeroSubscriptionTip }}</div>
-    <div v-if="toastMsg" class="badge" :style="toastType === 'error' ? 'color:var(--red);border-color:var(--red)' : 'color:var(--green);border-color:var(--green)'">
+    <!-- 零订阅：这类内容当前一条都不发，页面上不写出来店长只会以为"今天没有"。
+         文案末尾的「去「订阅」勾选」做成可点的（票 02）：光说去哪个 tab 还得自己找过去，
+         这里直接切过去。 -->
+    <div v-if="zeroSubscriptionTip" class="dash-error-banner">
+      <SvgIcon name="alert-triangle" :size="14" />
+      <span>{{ zeroSubscriptionTip }}</span>
+      <button class="btn btn-sm" type="button" @click="handleSwitchTab('subscriptions')">去「订阅」勾选</button>
+    </div>
+    <!-- toast 只是辅助（票 05）：真正的发送结果在「本次发送」卡上，这里让读屏也能听到。 -->
+    <div
+      v-if="toastMsg"
+      class="badge"
+      role="status"
+      aria-live="polite"
+      :style="toastType === 'error' ? 'color:var(--red);border-color:var(--red)' : 'color:var(--green);border-color:var(--green)'"
+    >
       {{ toastMsg }}
     </div>
 
@@ -1145,6 +1301,10 @@ onMounted(async () => {
               </template>
             </span>
           </div>
+          <!-- 预览失效（票 01）：换了任务 / 改了参数 / 刚保存过，预览就不再属于当前这条
+               任务，正文已清空、「立即发送」置灰。这里说清**为什么**变灰，否则店长只会
+               以为按钮坏了。 -->
+          <div v-if="previewStaleReason" class="wp-preview-stale">{{ previewStaleReason }}</div>
           <!-- 预览与实际外发是同一条渲染路径：后端给图就显示图。图片按原比例缩到面板宽，
                不裁不放大 —— 店长要看的是"这周末谁上班"，不是缩略图本身。 -->
           <div v-if="previewIsImage" class="wp-preview-image">
@@ -1160,6 +1320,49 @@ onMounted(async () => {
             placeholder="点「刷新预览」生成内容"
             style="min-height:280px;width:100%;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;white-space:pre-wrap"
           ></textarea>
+        </div>
+
+        <!-- ═══ 本次发送（票 05）══════════════════════════════════════════
+             `send-now` 只是**入队**，出站 30 秒一轮才真正发出去。所以点完「立即发送」
+             不能只弹一条 3 秒 toast 就把人打回列表：店长要的是「刚才那几条现在什么状态」，
+             而那几条此刻还散在「发送记录」里。结果留在这张卡上，按上限轮询刷新；文案只
+             承诺「约半分钟内出结果」，不写「已发送」—— 这里没说谎。 -->
+        <div
+          v-if="activeTab === 'jobs' && sendOutcome"
+          class="card wp-send-result"
+          role="status"
+          aria-live="polite"
+        >
+          <div class="panel-title" style="display:flex;justify-content:space-between;align-items:center">
+            <span>本次发送</span>
+            <button class="btn btn-sm" type="button" @click="handleViewSendResults">查看全部 →</button>
+          </div>
+          <div v-if="sendOutcome.error" class="wp-send-result__error">
+            <SvgIcon name="alert-triangle" :size="14" /> 发送失败：{{ sendOutcome.error }}
+          </div>
+          <template v-else>
+            <div class="wp-send-result__head">
+              已加入发送队列：将发给 {{ sendOutcome.targetCount }} 个群，约半分钟内出结果。
+            </div>
+            <div v-if="!sendOutcomeRows.length" class="wp-job-hint">
+              投递记录还没出来，点「查看全部」可去发送记录跟。
+            </div>
+            <ul v-else class="wp-send-result__rows">
+              <li
+                v-for="row in sendOutcomeRows"
+                :key="row.id"
+                :class="{ 'is-failed': row.status === 'failed' }"
+              >
+                <span class="wp-send-result__channel">{{ row.channel_name || '—' }}</span>
+                <span class="wp-send-result__status">{{ deliveryStatusLabel(row.status) }}</span>
+                <span class="wp-send-result__error-text">{{ deliveryErrorSummary(row.last_error) }}</span>
+              </li>
+            </ul>
+            <div class="wp-job-hint">
+              <template v-if="sendOutcome.exhausted">轮询已停止：可稍后在「发送记录」查看结果。</template>
+              <template v-else>出站每 30 秒一轮，这张卡每 10 秒自动刷新（最多约 2 分钟）。</template>
+            </div>
+          </template>
         </div>
       </div>
     </div>
@@ -1551,6 +1754,44 @@ onMounted(async () => {
   line-height: 1.5;
   color: var(--text-dim);
 }
+
+/* 预览失效的原因（票 01）：与「字节数」同一处视线里，说清「立即发送」为什么变灰。 */
+.wp-preview-stale {
+  font-size: 12px;
+  color: var(--yellow);
+  margin-bottom: 8px;
+}
+
+/* 「本次发送」（票 05）：发送后不离开当前 tab 就能看到这几条投递的具体状态。 */
+.wp-send-result__head {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-bottom: 8px;
+}
+.wp-send-result__error {
+  font-size: 12px;
+  color: var(--red);
+  word-break: break-word;
+}
+.wp-send-result__rows {
+  list-style: none;
+  margin: 0 0 8px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+}
+.wp-send-result__rows li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: baseline;
+}
+.wp-send-result__channel { color: var(--text); }
+.wp-send-result__status { color: var(--text-dim); }
+.wp-send-result__rows li.is-failed .wp-send-result__status { color: var(--red); }
+.wp-send-result__error-text { color: var(--red); word-break: break-word; }
 
 /* 发送记录（票 07）：筛选行在窄屏要能换行（三个下拉 + 两个按钮在一行里挤不下）。 */
 .wp-delivery-filters {

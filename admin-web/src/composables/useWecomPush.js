@@ -1,4 +1,4 @@
-import { computed, reactive, ref } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 import { api } from '../api/client'
 
 /**
@@ -93,6 +93,30 @@ export const WECOM_ERRCODE_HINTS = {
 }
 
 /**
+ * 出站（`services/wecom_outbox.py`）自己写进 `last_error` 的几种失败。
+ *
+ * 它们不是企微的 errcode，也不是网络层的问题，而是「这条记录本身没法继续」：
+ *   - `目标渠道不存在: <id>` / `目标渠道不存在（渠道已删）`（outbox :427 / :433）——渠道被
+ *     删了，去「订阅」重新勾收件群才能再发；
+ *   - `正文渲染失败：<原因>`（outbox :451）——参数坏了 / 图被清理 / 装不下，**直接落终态、
+ *     不重试**，所以文案必须说清楚「不会自动重试」；
+ *   - `webhook 解密失败：<原因>`（outbox :469）——走退避重试，重填 webhook 才能好。
+ *
+ * 值可以是函数：带原因的那两类要把原因嵌进人话里，原文仍然进「详情」。
+ */
+export const WECOM_OUTBOX_FAILURE_HINTS = [
+  [/目标渠道不存在/, () => '发送目标渠道已被删除，请到「订阅」重新勾选收件群'],
+  [
+    /正文渲染失败[：:]\s*([\s\S]*)$/,
+    (matched) => `内容生成失败：${(matched[1] || '').trim() || '原因不明'}。这类失败不会自动重试，请稍后在任务里重新发送`,
+  ],
+  [
+    /webhook 解密失败[：:]\s*([\s\S]*)$/,
+    () => '渠道地址无法解密，请到「渠道」重新填写 webhook',
+  ],
+]
+
+/**
  * 认得出但不是 errcode 的那几种失败（网络层最常见）。
  *
  * 顺序有意义：先匹配到的先用。
@@ -120,6 +144,12 @@ export function deliveryErrorSummary(text) {
   if (!raw) return ''
   const hint = WECOM_ERRCODE_HINTS[wecomErrcode(raw)]
   if (hint) return hint
+  // 出站的失败排在网络正则前面：`正文渲染失败：<原因>` 里的原因可能是任何异常（包括一条
+  // 连接超时），先被通用的网络正则接走就会丢掉「不会自动重试」这条关键信息。
+  for (const [pattern, translate] of WECOM_OUTBOX_FAILURE_HINTS) {
+    const matched = pattern.exec(raw)
+    if (matched) return translate(matched)
+  }
   const matched = WECOM_ERROR_PATTERNS.find(([pattern]) => pattern.test(raw))
   return matched ? matched[1] : raw
 }
@@ -742,6 +772,7 @@ export function sendNowConfirmText({
   content = '',
   targetNames = [],
   kind = 'text',
+  staleReason = '',
 } = {}) {
   const typeLabel = job?.topic_name || '推送内容'
   const targets = Number(job?.target_count) || 0
@@ -753,17 +784,24 @@ export function sendNowConfirmText({
 
   const size = Number(bytes) || 0
   const isImage = kind === 'image'
+  // 预览失效（票 01）：预览已经和当前任务 / 参数对不上，正文是**上一条**的。这时绝不
+  // 能给「正文首行」—— 拿别人的正文当这次要发的东西，比不给更危险。
+  const stale = String(staleReason || '').trim()
   // 预览为空时说清这一点：后端会自己现算一份内容发出去（send-now 不读预览），
   // 所以"空预览"不等于"发空消息"，但用户必须知道自己没核对过内容。图片类的文字
   // 预览本来就是空的，不能按文字口径说"没有预览"。
-  if (!content && !isImage) {
+  if (stale) {
+    lines.push(`注意：${stale}。确认发送会按任务配置现算内容，这个确认框里没有可核对的正文。`)
+  } else if (!content && !isImage) {
     lines.push('注意：当前没有预览内容，将按任务配置现算后发送，你没有核对过正文。')
   }
   if (isImage) {
     lines.push(`这次发的是一张图片消息，${size} / ${WECOM_IMAGE_LIMIT} 字节。`)
   } else {
     lines.push(`消息大小 ${size} / 2048 字节。`)
-    const head = String(content || '').split('\n').map((line) => line.trim()).find(Boolean)
+    const head = stale
+      ? ''
+      : String(content || '').split('\n').map((line) => line.trim()).find(Boolean)
     if (head) {
       lines.push(`正文首行：${head.length > 40 ? `${head.slice(0, 40)}…` : head}`)
     }
@@ -817,6 +855,10 @@ export function useWecomPush() {
   // 图片类内容（下周排班表）预览的 data URL：文本预览框对它是空的，页面按 kind 分支。
   const previewImage = ref('')
   const previewMeta = ref({ bytes: 0, chunkCount: 1, kind: 'text', limit: 2048 })
+  // 预览失效原因（票 01）：预览与「选中的任务 + 表单里这份参数」严格绑定。三者一旦
+  // 对不上就清空预览并记下原因 —— 否则店长会看着 A 的正文、按下去发的却是 B，而这条
+  // 消息撤回不了。空串表示「预览有效（或还没预览过）」。
+  const previewStaleReason = ref('')
   const loading = ref(false)
   const error = ref('')
   // 加载失败的技术原文（英文 detail / HTTP 状态）：页面上折叠在「详情」里，不进主提示
@@ -1250,6 +1292,9 @@ export function useWecomPush() {
     selectedJobId.value = (data.job && data.job.id) || Number(id) || selectedJobId.value
     resetJobForm()
     await loadJobs()
+    // 保存成功 = 这条任务的参数可能已经换了，预览作废（票 01）。放在最后：`resetJobForm`
+    // 也会触发参数 watch，先让它把原因写成「参数已修改」，再由这里盖成准确的那一条。
+    invalidatePreview('任务已保存，请重新预览')
   }
 
   async function deleteJob(id) {
@@ -1257,6 +1302,31 @@ export function useWecomPush() {
     if (selectedJobId.value === id) selectedJobId.value = null
     await loadJobs()
   }
+
+  /**
+   * 清空预览并记下「为什么失效」（票 01）。
+   *
+   * 三样东西一起清：正文、图片、字节数。只清一部分的话，页面上会留下"字节数 512 / 2048"
+   * 这类与空白正文自相矛盾的状态，而旁边的「立即发送」还会是可点的。
+   */
+  function invalidatePreview(reason = '预览已失效，请重新预览') {
+    previewContent.value = ''
+    previewImage.value = ''
+    previewMeta.value = { bytes: 0, chunkCount: 1, kind: 'text', limit: 2048 }
+    previewStaleReason.value = reason
+  }
+
+  // 换任务：预览属于上一条任务，切过去就作废。首屏 `loadJobs` 从 null 自动选中第一条
+  // 不算"切换"（那时本来也没有预览），否则一进页面就挂一条"任务已切换"的提示。
+  watch(selectedJobId, (next, prev) => {
+    if (prev === null || prev === undefined || prev === next) return
+    invalidatePreview('任务已切换，请重新预览')
+  })
+
+  // 改任务参数（名称 / 内容类型 / 参数 / 备注 / 启停）：预览是按旧参数算的，一律作废。
+  // `editJob` 把一条任务填回表单也走这里 —— 保守一点：无法证明预览仍属于当前表单，
+  // 就当它失效。
+  watch(jobForm, () => invalidatePreview('任务参数已修改，请重新预览'), { deep: true })
 
   async function previewSelectedJob() {
     if (!selectedJobId.value) throw new Error('请先选择任务')
@@ -1272,6 +1342,8 @@ export function useWecomPush() {
       kind,
       limit: data.limit || (kind === 'image' ? WECOM_IMAGE_LIMIT : 2048),
     }
+    // 重新预览过，失效标记就清掉（票 01）：现在这份预览就是当前任务 / 参数的。
+    previewStaleReason.value = ''
   }
 
   async function sendSelectedJob() {
@@ -1285,7 +1357,8 @@ export function useWecomPush() {
 
   return {
     meta, channels, topics, groups, jobs, matrix, deliveries, audit,
-    selectedJobId, previewContent, previewImage, previewMeta, loading, error, errorDetail,
+    selectedJobId, previewContent, previewImage, previewMeta, previewStaleReason,
+    loading, error, errorDetail,
     activeTab, channelForm, channelGroupForm, multiSelect,
     contractWarning, zeroSubscriptionTip, viewMode, zeroTopicIds,
     resetChannelForm, resetChannelGroupForm, resetJobForm, jobForm,

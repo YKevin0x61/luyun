@@ -115,14 +115,18 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
-describe('企微推送页的 tab 骨架（不改路由）', () => {
-  it('五个页内 tab 都在，默认停在「渠道」', async () => {
+describe('企微推送页的 tab 骨架', () => {
+  it('五个页内 tab 都在；有渠道没任务时默认落在「定时任务」（票 02）', async () => {
     const { wrapper } = await mountView({ channels: [channel(1, '门店群')], topics: [topic('sales_report', '销售报表')] })
 
     // 「变更历史」是票 11 补上的第五个（配置变更留痕，只读）。
     expect(wrapper.findAll('.view-tab').map((node) => node.text())).toEqual([
       '渠道', '订阅', '定时任务', '发送记录', '变更历史',
     ])
+    // 票 02：默认落点随状态走 —— 渠道已经配好、任务还没有，下一步就是建任务。
+    expect(wrapper.find('.view-tab.active').text()).toBe('定时任务')
+
+    await openTab(wrapper, '渠道')
     expect(wrapper.find('.view-tab.active').text()).toBe('渠道')
     expect(wrapper.text()).toContain('渠道群组')
   })
@@ -158,6 +162,7 @@ describe('渠道 tab 的卡片', () => {
       topics: [topic('sales_report', '销售报表', [1])],
       groups: [{ id: 3, name: '日报群组', enabled: true, notes: '', member_channel_ids: [1] }],
     })
+    await openTab(wrapper, '渠道')
 
     const text = wrapper.text()
     expect(text).toContain('启用')
@@ -175,6 +180,7 @@ describe('渠道 tab 的卡片', () => {
       channels: [channel(1, '门店群', { job_count: 1, topics: [{ id: 'sales_report', name: '销售报表' }] })],
       topics: [topic('sales_report', '销售报表')],
     })
+    await openTab(wrapper, '渠道')
     const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
 
     const del = wrapper.findAll('button').find((node) => node.text() === '删除')
@@ -194,6 +200,7 @@ describe('渠道 tab 的卡片', () => {
       channels: [channel(1, '门店群')],
       topics: [topic('sales_report', '销售报表', [1])],
     })
+    await openTab(wrapper, '渠道')
     const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
 
     const test = wrapper.findAll('button').find((node) => node.text() === '测试')
@@ -212,6 +219,7 @@ describe('渠道 tab 的卡片', () => {
       channels: [channel(1, '门店群')],
       topics: [topic('sales_report', '销售报表', [1])],
     })
+    await openTab(wrapper, '渠道')
     vi.spyOn(window, 'confirm').mockReturnValue(false)
 
     await wrapper.findAll('button').find((node) => node.text() === '测试').trigger('click')
@@ -225,6 +233,7 @@ describe('渠道 tab 的卡片', () => {
       channels: [channel(1, '门店群')],
       topics: [topic('sales_report', '销售报表', [1])],
     })
+    await openTab(wrapper, '渠道')
     vi.spyOn(window, 'confirm').mockReturnValue(true)
 
     await wrapper.findAll('button').find((node) => node.text() === '测试').trigger('click')
@@ -652,6 +661,7 @@ describe('渠道群组卡的成员折叠（U15）', () => {
 
   it('默认只列已勾选的成员，其余折进「展开全部 N 个渠道」', async () => {
     const { wrapper } = await mountView({ channels: THREE, topics: [], groups: GROUPS })
+    await openTab(wrapper, '渠道')
     const card = groupCard(wrapper, '日报群组')
 
     const rows = card.findAll('label.luyun-check-row')
@@ -662,6 +672,7 @@ describe('渠道群组卡的成员折叠（U15）', () => {
 
   it('展开后列出全部渠道，还能收回去', async () => {
     const { wrapper } = await mountView({ channels: THREE, topics: [], groups: GROUPS })
+    await openTab(wrapper, '渠道')
 
     await expandButton(groupCard(wrapper, '日报群组')).trigger('click')
     await flushPromises()
@@ -678,6 +689,7 @@ describe('渠道群组卡的成员折叠（U15）', () => {
 
   it('一个成员都没有的群组不留一排空行，只写一句并给展开入口', async () => {
     const { wrapper } = await mountView({ channels: THREE, topics: [], groups: GROUPS })
+    await openTab(wrapper, '渠道')
     const card = groupCard(wrapper, '空群组')
 
     expect(card.findAll('label.luyun-check-row')).toHaveLength(0)
@@ -689,6 +701,7 @@ describe('渠道群组卡的成员折叠（U15）', () => {
     const { wrapper, fetchMock } = await mountView({
       channels: THREE, topics: [], groups: GROUPS,
     })
+    await openTab(wrapper, '渠道')
 
     await expandButton(groupCard(wrapper, '日报群组')).trigger('click')
     await flushPromises()
@@ -870,7 +883,8 @@ describe('群组整体订阅（票 08）', () => {
       })],
     })
 
-    // 渠道卡在默认的「渠道」tab 上
+    // 票 02 之后默认落点随状态走（这里没有任务 → 落在「定时任务」），先切到渠道卡。
+    await openTab(wrapper, '渠道')
     const badge = wrapper.findAll('.badge').find((node) => node.text() === '含群组订阅')
     expect(badge).toBeTruthy()
     await badge.trigger('click')

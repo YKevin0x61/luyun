@@ -118,6 +118,15 @@ describe('企微推送页的立即发送', () => {
     expect(src).toContain('targetNames:sendTargetNames.value,')
   })
 
+  // 票 01：预览与当前任务 / 参数对不上时，按钮变灰还不够 —— 页面得说清是哪一步让预览
+  // 失效了（换任务 / 改参数 / 刚保存过），否则店长只会以为按钮坏了。
+  it('预览失效时页面给出理由，确认文案也不带正文首行（票 01）', () => {
+    const src = compact(view)
+    expect(src).toContain('v-if="previewStaleReason"class="wp-preview-stale"')
+    expect(src).toContain('.wp-preview-stale{')
+    expect(src).toContain('staleReason:previewStaleReason.value,')
+  })
+
   // U12：预览已经选中任务（右上写着「当前任务：每日销售报表」），空 textarea 里却写
   // 「选择任务后点击刷新预览」—— 让店长去做一件已经做完的事。按钮的 title 在 U8 里已经
   // 改成同一口径，两处不能各说各话。
@@ -127,6 +136,28 @@ describe('企微推送页的立即发送', () => {
     expect(src).not.toContain('选择任务后点击刷新预览')
     expect(src).toContain("'点「刷新预览」后可发送'")
     expect(src).not.toContain('先选择任务并刷新预览')
+  })
+
+  // 票 05：`send-now` 只是入队，出站 30 秒一轮。点完按钮只看 3 秒 toast 的话，店长还得
+  // 自己去发送记录里翻哪几条是刚发的 —— 结果卡要留在预览卡下面，并且只能承诺
+  // 「约半分钟内出结果」，不能写「已发送」。
+  it('发送结果留在原地，文案不承诺即时送达且有轮询上限（票 05）', () => {
+    const src = compact(view)
+    expect(src).toContain('v-if="activeTab===\'jobs\'&&sendOutcome"')
+    expect(src).toContain('class="cardwp-send-result"')
+    expect(src).toContain('@click="handleViewSendResults"')
+    expect(src).toContain('已加入发送队列：将发给{{sendOutcome.targetCount}}个群，约半分钟内出结果。')
+    // 不得出现「已发送」这类即时送达的承诺
+    expect(src).not.toContain('已成功发送')
+    expect(src).not.toContain('已发送给')
+    expect(src).toContain('constSEND_POLL_MAX_ROUNDS=12')
+    expect(src).toContain('轮询已停止：可稍后在「发送记录」查看结果。')
+    expect(src).toContain('.wp-send-result__rows{')
+    // 轮询在组件卸载时停掉，不留一个还在发请求的定时器
+    expect(src).toContain('stopSendPolling()')
+    // toast 降成辅助，但读屏要能听到
+    expect(src).toContain('role="status"')
+    expect(src).toContain('aria-live="polite"')
   })
 })
 
@@ -351,5 +382,35 @@ describe('页内 tab 条在窄屏不竖排（D4）', () => {
     expect(src).toContain('class="wp-tabbarluyun-scrollbar"')
     expect(src).toContain('class="wp-api-version"')
     expect(src).toContain('接口版本{{WECOM_PUSH_API_VERSION}}')
+  })
+})
+
+// 票 02：默认落点随状态走，tab 记进 URL 的 `?tab=`（路径不变，页面清单契约保持绿）。
+describe('页内 tab 的落点与 URL（票 02）', () => {
+  it('默认落点按状态三档排：没渠道 → 渠道，没任务 → 定时任务，否则 → 发送记录', () => {
+    const src = compact(view)
+    expect(src).toContain('functiondefaultTabForState(){')
+    expect(src).toContain("if(!channels.value.length)return'channels'")
+    expect(src).toContain("if(!jobs.value.length)return'jobs'")
+    expect(src).toContain("return'logs'")
+    // 数据回来后只补默认；URL 深链与用户自己点过的 tab 优先
+    expect(src).toContain('if(!userPickedTab&&!tabFromQuery())activeTab.value=defaultTabForState()')
+  })
+
+  it('tab 只写 query（replace），不新增路由', () => {
+    const src = compact(view)
+    expect(src).toContain('functionwriteTabQuery(tabId){')
+    expect(src).toContain('router.replace({query:{...currentQuery(),tab:tabId}})')
+    expect(src).toContain('constVALID_TABS=newSet(TABS.map((tab)=>tab.id))')
+    // 路径仍是 /wecom-push：没有新增子路由的写法
+    expect(src).not.toContain("'/wecom-push/logs'")
+    expect(src).not.toContain("'/wecom-push/config'")
+  })
+
+  it('页顶零订阅黄条带一个直达订阅的按钮', () => {
+    const src = compact(view)
+    expect(src).toContain("v-if=\"zeroSubscriptionTip\"class=\"dash-error-banner\"")
+    expect(src).toContain("@click=\"handleSwitchTab('subscriptions')\"")
+    expect(src).toContain('{{zeroSubscriptionTip}}')
   })
 })
