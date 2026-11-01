@@ -202,6 +202,8 @@ export const COLUMN_LABELS = {
   'scheduling_overrides.kind': '覆盖来源', 'scheduling_overrides.voided': '已作废',
   'scheduling_requests.kind': '申请类型',
   'scheduling_requests.note': '备注',
+  // 0044：驳回时写的那句原因（批准不写这一列）。数据管理页按列名直接翻，缺了就是英文。
+  'scheduling_requests.decision_note': '驳回说明',
   'wecom_push_webhooks.hygiene_feed': '卫生播报', 'wecom_channel_groups.name': '分组名称',
   'hygiene_wecom_shares.kind': '业务类型',
   'hygiene_employees.health_cert_date': '健康证到期',

@@ -184,7 +184,10 @@ describe('企微推送页的触屏档尺寸（U11）', () => {
 
   it('≤700px 时小按钮 / 页内 tab / 输入框都放大到能点', () => {
     const block = touchBlock()
-    expect(block).toContain(':deep(.btn-sm){min-height:40px;')
+    // 2026-11-02：按钮原来只到 40px —— 低于 44 的触控下限（规范与 `designGuard` 的
+    // small_tap 计数都按 44 认），抬手容易点空，所以两档按钮一起抬到 44。
+    expect(block).toContain(':deep(.btn){min-height:44px;')
+    expect(block).toContain(':deep(.btn-sm){min-height:44px;')
     expect(block).toContain('.wp-tabbar.view-tab{min-height:44px;')
     expect(block).toContain(':deep(.input),:deep(.select){min-height:44px;')
   })

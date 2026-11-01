@@ -1003,8 +1003,8 @@ onMounted(async () => {
               <table class="data-table wp-matrix">
                 <thead>
                   <tr>
-                    <th style="cursor:default">内容类型</th>
-                    <th v-for="channel in matrixColumns" :key="channel.id" style="cursor:default">
+                    <th class="wp-th">内容类型</th>
+                    <th v-for="channel in matrixColumns" :key="channel.id" class="wp-th">
                       {{ channel.name }}<span v-if="!channel.enabled" style="color:var(--text-dim)">（停用）</span>
                     </th>
                   </tr>
@@ -1137,8 +1137,8 @@ onMounted(async () => {
             <table class="data-table wp-matrix wp-group-matrix">
               <thead>
                 <tr>
-                  <th style="cursor:default">群组</th>
-                  <th v-for="row in matrixRows" :key="row.id" style="cursor:default">{{ row.name }}</th>
+                  <th class="wp-th">群组</th>
+                  <th v-for="row in matrixRows" :key="row.id" class="wp-th">{{ row.name }}</th>
                 </tr>
               </thead>
               <tbody>
@@ -1476,14 +1476,14 @@ onMounted(async () => {
         <table class="data-table wp-card-table wp-delivery-table">
           <thead>
             <tr>
-              <th style="cursor:default">时间</th>
-              <th style="cursor:default">目标渠道</th>
-              <th style="cursor:default">内容类型</th>
-              <th style="cursor:default">任务</th>
-              <th style="cursor:default">状态</th>
-              <th style="cursor:default">字节数</th>
-              <th style="cursor:default">尝试次数</th>
-              <th style="cursor:default">最后一次错误</th>
+              <th class="wp-th">时间</th>
+              <th class="wp-th">目标渠道</th>
+              <th class="wp-th">内容类型</th>
+              <th class="wp-th">任务</th>
+              <th class="wp-th">状态</th>
+              <th class="wp-th">字节数</th>
+              <th class="wp-th">尝试次数</th>
+              <th class="wp-th">最后一次错误</th>
             </tr>
           </thead>
           <tbody>
@@ -1633,11 +1633,11 @@ onMounted(async () => {
         <table class="data-table wp-card-table wp-audit-table">
           <thead>
             <tr>
-              <th style="cursor:default">时间</th>
-              <th style="cursor:default">操作人</th>
-              <th style="cursor:default">操作</th>
-              <th style="cursor:default">对象</th>
-              <th style="cursor:default">变更内容</th>
+              <th class="wp-th">时间</th>
+              <th class="wp-th">操作人</th>
+              <th class="wp-th">操作</th>
+              <th class="wp-th">对象</th>
+              <th class="wp-th">变更内容</th>
             </tr>
           </thead>
           <tbody>
@@ -1791,6 +1791,10 @@ onMounted(async () => {
   border-radius: 6px;
 }
 .luyun-check-row.is-off { cursor: help; }
+
+/* 表头格不显示手型（这些表头点不动）。原来散着写了 17 处内联 `cursor:default`，
+   收成一个类 —— 设计护栏的棘轮只许本页内联样式往下走，散着写迟早破线（2026-11-02）。 */
+.wp-th { cursor: default; }
 
 /* 票 08：群组整体订阅那一块（与渠道矩阵同一种表格，只是行是群组）。 */
 .wp-group-block .panel-title { align-items: baseline; }
@@ -2064,8 +2068,8 @@ onMounted(async () => {
    三档实测控件尺寸完全相同：`.btn-sm` 42×24、页内 tab 52×31、输入框高 34 —— 手机档
    仍是桌面尺寸。桌面档维持现状，只在窄屏这一档放大。 */
 @media (max-width: 700px) {
-  :deep(.btn) { min-height: 40px; }
-  :deep(.btn-sm) { min-height: 40px; padding: 8px 12px; font-size: 12px; }
+  :deep(.btn) { min-height: 44px; }
+  :deep(.btn-sm) { min-height: 44px; padding: 8px 12px; font-size: 12px; }
   .wp-tabbar .view-tab { min-height: 44px; padding: 10px 14px; }
   :deep(.input), :deep(.select) { min-height: 44px; }
   .wp-matrix-hit { min-width: 44px; min-height: 44px; }
@@ -2112,7 +2116,7 @@ onMounted(async () => {
   border-radius: 8px;
   overflow: auto;
   max-height: 620px;
-  background: #fff;
+  background: white;
   /* 网格子项默认 min-width:auto：图片的固有宽度（1242px）会把整列撑宽、顶出卡片，
      于是「周日」那列被卡片右边界切掉。图片一律按容器缩放。 */
   min-width: 0;
