@@ -384,3 +384,33 @@ describe('页内 tab 条在窄屏不竖排（D4）', () => {
     expect(src).toContain('接口版本{{WECOM_PUSH_API_VERSION}}')
   })
 })
+
+// 票 02：默认落点随状态走，tab 记进 URL 的 `?tab=`（路径不变，页面清单契约保持绿）。
+describe('页内 tab 的落点与 URL（票 02）', () => {
+  it('默认落点按状态三档排：没渠道 → 渠道，没任务 → 定时任务，否则 → 发送记录', () => {
+    const src = compact(view)
+    expect(src).toContain('functiondefaultTabForState(){')
+    expect(src).toContain("if(!channels.value.length)return'channels'")
+    expect(src).toContain("if(!jobs.value.length)return'jobs'")
+    expect(src).toContain("return'logs'")
+    // 数据回来后只补默认；URL 深链与用户自己点过的 tab 优先
+    expect(src).toContain('if(!userPickedTab&&!tabFromQuery())activeTab.value=defaultTabForState()')
+  })
+
+  it('tab 只写 query（replace），不新增路由', () => {
+    const src = compact(view)
+    expect(src).toContain('functionwriteTabQuery(tabId){')
+    expect(src).toContain('router.replace({query:{...currentQuery(),tab:tabId}})')
+    expect(src).toContain('constVALID_TABS=newSet(TABS.map((tab)=>tab.id))')
+    // 路径仍是 /wecom-push：没有新增子路由的写法
+    expect(src).not.toContain("'/wecom-push/logs'")
+    expect(src).not.toContain("'/wecom-push/config'")
+  })
+
+  it('页顶零订阅黄条带一个直达订阅的按钮', () => {
+    const src = compact(view)
+    expect(src).toContain("v-if=\"zeroSubscriptionTip\"class=\"dash-error-banner\"")
+    expect(src).toContain("@click=\"handleSwitchTab('subscriptions')\"")
+    expect(src).toContain('{{zeroSubscriptionTip}}')
+  })
+})

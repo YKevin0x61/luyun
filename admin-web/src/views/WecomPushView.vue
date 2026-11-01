@@ -1,5 +1,5 @@
 <script setup>
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, getCurrentInstance, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import {
   useWecomPush, WECOM_PUSH_API_VERSION, MATRIX_CHANNEL_LIMIT, scheduledTopics,
   channelDeleteConfirmText, channelGroupNames, channelTopicNames, formatSentAt,
@@ -12,7 +12,8 @@ import SvgIcon from '../components/SvgIcon.vue'
 import PushParamsForm from '../components/wecom/PushParamsForm.vue'
 import LuyunCheckbox from '../components/ui/LuyunCheckbox.vue'
 
-// 页内 tab：不改路由（页面清单契约保持绿）。「变更历史」是票 11 的第五个 tab。
+// 页内 tab：**路径不变**（页面清单契约保持绿），只把当前 tab 记进 URL 的 `?tab=`（票 02）。
+//「变更历史」是票 11 的第五个 tab。
 const TABS = [
   { id: 'channels', name: '渠道' },
   { id: 'subscriptions', name: '订阅' },
@@ -38,6 +39,59 @@ const {
   editJob, pickJobTopic, applyJobPreset, saveJob, deleteJob, previewSelectedJob,
   sendSelectedJob,
 } = useWecomPush()
+
+// ── 页内 tab 的落点与 URL（票 02）────────────────────────────────────────────
+// 只动 query：路径仍是 `/wecom-push`，`pageRoutes.json` / `main.py` / 反代一个字不用碰。
+// 刷新、分享、从浏览器历史回来都还停在同一个 tab。
+//
+// 这里**不用** `useRoute()` / `useRouter()`：这一页的视图测试大多不装 router，缺注入时
+// vue-router 会为每个用例打一条 injection 警告 —— 几十个文件的输出全被它淹了。改成从
+// `appContext` 取（装了才有），没装时 tab 照常切、只是读写不到 URL：生产环境这一页一定
+// 在 SPA 里，而单测里退回 window.location 反而会让同一文件里的用例互相污染（jsdom 共用
+// 一个 window，前一个用例写进去的 `?tab=` 会变成后一个用例的深链）。
+const router = (() => {
+  const instance = getCurrentInstance()
+  const injected = instance && instance.appContext.config.globalProperties.$router
+  return injected && typeof injected.replace === 'function' ? injected : null
+})()
+const VALID_TABS = new Set(TABS.map((tab) => tab.id))
+// 用户已经自己点过 tab：首屏数据回来后不要再拿默认落点覆盖他的选择。
+let userPickedTab = false
+
+/** 当前路由的 query（没装 router 就没有，当空对象）。 */
+function currentQuery() {
+  return (router && router.currentRoute.value.query) || {}
+}
+
+/** 把 tab 写进 URL（只动 query 里的 `tab`，路径与其它 query 不动）。 */
+function writeTabQuery(tabId) {
+  if (!router || String(currentQuery().tab || '') === tabId) return
+  // `replace` 而不是 `push`：切五个 tab 不该留下五条历史。
+  router.replace({ query: { ...currentQuery(), tab: tabId } }).catch(() => {})
+}
+
+/** URL 里写得明明白白要哪个 tab 就用哪个；没写 / 名字不认识都当没写。 */
+function tabFromQuery() {
+  const raw = currentQuery().tab
+  const name = Array.isArray(raw) ? raw[0] : raw
+  return VALID_TABS.has(String(name || '')) ? String(name) : ''
+}
+
+/**
+ * 默认落点随状态走（票 02）。原来固定落在「渠道」——那是几个月才配一次的事，而店长每天
+ * 打开这一页想知道的是「今天的推送发出去没有」。三档按打开这一页要做的事排：
+ *   一个渠道都没有 → 新装引导，先建渠道；
+ *   有渠道、没任务   → 去建任务；
+ *   常规环境         → 发送记录。
+ */
+function defaultTabForState() {
+  if (!channels.value.length) return 'channels'
+  if (!jobs.value.length) return 'jobs'
+  return 'logs'
+}
+
+// 深链先落地：数据还没回来时就已经停在请求的 tab 上，不会先闪一下别的 tab。
+if (tabFromQuery()) activeTab.value = tabFromQuery()
 
 const toastMsg = ref('')
 const toastType = ref('info')
@@ -106,7 +160,11 @@ function handleRefreshAudit() {
  * 历史没有意义。切过去的那一刻拉一次，之后靠「刷新」与翻页。
  */
 function handleSwitchTab(tabId) {
+  if (!VALID_TABS.has(tabId)) return
+  userPickedTab = true
   activeTab.value = tabId
+  // tab 进 URL（票 02）：`?tab=logs` 能直达，刷新不丢。
+  writeTabQuery(tabId)
   if (tabId === 'audit') handleRefreshAudit()
 }
 
@@ -507,6 +565,9 @@ onMounted(async () => {
   // 首屏三份数据（meta / 渠道 / 任务）+ 发送记录一页一起拉；失败的落点与「重试」按钮
   // 走同一条路（composable 的 reloadAll），页面只管展示 `error` / `errorDetail`。
   await reloadAll()
+  // 默认落点要等数据回来才知道（有没有渠道 / 任务），所以放在 reloadAll 之后；URL 深链
+  // 已经先落了地，用户自己也点过 tab 的话不再覆盖。
+  if (!userPickedTab && !tabFromQuery()) activeTab.value = defaultTabForState()
 })
 </script>
 
@@ -525,8 +586,14 @@ onMounted(async () => {
     </div>
     <!-- 接口版本不匹配：只提示，不阻断操作（旧页面照样能读，写接口由后端把关） -->
     <div v-if="contractWarning" class="dash-error-banner"><SvgIcon name="alert-triangle" :size="14" /> {{ contractWarning }}</div>
-    <!-- 零订阅：这类内容当前一条都不发，页面上不写出来店长只会以为"今天没有" -->
-    <div v-if="zeroSubscriptionTip" class="dash-error-banner"><SvgIcon name="alert-triangle" :size="14" /> {{ zeroSubscriptionTip }}</div>
+    <!-- 零订阅：这类内容当前一条都不发，页面上不写出来店长只会以为"今天没有"。
+         文案末尾的「去「订阅」勾选」做成可点的（票 02）：光说去哪个 tab 还得自己找过去，
+         这里直接切过去。 -->
+    <div v-if="zeroSubscriptionTip" class="dash-error-banner">
+      <SvgIcon name="alert-triangle" :size="14" />
+      <span>{{ zeroSubscriptionTip }}</span>
+      <button class="btn btn-sm" type="button" @click="handleSwitchTab('subscriptions')">去「订阅」勾选</button>
+    </div>
     <!-- toast 只是辅助（票 05）：真正的发送结果在「本次发送」卡上，这里让读屏也能听到。 -->
     <div
       v-if="toastMsg"
