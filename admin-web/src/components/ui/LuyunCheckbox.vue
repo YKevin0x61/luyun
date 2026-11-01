@@ -1,19 +1,29 @@
 <script setup>
+import { computed } from 'vue'
 import { CheckboxIndicator, CheckboxRoot } from 'reka-ui'
 import SvgIcon from '../SvgIcon.vue'
 
-defineProps({
+const props = defineProps({
   disabled: { type: Boolean, default: false },
   id: { type: String, default: undefined },
+  // 半选（票 08）：群组行「组里只有一部分渠道被单独订了」时用它。reka 的 CheckboxRoot
+  // 认 `'indeterminate'` 这个值，点一下从半选变成全选（true），所以这里只代理它、
+  // 不另造一套状态。
+  indeterminate: { type: Boolean, default: false },
 })
 
 const model = defineModel({ type: Boolean, default: false })
+
+const rendered = computed({
+  get: () => (props.indeterminate ? 'indeterminate' : model.value === true),
+  set: (value) => { model.value = value === true },
+})
 </script>
 
 <template>
   <CheckboxRoot
     :id="id"
-    v-model="model"
+    v-model="rendered"
     :disabled="disabled"
     class="luyun-checkbox"
   >

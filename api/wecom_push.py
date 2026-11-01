@@ -486,22 +486,31 @@ async def _channel_last_sent(db: DatabaseManager) -> Dict[int, str]:
 
 
 async def _subscription_targets(db: DatabaseManager) -> Dict[str, Any]:
-    """订阅矩阵一次取全，返回 ``{topics, channels}``（页面上两处都读这一份）。
+    """订阅矩阵一次取全，返回 ``{topics, channels, groups}``（页面上两处都读这一份）。
 
-    - ``topics``：行 = 内容类型（注册表顺序），每行带它订阅到的渠道 id
-      （``channels``）与 ``contains_employee_photos``；
+    - ``topics``：行 = 内容类型（注册表顺序），每行带它订阅到的渠道
+      （``channels: [{id, enabled, via_group}]``）、整组订阅它的群组
+      （``groups: [{id, name, enabled}]``）与 ``contains_employee_photos``；
     - ``channels``：列 = **全部渠道**，每个带启停 / 备注 / 所属群组 / 订阅了哪些内容 /
       最近一次发送成功时间。列取全渠道而不是「只取被订阅到的」：新建但还没勾过订阅的
       渠道也要出现在矩阵上（否则没有可勾的位置），而渠道卡片本来就要显示未被订阅的群。
+    - ``groups``：群组与成员（``{id, name, enabled, notes, member_channel_ids}``），
+      与 ``/webhooks`` 的 ``groups`` 同一份口径 —— 页面据此画出「群组整体订阅」那些行
+      （GLOSSARY「推送渠道群组 … 可以整体被订阅」）。
+
+    ``via_group`` 只在**仅**经群组命中时为真：页面据此把那一格画成只读的「经群组订阅」
+    （直接取消勾选写的是 channel 级停用行，群组仍覆盖它，重载后还是勾着 —— 死交互）。
     """
     subscriptions = await db.wecom_subscriptions_all()
-    groups = {
-        int(group["id"]): group for group in await db.wecom_channel_groups_all()
-    }
+    group_rows = await db.wecom_channel_groups_all()
+    groups = {int(group["id"]): group for group in group_rows}
     members_map = await db.wecom_channel_group_members_map()
 
     # 每个渠道订阅了哪些内容类型：直接订阅 + 经由群组（两种来路都要在卡片上看得出来）。
     by_channel: Dict[int, Dict[str, Any]] = {}
+    # 每个内容类型被哪些群组**整组**订阅了（含群组已停用的那几行：订阅还在、投递暂停，
+    # 矩阵上要显示成「已停用（订阅保留）」，与停用渠道的格子同一套语义）。
+    groups_by_topic: Dict[str, set] = {}
     for subscription in subscriptions:
         if not subscription.get("enabled"):
             continue  # 停用的订阅不算「订阅了这类内容」
@@ -510,6 +519,7 @@ async def _subscription_targets(db: DatabaseManager) -> Dict[str, Any]:
         if group_id is None:
             entries = [(int(subscription["target_channel_id"]), False)]
         else:
+            groups_by_topic.setdefault(topic_id, set()).add(int(group_id))
             group = groups.get(int(group_id))
             if group is None or not group.get("enabled"):
                 continue  # 群组停用：这一组订阅暂停（与 resolve_targets 同一口径）
@@ -571,32 +581,50 @@ async def _subscription_targets(db: DatabaseManager) -> Dict[str, Any]:
             ],
         }
 
-    def topic_payload(topic, subscribed_channel_ids: List[int]) -> Dict[str, Any]:
+    def topic_payload(
+        topic,
+        subscribed_channels: List[Dict[str, Any]],
+        subscribed_group_ids: List[int],
+    ) -> Dict[str, Any]:
         return {
             "id": topic.id,
             "name": topic.name,
             "triggers": [trigger.value for trigger in topic.triggers_in_order],
             "contains_employee_photos": topic.contains_employee_photos,
             "default_schedule_time": topic.default_schedule_time,
-            # `{id, enabled}` 而不是 id 数组：页面要判「订阅了但渠道全停着」——
-            # 那等于一条都不发，与零订阅同一种要亮出来的状态（用户故事 9）。
+            # `{id, enabled, via_group}` 而不是 id 数组：页面要判「订阅了但渠道全停着」——
+            # 那等于一条都不发，与零订阅同一种要亮出来的状态（用户故事 9）；`via_group`
+            # 让那一格能画成只读的「经群组订阅」（票 08）。
             "channels": [
                 {
-                    "id": channel_id,
-                    "enabled": bool(channels[channel_id].get("enabled")),
+                    "id": int(item["id"]),
+                    "enabled": bool(channels[int(item["id"])].get("enabled")),
+                    "via_group": bool(item["via_group"]),
                 }
-                for channel_id in sorted(subscribed_channel_ids)
+                for item in sorted(subscribed_channels, key=lambda entry: int(entry["id"]))
+            ],
+            # 整组订阅这一行内容类型的群组（票 08）：页面据此画「群组 × 内容类型」的勾选，
+            # 并在一格都不发时说出是哪个群组订的。
+            "groups": [
+                {
+                    "id": group_id,
+                    "name": groups.get(group_id, {}).get("name", ""),
+                    "enabled": bool(groups.get(group_id, {}).get("enabled")),
+                }
+                for group_id in sorted(subscribed_group_ids)
             ],
         }
 
     rows = []
     for topic in all_topics():
-        channel_ids = [
-            channel_id
-            for channel_id, item in by_channel.items()
+        subscribed_channels = [
+            {"id": channel_id, "via_group": item["topics"][topic.id]["via_group"]}
+            for channel_id, item in sorted(by_channel.items())
             if topic.id in item["topics"] and channel_id in channels
         ]
-        rows.append(topic_payload(topic, channel_ids))
+        rows.append(topic_payload(
+            topic, subscribed_channels, groups_by_topic.get(topic.id, set())
+        ))
 
     # 列：全部渠道，按名称排序（矩阵的列序与群组下拉的选项序一致）。
     column_ids = sorted(channels, key=lambda cid: str(channels[cid].get("name", "")))
@@ -606,6 +634,10 @@ async def _subscription_targets(db: DatabaseManager) -> Dict[str, Any]:
             payload
             for payload in (channel_payload(cid) for cid in column_ids)
             if payload is not None
+        ],
+        "groups": [
+            _group_payload(group, members_map.get(int(group["id"]), []))
+            for group in group_rows
         ],
     }
 
@@ -758,7 +790,7 @@ async def list_webhooks(db: DatabaseManager = Depends(get_db)):
         ],
         "channels": matrix["channels"],
         "topics": matrix["topics"],
-        "groups": await _groups_with_members(db),
+        "groups": matrix["groups"],
     }
 
 
@@ -1052,13 +1084,18 @@ async def _group_detail(db: DatabaseManager, group_id: int) -> Optional[Dict[str
 async def list_subscriptions(db: DatabaseManager = Depends(get_db)):
     """订阅矩阵：``topics`` 是行（每行带 ``contains_employee_photos``），
     ``channels`` 是列。零订阅的内容类型行里 ``channels`` 为空数组 —— 页面据此高亮
-    并在顶部提示，判据只有这一处。"""
+    并在顶部提示，判据只有这一处。
+
+    ``groups``（票 08）是「群组整体订阅」那些行要用的群组与成员；``topics[].groups``
+    是「这一行内容被哪些群组整组订了」。两者一起给出，页面才画得出群组行，也才分得清
+    「整组订的」与「某个成员被单独订的」（后者是半选）。"""
     matrix = await _subscription_targets(db)
     return {
         "success": True,
         "api_version": WECOM_PUSH_API_VERSION,
         "topics": matrix["topics"],
         "channels": matrix["channels"],
+        "groups": matrix["groups"],
     }
 
 

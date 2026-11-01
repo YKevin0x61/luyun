@@ -378,10 +378,17 @@ table.data-table td.actions { display: flex; gap: 6px; }
   color: inherit;
 }
 .luyun-checkbox__indicator svg { opacity: 0; transform: scale(.85); transition: opacity .12s, transform .12s; }
-.luyun-checkbox[data-state='checked'] .luyun-checkbox__indicator svg,
-.luyun-checkbox[data-state='indeterminate'] .luyun-checkbox__indicator svg {
+.luyun-checkbox[data-state='checked'] .luyun-checkbox__indicator svg {
   opacity: 1;
   transform: scale(1);
+}
+/* 半选（票 08）：画一条横杠，不是勾 —— 勾读作「整组都订了」，那是另一种意思。 */
+.luyun-checkbox[data-state='indeterminate']::after {
+  content: '';
+  width: 8px;
+  height: 2px;
+  border-radius: 1px;
+  background: currentColor;
 }
 
 .luyun-radio-group { display: flex; flex-direction: column; gap: 6px; }

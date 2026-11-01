@@ -13,7 +13,7 @@ import WecomPushView from '../WecomPushView.vue'
 // 与 `wecomPushLayout.test.js`（读源码钉窄屏那几条 CSS）分工：那一份挡的是"样式被
 // 顺手简化掉"，这一份挡的是"功能没接上"。
 
-const API_VERSION = 'v4'
+const API_VERSION = 'v5'
 
 /** 一条渠道的完整卡片形状（读接口给的就是这个）。 */
 function channel(id, name, overrides = {}) {
@@ -69,7 +69,7 @@ function probeFetch({ channels = [], topics = [], groups = [], writeStatus = 200
     }
     if (path.includes('/api/wecom-push/subscriptions')) {
       return jsonResponse({
-        success: true, api_version: API_VERSION, channels, topics,
+        success: true, api_version: API_VERSION, channels, topics, groups,
       })
     }
     if (path.includes('/api/wecom-push/channel-groups')) {
@@ -701,5 +701,181 @@ describe('渠道群组卡的成员折叠（U15）', () => {
     const writes = fetchMock.calls.filter((call) => call.method !== 'GET')
     expect(writes).toHaveLength(1)
     expect(writes[0].path).toContain('/channel-groups/1/members')
+  })
+})
+
+// 票 08：「群组整体订阅」的入口。后端一直支持 `target_group_id`（勾一次 = 这个组里的
+// 渠道一起订），缺的是页面上的入口 —— 群组一多只能挨个点。
+//
+// 读接口这一轮多了三样，用例按它们画格子：`groups`（群组与成员）、`topics[].groups`
+// （整组订了哪些内容）、`topics[].channels[].via_group`（这一格是不是群组来的）。
+describe('群组整体订阅（票 08）', () => {
+  const GROUP = { id: 7, name: '日报群组', enabled: true, notes: '', member_channel_ids: [2, 3] }
+  const CHANNELS = [channel(1, '门店群'), channel(2, '日报群'), channel(3, '后厨群')]
+
+  function groupCells(wrapper) {
+    return wrapper.find('table.wp-group-matrix').findAll('tbody tr')[0].findAll('td')
+  }
+
+  it('矩阵下面有群组行：勾一次只发一条 target_group_id 的请求', async () => {
+    const { wrapper, fetchMock } = await mountView({
+      channels: CHANNELS,
+      groups: [GROUP],
+      topics: [topic('sales_report', '销售报表', [1])],
+    })
+    await openTab(wrapper, '订阅')
+
+    const table = wrapper.find('table.wp-group-matrix')
+    expect(table.exists()).toBe(true)
+    expect(table.find('tbody tr').text()).toContain('日报群组')
+    expect(table.find('tbody tr').text()).toContain('2 个渠道')
+
+    const cell = groupCells(wrapper)[1]
+    expect(cell.find('button[role=checkbox]').attributes('aria-checked')).toBe('false')
+    await cell.find('button[role=checkbox]').trigger('click')
+    await flushPromises()
+
+    const posts = fetchMock.calls.filter((call) => call.method === 'POST')
+    expect(posts).toHaveLength(1)
+    expect(JSON.parse(posts[0].body)).toEqual({
+      topic_id: 'sales_report', target_group_id: 7, enabled: true,
+    })
+  })
+
+  it('整组订着时是勾上的，取消勾选发的是「停用这条群组订阅」', async () => {
+    const { wrapper, fetchMock } = await mountView({
+      channels: CHANNELS,
+      groups: [GROUP],
+      topics: [topic('sales_report', '销售报表', [], {
+        channels: [
+          { id: 2, enabled: true, via_group: true },
+          { id: 3, enabled: true, via_group: true },
+        ],
+        groups: [{ id: 7, name: '日报群组', enabled: true }],
+      })],
+    })
+    await openTab(wrapper, '订阅')
+
+    const cell = groupCells(wrapper)[1]
+    expect(cell.find('button[role=checkbox]').attributes('aria-checked')).toBe('true')
+    await cell.find('button[role=checkbox]').trigger('click')
+    await flushPromises()
+
+    const posts = fetchMock.calls.filter((call) => call.method === 'POST')
+    expect(posts).toHaveLength(1)
+    expect(JSON.parse(posts[0].body)).toEqual({
+      topic_id: 'sales_report', target_group_id: 7, enabled: false,
+    })
+  })
+
+  // 半选：组里**一部分**成员被单独订了。画成未勾会让下一次点勾「看起来没变化」却真的
+  // 改了订阅；点一下等于补齐整组。
+  it('组里只有一部分渠道被单独订：那一格是半选，点一下补齐整组', async () => {
+    const { wrapper, fetchMock } = await mountView({
+      channels: CHANNELS,
+      groups: [GROUP],
+      topics: [topic('sales_report', '销售报表', [2])],
+    })
+    await openTab(wrapper, '订阅')
+
+    const cell = groupCells(wrapper)[1]
+    // reka-ui 把半选映射成 `data-state="indeterminate"` / `aria-checked="mixed"`
+    expect(cell.find('button[role=checkbox]').attributes('data-state')).toBe('indeterminate')
+    await cell.find('button[role=checkbox]').trigger('click')
+    await flushPromises()
+
+    const posts = fetchMock.calls.filter((call) => call.method === 'POST')
+    expect(posts).toHaveLength(1)
+    expect(JSON.parse(posts[0].body)).toEqual({
+      topic_id: 'sales_report', target_group_id: 7, enabled: true,
+    })
+  })
+
+  it('群组停用时那一格是只读标记「已停用（订阅保留）」，点它不写库只指路', async () => {
+    const { wrapper, fetchMock } = await mountView({
+      channels: CHANNELS,
+      groups: [{ ...GROUP, enabled: false }],
+      topics: [topic('sales_report', '销售报表', [], {
+        channels: [],
+        groups: [{ id: 7, name: '日报群组', enabled: false }],
+      })],
+    })
+    await openTab(wrapper, '订阅')
+
+    const cell = groupCells(wrapper)[1]
+    expect(cell.find('button[role=checkbox]').exists()).toBe(false)
+    expect(cell.text()).toContain('已停用（订阅保留）')
+
+    await cell.trigger('click')
+    await flushPromises()
+    expect(fetchMock.calls.filter((call) => call.method === 'POST')).toEqual([])
+    expect(wrapper.text()).toContain('到「渠道」tab 启用这个群组后就会恢复投递')
+  })
+
+  // 仅经群组订的那一格只读：直接取消勾选写的是「渠道这一条停用」，群组仍然覆盖它，
+  // 重载之后还是勾着（与票 04 同一种死交互）。
+  it('仅经群组订的渠道格子也只读，点它指路去群组那一行', async () => {
+    const { wrapper, fetchMock } = await mountView({
+      channels: CHANNELS,
+      groups: [GROUP],
+      topics: [topic('sales_report', '销售报表', [], {
+        channels: [{ id: 2, enabled: true, via_group: true }],
+        groups: [{ id: 7, name: '日报群组', enabled: true }],
+      })],
+    })
+    await openTab(wrapper, '订阅')
+
+    const cell = wrapper.find('table.wp-matrix').findAll('tbody tr')[0].findAll('td')[2]
+    expect(cell.find('button[role=checkbox]').exists()).toBe(false)
+    expect(cell.text()).toContain('经群组订阅')
+
+    await cell.trigger('click')
+    await flushPromises()
+    expect(fetchMock.calls.filter((call) => call.method === 'POST')).toEqual([])
+    expect(wrapper.text()).toContain('来自群组 「日报群组」')
+  })
+
+  it('渠道 > 8 的多选列表里同样有群组行', async () => {
+    const many = Array.from({ length: 9 }, (_, index) => channel(index + 1, `群 ${index + 1}`))
+    const { wrapper, fetchMock } = await mountView({
+      channels: many,
+      groups: [{ ...GROUP, member_channel_ids: [1, 2] }],
+      topics: [topic('sales_report', '销售报表', [])],
+    })
+    await openTab(wrapper, '订阅')
+
+    // 多渠道时渠道矩阵换成多选列表，但「群组整体订阅」那一块还在。
+    expect(wrapper.findAll('.luyun-check-row').length).toBe(0)  // 还没选内容
+    const table = wrapper.find('table.wp-group-matrix')
+    expect(table.exists()).toBe(true)
+
+    await table.find('tbody tr').findAll('td')[1].trigger('click')
+    await flushPromises()
+    const posts = fetchMock.calls.filter((call) => call.method === 'POST')
+    expect(posts).toHaveLength(1)
+    expect(JSON.parse(posts[0].body)).toEqual({
+      topic_id: 'sales_report', target_group_id: 7, enabled: true,
+    })
+  })
+
+  it('「含群组订阅」徽章点开说清是哪个群组带来的哪几类订阅', async () => {
+    const { wrapper } = await mountView({
+      channels: [channel(2, '日报群', {
+        topics: [{ id: 'sales_report', name: '销售报表', via_group: true }],
+      })],
+      groups: [{ ...GROUP, member_channel_ids: [2] }],
+      topics: [topic('sales_report', '销售报表', [], {
+        channels: [{ id: 2, enabled: true, via_group: true }],
+        groups: [{ id: 7, name: '日报群组', enabled: true }],
+      })],
+    })
+
+    // 渠道卡在默认的「渠道」tab 上
+    const badge = wrapper.findAll('.badge').find((node) => node.text() === '含群组订阅')
+    expect(badge).toBeTruthy()
+    await badge.trigger('click')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('含群组订阅：销售报表（来自群组 「日报群组」）')
   })
 })

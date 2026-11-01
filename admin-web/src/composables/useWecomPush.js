@@ -12,7 +12,7 @@ import { api } from '../api/client'
  * `admin-web/src/composables/__tests__/useWecomPushSubscriptions.test.js`
  * 与 `tests/test_wecom_push_channels_api.py`。
  */
-export const WECOM_PUSH_API_VERSION = 'v4'
+export const WECOM_PUSH_API_VERSION = 'v5'
 
 /**
  * 订阅视图切「多选列表」的渠道数阈值。
@@ -390,7 +390,94 @@ export function matrixCellState(row, channel) {
   return subscribed ? 'subscribed' : 'unsubscribed'
 }
 
-/** 某一行的零订阅判定：一个**可投递**的渠道都没有，就是这类内容当前一条都不发。/** 某一行的零订阅判定：一个**可投递**的渠道都没有，就是这类内容当前一条都不发。
+/** 订阅矩阵里的群组（票 08）：`{id, name, enabled, member_channel_ids}`。
+ *
+ * 读接口（`/subscriptions` 与 `/webhooks`）都带这一份；页面据此画「群组整体订阅」那些行
+ * —— 「勾一次 = 这个组里的渠道一起订」的后端能力早就有（`target_group_id`），缺的只是
+ * 一个入口。
+ */
+export function matrixGroups(matrix) {
+  return (matrix && matrix.groups) || []
+}
+
+/** 群组的成员渠道 id（后端给的是排好序的整数数组）。 */
+export function groupMemberIds(group) {
+  return ((group && group.member_channel_ids) || []).map(Number)
+}
+
+/** 某一行内容是不是被这个群组**整组**订了（不展开成员，只看那一行订阅在不在）。 */
+export function topicGroupSubscribed(row, groupId) {
+  return ((row && row.groups) || []).some((group) => Number(group.id) === Number(groupId))
+}
+
+/** 这一行里**单独**订了的渠道 id（不经群组）：半选判定要拿它和群组成员做差。 */
+function topicDirectChannelIds(row) {
+  return ((row && row.channels) || [])
+    .filter((channel) => channel
+      && channel.id !== undefined && channel.id !== null
+      && !channel.via_group)
+    .map((channel) => Number(channel.id))
+}
+
+/**
+ * 群组一格的勾选态（票 08）：`subscribed` / `partial` / `unsubscribed` /
+ * `group-disabled` / `group-disabled-subscribed`。
+ *
+ * - `subscribed`：这个群组对这类内容是整组订着的；
+ * - `partial`（半选）：整组没订，但组里有**一部分**成员被单独订了 —— 勾一次等于把整组补齐；
+ * - `group-disabled*`：群组自己停着。订阅还在、投递暂停，格子只读，与停用渠道同一套语义
+ *   （后端 `resolve_targets` 对停用群组整组跳过）。
+ *
+ * 一个成员都没订才叫未勾：只要有一个成员被单独订了，画成未勾会让下一次点勾「看起来没变化」
+ * 却真的改了订阅。
+ */
+export function groupCellState(row, group) {
+  if (!group || group.id === undefined || group.id === null) return 'unsubscribed'
+  const covered = topicGroupSubscribed(row, group.id)
+  if (!group.enabled) return covered ? 'group-disabled-subscribed' : 'group-disabled'
+  if (covered) return 'subscribed'
+  const members = groupMemberIds(group)
+  const direct = topicDirectChannelIds(row)
+  const hit = members.filter((channelId) => direct.includes(channelId))
+  if (hit.length && hit.length < members.length) return 'partial'
+  return 'unsubscribed'
+}
+
+/** 这一格是不是**仅**经群组订的（票 08）：是的话取消勾选写不到群组那一行，格子只读。 */
+export function topicChannelViaGroup(row, channelId) {
+  const entry = ((row && row.channels) || []).find((channel) => channel
+    && channel.id !== undefined && channel.id !== null
+    && Number(channel.id) === Number(channelId))
+  return Boolean(entry && entry.via_group)
+}
+
+/** 这条订阅是哪个群组带来的：给定内容类型那一行与群组名单，返回命中它的群组。 */
+export function channelGroupSources(row, channelId, groups) {
+  const channel = Number(channelId)
+  return (groups || []).filter((group) => groupMemberIds(group).includes(channel)
+    && topicGroupSubscribed(row, group.id))
+}
+
+/**
+ * 「含群组订阅」徽章点开时的文本（票 08）：哪个群组、带来了哪几类内容的订阅。
+ *
+ * 以前这枚徽章只是告诉你「有群组来的」，点不开也说不出是谁 —— 群组一多就只能靠猜。
+ */
+export function channelGroupSubscriptionText(channel, matrix) {
+  const viaTopics = ((channel && channel.topics) || []).filter((topic) => topic && topic.via_group)
+  if (!viaTopics.length) return ''
+  const rows = matrixTopics(matrix)
+  const groupList = matrixGroups(matrix)
+  const parts = viaTopics.map((topic) => {
+    const row = rows.find((item) => item.id === topic.id) || null
+    const names = channelGroupSources(row, channel.id, groupList)
+      .map((group) => `「${group.name || group.id}」`)
+    return `${topic.name || topic.id}（来自群组 ${names.join('、') || '未知'}）`
+  })
+  return `含群组订阅：${parts.join('；')}`
+}
+
+/** 某一行的零订阅判定：一个**可投递**的渠道都没有，就是这类内容当前一条都不发。
  *
  * 「订阅了但渠道停着」也算零订阅 —— 投递会跳过停用渠道（出站记 skipped），页面上不
  * 亮出来，店长会以为还在发（用户故事 9 要的正是这个可见性）。
@@ -776,7 +863,11 @@ export function useWecomPush() {
     channels.value = data.channels || []
     groups.value = data.groups || []
     topics.value = data.topics || []
-    matrix.value = { topics: data.topics || [], channels: data.channels || [] }
+    matrix.value = {
+      topics: data.topics || [],
+      channels: data.channels || [],
+      groups: data.groups || [],
+    }
   }
 
   async function loadSubscriptions() {
@@ -784,7 +875,11 @@ export function useWecomPush() {
     // 每条读接口都带着自己的接口版本：整页只在启动时拉一次 /meta，页面开着不动的
     // 那段时间里后端换了版本的话，只有这里能看出来（提示条是同一份文案，不阻断）。
     if (data.api_version) meta.value = { ...meta.value, api_version: data.api_version }
-    matrix.value = { topics: data.topics || [], channels: data.channels || [] }
+    matrix.value = {
+      topics: data.topics || [],
+      channels: data.channels || [],
+      groups: data.groups || [],
+    }
     if (!topics.value.length) topics.value = data.topics || []
     if (!channels.value.length) channels.value = data.channels || []
     return matrix.value

@@ -9,6 +9,8 @@ import {
   deliveryStatusLabel, deliveryErrorSummary, formatDeliveryTime,
   deliveryTriggerLabel, deliveryTaskLabel,
   matrixCellState, topicSubscribedChannelIds,
+  matrixGroups, groupMemberIds, groupCellState, topicChannelViaGroup,
+  channelGroupSources, channelGroupSubscriptionText,
   auditActionLabel,
   auditObjectLabel, auditVisibleFields, auditChangeText,
 } from '../composables/useWecomPush'
@@ -196,6 +198,8 @@ const sendTargetNames = computed(() => sendNowTargetNames({
 const isMultiSelectView = computed(() => viewMode.value === 'multi-select')
 const matrixRows = computed(() => matrix.value.topics || [])
 const matrixColumns = computed(() => matrix.value.channels || [])
+// 群组整体订阅的那些行（票 08）：行 = 群组、列 = 内容类型。
+const matrixGroupRows = computed(() => matrixGroups(matrix.value))
 // 某个内容类型当前勾了哪些渠道：判据在 composable 里（`subscribedChannelIds` →
 // `topicActiveChannelIds`），矩阵与多选列表共用同一份 —— 徽章「N 个渠道」数的就是它。
 const subscriptionIds = computed(() => {
@@ -247,7 +251,82 @@ function handleMatrixCellClick(row, channel, event) {
     flashDisabledChannelSubscription(row, channel)
     return
   }
+  // 票 08：仅经群组订的那一格同样只读 —— 直接取消勾选写的是「渠道这一条停用」，
+  // 群组仍然覆盖它，重载之后还是勾着（死交互）。要说清楚去哪儿取消。
+  if (topicChannelViaGroup(row, channel.id)) {
+    flashViaGroupSubscription(row, channel)
+    return
+  }
   handleToggleSubscription(row, channel)
+}
+
+/** 群组行的格子标签 / id（票 08）：读屏要能听出「哪个群组、订的哪类内容」。 */
+function groupCellLabel(row, group) {
+  return `${group.name || group.id} 整体订阅 ${row.name}`
+}
+function groupCellId(row, group) {
+  return `wp-group-matrix-${row.id}-${group.id}`
+}
+
+/** 点群组格子（票 08）：整格都是热区，理由同 `handleMatrixCellClick`（U3）。 */
+function handleGroupCellClick(row, group, event) {
+  if (event.target && event.target.closest && event.target.closest('.luyun-checkbox')) return
+  if (!group.enabled) {
+    flashDisabledGroupSubscription(row, group)
+    return
+  }
+  handleToggleGroupSubscription(row, group)
+}
+
+/** 群组停用的格子被点：订阅还在不在、去哪儿启用（与停用渠道同一套说法）。 */
+function flashDisabledGroupSubscription(row, group) {
+  const kept = groupCellState(row, group) === 'group-disabled-subscribed'
+  flash(kept
+    ? `群组「${group.name || group.id}」已停用：整组的订阅还留着，到「渠道」tab 启用这个群组后就会恢复投递`
+    : `群组「${group.name || group.id}」已停用：启用后才能整组订阅`)
+}
+
+/** 「经群组订阅」的格子被点：说清楚这条订阅是哪来的、去哪儿取消（票 08）。 */
+function flashViaGroupSubscription(row, channel) {
+  const names = channelGroupSources(row, channel.id, matrixGroupRows.value)
+    .map((group) => `「${group.name || group.id}」`)
+  flash(`「${channel.name}」收「${row.name}」的这条订阅来自群组 ${names.join('、') || '（未知）'} `
+    + '的整体订阅：在下面「群组整体订阅」里取消那一格，或去群组里移除这个渠道')
+}
+
+/**
+ * 勾 / 取消「整组订阅」（票 08）：一次写一行 `target_group_id`，展开成哪些渠道由后端
+ * 求解（`resolve_targets` 已做并集去重 —— 同一渠道被直接订阅与群组订阅同时命中只投一次）。
+ *
+ * 半选（`partial`）时点一下等于「补齐整组」：向 enabled=true 走，与全未勾时同一个方向。
+ */
+async function handleToggleGroupSubscription(row, group) {
+  const state = groupCellState(row, group)
+  if (state === 'group-disabled' || state === 'group-disabled-subscribed') {
+    flashDisabledGroupSubscription(row, group)
+    return
+  }
+  const enabled = state !== 'subscribed'
+  try {
+    await toggleSubscription({ topicId: row.id, groupId: group.id, enabled })
+    flash(enabled
+      ? `已把「${row.name}」整组订阅给「${group.name || group.id}」`
+      : `已取消群组「${group.name || group.id}」对「${row.name}」的整组订阅`, 'success')
+  } catch (e) { flash(e.message, 'error') }
+}
+
+/** 多选列表里点只读的那一行（停用渠道 / 经群组订阅）：给去处，不静默。 */
+function handleMultiSelectRowClick(channel) {
+  if (!channel.enabled) flashDisabledChannelSubscription(pickedTopicRow.value, channel)
+  else if (topicChannelViaGroup(pickedTopicRow.value, channel.id)) {
+    flashViaGroupSubscription(pickedTopicRow.value, channel)
+  }
+}
+
+/** 「含群组订阅」徽章点开（票 08）：列出是哪个群组带来的哪几类订阅。 */
+function handleChannelGroupBadge(channel) {
+  const text = channelGroupSubscriptionText(channel, matrix.value)
+  flash(text || `渠道「${channel.name}」没有经群组带来的订阅`)
 }
 
 /**
@@ -593,7 +672,18 @@ onMounted(async () => {
               </div>
               <div style="color:var(--text-dim);font-size:12px">
                 订阅内容：{{ channelTopicNames(item) || '未订阅任何内容' }}
-                <span v-if="(item.topics || []).some((t) => t.via_group)" class="badge" style="margin-left:4px">含群组订阅</span>
+                <!-- 票 08：这枚徽章点得开 —— 说出是哪个群组带来了哪几类订阅。 -->
+                <span
+                  v-if="(item.topics || []).some((t) => t.via_group)"
+                  class="badge wp-badge-btn"
+                  style="margin-left:4px"
+                  role="button"
+                  tabindex="0"
+                  :aria-label="`「${item.name}」含群组订阅，点开看是哪个群组带来的`"
+                  @click="handleChannelGroupBadge(item)"
+                  @keydown.enter.prevent="handleChannelGroupBadge(item)"
+                  @keydown.space.prevent="handleChannelGroupBadge(item)"
+                >含群组订阅</span>
               </div>
               <div style="color:var(--text-dim);font-size:12px">最近一次发送成功：{{ formatSentAt(item) }}</div>
               <div v-if="item.job_count" style="color:var(--text-dim);font-size:12px">被 {{ item.job_count }} 条推送任务引用</div>
@@ -750,6 +840,10 @@ onMounted(async () => {
                           ? '已停用（订阅保留）'
                           : '已停用'
                       }}</span>
+                      <!-- 票 08：仅经群组订的那一格也只读 —— 直接取消勾选写的是「渠道这一条
+                           停用」，群组仍然覆盖它，重载之后还是勾着。 -->
+                      <span v-else-if="topicChannelViaGroup(row, channel.id)" class="wp-matrix-off"
+                        >经群组订阅</span>
                       <span v-else class="wp-matrix-hit">
                         <LuyunCheckbox
                           :id="matrixCellId(row, channel)"
@@ -804,14 +898,17 @@ onMounted(async () => {
                 v-for="channel in matrixColumns"
                 :key="channel.id"
                 class="luyun-check-row"
-                :class="{ 'is-off': !channel.enabled }"
-                @click="!channel.enabled && flashDisabledChannelSubscription(pickedTopicRow, channel)"
+                :class="{ 'is-off': !channel.enabled || topicChannelViaGroup(pickedTopicRow, channel.id) }"
+                @click="handleMultiSelectRowClick(channel)"
               >
                 <span v-if="!channel.enabled" class="wp-matrix-off">{{
                   matrixCellState(pickedTopicRow, channel) === 'disabled-subscribed'
                     ? '已停用（订阅保留）'
                     : '已停用'
                 }}</span>
+                <!-- 票 08：仅经群组订的渠道在多选列表里也只读（同一份状态，另一种渲染）。 -->
+                <span v-else-if="topicChannelViaGroup(pickedTopicRow, channel.id)" class="wp-matrix-off"
+                  >经群组订阅</span>
                 <LuyunCheckbox
                   v-else
                   :model-value="(multiSelect.channelIds || []).includes(channel.id)"
@@ -831,6 +928,63 @@ onMounted(async () => {
             <p v-else style="color:var(--text-dim);font-size:12px;margin-top:12px">先选一类内容，再勾渠道。</p>
           </template>
         </template>
+
+        <!-- 群组整体订阅（票 08）：勾一次 = 这个组里的渠道一起订。渠道 ≤8 的矩阵与 >8 的
+             多选列表都保留这一块 —— 渠道一多，更需要「一次订一组」而不是挨个点。 -->
+        <div v-if="matrixGroupRows.length" class="wp-group-block">
+          <div class="panel-title" style="margin-top:16px">
+            <span>群组整体订阅</span>
+            <span style="color:var(--text-dim);font-size:12px">
+              {{ matrixGroupRows.length }} 个群组 · 勾一次，这个组里的渠道一起订
+            </span>
+          </div>
+          <div class="data-table-wrap luyun-scrollbar">
+            <table class="data-table wp-matrix wp-group-matrix">
+              <thead>
+                <tr>
+                  <th style="cursor:default">群组</th>
+                  <th v-for="row in matrixRows" :key="row.id" style="cursor:default">{{ row.name }}</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="group in matrixGroupRows" :key="group.id">
+                  <td>
+                    <strong>{{ group.name }}</strong>
+                    <span v-if="!group.enabled" class="badge" style="margin-left:6px;color:var(--yellow);border-color:var(--yellow)">群组停用</span>
+                    <div style="color:var(--text-dim);font-size:11px">{{ groupMemberIds(group).length }} 个渠道</div>
+                  </td>
+                  <td
+                    v-for="row in matrixRows"
+                    :key="row.id"
+                    class="wp-matrix-cell"
+                    @click="handleGroupCellClick(row, group, $event)"
+                  >
+                    <!-- 群组停用时整组订阅暂停（后端对停用群组整组跳过）：格子只读，
+                         订阅还在就写「已停用（订阅保留）」，与停用渠道同一套语义。 -->
+                    <span v-if="!group.enabled" class="wp-matrix-off">{{
+                      groupCellState(row, group) === 'group-disabled-subscribed'
+                        ? '已停用（订阅保留）'
+                        : '已停用'
+                    }}</span>
+                    <span v-else class="wp-matrix-hit">
+                      <LuyunCheckbox
+                        :id="groupCellId(row, group)"
+                        :model-value="groupCellState(row, group) === 'subscribed'"
+                        :indeterminate="groupCellState(row, group) === 'partial'"
+                        :aria-label="groupCellLabel(row, group)"
+                        @update:model-value="() => handleToggleGroupSubscription(row, group)"
+                      />
+                    </span>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p style="color:var(--text-dim);font-size:12px;margin:8px 0 0">
+            群组里只有一部分渠道被单独订阅时，这一格是半选：勾一次把整组补齐。
+            群组停用时订阅还在、投递暂停，到「渠道」tab 启用这个群组即可恢复。
+          </p>
+        </div>
 
         <!-- 票 04：这段原来写「渠道停用时订阅保留、投递跳过」，但停用渠道那几格看起来
              就是未勾 —— 文案与画面互相打脸。现在停用格是只读标记，文案照实说。 -->
@@ -1372,6 +1526,12 @@ onMounted(async () => {
   border-radius: 6px;
 }
 .luyun-check-row.is-off { cursor: help; }
+
+/* 票 08：群组整体订阅那一块（与渠道矩阵同一种表格，只是行是群组）。 */
+.wp-group-block .panel-title { align-items: baseline; }
+/* 「含群组订阅」徽章点了才有内容：光标与键盘焦点都要看得出来它是个入口。 */
+.wp-badge-btn { cursor: pointer; }
+.wp-badge-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 /* 多选列表里「先选内容类型」的那一列按钮：选中态要看得出来。 */
 .wp-pick-row {

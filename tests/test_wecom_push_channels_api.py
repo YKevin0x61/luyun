@@ -419,7 +419,7 @@ def test_subscription_matrix_rows_are_topics_and_columns_are_channels(api):
         "resource_watermark",
     ]
     assert rows["sales_report"]["channels"] == [
-        {"id": channel["id"], "enabled": True}
+        {"id": channel["id"], "enabled": True, "via_group": False}
     ]
     assert rows["hygiene_photo"]["contains_employee_photos"] is True
     assert rows["sales_report"]["contains_employee_photos"] is False
@@ -493,6 +493,144 @@ def test_subscribing_a_group_delivers_to_its_members(api):
     # 渠道卡片要看得出来这条订阅是经群组来的
     cards = api.as_session("GET", f"{API_PREFIX}/webhooks").json()["channels"]
     assert cards[0]["topics"][0]["via_group"] is True
+
+
+def test_subscription_matrix_carries_group_rows_and_via_group(api):
+    """票 08：矩阵画得出「群组」那一行 —— 读接口要说清整组订了哪些内容、哪几格是群组来的。"""
+    channel_a = _create_channel(api, name="门店群")
+    channel_b = _create_channel(api, name="日报群", url=WEBHOOK_URL_B)
+    group = api.as_session(
+        "POST", f"{API_PREFIX}/channel-groups", json={"name": "日报群组"}
+    ).json()["group"]
+    for channel in (channel_a, channel_b):
+        api.as_session(
+            "POST",
+            f"{API_PREFIX}/channel-groups/{group['id']}/members",
+            json={"channel_id": channel["id"]},
+        )
+
+    subscribed = api.as_session(
+        "POST",
+        f"{API_PREFIX}/subscriptions",
+        json={"topic_id": "sales_report", "target_group_id": group["id"]},
+    )
+    assert subscribed.status_code == 200, subscribed.text
+
+    payload = api.as_session("GET", f"{API_PREFIX}/subscriptions").json()
+
+    # 群组与成员：「群组整体订阅」那块一次画全（行 = 群组、列 = 内容类型）。
+    assert payload["groups"] == [{
+        "id": group["id"],
+        "name": "日报群组",
+        "enabled": True,
+        "notes": "",
+        "member_channel_ids": [channel_a["id"], channel_b["id"]],
+    }]
+    rows = {row["id"]: row for row in payload["topics"]}
+    assert rows["sales_report"]["groups"] == [
+        {"id": group["id"], "name": "日报群组", "enabled": True}
+    ]
+    # 群组展开成成员渠道，且标着「经群组来的」（页面据此把那一格画成只读）。
+    assert rows["sales_report"]["channels"] == [
+        {"id": channel_a["id"], "enabled": True, "via_group": True},
+        {"id": channel_b["id"], "enabled": True, "via_group": True},
+    ]
+    # 没被整组订的其他内容类型：groups 空（不凭空多出一个勾）。
+    assert rows["hygiene_photo"]["groups"] == []
+
+    # 同一个渠道再直接订一次：这一格改成「直接订的」，群组那一行仍整组订着 —— 两条路径
+    # 并存是合法的（投递只算一次，见下一个用例）。
+    api.as_session(
+        "POST",
+        f"{API_PREFIX}/subscriptions",
+        json={"topic_id": "sales_report", "target_channel_id": channel_a["id"]},
+    )
+    rows = {
+        row["id"]: row
+        for row in api.as_session("GET", f"{API_PREFIX}/subscriptions").json()["topics"]
+    }
+    assert rows["sales_report"]["channels"] == [
+        {"id": channel_a["id"], "enabled": True, "via_group": False},
+        {"id": channel_b["id"], "enabled": True, "via_group": True},
+    ]
+    assert rows["sales_report"]["groups"] == [
+        {"id": group["id"], "name": "日报群组", "enabled": True}
+    ]
+
+
+def test_a_disabled_group_keeps_its_subscription_on_the_matrix(api):
+    """群组停用 = 整组投递暂停，但订阅还在：矩阵上要显示得出「已停用（订阅保留）」。"""
+    channel = _create_channel(api, name="门店群")
+    group = api.as_session(
+        "POST", f"{API_PREFIX}/channel-groups", json={"name": "日报群组"}
+    ).json()["group"]
+    api.as_session(
+        "POST",
+        f"{API_PREFIX}/channel-groups/{group['id']}/members",
+        json={"channel_id": channel["id"]},
+    )
+    api.as_session(
+        "POST",
+        f"{API_PREFIX}/subscriptions",
+        json={"topic_id": "sales_report", "target_group_id": group["id"]},
+    )
+    api.as_session(
+        "PUT",
+        f"{API_PREFIX}/channel-groups/{group['id']}",
+        json={"name": "日报群组", "enabled": False},
+    )
+
+    rows = {
+        row["id"]: row
+        for row in api.as_session("GET", f"{API_PREFIX}/subscriptions").json()["topics"]
+    }
+    # 订阅行还在（页面据此说「订阅保留」），但不再展开成成员（与 resolve_targets 同口径）。
+    assert rows["sales_report"]["groups"] == [
+        {"id": group["id"], "name": "日报群组", "enabled": False}
+    ]
+    assert rows["sales_report"]["channels"] == []
+
+
+def test_a_group_subscription_delivers_once_when_a_member_is_also_subscribed(api):
+    """票 08 验收：整组订阅 + 成员单独订阅同时命中时，只投递一次（GLOSSARY「只投递一次」）。"""
+    import asyncio
+
+    from database import DatabaseManager
+    from services.wecom_outbox import resolve_targets
+
+    channel_a = _create_channel(api, name="门店群")
+    channel_b = _create_channel(api, name="日报群", url=WEBHOOK_URL_B)
+    group = api.as_session(
+        "POST", f"{API_PREFIX}/channel-groups", json={"name": "日报群组"}
+    ).json()["group"]
+    for channel in (channel_a, channel_b):
+        api.as_session(
+            "POST",
+            f"{API_PREFIX}/channel-groups/{group['id']}/members",
+            json={"channel_id": channel["id"]},
+        )
+    api.as_session(
+        "POST",
+        f"{API_PREFIX}/subscriptions",
+        json={"topic_id": "sales_report", "target_group_id": group["id"]},
+    )
+    api.as_session(
+        "POST",
+        f"{API_PREFIX}/subscriptions",
+        json={"topic_id": "sales_report", "target_channel_id": channel_a["id"]},
+    )
+
+    async def _targets():
+        db = DatabaseManager()
+        assert await db.connect()
+        try:
+            return [target.channel_id for target in await resolve_targets(db, "sales_report")]
+        finally:
+            await db.close()
+
+    targets = asyncio.run(_targets())
+    assert sorted(targets) == [channel_a["id"], channel_b["id"]]
+    assert len(targets) == len(set(targets))
 
 
 def test_unchecking_a_subscription_stops_delivery(api):

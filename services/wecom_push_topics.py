@@ -76,9 +76,12 @@ WEEKDAY_SHORT_LABELS = {value: label.replace("周", "") for value, label in WEEK
 # v4（发送记录补「哪条任务」）：`/logs` 的每一行多了 `schedule_id` / `job_name` /
 # `trigger`，`/logs` 多了 `job_id` 筛选。加法，但页面要加一列才回答得出「这是哪条任务
 # 发的」，所以 +1。
+# v5（群组整体订阅）：`/subscriptions` 多了 `groups`（群组与成员），`topics[]` 每行多了
+# `groups`（整组订了这一行的群组），`topics[].channels[]` 每项多了 `via_group`。加法，
+# 但页面要靠它们才画得出「群组」那一行、并把「经群组订阅」的格子画成只读，所以 +1。
 # 前端那一半在 `admin-web/src/composables/useWecomPush.js`（`WECOM_PUSH_API_VERSION`），
 # 两处由 `admin-web/src/composables/__tests__/useWecomPushSubscriptions.test.js` 钉住。
-WECOM_PUSH_API_VERSION = "v4"
+WECOM_PUSH_API_VERSION = "v5"
 
 
 
