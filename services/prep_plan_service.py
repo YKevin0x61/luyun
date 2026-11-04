@@ -26,7 +26,7 @@ import hashlib
 import json
 import logging
 import math
-from bisect import bisect_left, bisect_right
+from bisect import bisect_left
 from collections import defaultdict
 from datetime import date, datetime, time, timedelta
 from typing import Any, Dict, List, Optional, Tuple
@@ -46,13 +46,17 @@ FORECAST_SETTINGS_KEY = "prep_plan_forecast"
 FALLBACK_RUNTIME_SETTINGS_KEY = "scraper_runtime"
 LOUMIAN_STATION = "loumian"
 
-# 预测口径（ADR 0120：少剩货优先，取需求分布的 p40，不再加任何安全缓冲）
+# 预测口径（ADR 0128：分品分档取需求分位，不加任何安全缓冲）
 #
-# 为什么不加缓冲：24 小时保质 + 不能结转，多做出来的就是报废。实测（90 个营业日、8 周
-# 同星期几、07:00 快照）「单边多出」随分位的变化是：p30 12.0% / p40 15.7% / 均量 20.2%
-# / p80 36.3%。上一轮的 conformal 缓冲为了「九成够卖」把净多做推到 +76.7%，与新鲜度直接冲突。
-FORECAST_QUANTILE = 0.40       # 取需求分位；0.4 = 剩货 15.7%、缺货 21.6%
-FORECAST_WINDOW_WEEKS = 8      # 同星期几取近 8 周（p40 在 4 个样本上估不稳）
+# 2026-11-04 用 8 天真实快照复盘（548 品-天、07:00）：p40 把缺货推到 20.2%、单边多出只有
+# 4.2%——缺货是多出的 4.8 倍，已经从「多做 76.7%」弹到另一头。改成分品分档：
+#   · 主力品（占全部配料订单行 ≥ 2%）取 p70：缺货 13.5% / 多出 9.1%（实测反事实）
+#   · 其余取 p50：p50 整体缺货 16.4% / 多出 6.0%
+# 两个分位都仍低于「均量」口径的多出水平，所以没有回到多做的那一头。
+FORECAST_QUANTILE = 0.50          # 非主力品：需求分位
+FORECAST_QUANTILE_MAJOR = 0.70    # 主力品：需求分位
+MAJOR_ITEM_LINE_SHARE = 0.02      # 主力品判据：占全部配料订单行 ≥ 2%
+FORECAST_WINDOW_WEEKS = 8         # 同星期几取近 8 周（分位在 4 个样本上估不稳）
 STORE_FACTOR_SHORT_DAYS = 7    # 整店水位：近 7 天 …
 STORE_FACTOR_LONG_DAYS = 21    # … 对前 21 天
 # 水位限幅收到 ±15%：趋势修正是真需求，但 ±30% 对「少剩货」太激进
@@ -60,9 +64,15 @@ STORE_FACTOR_MIN = 0.75
 STORE_FACTOR_MAX = 1.30
 # 参考值的时间跨度：现在起的未来 24 小时（与保质期对齐，见 ADR 0122）
 FORECAST_HORIZON_HOURS = 24
-# 偶发品下限：近 7 天卖出过的品，建议量至少 1 个单位，否则 p40 会让长尾品静默消失
+# 偶发品下限：近 7 天卖出过的品，建议量至少 1 个单位，否则分位会让长尾品静默消失
 SPARSE_FLOOR_DAYS = 7
 SPARSE_FLOOR_QTY = 1.0
+# 候选日全为 0、但近 14 天同时段其实有量时，退回 14 天均值 × 水位。
+# 覆盖「新品只有最近两周有量」「候选日恰好都撞上采集断档」这一类——不给 0 让人误以为不用做。
+STALE_FALLBACK_DAYS = 14
+
+# 复盘页的主口径钟点：师傅真正下单备货的时刻，其余钟点只是「越晚越不准」的参照
+_PRIMARY_CLOCK = "07:00"
 
 # 配方岗位 → 档口（沿用旧口径；半成品规则里 position 用的就是这一套名字）
 # 岗位 = 备货品「谁做的」，不是档口本身：多个岗位可以归到同一个档口
@@ -84,7 +94,7 @@ POSITION_STATION_MAP = {
 def _quantile(values: List[float], q: float) -> float:
     """经验分位（线性插值）。
 
-    ADR 0120 起建议量取需求分布的 p40：少剩货优先，不加任何安全缓冲。
+    ADR 0128 起按品分档取分位（主力品 p70 / 其余 p50），不加任何安全缓冲。
     24 小时保质下多做出来的就是报废，缓冲的代价是真金白银。
     """
     if not values:
@@ -127,10 +137,28 @@ class _UsageIndex:
     def days(self) -> set:
         return set(self._raw)
 
+    def nonzero_keys(self) -> set:
+        """回看期内真正算出过正量的备货品键。
+
+        用来识别「配方条目在、菜也在卖，但系数被存成 0 / 明细被清空」——这种品会静默
+        算成 0，2026-10-27 虾饺就这样参考值 0 而实卖 143 个。
+        """
+        return {
+            key
+            for (_day, key), rows in self._by_key.items()
+            if any(row[1] > 0 for row in rows)
+        }
+
     @staticmethod
     def _sum(rows, idx, start: int, end: int) -> float:
+        """`[start, end)` —— 右端是**开**区间。
+
+        24 小时滚动窗口的结束时刻正好落在一个整点上，右端若取闭区间，那条「次日同钟点」
+        的订单会被算进前一天的窗口（实测：08:00 与 09:00 两条快照，09:00 那条的候选量
+        凭空多出一天的量）。用 bisect_left 扣掉等于 end 的那些。
+        """
         lo = bisect_left(idx, start)
-        hi = bisect_right(idx, end)
+        hi = bisect_left(idx, end)
         if lo >= hi:
             return 0.0
         return sum(row[1] for row in rows[lo:hi])
@@ -231,7 +259,9 @@ class PrepPlanService:
             entry = {
                 "semi_name": row["semi_name"] or "",
                 "position": row["position"] or "",
-                "factor": float(row["factor"] or 1),
+                # 只有 NULL 才当 1；存成 0 就是「这一项永远算不出量」，不能静默当 1（那会让
+                # 系数填错一直不被发现）。存 0 的品由 compute_suggestions 标 broken_rule。
+                "factor": 1.0 if row["factor"] is None else float(row["factor"]),
                 "unit": row["unit"] or "",
             }
             exact[row["dish_name"] or ""].append(entry)
@@ -342,10 +372,17 @@ class PrepPlanService:
         cfg = raw if isinstance(raw, dict) else {}
         quantile = float(cfg.get("quantile", FORECAST_QUANTILE))
         quantile = min(max(quantile, 0.05), 0.95)
+        quantile_major = float(cfg.get("quantile_major", FORECAST_QUANTILE_MAJOR))
+        quantile_major = min(max(quantile_major, 0.05), 0.95)
+        major_share = float(cfg.get("major_share", MAJOR_ITEM_LINE_SHARE))
+        major_share = min(max(major_share, 0.0), 1.0)
         weeks = int(cfg.get("window_weeks") or FORECAST_WINDOW_WEEKS)
         weeks = min(max(weeks, 4), 12)
         return {
             "quantile": quantile,
+            # 主力品分位；把 major_share 配成 0 就等于全品统一用 quantile
+            "quantile_major": quantile_major,
+            "major_share": major_share,
             "window_weeks": weeks,
             # 水位要回看 28 天（7+21），同星期几要回看 weeks*7 天，取大者再加 1 天余量
             "lookback_days": max(weeks * 7, STORE_FACTOR_SHORT_DAYS + STORE_FACTOR_LONG_DAYS) + 1,
@@ -373,6 +410,10 @@ class PrepPlanService:
         items = await self._load_items(db)
 
         usage = _UsageIndex()
+        # 主力品判据用「订单行数」：跨单位可比（个/条/份/斤/包 不能直接相加），
+        # 含义也直白——有多少次被点到。
+        line_counts: Dict[Tuple[str, str], int] = {}
+        dish_lines: Dict[str, int] = {}
         for row in rows:
             parsed = self._order_datetime(row["order_time"])
             if parsed is None:
@@ -383,12 +424,17 @@ class PrepPlanService:
             usage.add_raw(day, epoch, qty)
             if qty == 0:
                 continue
+            dish_lines[row["dish_name"]] = dish_lines.get(row["dish_name"], 0) + 1
             dishes = exact_rules.get(row["dish_name"]) or norm_rules.get(
                 normalize_dish_name(row["dish_name"]), ()
             )
             for rule in dishes:
-                usage.add(day, (rule["semi_name"], rule["unit"]), epoch, qty * rule["factor"])
+                key = (rule["semi_name"], rule["unit"])
+                line_counts[key] = line_counts.get(key, 0) + 1
+                usage.add(day, key, epoch, qty * rule["factor"])
         usage.finalize()
+        total_lines = sum(line_counts.values()) or 1
+        mapped_keys = usage.nonzero_keys()
 
         days_with_orders = usage.days()
         today_candidates = [
@@ -398,6 +444,11 @@ class PrepPlanService:
         recent_days = [
             today - timedelta(days=i)
             for i in range(1, SPARSE_FLOOR_DAYS + 1)
+            if (today - timedelta(days=i)) in days_with_orders
+        ]
+        fallback_days = [
+            today - timedelta(days=i)
+            for i in range(1, STALE_FALLBACK_DAYS + 1)
             if (today - timedelta(days=i)) in days_with_orders
         ]
 
@@ -453,25 +504,51 @@ class PrepPlanService:
             for rules in exact_rules.values()
             for rule in rules
         }
+        # 每个备货品被哪些明细菜品引用：配方在、但这些菜近两周一条订单都没有时，
+        # 说明是「配方接不上菜」（系数被存成 0、明细被清空），不是真没需求。
+        rule_dishes: Dict[Tuple[str, str], set] = {}
+        for dish_name, rules in exact_rules.items():
+            for rule in rules:
+                rule_dishes.setdefault((rule["semi_name"], rule["unit"]), set()).add(dish_name)
+
         entries: List[dict] = []
         for item in items:
             key = (item["item_name"], item["unit"])
             has_rule = key in rule_index
+            line_share = line_counts.get(key, 0) / total_lines
+            quantile_used = (
+                cfg["quantile_major"] if line_share >= cfg["major_share"] else cfg["quantile"]
+            )
             values = [window_qty(day, key) for day in active_candidates]
+            fallback_applied = False
             if not has_rule:
                 demand_qty = 0.0
                 status = "missing_rule"
             elif not active_candidates:
                 demand_qty = 0.0
                 status = "no_history"
+            elif key not in mapped_keys and any(
+                dish_lines.get(name) for name in rule_dishes.get(key, ())
+            ):
+                # 配方条目在、明细菜品也在卖，但一整段回看期一条量都算不出来：
+                # 系数被存成 0 或明细被清空的典型形态。这种「静默 0」会真的少备一天货
+                # （2026-10-27 虾饺参考 0、实卖 143 个），宁可报出来让人确认。
+                demand_qty = 0.0
+                status = "broken_rule"
             else:
-                # 需求分位（p40）：少剩货优先，不加任何安全缓冲
-                demand_qty = round(max(0.0, _quantile(values, cfg["quantile"]) * factor), 1)
+                base = _quantile(values, quantile_used)
+                if base <= 0 and values:
+                    # 候选日全撞在淡日/采集断档上，但近两周其实有量：退回均值，不给 0
+                    usable = [q for q in (window_qty(dd, key) for dd in fallback_days) if q > 0]
+                    if usable:
+                        base = sum(usable) / len(usable)
+                        fallback_applied = True
+                demand_qty = round(max(0.0, base * factor), 1)
                 status = "ok"
 
             floor_applied = False
             if status in ("ok", "no_history") and demand_qty < SPARSE_FLOOR_QTY:
-                # p40 会把偶发品压成 0；近 7 天真的卖出过就保底 1 个单位
+                # 分位会把偶发品压成 0；近 7 天真的卖出过就保底 1 个单位
                 if any(window_qty(dd, key) > 0 for dd in recent_days):
                     demand_qty = SPARSE_FLOOR_QTY
                     floor_applied = True
@@ -508,10 +585,14 @@ class PrepPlanService:
                         ],
                         "active_days": len(active_candidates),
                         "store_factor": round(factor, 3),
-                        "quantile": cfg["quantile"],
+                        # 这一品实际用的分位（主力品 p70 / 其余 p50），页面按它显示档位
+                        "quantile": quantile_used,
+                        "is_major": line_share >= cfg["major_share"],
+                        "line_share": round(line_share, 4),
                         # 未扣在库的需求量：页面拿它显示「今天要卖多少」
                         "demand_qty": demand_qty,
                         "floor_applied": floor_applied,
+                        "fallback_applied": fallback_applied,
                     },
                     "history7": [
                         {
@@ -552,8 +633,13 @@ class PrepPlanService:
             "missing_rule": [
                 e["item_name"] for e in entries if e["basis"]["status"] == "missing_rule"
             ],
+            "broken_rule": [
+                e["item_name"] for e in entries if e["basis"]["status"] == "broken_rule"
+            ],
             "forecast": {
                 "quantile": cfg["quantile"],
+                "quantile_major": cfg["quantile_major"],
+                "major_share": cfg["major_share"],
                 "window_weeks": cfg["window_weeks"],
                 "store_factor": round(factor, 3),
             },
@@ -1027,14 +1113,19 @@ class PrepPlanService:
         return {"success": True, "windows": len(pending), "rows": written}
 
     async def get_snapshot_day(self, db, day: str) -> dict:
-        """某一天的快照 + 实际，按品聚合。复盘页的唯一数据源。"""
+        """某一天的快照 + 实际。复盘页的唯一数据源。
+
+        ADR 0129：**按快照钟点分组**给出，而不是按品聚合。同一品在 07:00 与 19:00 是
+        两个完全不同的 24 小时窗口，把一天的 24 个窗口平均掉会让误差互相抵消——
+        逐条预测全错也能平均出一个「偏差很小」的假象。复盘必须一条快照对一条实际。
+        """
         tdb = db.table("prep_plan_snapshots")
         async with tdb.conn.cursor() as cursor:
             await cursor.execute(
                 """
                 SELECT s.snapshot_at, s.window_start, s.prep_item_id, s.item_name,
                        s.unit, s.station, s.suggested_qty, s.final_qty, s.store_factor,
-                       s.rules_fingerprint, s.snapshot_at,
+                       s.rules_fingerprint, s.basis_json,
                        a.sold_qty, a.rules_fingerprint AS actual_fingerprint
                 FROM prep_plan_snapshots s
                 LEFT JOIN prep_plan_actuals a
@@ -1072,7 +1163,106 @@ class PrepPlanService:
                 }
             )
         items = sorted(by_item.values(), key=lambda b: (-len(b["hours"]), b["item_name"]))
-        return {"success": True, "day": day, "items": items, "rows": len(rows)}
+        snapshots = self._snapshot_groups(rows)
+        return {
+            "success": True,
+            "day": day,
+            "items": items,
+            "snapshots": snapshots,
+            "primary_clock": _PRIMARY_CLOCK if any(
+                g["clock"] == _PRIMARY_CLOCK for g in snapshots
+            ) else (snapshots[0]["clock"] if snapshots else None),
+            "rows": len(rows),
+        }
+
+    @staticmethod
+    def _snapshot_groups(rows) -> List[dict]:
+        """把一天的快照按「快照钟点」分组，并给每组算一份可判读的指标。
+
+        一条快照 = 一个 24 小时窗口的一次预测，只能跟**它自己那个窗口**的实际销量比。
+        同日不同钟点的窗口高度重叠（相邻两条重叠 23 小时），所以绝不能再平均。
+        """
+        groups: Dict[str, dict] = {}
+        for row in rows:
+            clock = str(row["snapshot_at"] or "")[11:16]
+            bucket = groups.setdefault(clock, {"clock": clock, "items": []})
+            try:
+                basis = json.loads(row["basis_json"]) if row["basis_json"] else {}
+            except (TypeError, ValueError):
+                basis = {}
+            sold = None if row["sold_qty"] is None else float(row["sold_qty"])
+            bucket["items"].append(
+                {
+                    "item_name": row["item_name"] or "",
+                    "unit": row["unit"] or "",
+                    "station": row["station"] or "",
+                    "suggested_qty": float(row["suggested_qty"] or 0),
+                    "final_qty": None if row["final_qty"] is None else float(row["final_qty"]),
+                    "sold_qty": sold,
+                    "store_factor": float(row["store_factor"] or 1),
+                    "quantile": basis.get("quantile"),
+                    "is_major": bool(basis.get("is_major")),
+                    "status": basis.get("status") or "ok",
+                    "same_rules": bool(
+                        sold is not None
+                        and (row["rules_fingerprint"] or "")
+                        == (row["actual_fingerprint"] or "")
+                    )
+                    if sold is not None
+                    else None,
+                }
+            )
+        out = []
+        for clock in sorted(groups):
+            group = groups[clock]
+            group["items"].sort(key=lambda i: -i["suggested_qty"])
+            group["summary"] = _summarise_snapshot(group["items"])
+            out.append(group)
+        return out
+
+
+def _summarise_snapshot(items: List[dict]) -> dict:
+    """够卖率 / 缺货量 / 多出量 / 参考·实际比。窗口未结束或配方变过的行不进指标。"""
+    # 配方改过的行不剔除，只计数标注：剔除会让「那天改过一次配方」的整天变成空白，
+    # 复盘页就没有数据可看（实际销量是按当前配方重算的，误差方向已知）。
+    usable = [i for i in items if i["sold_qty"] is not None]
+    pending = sum(1 for i in items if i["sold_qty"] is None)
+    drifted = sum(1 for i in usable if not i["same_rules"])
+    if not usable:
+        return {
+            "measured": 0,
+            "pending": pending,
+            "drifted": drifted,
+            "covered": None,
+            "sold_total": 0.0,
+            "suggested_total": 0.0,
+            "shortfall": 0.0,
+            "overfill": 0.0,
+            "shortfall_ratio": None,
+            "overfill_ratio": None,
+            "ref_ratio": None,
+        }
+    sold_total = sum(i["sold_qty"] for i in usable)
+    sugg_total = sum(i["suggested_qty"] for i in usable)
+    shortfall = sum(max(0.0, i["sold_qty"] - i["suggested_qty"]) for i in usable)
+    overfill = sum(max(0.0, i["suggested_qty"] - i["sold_qty"]) for i in usable)
+    covered = sum(1 for i in usable if i["suggested_qty"] >= i["sold_qty"])
+    # 实际一件没卖时比例没有分母：宁可是 None（页面显示「—」），
+    # 也不要拿 0 去伪装成「参考值是实际的无穷倍」或「缺货 0%」。
+    denom = sold_total if sold_total > 0 else None
+    return {
+        "measured": len(usable),
+        "pending": pending,
+        "drifted": drifted,
+        "covered": covered / len(usable),
+        "sold_total": round(sold_total, 1),
+        "suggested_total": round(sugg_total, 1),
+        "shortfall": round(shortfall, 1),
+        "overfill": round(overfill, 1),
+        "shortfall_ratio": None if denom is None else shortfall / denom,
+        "overfill_ratio": None if denom is None else overfill / denom,
+        "ref_ratio": None if denom is None else sugg_total / denom,
+    }
 
 
 prep_plan_service = PrepPlanService()

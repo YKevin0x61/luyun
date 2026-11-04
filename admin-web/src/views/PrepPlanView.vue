@@ -3,7 +3,17 @@ import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import MiniBarChart from '../components/prep/MiniBarChart.vue'
 import { api } from '../api/client'
 import { usePrepPlan } from '../composables/usePrepPlan'
-import { BASIS_HINT, COPIED_LABEL, COPY_LABEL, PREP_PLAN_TITLE } from '../utils/prepPlanCopy'
+import {
+  BASIS_HINT,
+  BROKEN_RULE_TEXT,
+  COPIED_LABEL,
+  COPY_LABEL,
+  MAJOR_TAG,
+  MISSING_RULE_TEXT,
+  NO_HISTORY_TEXT,
+  PREP_PLAN_TITLE,
+  STALE_FALLBACK_TEXT,
+} from '../utils/prepPlanCopy'
 import { buildPrepPlanText } from '../utils/prepPlanText'
 import { workbenchDocumentTitle } from '../utils/workbenchCopy'
 
@@ -114,24 +124,31 @@ function cancelEdit() {
   editingId.value = null
 }
 
-/** 展开后的公式说明：p40 → 整店水位 → 扣在库，三段都写出来。 */
+/**
+ * 展开后的公式说明：分位档 → 整店水位，几段都写出来。
+ * ADR 0128 起分位按品分档（大品 p70 / 其余 p50），basis.quantile 存的是这一品实际用的档。
+ */
 function basisFormula(entry) {
   const basis = entry.basis || {}
   const days = (basis.weekdays || []).length
-  const pct = Math.round(Number(basis.quantile || 0.4) * 100)
+  const pct = Math.round(Number(basis.quantile ?? 0.5) * 100)
   const factor = Number(basis.store_factor || 1)
-  const parts = [`这 ${days} 天同样钟点里偏保守的那档（p${pct}）`]
+  const tier = basis.is_major ? `p${pct}，${MAJOR_TAG}` : `p${pct}`
+  const parts = [`这 ${days} 天同样钟点里偏保守的那档（${tier}）`]
+  if (basis.fallback_applied) parts.push(STALE_FALLBACK_TEXT)
   if (Math.abs(factor - 1) >= 0.05) parts.push(`× 整店水位 ${factor.toFixed(2)}`)
   return parts.join(' ')
 }
 
 function basisText(entry) {
   const basis = entry.basis || {}
-  if (basis.status === 'missing_rule') return '没有配方系数，算不出建议量'
-  if (basis.status === 'no_history') return '近 8 周没有可比的同星期几'
+  if (basis.status === 'missing_rule') return MISSING_RULE_TEXT
+  if (basis.status === 'no_history') return NO_HISTORY_TEXT
+  if (basis.status === 'broken_rule') return BROKEN_RULE_TEXT
   const rows = (basis.weekdays || []).map((row) => `${row.day.slice(5)} ${row.qty}`)
   const base = rows.length ? `近 ${rows.length} 个同星期几：${rows.join(' / ')}` : ''
   const extras = []
+  if (basis.is_major) extras.push(MAJOR_TAG)
   const factor = Number(basis.store_factor || 1)
   if (Math.abs(factor - 1) >= 0.05) extras.push(`整店水位 ×${factor}`)
   return [base, ...extras].filter(Boolean).join('；')
@@ -265,7 +282,11 @@ watch(activeStation, () => {
             v-for="entry in group.entries"
             :key="entry.id"
             class="pp-row"
-            :class="{ 'is-zero': isZero(entry), 'is-staff': isStaff }"
+            :class="{
+              'is-zero': isZero(entry),
+              'is-staff': isStaff,
+              'is-broken': entry.basis?.status === 'broken_rule',
+            }"
             @click="isStaff && toggleExpand(entry)"
           >
             <!-- `.stop`：员工端整行（`li`）也挂了同一个展开动作。点名称时事件会先到这颗按钮、
@@ -273,6 +294,8 @@ watch(activeStation, () => {
                  只有点数字（穿透到行上）才开」。按钮自己停掉冒泡，每条路径就只toggle一次。 -->
             <button type="button" class="pp-row-main" @click.stop="toggleExpand(entry)">
               <span class="pp-name">{{ entry.item_name }}</span>
+              <i v-if="entry.basis?.is_major" class="pp-major">{{ MAJOR_TAG }}</i>
+              <i v-if="entry.basis?.status === 'broken_rule'" class="pp-broken">配方没接上</i>
               <span class="pp-caret" aria-hidden="true">{{ expandedId === entry.id ? '▾' : '▸' }}</span>
             </button>
 
@@ -555,6 +578,35 @@ watch(activeStation, () => {
 .pp-manual {
   font-size: var(--fs-11, 11px);
   font-style: normal;
+  color: var(--warn);
+}
+
+/* 大品标记：只标「这一档取的是 p70」，不参与排版权重 —— 它解释数字为什么偏高，
+   让人不用点开就知道哪几项是重点。 */
+.pp-major {
+  flex: 0 0 auto;
+  padding: 0 4px;
+  border-radius: 4px;
+  background: var(--line);
+  color: var(--ink-dim);
+  font-size: var(--fs-11, 11px);
+  font-style: normal;
+  line-height: 16px;
+}
+
+/* 配方断档：参考值算不出来但实际在卖，这一行就是「今天少备一天货」的入口。 */
+.pp-broken {
+  flex: 0 0 auto;
+  padding: 0 4px;
+  border-radius: 4px;
+  background: var(--warn-soft);
+  color: var(--warn);
+  font-size: var(--fs-11, 11px);
+  font-style: normal;
+  line-height: 16px;
+}
+
+.pp-row.is-broken .pp-name {
   color: var(--warn);
 }
 
