@@ -1417,6 +1417,54 @@ async def admin_patch_roster(
     return {"employee": employee}
 
 
+class RosterPasswordIn(BaseModel):
+    """店长重设员工登录密码（2026-11-02）。
+
+    与员工自助改密的 `StaffPasswordIn` 差一个字段：这里**没有** `current_password` ——
+    库里只有哈希，管理端拿不到原文，员工忘了密码时只能被重设。两次输入一致那条规则
+    仍然要有（打错一位就是把人家锁在门外），只在服务端判。
+    """
+
+    new_password: str
+    confirm_password: str
+
+
+@router.post("/admin/roster/{employee_id}/reset-password")
+async def admin_reset_roster_password(
+    employee_id: int,
+    body: RosterPasswordIn,
+    _session_id: str = Depends(require_session),
+    accounts: EmployeeAccounts = Depends(_get_accounts),
+) -> Dict[str, bool]:
+    """店长给员工重设登录密码（花名册抽屉里的「重设密码」）。
+
+    * 两次输入一致在这里判 —— 页面先判一遍只是省一次往返，判据在服务端；
+    * 密码规则与注册、员工自助改密**同一套**（`services/password_hash.validate_password`），
+      所以「至少 N 位」这类文案三处共用一份（`_ERROR_DETAILS`）；
+    * 成功后旧密码立即作废、该员工所有员工端会话被删 —— 员工拿新密码重新登录。
+      重设的用意就是「旧凭据不再可信」，留着会话等于让拿着旧设备的人继续用。
+
+    管理端会话才进得来（`require_session`）：员工端那一侧只有自助改密
+    （`PATCH /staff/password`，要旧密码），没有重设别人的入口。
+    """
+    if body.new_password != body.confirm_password:
+        raise HTTPException(
+            status_code=400,
+            detail=_ERROR_DETAILS["passwords_do_not_match"],
+        )
+    try:
+        await accounts.reset_password(employee_id, body.new_password)
+    except EmployeeAccountsError as exc:
+        raise _http_error(exc) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=_error_detail(str(exc)),
+        ) from exc
+    await _hygiene_nudge("roster", "password_reset", employee_id=employee_id)
+    return {"success": True}
+
+
 async def _admin_set_assignment(
     employee_id: int,
     body: AssignmentIn,

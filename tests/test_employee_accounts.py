@@ -222,6 +222,35 @@ class EmployeeAccountsTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(await self.accounts.login(PHONE, PASSWORD))
         self.assertIsNotNone(await self.accounts.login(PHONE, "new-password123"))
 
+    async def test_admin_reset_password_skips_old_password_and_revokes_every_session(self):
+        """店长重设密码（2026-11-02）：不校验旧密码、旧密码作废、一台会话都不留。
+
+        与上一条对照着看才是这件事的全部：员工自助改密要旧密码、保留当前设备；
+        管理端重设没有旧密码可验（库里只有哈希），也就不保留任何设备。
+        """
+        employee = await self._approved_employee()
+        first = await self.accounts.login(PHONE, PASSWORD)
+        second = await self.accounts.login(PHONE, PASSWORD)
+
+        await self.accounts.reset_password(employee["id"], "reset-password-123")
+
+        self.assertIsNone(await self.accounts.get_staff_session(first["session_id"]))
+        self.assertIsNone(await self.accounts.get_staff_session(second["session_id"]))
+        self.assertIsNone(await self.accounts.login(PHONE, PASSWORD))
+        self.assertIsNotNone(await self.accounts.login(PHONE, "reset-password-123"))
+
+    async def test_admin_reset_password_bounces_off_the_shared_password_policy(self):
+        """密码规则不另起一套：太短走 `password_too_short`，且失败时一个字都不写。"""
+        employee = await self._approved_employee()
+        with self.assertRaises(ValueError) as too_short:
+            await self.accounts.reset_password(employee["id"], "short")
+        self.assertEqual(str(too_short.exception), "password_too_short")
+        self.assertIsNotNone(await self.accounts.login(PHONE, PASSWORD))
+
+        with self.assertRaises(EmployeeAccountsError) as missing:
+            await self.accounts.reset_password(999999, "reset-password-123")
+        self.assertEqual(missing.exception.code, "employee_not_found")
+
     async def test_the_workbench_day_cut_decides_which_schedule_row_is_today(self):
         """零点切日：卫生认的「今天」跟排班展开用的是同一个切法（票 10 / ADR 0125）。
 

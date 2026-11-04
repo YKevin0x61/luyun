@@ -916,6 +916,34 @@ class EmployeeAccounts:
         await self._conn.commit()
         logger.info("hygiene employee password changed id=%s", employee_id)
 
+    @serialized_write
+    async def reset_password(self, employee_id: int, new_password: str) -> None:
+        """管理员给员工**重设**登录密码（花名册抽屉，2026-11-02）。
+
+        与 `change_password` 只差一件事：**不校验旧密码**。这不是省一道检查 —— 库里的
+        密码是哈希，管理端本来就拿不到原文，员工忘了密码时除了重设没有第二条路。
+
+        代价一并落在这里：旧密码当场作废，该员工的**所有**员工端会话全删。重设的语义
+        就是「旧凭据不再可信」，留着会话等于让拿着旧设备的人继续用。
+
+        `validate_password` 的失败照旧抛 `ValueError`（`password_too_short` 等），由
+        HTTP 层翻成与注册、员工自助改密**同一批**中文原话。
+        """
+        if await self._fetch_employee(employee_id) is None:
+            raise EmployeeAccountsError("employee_not_found", "employee_not_found")
+        password_hash.validate_password(new_password)
+        hashed = await password_hash.hash_password_async(new_password)
+        await self._conn.execute(
+            "UPDATE hygiene_employees SET password_hash = ?, updated_at = ? WHERE id = ?",
+            (hashed, self._now_iso(), int(employee_id)),
+        )
+        await self._conn.execute(
+            "DELETE FROM hygiene_staff_sessions WHERE employee_id = ?",
+            (int(employee_id),),
+        )
+        await self._conn.commit()
+        logger.info("hygiene employee password reset by admin id=%s", employee_id)
+
     async def set_permission(self, employee_id: int, permission: str) -> dict:
         row = await self._fetch_employee(employee_id)
         if row is None:

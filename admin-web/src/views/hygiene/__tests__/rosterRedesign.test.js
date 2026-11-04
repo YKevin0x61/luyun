@@ -242,7 +242,7 @@ describe('花名册 · 列表行内容', () => {
 })
 
 describe('花名册 · 编辑抽屉', () => {
-  it('点行打开抽屉：12 项字段按定稿顺序，手机号与注册时间只读', async () => {
+  it('点行打开抽屉：13 项字段按定稿顺序，手机号与注册时间只读', async () => {
     const wrapper = await mountRoster()
     await openDrawer(wrapper, '王强')
 
@@ -250,14 +250,15 @@ describe('花名册 · 编辑抽屉', () => {
     expect(drawer.get('.roster-drawer-title').text()).toBe('王强')
     const labels = drawer.findAll('.roster-field-head > span:first-child').map((node) => node.text())
     expect(labels).toEqual([
-      '姓名', '职位', '手机号', '注册时间', '身份证号', '健康证办理日期',
+      // 「登录密码」是 2026-11-02 加的（只有重设入口，没有查看原文）。
+      '姓名', '职位', '手机号', '登录密码', '注册时间', '身份证号', '健康证办理日期',
       '底薪', '入职日期', '工龄奖', '卫生权限',
     ])
     expect(drawer.text()).toContain('管理权限')
 
-    // 手机号与注册时间是只读文本（不是 input）。
+    // 手机号与注册时间是只读文本（不是 input）；中间插了「登录密码」那一格。
     expect(drawer.get('.roster-readonly.is-mono').text()).toBe('13800000003')
-    expect(drawer.findAll('.roster-readonly')[1].text()).toBe('2026-10-01 09:00')
+    expect(drawer.findAll('.roster-readonly')[2].text()).toBe('2026-10-01 09:00')
     // 有效期至来自服务端派生值。
     expect(drawer.text()).toContain('有效期至 2026-10-25')
     // 底薪与身份证号在这里（与列表行相反）。

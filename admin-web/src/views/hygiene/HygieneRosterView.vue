@@ -165,7 +165,7 @@ function segmentText(item) {
 }
 
 /** 「管理员 · N 项 / 普通员工 · 无」：标签用服务端派生的值，**项数只数员工端真正生效的
- *  六项**（`admin_caps` 里可能存着超管专属七项，按全长度报会写成「管理员 · 8 项」而实际
+ *  五项**（`admin_caps` 里可能存着超管专属七项，按全长度报会写成「管理员 · 8 项」而实际
  *  能用 0 项）。边缘情况照实显示「管理员 · 0 项」。 */
 function capChip(row) {
   const caps = normalizeCaps(row.admin_caps)
@@ -338,6 +338,7 @@ function closeDrawer() {
   draft.value = null
   drawerError.value = ''
   discardOpen.value = false
+  closeResetPassword()
 }
 
 function requestClose() {
@@ -519,6 +520,63 @@ async function confirmCancelResignation() {
     drawerError.value = err.message || '取消离职失败'
   } finally {
     busy.value = false
+  }
+}
+
+// ── 重设登录密码（2026-11-02）──────────────────────────────────────────────
+// 密码在库里只有哈希，管理端**看不到也拿不回来**原文 —— 所以这里只有「重设」，没有
+// 「查看」。员工忘了密码、或者怀疑别人知道他的密码，都走这一颗。
+//
+// 重设的代价写在请求里那两件事上：旧密码当场作废、该员工所有员工端会话被删。因此
+// 弹层上那句提示要说清"要用新密码重新登录"，别让店长以为只是换了个密码而已。
+const passwordOpen = ref(false)
+const passwordNew = ref('')
+const passwordConfirm = ref('')
+const passwordSaving = ref(false)
+const passwordError = ref('')
+
+function askResetPassword() {
+  if (busy.value || !drawerRow.value) return
+  passwordNew.value = ''
+  passwordConfirm.value = ''
+  passwordError.value = ''
+  passwordOpen.value = true
+}
+
+function closeResetPassword() {
+  passwordOpen.value = false
+  passwordNew.value = ''
+  passwordConfirm.value = ''
+  passwordError.value = ''
+}
+
+async function confirmResetPassword() {
+  const row = drawerRow.value
+  if (!row || passwordSaving.value) return
+  passwordError.value = ''
+  // 客户端先判一遍只是省一次往返：判据仍在服务端（它还要判长度策略）。
+  if (!passwordNew.value) {
+    passwordError.value = '请填写新密码'
+    return
+  }
+  if (passwordNew.value !== passwordConfirm.value) {
+    passwordError.value = '两次输入的新密码不一致'
+    return
+  }
+  passwordSaving.value = true
+  try {
+    await api.post(`/api/hygiene/admin/roster/${row.id}/reset-password`, {
+      new_password: passwordNew.value,
+      confirm_password: passwordConfirm.value,
+    })
+    const label = row.name || row.phone
+    closeResetPassword()
+    flash(`已重设 ${label} 的登录密码，旧密码和已登录的设备都失效了`)
+  } catch (err) {
+    // 服务端的中文原话直接摆出来（至少 8 位 / 两次不一致 / 这个人不存在…）。
+    passwordError.value = err.message || '重设密码失败'
+  } finally {
+    passwordSaving.value = false
   }
 }
 
@@ -719,6 +777,9 @@ async function copyInvite() {
         </div>
 
         <div class="roster-drawer-body">
+          <!-- 抽屉开着时那行 flash 在页面顶部、被抽屉盖住：抽屉里再摆一份，
+               否则"重设完密码"这种留在抽屉里的动作看不到任何结果。 -->
+          <p v-if="savedHint" class="roster-saved-inline" role="status">{{ savedHint }}</p>
           <p v-if="drawerError" class="roster-error" role="alert">{{ drawerError }}</p>
 
           <div v-if="draft" class="hy-person-fields">
@@ -749,6 +810,22 @@ async function copyInvite() {
             <label title="登录账号，员工本人能在「我的」里改">
               <span class="roster-field-head"><span>手机号</span></span>
               <span class="roster-readonly is-mono">{{ drawerRow.phone }}</span>
+            </label>
+
+            <!-- 登录密码（2026-11-02）：老板要的那件事 —— 员工忘了密码/怀疑泄露时，
+                 店长在花名册里就能给他重设。库里只有哈希，所以这里**没有**「查看密码」，
+                 只有「重设」；重设会让他所有设备重新登录（弹层里那句提示说的就是它）。 -->
+            <label title="密码只有哈希，看不到原文；重设后旧密码和已登录的设备都失效">
+              <span class="roster-field-head"><span>登录密码</span></span>
+              <span class="roster-password-row">
+                <span class="roster-readonly is-mono">••••••••</span>
+                <button
+                  type="button"
+                  class="btn btn-sm"
+                  :disabled="busy"
+                  @click="askResetPassword"
+                >重设密码</button>
+              </span>
             </label>
 
             <label title="员工自己注册的时间">
@@ -975,6 +1052,55 @@ async function copyInvite() {
       </div>
     </div>
 
+    <!-- 重设登录密码（2026-11-02）：没有"当前密码"这一格 —— 管理端拿不到原密码，
+         员工忘了也只能被重设。两次输入在页面先判一遍，判据在服务端。 -->
+    <div v-if="passwordOpen" class="modal-overlay roster-password-overlay" @click.self="closeResetPassword">
+      <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="roster-password-title">
+        <div class="modal-header">
+          <h3 id="roster-password-title">重设登录密码</h3>
+          <button type="button" class="btn btn-sm" aria-label="关闭" @click="closeResetPassword">关闭</button>
+        </div>
+        <p class="editor-lead">
+          给 {{ drawerRow.name || drawerRow.phone }} 设一个新密码，设完告诉他。
+        </p>
+        <label class="roster-field">
+          <span>新密码</span>
+          <input
+            v-model="passwordNew"
+            type="password"
+            class="input"
+            minlength="8"
+            autocomplete="new-password"
+            :disabled="passwordSaving"
+          >
+        </label>
+        <label class="roster-field">
+          <span>确认新密码</span>
+          <input
+            v-model="passwordConfirm"
+            type="password"
+            class="input"
+            minlength="8"
+            autocomplete="new-password"
+            :disabled="passwordSaving"
+          >
+        </label>
+        <p class="editor-note">
+          至少 8 位。重设后<strong>旧密码立即失效</strong>，他已登录的手机也要重新登录。
+        </p>
+        <p v-if="passwordError" class="roster-error" role="alert">{{ passwordError }}</p>
+        <div class="roster-foot-actions">
+          <button type="button" class="btn" :disabled="passwordSaving" @click="closeResetPassword">取消</button>
+          <button
+            type="button"
+            class="btn btn-primary"
+            :disabled="passwordSaving || !passwordNew || !passwordConfirm"
+            @click="confirmResetPassword"
+          >{{ passwordSaving ? '保存中…' : '重设密码' }}</button>
+        </div>
+      </div>
+    </div>
+
     <ConfirmDialog
       v-if="cancelResignOpen"
       class="roster-dialog"
@@ -1158,6 +1284,12 @@ async function copyInvite() {
 .roster-page .roster-empty .btn { margin-left: .6rem; }
 .roster-page .roster-error { margin: 0; font-size: 11px; color: var(--danger-bright); }
 .roster-page .roster-saved { margin: 0; font-size: 11px; color: var(--ok); }
+/* 抽屉里那份 flash（与页头那份同一句话，理由见模板注释）。 */
+.roster-page .roster-saved-inline { margin: 0 0 2px; font-size: 11px; color: var(--ok); }
+/* 小弹层的引导语与说明。这两个 class 原先只有标记没有样式（跟着 `.roster-field` 一起
+   缺），默认 16px 会把"至少 8 位…"顶得比字段标签还大 —— 补回正文档。 */
+.roster-page .editor-lead { margin: 0 0 10px; font-size: 13px; line-height: 1.6; color: var(--ink); }
+.roster-page .editor-note { margin: 0 0 10px; font-size: 12px; line-height: 1.6; color: var(--ink-dim); }
 
 /* 抽屉 / 弹层：抽屉是叠在队列档上的浮层（档位契约不变） */
 .roster-page > .modal-overlay { animation: none; }
@@ -1172,6 +1304,8 @@ async function copyInvite() {
 /* 登记离职那个小弹层**盖在抽屉上面**（它是从抽屉里点出来的，抽屉还开着）——
    不抬一档的话它会被抽屉的 z-index 压住，按钮点不到（实测：点「取消」被抽屉吃掉）。 */
 .roster-page > .roster-resign-overlay { z-index: calc(var(--z-queue) + 1); }
+/* 重设密码同理：它也是从抽屉里点出来的小弹层，抽屉还开着 —— 同一档，不抬就会被吃掉点击。 */
+.roster-page > .roster-password-overlay { z-index: calc(var(--z-queue) + 1); }
 .roster-resign-plan {
   margin: 8px 0 0; padding: 7px 10px; border-radius: var(--r-1);
   border: 1px solid var(--warn); background: var(--warn-soft, transparent);
@@ -1228,6 +1362,18 @@ async function copyInvite() {
   background: var(--surface-2); color: var(--ink); font-weight: 500;
 }
 .roster-page .roster-readonly.is-mono { font-family: var(--font-mono); }
+/* 「登录密码」那一格：左边是只读的圆点，右边是重设入口 —— 与手机号同一种"看着像只读、
+   旁边开一个小口"的语言（2026-11-02）。 */
+.roster-page .roster-password-row { display: flex; align-items: center; gap: .5rem; }
+.roster-page .roster-password-row .roster-readonly { flex: 1 1 auto; min-width: 0; letter-spacing: .08em; }
+/* 小弹层里的「标签在上、输入框在下」。`.roster-field` 这个名字原先只有标记没有样式
+   （登记离职那个弹层也是它）：不加这一段，标签与输入框会挤成一排、两个输入框互相压住。 */
+.roster-page .roster-field {
+  display: flex; flex-direction: column; gap: .32rem;
+  margin-bottom: .6rem;
+  font-size: .76rem; font-weight: 600; color: var(--ink-dim);
+}
+.roster-page .roster-field .input { min-height: 44px; }
 .roster-page .roster-field-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: .35rem; }
 .roster-page .roster-field-note { color: var(--warn); font-size: .72rem; font-weight: 600; }
 .roster-page .roster-expiry { font-size: .72rem; font-weight: 500; color: var(--ink-faint); }
