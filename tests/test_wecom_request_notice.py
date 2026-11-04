@@ -116,7 +116,7 @@ def test_the_link_points_at_the_manager_inbox():
         "https://a.cn/workbench/hr/inbox"
     )
     assert notice.admin_url(notice.OVERTIME_REVIEW_PATH, "https://a.cn/") == (
-        "https://a.cn/workbench/hr/overtime"
+        "https://a.cn/workbench/hr/overtime-review"
     )
 
 

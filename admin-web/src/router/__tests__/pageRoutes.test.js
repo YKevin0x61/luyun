@@ -96,15 +96,17 @@ describe('页面清单（唯一来源）', () => {
     expect(aliases.filter((alias) => paths.includes(alias))).toEqual([])
   })
 
-  it('staffCap 只标在这五页上，audience 仍是 admin（它是第四维，不是第二份 audience）', () => {
+  it('staffCap 只标在这六页上，audience 仍是 admin（它是第四维，不是第二份 audience）', () => {
     // 2026-10-14 用户裁定：排班三页（人事组）与损耗分析（后勤组）对「勾了对应能力的员工」
     // 也开。audience 仍是 admin —— 管理端会话照旧直接放行，员工身份再要那一项能力。
     // 2026-10-31 用户裁定：考勤表页并进同一项（`schedule`，显示名改成「人事管理」）。
+    // 2026-11-03 用户裁定：加班补钟审批拆成独立页，同样归 `schedule`。
     const withCap = PAGE_ROUTES.filter((row) => row.staffCap)
     expect(withCap.map((row) => [row.path, row.staffCap])).toEqual([
       ['/workbench/hr/calendar', 'schedule'],
       ['/workbench/hr/inbox', 'schedule'],
       ['/workbench/hr/shifts', 'schedule'],
+      ['/workbench/hr/overtime-review', 'schedule'],
       ['/workbench/hr/attendance', 'schedule'],
       ['/workbench/kitchen/loss', 'wastage'],
     ])
@@ -129,9 +131,9 @@ describe('页面清单（唯一来源）', () => {
       '/workbench/hr/roster',
       // 人事提醒（overtime-and-reminders 票 05）：工龄奖该调名单 + 档案待补，同套工作台外壳。
       '/workbench/hr/reminders',
-      // 加班统计（overtime-and-reminders 票 02）：超管的审批台（待办 / 批驳 / 作废 / 代录），
-      // 套的是人事那一组的壳。员工那一面在 `/workbench/staff/overtime`（票 01）。
-      '/workbench/hr/overtime',
+      // 加班补钟审批（2026-11-03）：加班与补钟的唯一管理页（原「加班统计」并入这里），
+      // 套人事那一组的壳；旧 `/workbench/hr/overtime` 已删干净。
+      '/workbench/hr/overtime-review',
       // 考勤表（考勤表导出 票 01）：人事组的第七页 —— 当月一人一张卡，同套人事壳。
       '/workbench/hr/attendance',
       // 节假日日历（考勤表导出 票 02）：超管逐日标「这天是法定节假日」，套人事那一组的壳。

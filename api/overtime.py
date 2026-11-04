@@ -19,7 +19,7 @@ from pydantic import BaseModel
 from api.security import require_session, require_staff_session
 from database import get_db
 from services.identity import EmployeeAccounts
-from services.identity.capabilities import CAP_OVERTIME, has_cap
+from services.identity.capabilities import CAP_SCHEDULE, has_cap
 from services.overtime.ledger import (
     HALF_HOURS_MAX,
     MAX_REASON,
@@ -70,7 +70,7 @@ _ERROR_DETAILS = {
     "salary_missing": "这位同事的底薪还没补：先到花名册补上底薪，再回来批这一笔",
     # 提交人不能批自己的登记（同卫生的 `cannot_self_accept` 口径）：钱与留痕都是自己
     # 给自己。判据看「这一笔算谁的」，所以代别人补录的那一笔仍然批得动。
-    "cannot_self_accept": "交这笔的人不能自己批：请让另一位有「加班与补钟审批」权限的店长来处理",
+    "cannot_self_accept": "交这笔的人不能自己批：请让另一位有「人事管理」权限的店长来处理",
     # 逐条点名迁移文件（同排班的 `not_migrated`）：503 要说清该应用哪一个脚本。
     # 票 05 加表时也在这句里补上自己的文件名。
     "not_migrated": (
@@ -148,19 +148,19 @@ def _bad_request(exc: OvertimeError) -> HTTPException:
 
 
 def _can_review(employee: dict) -> bool:
-    """这个人能不能审批别人的加班登记 —— 判据只看 `admin_caps` 里那一项。
+    """这个人能不能审批别人的加班登记 —— 判据只看 `admin_caps` 里的「人事管理」那一项。
 
     `permission` 那一列是人话标签（「管理员」/「普通员工」），**不是判据**：同一档的
     两个人可以有完全不同的开关，拿标签判会放行没给的那件事（`docs/adr/0093`）。
     """
-    return has_cap(employee.get("admin_caps"), CAP_OVERTIME)
+    return has_cap(employee.get("admin_caps"), CAP_SCHEDULE)
 
 
 def _entry_actor(employee: dict) -> EntryActor:
     """员工会话 → 台账层的 actor。
 
     窗口按**提交人**判（判据在服务层的 `submit()` 里）：普通员工只能报今天与昨天，
-    勾了「加班与补钟审批」的店长跟超管一样能补录任意过去日期 —— 能力跟人走，
+    勾了「人事管理」的店长跟超管一样能补录任意过去日期 —— 能力跟人走，
     不跟「这一笔算谁的」走（`docs/adr/0100` / `0103`）。
     """
     return EntryActor(
@@ -170,7 +170,7 @@ def _entry_actor(employee: dict) -> EntryActor:
 
 
 def _require_reviewer(employee: dict = Depends(require_staff_session)) -> dict:
-    """店长那一面的门：员工会话 **加上**「加班与补钟审批」能力。
+    """店长那一面的门：员工会话 **加上**「人事管理」能力。
 
     店长**没有管理端账号** —— 他就是花名册上的一个真人 + 员工会话，所以这一面走员工门，
     形状与卫生那三项（管理员在员工手机端验收）完全一样，见 `docs/adr/0103`。
@@ -186,7 +186,7 @@ def _require_reviewer(employee: dict = Depends(require_staff_session)) -> dict:
     if not _can_review(employee):
         raise HTTPException(
             status_code=403,
-            detail="只有开了「加班与补钟审批」的人能审批加班登记：请找超级管理员在花名册里开通",
+            detail="只有开了「人事管理」的人能审批加班登记：请找超级管理员在花名册里开通",
         )
     return employee
 
@@ -574,7 +574,7 @@ async def admin_void(
     return {"entry": entry}
 
 
-# ── 店长那一面（票 04）：员工会话 + 「加班与补钟审批」能力 ─────────────────────
+# ── 店长那一面（票 04）：员工会话 + 「人事管理」能力 ───────────────────────────
 #
 # 与上面 `/admin/*` 那组**能力相同、门不同**：超管走管理端 cookie，店长走员工 cookie
 # 加一个能力键。两扇门落在同一套服务层方法上（`list_pending` / `approve` / `reject` /
@@ -702,7 +702,7 @@ async def review_reject(
 # ── 抵扣单的审批与作废（ADR 0124）──────────────────────────────────────────
 #
 # 与加班登记那套**同一份状态机、同一批门**：员工提/撤在 `/me/*`（员工门），店长批在
-# `/review/*`（员工会话 + 加班与补钟审批能力），超管批/作废在 `/admin/*`（管理端门）。
+# `/review/*`（员工会话 + 人事管理能力），超管批/作废在 `/admin/*`（管理端门）。
 # 两条审批门落在同一套服务层方法上，所以「怎么判一张抵扣单」只有一份实现。
 
 

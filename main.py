@@ -1280,9 +1280,11 @@ SPA_PAGE_ROUTES = (
     "/workbench/hr/roster",
     # 人事提醒（票 05）：工龄奖该调名单 + 档案待补。同一批：漏一条就是硬导航 404。
     "/workbench/hr/reminders",
-    # 加班统计（票 02）：超管的审批台 —— 待办队列 + 批 / 驳 / 作废 + 代员工补录。
-    # 员工那一面在 `/workbench/staff/overtime`（票 01），店长那一面在员工手机端（票 04）。
-    "/workbench/hr/overtime",
+    # 加班补钟审批（2026-11-03 用户裁定）：加班与补钟的唯一管理页 —— 原「加班统计」
+    # （`/workbench/hr/overtime`）并入这里，旧路径删干净。页面清单里
+    # `audience: admin + staffCap: schedule` —— 超管直进，勾了「人事管理」的店长也能进。
+    # 同一批：漏一条就是直连 uvicorn 硬导航 404。
+    "/workbench/hr/overtime-review",
     # 考勤表（考勤表导出票 01）：人事组的第七页 —— 当月一人一张卡。同一批：漏一条就是
     # 直连 uvicorn 硬导航 404（前端侧由 tests/test_spa_page_routes.py 双向盯住）。
     "/workbench/hr/attendance",

@@ -112,9 +112,11 @@ const routes = [
   workbenchHrPage('/workbench/hr/roster', 'workbench-hr-roster', () => import('../views/hygiene/HygieneRosterView.vue')),
   // 人事提醒（票 05）：该调工龄奖的人（含历史欠调）+ 档案待补。只提醒，钱要人工点确认。
   workbenchHrPage('/workbench/hr/reminders', 'workbench-hr-reminders', () => import('../views/hr/HrRemindersView.vue')),
-  // 加班统计（票 02）：超管的审批台 —— 待办队列 + 批 / 驳 / 作废 + 代员工补录。员工那一面
-  // 在 `/workbench/staff/overtime`（票 01）；店长那一面在员工手机端（票 04，走能力键）。
-  workbenchHrPage('/workbench/hr/overtime', 'workbench-hr-overtime', () => import('../views/overtime/HrOvertimeView.vue')),
+  // 加班补钟审批（2026-11-03 用户裁定）：加班与补钟的**唯一管理页** —— 原「加班统计」
+  // （`/workbench/hr/overtime`）并入这里，旧路径删干净、不留别名。一页两种身份：
+  // 超管用管理端会话、勾了「人事管理」的店长用员工会话，页面自己选端点（`/admin/*` 或
+  // `/review/*`，两套都落在同一个服务层）；台账与加班费只给管理端（底薪不下发员工端）。
+  workbenchHrPage('/workbench/hr/overtime-review', 'workbench-hr-overtime-review', () => import('../views/overtime/OvertimeReviewView.vue')),
   // 考勤表（考勤表导出 票 01）：当月一人一张卡，逐日是「上班 / 休 / 待补」+ 职位 / 底薪 /
   // 年限 / 是否新入职 / 当月净时长。**只读、只算当月** —— 逐日改格在票 06、手填列在票 05、
   // 封账在票 04、导出在票 08，都往同一页上加。
@@ -202,8 +204,9 @@ const routes = [
   // 整月：从「今天」页那张排班卡的「整月」按钮进来，看自己这个月每天上什么班。
   workbenchStaffPage('/workbench/staff/month', 'today-month', () => import('../views/today/TodayMonthView.vue')),
   // 加班与补钟（票 01）：员工自己提一笔、看自己的记录与月度净时长。管理端的审批与
-  // 统计在票 02（`/workbench/hr/overtime`），店长在手机上的审批面在票 04 —— 这一页
-  // 现在只认员工会话（`audience: staff`）。
+  // 统计在人事组的「加班补钟审批」（`/workbench/hr/overtime-review`，2026-11-03 起
+  // 原「加班统计」也并进了那一页），店长在手机上的审批面在票 04 —— 这一页现在只认
+  // 员工会话（`audience: staff`）。
   workbenchStaffPage('/workbench/staff/overtime', 'me-overtime', () => import('../views/overtime/MeOvertimeView.vue')),
   // 损耗登记（从 worktool2 那个小程序搬过来）：记一笔（物料 / 数量 / 原因 / 照片），
   // 顺带看自己最近记的几笔。`audience: both` —— 员工用员工会话、店长用管理端会话，

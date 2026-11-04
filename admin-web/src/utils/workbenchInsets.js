@@ -68,8 +68,8 @@ export const GROUP_CONTENT_INSETS = {
       inline: 'max(var(--hy-page, 18px), var(--safe-l), var(--safe-r))',
     },
   },
-  // 人事六页 → 0：月历（内容在 `.gB-body` 的 4/16 上）、待办 / 班次表 / 人事提醒 / 加班统计
-  // （根的 `18px 16px 40px`）都自带内边距；唯一不自带的花名册吃的是组壳那条
+  // 人事八页 → 0：月历（内容在 `.gB-body` 的 4/16 上）、待办 / 班次表 / 人事提醒 /
+  // 加班补钟审批（根的 `18px 16px 40px`）都自带内边距；唯一不自带的花名册吃的是组壳那条
   // `:deep(.roster-page)`（票 05 从卫生搬过来时补的），那条随本票退场、值一字不差地落在
   // `views/hygiene/HygieneRosterView.vue` 自己的样式里 —— 组里五页数值一致、花名册另一样，
   // 给组一个非零值会把那五页推走。

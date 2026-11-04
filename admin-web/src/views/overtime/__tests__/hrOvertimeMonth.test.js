@@ -9,7 +9,7 @@ function read(rel) {
   return readFileSync(join(here, rel), 'utf8')
 }
 
-const view = read('../HrOvertimeView.vue')
+const view = read('../OvertimeReviewView.vue')
 
 /** 管理端「加班费」那一块（票 03）：口径全在服务端，页面只负责摆出来。
  *
@@ -18,10 +18,9 @@ const view = read('../HrOvertimeView.vue')
  */
 describe('加班费账单（票 03）', () => {
   it('账单按月读 `/api/overtime/admin/month`，月份跟着台账那个筛选走', () => {
-    expect(view).toMatch(/api\.get\('\/api\/overtime\/admin\/month', params\)/)
-    expect(view).toMatch(
-      /const params = month\.value \? \{ month: month\.value \} : undefined/,
-    )
+    expect(view).toMatch(/month: '\/api\/overtime\/admin\/month'/)
+    expect(view).toMatch(/api\.get\(endpoints\.value\.month, monthParams\(\)\)/)
+    expect(view).toMatch(/return month\.value \? \{ month: month\.value \} : undefined/)
   })
 
   it('账单读不出来时只让这一块报错，不整页变灰', () => {

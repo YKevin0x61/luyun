@@ -553,7 +553,7 @@ describe('内容区的横向与上内边距按组给（票 04）', () => {
     stubTiers({ mobile: true, wide: false })
     const { wrapper } = await mountShell('/workbench/hr/roster')
 
-    // 组里另外五页（月历 / 待办 / 班次表 / 人事提醒 / 加班统计）的根自带内边距，
+    // 组里另外五页（月历 / 待办 / 班次表 / 人事提醒 / 加班补钟审批）的根自带内边距，
     // 组级给一个非零值会把它们推走 —— 所以壳给人事组 0，花名册那份跟着老规则走。
     expect(insetOf(wrapper, '--wb-inset-top')).toBe('0px')
     expect(insetOf(wrapper, '--wb-inset-inline')).toBe('0px')

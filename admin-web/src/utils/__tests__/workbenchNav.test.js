@@ -98,7 +98,7 @@ describe('两套一级导航表（2026-10-19 信息架构重排第二层）', ()
       .toBe('/workbench/kitchen/recipe')
   })
 
-  it('组里的页从清单派生（人事八页、现场八页，顺序照清单）', () => {
+  it('组里的页从清单派生（人事八页、现场九页，顺序照清单）', () => {
     expect(workbenchPagesOf('hr').map((page) => page.path)).toEqual([
       '/workbench/hr/calendar',
       '/workbench/hr/inbox',
@@ -106,8 +106,9 @@ describe('两套一级导航表（2026-10-19 信息架构重排第二层）', ()
       '/workbench/hr/roster',
       // 人事提醒（overtime-and-reminders 票 05）：工龄奖该调名单 + 档案待补。
       '/workbench/hr/reminders',
-      // 加班统计（overtime-and-reminders 票 02）：超管的审批台。
-      '/workbench/hr/overtime',
+      // 加班补钟审批（2026-11-03）：加班与补钟的唯一管理页（原「加班统计」并入这里），
+      // 超管与勾了「人事管理」的店长共用。
+      '/workbench/hr/overtime-review',
       // 考勤表（考勤表导出 票 01）：当月一人一张卡。人事组第七页 —— 导航顺序照清单。
       '/workbench/hr/attendance',
       // 节假日日历（考勤表导出 票 02）：法定节假日补休的唯一依据，逐日标记。第八页。
@@ -128,7 +129,8 @@ describe('两套一级导航表（2026-10-19 信息架构重排第二层）', ()
     ])
     // 标题也从清单来：外壳的导航与页签不另抄一份名字。
     expect(workbenchPagesOf('hr').map((page) => page.title)).toEqual([
-      '排班月历', '排班待办', '班次表', '花名册', '人事提醒', '加班统计', '考勤表', '节假日日历',
+      '排班月历', '排班待办', '班次表', '花名册', '人事提醒', '加班补钟审批',
+      '考勤表', '节假日日历',
     ])
     // 认不出的组给空表（不猜、也不兜底成一整份清单）。
     expect(workbenchPagesOf('nope')).toEqual([])
@@ -136,7 +138,8 @@ describe('两套一级导航表（2026-10-19 信息架构重排第二层）', ()
 
   it('十七页正好落在人事 / 现场两组里，平铺那批地址一条都不在清单里', () => {
     const grouped = PAGE_ROUTES.filter((row) => row.group === 'hr' || row.group === 'floor')
-    // 人事八页（+考勤表、+节假日日历，考勤表导出 票 01/02）+ 现场九页（+日常清单，2026-10-19）。
+    // 人事八页（+考勤表、+节假日日历，考勤表导出 票 01/02；「加班统计」2026-11-03 并入
+    // 「加班补钟审批」，总页数不变）+ 现场九页（+日常清单，2026-10-19）。
     expect(grouped).toHaveLength(17)
     // 留一半最坏：「点得进去、刷新 404」。
     for (const old of [
@@ -284,17 +287,19 @@ describe('按身份过滤导航', () => {
     expect(keysOf('super', [])).toEqual(['home', 'hr', 'floor', 'kitchen'])
   })
 
-  it('组内导航：员工进人事组只看到他能用的四页', () => {
+  it('组内导航：员工进人事组只看到他能用的五页', () => {
     const hrPages = (audience, caps) => workbenchPagesOf('hr', audience, caps)
       .map((page) => page.path)
-    // 2026-10-31：考勤表并进同一项能力（`schedule`，显示名「人事管理」）。
+    // 2026-10-31：考勤表并进同一项能力（`schedule`，显示名「人事管理」）；
+    // 2026-11-03：加班补钟审批拆成独立页，同样归那一项。
     expect(hrPages('staff', ['schedule'])).toEqual([
       '/workbench/hr/calendar',
       '/workbench/hr/inbox',
       '/workbench/hr/shifts',
+      '/workbench/hr/overtime-review',
       '/workbench/hr/attendance',
     ])
-    // 没勾就一页都不给（花名册 / 人事提醒 / 加班统计 / 节假日日历都是管理端那一档）。
+    // 没勾就一页都不给（花名册 / 人事提醒 / 节假日日历都是管理端那一档）。
     expect(hrPages('staff', [])).toEqual([])
     expect(hrPages('admin', [])).toHaveLength(8)
     // 后勤组：员工带「损耗分析」能力才多那一页（配方的印码与管理面仍是管理端专属）。

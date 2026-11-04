@@ -36,10 +36,10 @@ from services.wecom_push_topics import (
 
 logger = logging.getLogger(__name__)
 
-# 店长那边的落点：请假去人事「待办」，加班去「加班统计」。两份路径写在
+# 店长那边的落点：请假去人事「待办」，加班去人事「加班补钟审批」。两份路径写在
 # ``admin-web/src/router/index.js`` 的 workbenchHrPage 里，改路由要同步这里。
 LEAVE_REVIEW_PATH = "/workbench/hr/inbox"
-OVERTIME_REVIEW_PATH = "/workbench/hr/overtime"
+OVERTIME_REVIEW_PATH = "/workbench/hr/overtime-review"
 
 # 员工那边的落点：驳回之后他得回去重提，所以驳回那条要带员工页的链接（批准不带 ——
 # 批完了没什么可点的，多一句链接只是噪音）。

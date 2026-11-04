@@ -27,7 +27,6 @@ const CONTRACT_KEYS = [
   'daily_review',
   'deep_review',
   'fix',
-  'overtime',
   'schedule',
   'wastage',
   'attire',
@@ -40,20 +39,20 @@ const CONTRACT_KEYS = [
 ]
 
 describe('adminCaps · 前后端契约', () => {
-  it('十三项键名与顺序逐字等于后端 CAPABILITIES', () => {
+  it('十二项键名与顺序逐字等于后端 CAPABILITIES', () => {
     expect(ADMIN_CAPABILITIES).toEqual(CONTRACT_KEYS)
     expect(ADMIN_CAP_DEFS.map((item) => item.key)).toEqual(CONTRACT_KEYS)
   })
 
-  it('可勾的六项 = 员工端有执行点的那六项，其余七项只读（两组不重不漏）', () => {
-    // 这六项与后端 `STAFF_SIDE_CAPABILITIES` 同义：三项在员工手机端「卫生」页生效，
-    // `overtime` 在「加班与补钟」页生效（2026-10-07 加的第 11 项，见 `docs/adr/0103`），
-    // `schedule` 在人事组三页、`wastage` 在后勤组的损耗分析页（2026-10-14 加的两项）。
+  it('可勾的五项 = 员工端有执行点的那五项，其余七项只读（两组不重不漏）', () => {
+    // 这五项与后端 `STAFF_SIDE_CAPABILITIES` 同义：三项在员工手机端「卫生」页生效，
+    // `schedule` 在人事组四页并在「加班与补钟」页审批（2026-11-03 把原来那项
+    // `overtime` 并了进来），`wastage` 在后勤组的损耗分析页。
     expect(ADMIN_CAP_STAFF_DEFS.map((item) => item.key))
-      .toEqual(['daily_review', 'deep_review', 'fix', 'overtime', 'schedule', 'wastage'])
+      .toEqual(['daily_review', 'deep_review', 'fix', 'schedule', 'wastage'])
     expect(ADMIN_CAP_SUPERVISOR_ONLY_KEYS)
       .toEqual(['attire', 'standard', 'zone', 'roster', 'boards', 'clock', 'data'])
-    // 两组刚好分完十三项：多一个少一个都会让"可勾面 == 生效面"这个前提失效。
+    // 两组刚好分完十二项：多一个少一个都会让"可勾面 == 生效面"这个前提失效。
     expect([...ADMIN_CAP_STAFF_DEFS.map((item) => item.key), ...ADMIN_CAP_SUPERVISOR_ONLY_KEYS])
       .toEqual(CONTRACT_KEYS)
   })
@@ -146,7 +145,7 @@ describe('判据收敛：两个页面只按开关判，不按 permission 档位'
     // 抽屉里没有任何下拉（「卫生权限」原来是唯一一个 `<select>`）。
     expect(src).not.toMatch(/<select/)
     expect(src).not.toMatch(/permission\s*===/)
-    // 可勾的那六项按契约顺序渲染；草稿进页归一化，PATCH 时把**只读七项已有的值原样带回**
+    // 可勾的那五项按契约顺序渲染；草稿进页归一化，PATCH 时把**只读七项已有的值原样带回**
     // （它们没有可勾的界面，整组替换若漏掉就是静默删权限）。
     expect(src).toMatch(/v-for="cap in ADMIN_CAP_STAFF_DEFS"/)
     expect(src).toMatch(
@@ -157,7 +156,7 @@ describe('判据收敛：两个页面只按开关判，不按 permission 档位'
     expect(src).not.toMatch(/ADMIN_CAP_SUPERVISOR_ONLY/)
   })
 
-  it('花名册行内项数只数员工端真正生效的六项（不按 admin_caps 全长度报）', () => {
+  it('花名册行内项数只数员工端真正生效的五项（不按 admin_caps 全长度报）', () => {
     const src = readView('HygieneRosterView')
     expect(src).toMatch(
       /ADMIN_CAP_STAFF_DEFS\.filter\(\(item\) => caps\.includes\(item\.key\)\)\.length/,

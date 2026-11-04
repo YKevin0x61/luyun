@@ -20,8 +20,9 @@ const HR_PAGES = [
   ['/workbench/hr/inbox', 'SchedulingInboxView.vue'],
   ['/workbench/hr/shifts', 'SchedulingShiftsView.vue'],
   ['/workbench/hr/roster', 'HygieneRosterView.vue'],
-  // 加班统计（票 02）：超管的审批台 —— 待办、批 / 驳 / 作废、代员工补录都在这一页。
-  ['/workbench/hr/overtime', 'HrOvertimeView.vue'],
+  // 加班补钟审批（2026-11-03）：加班与补钟的唯一管理页 —— 审批、代录、台账、加班费
+  // 都在这一页（原「加班统计」同日并入，旧路径已删干净）。
+  ['/workbench/hr/overtime-review', 'OvertimeReviewView.vue'],
 ]
 
 const FLOOR_PAGES = [

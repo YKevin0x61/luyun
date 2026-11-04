@@ -1305,10 +1305,10 @@ def _submit_for(client, accounts, entry_date, half_hours, reason):
     return entry
 
 
-# ── 票 04：店长在手机上审批（第 11 项能力键 `overtime`）──────────────────────
+# ── 票 04：店长在手机上审批（「人事管理」能力键 `schedule`）────────────────────
 #
 # 店长**没有管理端账号**：他就是花名册上的一个真人 + 员工会话。所以这一面走员工门
-# （`require_staff_session`）**加上**能力判据（`has_cap(caps, CAP_OVERTIME)`），形状与
+# （`require_staff_session`）**加上**能力判据（`has_cap(caps, CAP_SCHEDULE)`），形状与
 # 卫生那三项（管理员在员工手机端验收）完全一样，见 `docs/adr/0103`。
 #
 # 判据一律看 `admin_caps`：`permission` 那一列只是人话标签，拿它判会放行没给的那件事。
@@ -1327,8 +1327,8 @@ def _with_caps(accounts, phone, name, caps):
 
 
 def _supervisor(accounts):
-    """开好「加班与补钟审批」的店长 —— 仍然是员工会话，没有管理端 cookie。"""
-    return _with_caps(accounts, SUPERVISOR_PHONE, SUPERVISOR_NAME, ["overtime"])
+    """开好「人事管理」的店长 —— 仍然是员工会话，没有管理端 cookie。"""
+    return _with_caps(accounts, SUPERVISOR_PHONE, SUPERVISOR_NAME, ["schedule"])
 
 
 def test_me_says_whether_i_can_review(overtime_http):
@@ -1536,7 +1536,7 @@ def test_the_cap_takes_effect_immediately(overtime_http):
     # 同一条 cookie、没有重登：被收回的是能力，不是会话。
     assert client.get("/api/overtime/me").status_code == 200
 
-    _run(accounts.set_admin_caps(supervisor_id, ["overtime"]))
+    _run(accounts.set_admin_caps(supervisor_id, ["schedule"]))
     assert client.get("/api/overtime/review/pending").status_code == 200
 
 

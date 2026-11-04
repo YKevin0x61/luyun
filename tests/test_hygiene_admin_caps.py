@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""管理权限开关的契约：前后端十项键名逐字一致，解析 fail-closed。
+"""管理权限开关的契约：前后端十二项键名逐字一致，解析 fail-closed。
 
 `services/identity/capabilities.py`（后端）与 `admin-web/src/utils/adminCaps.js`（前端）是
 **同一份契约的两半**：线上只走键名。键名一旦对不上，症状都是**静默**的 —— 花名册里勾了、
@@ -130,7 +130,7 @@ def test_every_wired_capability_is_referenced_by_a_judgment():
     )
     wired = tuple(key for key in CAPABILITIES if key not in UNWIRED_CAPABILITIES)
     assert wired == STAFF_SIDE_CAPABILITIES, (
-        f"要判据的应当是员工端有执行点的那三项，实际 {wired} vs {STAFF_SIDE_CAPABILITIES}"
+        f"要判据的应当是员工端有执行点的那五项，实际 {wired} vs {STAFF_SIDE_CAPABILITIES}"
     )
     sites = _capability_reference_sites()
     missing = [key for key in wired if not sites[key]]
@@ -143,7 +143,7 @@ def test_every_wired_capability_is_referenced_by_a_judgment():
 
 
 def test_frontend_keys_match_backend_exactly():
-    """十项键名与顺序逐字相同 —— 这是前后端唯一共享的东西。"""
+    """十二项键名与顺序逐字相同 —— 这是前后端唯一共享的东西。"""
     src = FRONTEND.read_text(encoding="utf-8")
     keys = re.findall(r"key:\s*'([a-z_]+)'", src)
     assert tuple(keys) == CAPABILITIES, (
@@ -264,7 +264,7 @@ def test_frontend_checkbox_group_is_exactly_the_staff_side_caps():
 
     这一条钉的是「**可勾面 == 生效面**」。2026-10-06 的真机实测之前，十项并排画在花名册上，
     其中七项在员工端根本没有执行点：超管勾「数据与归档」→ 保存成功 → 员工端零变化，而界面
-    一句提示都没有（最坏的一类缺陷：静默无效）。现在可勾的只剩员工端真有落点的三项，其余
+    一句提示都没有（最坏的一类缺陷：静默无效）。现在可勾的只剩员工端真有落点的五项，其余
     七项降级成只读说明 —— 若哪天有人把某项的 `staffSide` 打开却没接后端判据，这里会红。
     """
     from services.identity.capabilities import (
@@ -279,11 +279,11 @@ def test_frontend_checkbox_group_is_exactly_the_staff_side_caps():
     staff_side = tuple(re.findall(r"key:\s*'([a-z_]+)'[^}]*staffSide:\s*true", src))
     supervisor_only = tuple(re.findall(r"key:\s*'([a-z_]+)'[^}]*staffSide:\s*false", src))
     assert staff_side == STAFF_SIDE_CAPABILITIES, (
-        f"前端可勾的三项 {staff_side} 与后端 {STAFF_SIDE_CAPABILITIES} 不一致"
+        f"前端可勾的五项 {staff_side} 与后端 {STAFF_SIDE_CAPABILITIES} 不一致"
     )
     assert supervisor_only == SUPERVISOR_ONLY_CAPABILITIES, (
         f"前端只读的七项 {supervisor_only} 与后端 {SUPERVISOR_ONLY_CAPABILITIES} 不一致"
     )
-    # 两组刚好把十项分完，不重不漏。
+    # 两组刚好把十二项分完，不重不漏。
     assert set(staff_side) | set(supervisor_only) == set(CAPABILITIES)
     assert not set(staff_side) & set(supervisor_only)

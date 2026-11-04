@@ -64,7 +64,7 @@ const staffMe = ref(null)
 const deepClock = ref(null)
 const dailyClocks = ref(null)
 
-// 「你能做的事」能力卡（票 01 / ADR 0093）的数据：十三项开关里**员工端真有执行点**的那六项
+// 「你能做的事」能力卡（票 01 / ADR 0093）的数据：十二项开关里**员工端真有执行点**的那五项
 // （`ADMIN_CAP_STAFF_DEFS` 与后端 `STAFF_SIDE_CAPABILITIES` 同义），逐项标出开了没有。
 // 判据一律看 `admin_caps` —— `permission` 只是显示用的标签（真机走查 S10：标签写着
 // 「管理员」而一项开关都没给是合法状态），拿标签判会放行没给的那件事。
@@ -76,12 +76,14 @@ const staffCaps = computed(() => ADMIN_CAP_STAFF_DEFS.map((item) => ({
 })))
 const staffCapCount = computed(() => staffCaps.value.filter((item) => item.granted).length)
 
-// 能力 → 落点（§12 第 1 条裁定：能力卡计 **4 项**，三项在「卫生」页、`overtime` 在「加班与补钟」页）。
+// 能力 → 落点（§12 第 1 条裁定：能力卡计 **5 项**，三项在「卫生」页、`schedule` 在人事组，`wastage` 在后勤组）。
+// 加班与补钟审批 2026-11-03 并进了 `schedule`，「加班与补钟」页仍在 `/workbench/staff/overtime`，
+// 但能力卡上不再单独占一项 —— 它的落点跟着人事管理走。
 // 落点写在数据旁边，而不是页尾一句概括句 —— 那种句子在一项能力多出来之后就会变成假话。
 // 2026-10-14 加的两项：`schedule` 落到人事组的月历（管理端那一面，员工会话 + 能力即可进），
 // `wastage` 落到后勤组的损耗分析（同上）。两页都是 `audience: admin` + `staffCap`。
-// 「今天会用到」这六项里，现场三项（日常验收 / 专项验收 / 整改单）今天就会真用上；
-// 其余（加班、排班、损耗）是隔天的事。分组只影响默认折叠哪几行，不改开关判据。
+// 「今天会用到」这五项里，现场三项（日常验收 / 专项验收 / 整改单）今天就会真用上；
+// 其余（排班 / 考勤、损耗）是隔天的事。分组只影响默认折叠哪几行，不改开关判据。
 const CAP_TODAY_KEYS = ['daily_review', 'deep_review', 'fix']
 const capsExpanded = ref(false)
 const capsToday = computed(() => staffCaps.value.filter((item) => CAP_TODAY_KEYS.includes(item.key)))
@@ -91,7 +93,6 @@ const CAP_ROUTES = {
   daily_review: '/workbench/staff/clean',
   deep_review: '/workbench/staff/clean',
   fix: '/workbench/staff/clean',
-  overtime: '/workbench/staff/overtime',
   schedule: '/workbench/hr/calendar',
   wastage: '/workbench/kitchen/loss',
 }
@@ -852,7 +853,7 @@ useNudgePull({
           <h2>你能做的事</h2>
           <!-- 档位那颗胶囊：原来在账号信息里的「卫生权限」那一行，票 01 起搬到这里 ——
                同一件事只说一遍。措辞 2026-10-14 从「现场复核」改成「管理权限」：花名册上
-               可勾的现在有六项，其中人事管理与损耗分析不是「复核」，写着那个词就成假话。 -->
+               可勾的现在有五项，其中人事管理与损耗分析不是「复核」，写着那个词就成假话。 -->
           <span class="hint">管理权限 · {{ staffCapCount }} 项</span>
         </div>
 

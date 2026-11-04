@@ -70,7 +70,7 @@ const formError = ref('')
 const note = ref('')
 const cancelBusyId = ref(null)
 
-// 票 04：店长那一面（第 11 项能力键 `overtime`）。`can_review` 由**服务端**算好带下来，
+// 票 04：店长那一面（「人事管理」能力键 `schedule`）。`can_review` 由**服务端**算好带下来，
 // 页面不自己重写一遍 caps 判据 —— 权限判据只有一处，改口径时不会漏掉这一页。
 const canReview = ref(false)
 const pending = ref([])
@@ -296,7 +296,7 @@ async function decideDeduction(deduction, action, body = {}) {
 
 // ── 店长那一面（票 04）：待审批队列、批 / 驳、代录选人 ────────────────────────
 
-/** 拉待审批队列与选人名单。两者都只认「加班与补钟审批」能力（没给的人调它 403）。 */
+/** 拉待审批队列与选人名单。两者都只认「人事管理」能力（没给的人调它 403）。 */
 async function loadReview() {
   reviewError.value = ''
   try {
