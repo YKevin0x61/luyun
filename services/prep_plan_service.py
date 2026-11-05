@@ -38,7 +38,9 @@ from services.dish_normalize import normalize_dish_name
 logger = logging.getLogger(__name__)
 
 SAME_WEEKDAY_LOOKBACK = 4
-HISTORY_DAYS = 7
+# 展开那一栏的用量柱形图：今天 + 前面 7 个完整营业日。今天那根只算到此刻，
+# 要和前 7 个整天比趋势就得给 8 根，否则一天是半天、其余是整天，看着像生意掉了。
+HISTORY_DAYS = 8
 DEFAULT_OPEN = "07:00"
 DEFAULT_CLOSE = "21:30"
 RUNTIME_SETTINGS_KEY = "prep_plan_runtime"
@@ -64,6 +66,9 @@ STORE_FACTOR_MIN = 0.75
 STORE_FACTOR_MAX = 1.30
 # 参考值的时间跨度：现在起的未来 24 小时（与保质期对齐，见 ADR 0122）
 FORECAST_HORIZON_HOURS = 24
+# 页面可选的时间跨度（小时）。24 是回测口径，其余是同一套算法的自然延伸：
+# 窗口拉长到整段，窗口里每个自然日都要算进去（周末备货会看 48 / 72 小时或整周）。
+FORECAST_HORIZONS = (24, 48, 72, 168)
 # 偶发品下限：近 7 天卖出过的品，建议量至少 1 个单位，否则分位会让长尾品静默消失
 SPARSE_FLOOR_DAYS = 7
 SPARSE_FLOOR_QTY = 1.0
@@ -107,6 +112,37 @@ def _quantile(values: List[float], q: float) -> float:
     lo = int(math.floor(pos))
     hi = min(lo + 1, len(ordered) - 1)
     return float(ordered[lo] + (ordered[hi] - ordered[lo]) * (pos - lo))
+
+
+def resolve_horizon_hours(value) -> int:
+    """把页面传来的时间跨度收成 `FORECAST_HORIZONS` 里的一个；非法值抛 ValueError。
+
+    只认整数小时且必须在白名单里：窗口长度决定「同星期几的哪一段」与整店水位怎么取，
+    随手传个 30 小时会让水位参考日错半格，宁可直接 400 让调用方改。
+    """
+    if value is None or value == "":
+        return FORECAST_HORIZON_HOURS
+    try:
+        hours = int(value)
+    except (TypeError, ValueError):
+        raise ValueError("时间跨度只支持 24 / 48 / 72 / 168 小时") from None
+    if hours not in FORECAST_HORIZONS:
+        raise ValueError("时间跨度只支持 24 / 48 / 72 / 168 小时")
+    return hours
+
+
+def fit_qty(qty: float, kind: str) -> float:
+    """按备货品形态把数量收口：半成品只能整份做，原料可以论斤论包。
+
+    半成品向上取整而不是四舍五入 —— 差 0.2 份也得下这一份的工，向下取整等于让人少做一份；
+    多一分的代价是几份报废，少一份的代价是一道菜停售。
+    原料保留 1 位小数：0.5 斤是真的可以称出来的。
+    """
+    value = float(qty or 0.0)
+    if kind == "made":
+        # 1e-9 挡住浮点误差：2.0000000000000004 不该被顶成 3
+        return float(math.ceil(value - 1e-9))
+    return round(value, 1)
 
 
 class _UsageIndex:
@@ -390,15 +426,26 @@ class PrepPlanService:
             "factor_max": float(cfg.get("factor_max", STORE_FACTOR_MAX)),
         }
 
-    async def compute_suggestions(self, db, now: datetime) -> dict:
-        """算出今天这份清单的建议量。返回纯计算结果，不落库。"""
+    async def compute_suggestions(
+        self, db, now: datetime, horizon_hours: Optional[int] = None
+    ) -> dict:
+        """算出这份清单的建议量。返回纯计算结果，不落库。
+
+        `horizon_hours` 是参考值覆盖的时间跨度（24 / 48 / 72 / 168，默认 24）：
+        窗口一律从**现在**起算，不截到打烊、也不按营业日取整。
+        """
+        horizon = resolve_horizon_hours(horizon_hours)
+        # 参考值按 24 小时切段：48 小时 = 2 段、7 天 = 7 段，各段自己算完再相加。
+        # 24 小时就是 1 段——那是回测过的口径（ADR 0122），多段的每一段都用同一套算法，
+        # 所以「7 天」是 7 个 24 小时预测之和，不是拿 7 天的总量再取一次分位。
+        slice_count = max(1, math.ceil(horizon / 24))
         open_t, close_t = await self._runtime(db)
         cfg = await self._forecast_config(db)
         today = now.date()
-        # ADR 0122：参考值覆盖「现在起的未来 24 小时」，与 24 小时保质对齐。
+        # ADR 0122：参考值覆盖「现在起的未来 N 小时」，与 24 小时保质对齐。
         # 这样下午打开页面不会因为「到打烊只剩 7 小时」而看着数字腰斩。
         window_start = now
-        window_end = now + timedelta(hours=FORECAST_HORIZON_HOURS)
+        window_end = now + timedelta(hours=horizon)
         after_close = now.time() >= close_t
         closed = False  # 滚动窗口下不存在「今天已打烊就没数」这回事
         clock_t = window_start.time()
@@ -446,48 +493,80 @@ class PrepPlanService:
             for i in range(1, SPARSE_FLOOR_DAYS + 1)
             if (today - timedelta(days=i)) in days_with_orders
         ]
-        fallback_days = [
-            today - timedelta(days=i)
-            for i in range(1, STALE_FALLBACK_DAYS + 1)
-            if (today - timedelta(days=i)) in days_with_orders
-        ]
 
-        def _span(day):
-            """从 day 的同钟点起算、往后 24 小时：[start, end)。跨天要拆成两段求和。"""
+        def _span_days_from(start: datetime, hours: int) -> List[date]:
+            """`[start, start + hours)` 盖到的每个自然日（右开：正好落在零点的算前一天）。"""
+            last = (start + timedelta(hours=hours) - timedelta(microseconds=1)).date()
+            days: List[date] = []
+            cursor = start.date()
+            while cursor <= last:
+                days.append(cursor)
+                cursor += timedelta(days=1)
+            return days
+
+        def _day_span(day):
+            """day 那天同钟点起算的 24 小时：[start, end)。这就是「一段」。"""
             start = _at(day, clock_t)
-            return start, start + timedelta(hours=FORECAST_HORIZON_HOURS)
+            return start, start + timedelta(hours=24)
+
+        def _window_span(day):
+            """从 day 的同钟点起算、往后 horizon 小时：[start, end)。"""
+            start = _at(day, clock_t)
+            return start, start + timedelta(hours=horizon)
+
+        def bucket_qty(day, key):
+            """day 那天那 24 小时里，这一品能做多少。"""
+            start, end = _day_span(day)
+            return sum(
+                usage.window(d, key, _epoch(start), _epoch(end))
+                for d in _span_days_from(start, 24)
+            )
 
         def window_qty(day, key):
-            start, end = _span(day)
-            total = usage.window(day, key, _epoch(start), _epoch(end))
-            # 窗口跨过零点：把次日那段补上
-            total += usage.window(day + timedelta(days=1), key, _epoch(start), _epoch(end))
-            return total
+            """day 起整个窗口的量：同星期几柱形图上那一根（多段时是各段之和）。"""
+            start, end = _window_span(day)
+            return sum(
+                usage.window(d, key, _epoch(start), _epoch(end))
+                for d in _span_days_from(start, horizon)
+            )
 
-        def store_volume(day):
+        def bucket_volume(day):
+            """整店水位用的量：day 那 24 小时全店卖了多少。"""
             if day not in days_with_orders:
                 return None
-            start, end = _span(day)
-            total = usage.raw_window(day, _epoch(start), _epoch(end))
-            total += usage.raw_window(day + timedelta(days=1), _epoch(start), _epoch(end))
-            return total
+            start, end = _day_span(day)
+            return sum(
+                usage.raw_window(d, _epoch(start), _epoch(end))
+                for d in _span_days_from(start, 24)
+            )
 
         factor_cache: Dict[date, float] = {}
 
         def day_factor(day) -> float:
-            """整店水位：近 7 天 / 前 21 天。只用 day 之前的数据，不泄漏。"""
+            """整店水位：近 7 天 / 前 21 天。只用 day 之前的数据，不泄漏。
+
+            水位一律按等长的 **24 小时**窗口比，与参考值跨几天无关：多段窗口里后面几段
+            的最近 7 天窗口还跑在 now 之后（订单没发生），把它们当完整窗口平均进来会把
+            水位系统性压到下限（跨 7 天时实测 0.75）。所以就一个水位，全程乘一次。
+            """
             if day in factor_cache:
                 return factor_cache[day]
             short = [
                 v
-                for v in (store_volume(day - timedelta(days=i)) for i in range(1, STORE_FACTOR_SHORT_DAYS + 1))
+                for v in (
+                    bucket_volume(day - timedelta(days=i))
+                    for i in range(1, STORE_FACTOR_SHORT_DAYS + 1)
+                )
                 if v is not None
             ]
             long_ = [
                 v
                 for v in (
-                    store_volume(day - timedelta(days=i))
-                    for i in range(STORE_FACTOR_SHORT_DAYS + 1, STORE_FACTOR_SHORT_DAYS + STORE_FACTOR_LONG_DAYS + 1)
+                    bucket_volume(day - timedelta(days=i))
+                    for i in range(
+                        STORE_FACTOR_SHORT_DAYS + 1,
+                        STORE_FACTOR_SHORT_DAYS + STORE_FACTOR_LONG_DAYS + 1,
+                    )
                 )
                 if v is not None
             ]
@@ -521,6 +600,11 @@ class PrepPlanService:
             )
             values = [window_qty(day, key) for day in active_candidates]
             fallback_applied = False
+            # 每段的分位落点（未乘水位、未取整）；页面据此显示「几段相加＝合计」
+            slice_bases: List[float] = []
+            # 分位落在多少：页面在同星期几的柱形图上用虚线标出这一档，
+            # 让人直接看到「8 个候选日里的哪一条」被选中，而不是只给一个结果数。
+            base_qty = 0.0
             if not has_rule:
                 demand_qty = 0.0
                 status = "missing_rule"
@@ -536,20 +620,39 @@ class PrepPlanService:
                 demand_qty = 0.0
                 status = "broken_rule"
             else:
-                base = _quantile(values, quantile_used)
-                if base <= 0 and values:
-                    # 候选日全撞在淡日/采集断档上，但近两周其实有量：退回均值，不给 0
-                    usable = [q for q in (window_qty(dd, key) for dd in fallback_days) if q > 0]
-                    if usable:
-                        base = sum(usable) / len(usable)
-                        fallback_applied = True
-                demand_qty = round(max(0.0, base * factor), 1)
+                for k in range(slice_count):
+                    shift = timedelta(days=k)
+                    # 第 k 段的候选日 = 今天 - 7i + k 天：同一批星期几，整体往后挪 k 天
+                    active_k = [
+                        day + shift
+                        for day in active_candidates
+                        if (day + shift) in days_with_orders
+                    ]
+                    values_k = [bucket_qty(day, key) for day in active_k]
+                    base_k = _quantile(values_k, quantile_used) if values_k else 0.0
+                    if base_k <= 0:
+                        # 该段候选日全撞在淡日/采集断档上，但近两周这一段有量：退回均值，不给 0
+                        day_k = today + shift
+                        usable = [
+                            q
+                            for q in (
+                                bucket_qty(day_k - timedelta(days=i), key)
+                                for i in range(1, STALE_FALLBACK_DAYS + 1)
+                            )
+                            if q > 0
+                        ]
+                        if usable:
+                            base_k = sum(usable) / len(usable)
+                            fallback_applied = True
+                    slice_bases.append(base_k)
+                base_qty = round(sum(slice_bases), 1)
+                demand_qty = fit_qty(max(0.0, sum(slice_bases) * factor), item["kind"])
                 status = "ok"
 
             floor_applied = False
             if status in ("ok", "no_history") and demand_qty < SPARSE_FLOOR_QTY:
                 # 分位会把偶发品压成 0；近 7 天真的卖出过就保底 1 个单位
-                if any(window_qty(dd, key) > 0 for dd in recent_days):
+                if any(bucket_qty(dd, key) > 0 for dd in recent_days):
                     demand_qty = SPARSE_FLOOR_QTY
                     floor_applied = True
 
@@ -564,7 +667,9 @@ class PrepPlanService:
                 for day in active_candidates
             ]
             next_hour_qty = (
-                round((sum(hour_values) / len(hour_values)) * factor, 1) if hour_values else 0.0
+                fit_qty((sum(hour_values) / len(hour_values)) * factor, item["kind"])
+                if hour_values
+                else 0.0
             )
             station = item["station"] or POSITION_STATION_MAP.get(item["position"], "")
             entries.append(
@@ -589,12 +694,24 @@ class PrepPlanService:
                         "quantile": quantile_used,
                         "is_major": line_share >= cfg["major_share"],
                         "line_share": round(line_share, 4),
+                        # 分位落点（未乘整店水位、未取整），柱形图虚线的位置
+                        "quantile_qty": base_qty,
+                        # 逐 24 小时的分段落点：48 小时两段、7 天七段，加起来就是 quantile_qty
+                        "slices": [
+                            {
+                                "start": (now + timedelta(hours=24 * k)).isoformat(),
+                                "end": (now + timedelta(hours=24 * (k + 1))).isoformat(),
+                                "quantile_qty": round(base_k, 1),
+                                "demand_qty": round(base_k * factor, 1),
+                            }
+                            for k, base_k in enumerate(slice_bases)
+                        ],
                         # 未扣在库的需求量：页面拿它显示「今天要卖多少」
                         "demand_qty": demand_qty,
                         "floor_applied": floor_applied,
                         "fallback_applied": fallback_applied,
                     },
-                    "history7": [
+                    "history": [
                         {
                             "day": day.isoformat(),
                             "qty": round(
@@ -627,7 +744,7 @@ class PrepPlanService:
                 "end": window_end.isoformat(),
                 "closed": closed,
                 "after_close": after_close,
-                "horizon_hours": FORECAST_HORIZON_HOURS,
+                "horizon_hours": horizon,
             },
             "entries": entries,
             "missing_rule": [
@@ -756,9 +873,10 @@ class PrepPlanService:
         now: Optional[datetime] = None,
         station: Optional[str] = None,
         employee_id: Optional[int] = None,
+        horizon_hours: Optional[int] = None,
     ) -> dict:
         now = now or datetime.now(CHINA_TZ)
-        computed = await self.compute_suggestions(db, now)
+        computed = await self.compute_suggestions(db, now, horizon_hours=horizon_hours)
         day_id = await self._ensure_day(db, computed["plan_day"], computed["window"])
         await self._persist_entries(db, day_id, computed["entries"])
         entries = await self._read_entries(db, day_id)
@@ -768,7 +886,7 @@ class PrepPlanService:
         source_by_item = {e["prep_item_id"]: e for e in computed["entries"]}
         for entry in entries:
             source = source_by_item.get(entry["prep_item_id"])
-            entry["history7"] = source["history7"] if source else []
+            entry["history"] = source["history"] if source else []
             entry["position"] = (source["position"] if source else "") or ""
 
         staff_station: Optional[str] = None
@@ -827,7 +945,13 @@ class PrepPlanService:
         tdb = db.table("prep_plan_entries")
         async with tdb.conn.cursor() as cursor:
             await cursor.execute(
-                "SELECT id, prep_item_id FROM prep_plan_entries WHERE id = ?", (entry_id,)
+                """
+                SELECT e.id, e.prep_item_id, i.kind
+                  FROM prep_plan_entries e
+                  LEFT JOIN prep_items i ON i.id = e.prep_item_id
+                 WHERE e.id = ?
+                """,
+                (entry_id,),
             )
             row = await cursor.fetchone()
             if row is None:
@@ -845,7 +969,7 @@ class PrepPlanService:
                        SET final_qty = ?, qty_source = 'manual', updated_at = ?
                      WHERE id = ?
                     """,
-                    (float(final_qty), stamp, entry_id),
+                    (fit_qty(final_qty, row["kind"] or ""), stamp, entry_id),
                 )
             if done is not None:
                 await cursor.execute(
@@ -1007,10 +1131,17 @@ class PrepPlanService:
         return hashlib.md5("\n".join(parts).encode("utf-8")).hexdigest()
 
     async def write_snapshot(self, db, now: Optional[datetime] = None) -> dict:
-        """整点写一份参考值快照。同一天同一整点重复调用按 upsert 处理。"""
+        """整点写一份参考值快照。同一天同一整点重复调用按 upsert 处理。
+
+        快照**固定 24 小时**：复盘页按「一条快照 = 它自己那个 24 小时窗口」对账
+        （ADR 0123/0129），页面上的时间跨度切换不改变这条口径，否则同一天不同钟点
+        的快照窗口长短不一，复盘没法横向比。
+        """
         now = now or datetime.now(CHINA_TZ)
         stamp = now.replace(minute=0, second=0, microsecond=0)
-        computed = await self.compute_suggestions(db, stamp)
+        computed = await self.compute_suggestions(
+            db, stamp, horizon_hours=FORECAST_HORIZON_HOURS
+        )
         fingerprint = await self._rules_fingerprint(db)
         created = datetime.now(CHINA_TZ).isoformat()
         window = computed["window"]

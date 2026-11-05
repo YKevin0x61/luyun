@@ -14,6 +14,7 @@ from services.prep_plan_service import (
     FORECAST_SETTINGS_KEY,
     PrepPlanService,
     _quantile,
+    fit_qty,
 )
 
 ITEM_NAME = "虾饺馅"
@@ -43,7 +44,9 @@ class PrepPlanRebuildFixture(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         await self.db.close()
 
-    async def _seed_item(self, *, item_name=ITEM_NAME, unit=UNIT, station=STATION, position='熟笼'):
+    async def _seed_item(
+        self, *, item_name=ITEM_NAME, unit=UNIT, station=STATION, position='熟笼', kind='made'
+    ):
         items = self.db.table("prep_items")
         async with items.conn.cursor() as cursor:
             await cursor.execute(
@@ -52,9 +55,18 @@ class PrepPlanRebuildFixture(unittest.IsolatedAsyncioTestCase):
                     item_name, station, position, category, unit, kind, active,
                     shelf_life_hours, lead_time_hours, min_batch_qty,
                     safety_stock_ratio, notes, created_at, updated_at
-                ) VALUES (?, ?, ?, '半成品', ?, 'made', 1, 24, 0, 0, 0.15, '', ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, 1, 24, 0, 0, 0.15, '', ?, ?)
                 """,
-                (item_name, station, position, unit, self.stamp, self.stamp),
+                (
+                    item_name,
+                    station,
+                    position,
+                    '半成品' if kind == 'made' else '原料',
+                    unit,
+                    kind,
+                    self.stamp,
+                    self.stamp,
+                ),
             )
             item_id = cursor.lastrowid
         await items.commit()
@@ -129,6 +141,8 @@ class SameWeekdayMeanTests(PrepPlanRebuildFixture):
         self.assertEqual(len(entry["basis"]["weekdays"]), 8)
         # 只有一个配方菜品 → 主力品档位（p70），且不加任何安全缓冲
         self.assertEqual(entry["basis"]["quantile"], 0.70)
+        # 页面柱形图的虚线画在这一档上：8 个候选日全是 80，落点就是 80（未乘水位、未取整）
+        self.assertEqual(entry["basis"]["quantile_qty"], 80)
 
     async def test_window_spans_the_next_24_hours(self):
         """中午 12 点看，窗口是「现在 → 明天 12 点」，跨两天各取一段（ADR 0122）。"""
@@ -174,15 +188,167 @@ class SameWeekdayMeanTests(PrepPlanRebuildFixture):
         self.assertEqual(entry["basis"]["status"], "missing_rule")
         self.assertIn("鱼皇料", result["missing_rule"])
 
-    async def test_history7_covers_seven_days(self):
+    async def test_history_covers_today_plus_seven_whole_days(self):
+        """柱形图给 8 根：今天（只算到此刻）+ 前面 7 个完整营业日，才比得出趋势。"""
         await self._seed_item()
         await self._seed_rule()
         await self._seed_orders(CANDIDATE_DAYS, hour=9, minute=0, qty=40)
 
         result = await self.service.compute_suggestions(self.db, TODAY_MORNING)
         entry = self._entry(result)
-        self.assertEqual(len(entry["history7"]), 7)
-        self.assertEqual(entry["history7"][0]["day"], "2026-10-22")
+        self.assertEqual(len(entry["history"]), 8)
+        self.assertEqual(entry["history"][0]["day"], "2026-10-22")
+        self.assertEqual(entry["history"][-1]["day"], "2026-10-15")
+
+
+class HorizonWindowTests(PrepPlanRebuildFixture):
+    """时间跨度：24 / 48 / 72 / 168 小时。
+
+    窗口一律从**现在**起算，所以「N 小时」必须把窗口盖到的每个自然日都算进去——
+    旧实现只加 day 和 day+1 两段，48 小时以上会整段整段地漏。
+    """
+
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        await self._seed_item()
+        await self._seed_rule()
+        await self._seed_stationary()
+
+    async def _suggested(self, hours):
+        result = await self.service.compute_suggestions(
+            self.db, TODAY_MORNING, horizon_hours=hours
+        )
+        return result, self._entry(result)
+
+    async def test_defaults_to_24_hours(self):
+        result, entry = await self._suggested(None)
+        self.assertEqual(result["window"]["horizon_hours"], 24)
+        self.assertEqual(entry["suggested_qty"], 80)
+
+    async def test_every_day_in_the_window_counts(self):
+        """每天 09:00 40 + 18:30 40，08:00 看：每多盖到一天就多 80。"""
+        for hours, expected in ((24, 80), (48, 160), (72, 240), (168, 560)):
+            result, entry = await self._suggested(hours)
+            self.assertEqual(result["window"]["horizon_hours"], hours)
+            self.assertEqual(entry["suggested_qty"], expected, f"{hours} 小时")
+            # 稳定序列上整店水位恒为 1，建议量就是分位量本身
+            self.assertAlmostEqual(entry["basis"]["store_factor"], 1.0, places=2)
+
+    async def test_window_bounds_follow_the_horizon(self):
+        result, _ = await self._suggested(168)
+        self.assertEqual(result["window"]["start"], TODAY_MORNING.isoformat())
+        self.assertEqual(
+            result["window"]["end"],
+            (TODAY_MORNING + timedelta(hours=168)).isoformat(),
+        )
+
+    async def test_unsupported_horizon_is_rejected(self):
+        with self.assertRaises(ValueError):
+            await self.service.compute_suggestions(
+                self.db, TODAY_MORNING, horizon_hours=30
+            )
+
+    async def test_get_today_passes_the_horizon_through(self):
+        result = await self.service.get_today(self.db, now=TODAY_MORNING, horizon_hours=72)
+        self.assertEqual(result["window"]["horizon_hours"], 72)
+        self.assertEqual(self._entry(result)["suggested_qty"], 240)
+
+    async def test_snapshot_stays_on_the_24_hour_window(self):
+        """复盘按「一条快照 = 它自己那个 24 小时窗口」对账，页面切跨度不能改它。"""
+        await self.service.write_snapshot(self.db, TODAY_MORNING)
+        snapshots = self.db.table("prep_plan_snapshots")
+        async with snapshots.conn.cursor() as cursor:
+            await cursor.execute("SELECT window_start, window_end FROM prep_plan_snapshots")
+            rows = await cursor.fetchall()
+        self.assertTrue(rows)
+        for row in rows:
+            start = datetime.fromisoformat(str(row["window_start"]))
+            end = datetime.fromisoformat(str(row["window_end"]))
+            self.assertEqual(end - start, timedelta(hours=24))
+
+
+class AdditiveSliceTests(PrepPlanRebuildFixture):
+    """超过 24 小时的参考值 = 各段 24 小时的预测相加。
+
+    用户口径（2026-11-05）：72 小时 = 未来 24 小时 + 第 25–48 小时 + 第 49–72 小时。
+    所以每段各自按「近 8 周同星期几」取分位，再相加；不是拿整段总量取一次分位。
+    24 小时只有一段，与回测口径（ADR 0122）逐字一致。
+    """
+
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        await self._seed_item()
+        await self._seed_rule()
+
+    async def _slices(self, hours):
+        entry = self._entry(
+            await self.service.compute_suggestions(
+                self.db, TODAY_MORNING, horizon_hours=hours
+            )
+        )
+        return entry["basis"]
+
+    async def test_one_slice_per_24_hours(self):
+        await self._seed_stationary()
+        for hours, count in ((24, 1), (48, 2), (72, 3), (168, 7)):
+            basis = await self._slices(hours)
+            self.assertEqual(len(basis["slices"]), count, f"{hours} 小时")
+            # 每段都是 24 小时，首尾相接
+            for k, part in enumerate(basis["slices"]):
+                start = datetime.fromisoformat(part["start"])
+                end = datetime.fromisoformat(part["end"])
+                self.assertEqual(start, TODAY_MORNING + timedelta(hours=24 * k))
+                self.assertEqual(end - start, timedelta(hours=24))
+            self.assertAlmostEqual(
+                sum(part["quantile_qty"] for part in basis["slices"]),
+                basis["quantile_qty"],
+                places=6,
+            )
+
+    async def test_stationary_series_sums_the_same_number_each_day(self):
+        await self._seed_stationary()
+        # 每天 80、水位恒为 1：48 小时就是 80 + 80
+        basis = await self._slices(48)
+        self.assertEqual([part["quantile_qty"] for part in basis["slices"]], [80, 80])
+        self.assertEqual(basis["quantile_qty"], 160)
+        entry = self._entry(
+            await self.service.compute_suggestions(self.db, TODAY_MORNING, horizon_hours=48)
+        )
+        self.assertEqual(entry["suggested_qty"], 160)
+
+    async def test_each_slice_is_quantiled_on_its_own_weekday(self):
+        """第 1 段看周四的 8 周、第 2 段看周五的 8 周，各取各的分位再相加。
+
+        周四与周五的量是「此起彼伏」的（各段的 p70 都落在 10 与 300 之间的插值 271），
+        但同一周两天合起来恒是 310 或 20 —— 先合计再取分位得到 310，
+        分段相加才是 271 + 271 = 542。这条用例钉的就是「分段」这个口径。
+        """
+        thu = [10, 10, 10, 10, 10, 300, 300, 300]
+        fri = [300, 300, 300, 10, 10, 10, 10, 10]
+        for weeks_back, (thu_qty, fri_qty) in enumerate(zip(thu, fri), start=1):
+            thursday = TODAY_MORNING.date() - timedelta(days=7 * weeks_back)
+            friday = thursday + timedelta(days=1)
+            await self._seed_orders([thursday.isoformat()], hour=9, minute=0, qty=thu_qty)
+            await self._seed_orders([friday.isoformat()], hour=9, minute=0, qty=fri_qty)
+
+        # 只有一个配方菜品 → 主力品，档位 p70（ADR 0128）
+        expected_thu = _quantile(thu, 0.70)
+        expected_fri = _quantile(fri, 0.70)
+        basis = await self._slices(48)
+        self.assertAlmostEqual(basis["slices"][0]["quantile_qty"], expected_thu, places=6)
+        self.assertAlmostEqual(basis["slices"][1]["quantile_qty"], expected_fri, places=6)
+        self.assertAlmostEqual(
+            basis["quantile_qty"], expected_thu + expected_fri, places=6
+        )
+        # 反面：先合计再取分位会落到 310，说明加的是「两段的分位」而不是「分位的两段」
+        self.assertAlmostEqual(_quantile([a + b for a, b in zip(thu, fri)], 0.70), 310.0)
+        self.assertNotAlmostEqual(basis["quantile_qty"], 310.0, places=1)
+
+    async def test_24_hours_has_no_decomposition_to_explain(self):
+        await self._seed_stationary()
+        basis = await self._slices(24)
+        self.assertEqual(len(basis["slices"]), 1)
+        self.assertEqual(basis["slices"][0]["quantile_qty"], basis["quantile_qty"])
 
 
 class ForecastQuantileTests(PrepPlanRebuildFixture):
@@ -317,6 +483,25 @@ class ForecastQuantileTests(PrepPlanRebuildFixture):
         entry = self._entry(await self.service.compute_suggestions(self.db, TODAY_MORNING))
         self.assertEqual(entry["basis"]["demand_qty"], 80)
         self.assertEqual(entry["suggested_qty"], 80)
+        # quantile_qty 是「分位落点」本身：乘水位、取整之前的那个数，页面靠它标虚线
+        self.assertEqual(entry["basis"]["quantile_qty"], 80)
+
+    async def test_quantile_qty_ignores_store_factor(self):
+        """水位变化只影响参考值，不该挪动虚线：候选日用量的分位是原始事实。"""
+        await self._seed_item()
+        await self._seed_rule()
+        await self._seed_stationary()
+        # 近 7 天里挑非候选日（候选日是周四）加量，把整店水位顶上去但不动候选日
+        busy = [
+            (TODAY_MORNING.date() - timedelta(days=i)).isoformat() for i in range(1, 7)
+        ]
+        await self._seed_orders(busy, hour=20, minute=0, qty=80)
+
+        payload = await self.service.compute_suggestions(self.db, TODAY_MORNING)
+        entry = self._entry(payload)
+        self.assertGreater(entry["basis"]["store_factor"], 1.0)
+        self.assertEqual(entry["basis"]["quantile_qty"], 80)
+        self.assertGreater(entry["basis"]["demand_qty"], 80)
 
 
 class SnapshotTests(PrepPlanRebuildFixture):
@@ -506,3 +691,67 @@ class StaffStationTests(PrepPlanRebuildFixture):
             await self.service.update_entry(
                 self.db, entry["id"], done=True, employee_id=self.employee_id
             )
+
+
+class IntegerQtyTests(PrepPlanRebuildFixture):
+    """半成品只能按整份做：参考值向上取整；原料照旧保留 1 位小数（0.5 斤称得出来）。
+
+    烧卖算出来 58.7 份没有意义 —— 师傅要么做 58 份要么做 59 份，报「58.7 份」只是把
+    计算过程漏给了看清单的人。
+    """
+
+    def test_fit_qty_rounds_made_up_and_leaves_bought_alone(self):
+        self.assertEqual(fit_qty(58.7, "made"), 59.0)
+        self.assertEqual(fit_qty(0.2, "made"), 1.0)
+        self.assertEqual(fit_qty(0.0, "made"), 0.0)
+        # 浮点误差不该白多算一份
+        self.assertEqual(fit_qty(2.0000000000000004, "made"), 2.0)
+        self.assertEqual(fit_qty(58.74, "bought"), 58.7)
+
+    async def test_made_item_gets_a_whole_number(self):
+        await self._seed_item()
+        # 一份虾饺皇用 0.335 份馅，每天卖 100 份 → 每天 33.5 份
+        await self._seed_rule(factor=0.335)
+        await self._seed_stationary(morning=100, evening=0)
+
+        payload = await self.service.get_today(self.db, now=TODAY_MORNING)
+        entry = self._entry(payload)
+
+        self.assertEqual(entry["basis"]["demand_qty"], 34)
+        self.assertEqual(entry["suggested_qty"], 34)
+        self.assertEqual(entry["final_qty"], 34)
+        self.assertEqual(entry["suggested_qty"], int(entry["suggested_qty"]))
+
+    async def test_bought_item_keeps_its_decimal(self):
+        await self._seed_item(item_name="河粉", unit="斤", kind="bought")
+        await self._seed_rule(semi_name="河粉", unit="斤", factor=0.335)
+        await self._seed_stationary(morning=100, evening=0)
+
+        payload = await self.service.get_today(self.db, now=TODAY_MORNING)
+        entry = self._entry(payload, item_name="河粉")
+
+        self.assertEqual(entry["suggested_qty"], 33.5)
+
+    async def test_manual_qty_is_rounded_up_for_made_items(self):
+        await self._seed_item()
+        await self._seed_rule()
+        await self._seed_stationary()
+
+        payload = await self.service.get_today(self.db, now=TODAY_MORNING)
+        entry = self._entry(payload)
+        await self.service.update_entry(self.db, entry["id"], final_qty=2.4)
+
+        again = await self.service.get_today(self.db, now=TODAY_MORNING)
+        self.assertEqual(self._entry(again)["final_qty"], 3)
+
+    async def test_manual_qty_keeps_the_decimal_for_bought_items(self):
+        await self._seed_item(item_name="河粉", unit="斤", kind="bought")
+        await self._seed_rule(semi_name="河粉", unit="斤")
+        await self._seed_stationary()
+
+        payload = await self.service.get_today(self.db, now=TODAY_MORNING)
+        entry = self._entry(payload, item_name="河粉")
+        await self.service.update_entry(self.db, entry["id"], final_qty=2.4)
+
+        again = await self.service.get_today(self.db, now=TODAY_MORNING)
+        self.assertEqual(self._entry(again, item_name="河粉")["final_qty"], 2.4)

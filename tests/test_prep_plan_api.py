@@ -220,3 +220,21 @@ def test_restock_and_review_are_gone(admin_client):
 
 
 
+
+
+def test_horizon_query_param_switches_the_window(admin_client):
+    """页面上的时间跨度胶囊：`hours` 决定窗口长度，后端原样回传。"""
+    client, db = admin_client
+    _seed(db)
+    body = client.get("/api/prep-plan/today", params={"hours": 168}).json()
+    assert body["window"]["horizon_hours"] == 168
+    # 不传就是回测过的 24 小时
+    assert client.get("/api/prep-plan/today").json()["window"]["horizon_hours"] == 24
+
+
+def test_unsupported_horizon_is_a_400(admin_client):
+    client, db = admin_client
+    _seed(db)
+    resp = client.get("/api/prep-plan/today", params={"hours": 30})
+    assert resp.status_code == 400
+    assert "24 / 48 / 72 / 168" in resp.json()["detail"]

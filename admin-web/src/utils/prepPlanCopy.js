@@ -14,13 +14,49 @@ export const COPY_LABEL = '复制清单'
 export const COPIED_LABEL = '已复制'
 export const EMPTY_LIST_TEXT = '今天不用做。'
 export const CLOSED_TEXT = '今天已打烊，明天早上再看。'
-export const LOADING_TEXT = '正在按现在到打烊算…'
 
 export const PICK_STATION_TITLE = '先选你在哪个岗位'
 export const PICK_STATION_HINT = '选了只看得到这个岗位的备货项，今天随时能改。'
 
-export const BASIS_HINT =
-  '参考值 = 未来 24 小时要卖多少（近 8 周同星期几的分位量 × 整店水位）；再减掉你看到的实物库存，才是要备的量'
+// 窗口一律从**现在**起算，所以 48 小时不是「今天 + 明天两个整天」，而是滚动的 48 小时；
+// 页头那句「现在 → 明天 13:59」也因此会变成「现在 → 后天 13:59」。
+export const HORIZON_OPTIONS = [
+  { hours: 24, label: '24 小时' },
+  { hours: 48, label: '48 小时' },
+  { hours: 72, label: '72 小时' },
+  { hours: 168, label: '7 天' },
+]
+export const DEFAULT_HORIZON_HOURS = 24
+/** 记住上次选的跨度：师傅切到「7 天」备周末货，下周不该再切一次。 */
+export const HORIZON_STORAGE_KEY = 'prepPlanHorizon'
+
+export function horizonLabel(hours) {
+  const found = HORIZON_OPTIONS.find((row) => row.hours === Number(hours))
+  return found ? found.label : HORIZON_OPTIONS[0].label
+}
+
+/** 大标题的前半句：24 小时说「今天」，长跨度直说「未来 48 小时 / 未来 7 天」。 */
+export function horizonTitle(hours) {
+  const value = Number(hours) || DEFAULT_HORIZON_HOURS
+  return value === DEFAULT_HORIZON_HOURS ? '今天' : `未来 ${horizonLabel(value)}`
+}
+
+/** 页脚口径：跨度变了括号里那半句得跟着变，其余算法口径不变。 */
+export function basisHint(hours) {
+  const value = Number(hours) || DEFAULT_HORIZON_HOURS
+  const span = `未来 ${horizonLabel(value)}`
+  return `参考值 = ${span}要卖多少（近 8 周同星期几的分位量 × 整店水位）；再减掉你看到的实物库存，才是要备的量`
+}
+
+/** 加载态：说清正在按多长的窗口算，切换后别让人以为还在算 24 小时。 */
+export function loadingText(hours) {
+  const value = Number(hours) || DEFAULT_HORIZON_HOURS
+  return `正在按现在起的 ${horizonLabel(value)}算…`
+}
+
+export const BASIS_HINT = basisHint(DEFAULT_HORIZON_HOURS)
+export const LOADING_TEXT = loadingText(DEFAULT_HORIZON_HOURS)
+
 export const FORMULA_HINT =
   '大品取 p70、其余取 p50，都不加安全量——24 小时保质，多做出来就是报废。'
 export const MAJOR_TAG = '大品'

@@ -33,7 +33,7 @@ const TODAY = {
       final_qty: 80,
       qty_source: 'suggested',
       done_at: null,
-      history7: [],
+      history: [],
     },
     {
       id: 2,
@@ -47,7 +47,7 @@ const TODAY = {
       final_qty: 20,
       qty_source: 'suggested',
       done_at: null,
-      history7: [],
+      history: [],
     },
     {
       id: 3,
@@ -61,7 +61,7 @@ const TODAY = {
       final_qty: 30,
       qty_source: 'suggested',
       done_at: '2026-10-22T09:00:00+08:00',
-      history7: [],
+      history: [],
     },
   ],
 }
@@ -146,5 +146,45 @@ describe('写动作', () => {
 
     await plan.setQty(entry, 'abc')
     expect(api.patch).not.toHaveBeenCalled()
+  })
+})
+
+
+describe('时间跨度', () => {
+  beforeEach(() => {
+    // 上一个用例可能刚把跨度存进去；这里的每条都想从干净的默认值开始
+    window.localStorage.clear()
+  })
+
+  it('load 带上当前跨度，后端回传的值覆盖本地状态', async () => {
+    api.get.mockImplementation(async (path, params) => {
+      if (path === '/api/prep-plan/today') {
+        return { ...TODAY, window: { ...TODAY.window, horizon_hours: params.hours } }
+      }
+      return {}
+    })
+    const plan = usePrepPlan()
+    await plan.load()
+    expect(api.get).toHaveBeenCalledWith('/api/prep-plan/today', { hours: 24 })
+
+    await plan.setHorizon(72)
+    expect(api.get).toHaveBeenLastCalledWith('/api/prep-plan/today', { hours: 72 })
+    expect(plan.horizonHours.value).toBe(72)
+    expect(window.localStorage.getItem('prepPlanHorizon')).toBe('72')
+  })
+
+  it('不认的值不切、也不落盘', async () => {
+    const plan = usePrepPlan()
+    await plan.load()
+    await plan.setHorizon(30)
+    expect(plan.horizonHours.value).toBe(24)
+    expect(window.localStorage.getItem('prepPlanHorizon')).toBeNull()
+  })
+
+  it('存了个坏值就回落 24 小时', async () => {
+    window.localStorage.setItem('prepPlanHorizon', 'abc')
+    const plan = usePrepPlan()
+    expect(plan.horizonHours.value).toBe(24)
+    await plan.load()
   })
 })

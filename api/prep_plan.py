@@ -61,12 +61,17 @@ def _wrap(exc: Exception, action: str) -> HTTPException:
 @reader_router.get("/today")
 async def get_today(
     station: Optional[str] = Query(None, description="档口 id；员工身份忽略（只看自己那档）"),
+    hours: Optional[int] = Query(
+        None, description="参考值的时间跨度（小时）：24 / 48 / 72 / 168，默认 24"
+    ),
     identity: dict = Depends(require_any_identity_session),
     db=Depends(get_db),
 ):
     try:
         employee_id, _name = _staff(identity)
-        return await prep_plan_service.get_today(db, station=station, employee_id=employee_id)
+        return await prep_plan_service.get_today(
+            db, station=station, employee_id=employee_id, horizon_hours=hours
+        )
     except HTTPException:
         raise
     except Exception as exc:
@@ -166,10 +171,15 @@ async def update_entry(
 
 
 @router.post("/today/recompute", dependencies=_ADMIN_WRITE)
-async def recompute_today(db=Depends(get_db)):
+async def recompute_today(
+    hours: Optional[int] = Query(
+        None, description="参考值的时间跨度（小时）：24 / 48 / 72 / 168，默认 24"
+    ),
+    db=Depends(get_db),
+):
     """按当前时刻重算建议量。手改过的数与勾选状态不动。"""
     try:
-        return await prep_plan_service.get_today(db)
+        return await prep_plan_service.get_today(db, horizon_hours=hours)
     except Exception as exc:
         raise _wrap(exc, "重算备货清单")
 

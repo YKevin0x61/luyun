@@ -4,15 +4,19 @@ import MiniBarChart from '../components/prep/MiniBarChart.vue'
 import { api } from '../api/client'
 import { usePrepPlan } from '../composables/usePrepPlan'
 import {
-  BASIS_HINT,
   BROKEN_RULE_TEXT,
   COPIED_LABEL,
   COPY_LABEL,
+  HORIZON_OPTIONS,
   MAJOR_TAG,
   MISSING_RULE_TEXT,
   NO_HISTORY_TEXT,
   PREP_PLAN_TITLE,
   STALE_FALLBACK_TEXT,
+  basisHint,
+  horizonLabel,
+  horizonTitle,
+  loadingText,
 } from '../utils/prepPlanCopy'
 import { buildPrepPlanText } from '../utils/prepPlanText'
 import { workbenchDocumentTitle } from '../utils/workbenchCopy'
@@ -20,8 +24,10 @@ import { workbenchDocumentTitle } from '../utils/workbenchCopy'
 /**
  * 备货计划（ADR 0117 重建）。
  *
- * 这一页只回答一个问题：**今天从现在到打烊，这个档口还要做多少、还要买多少。**
- * 没有时间窗选择器，没有「先点刷新」的空态，没有信心 / 裕度 / 风险读数。
+ * 这一页只回答一个问题：**从现在起的未来 N 小时，这个档口还要做多少、还要买多少。**
+ * N 由页头的跨度胶囊选（24 / 48 / 72 小时 / 7 天），窗口始终从「现在」起算，
+ * 所以同一时刻切到 48 小时看到的是滚动 48 小时，不是「今天 + 明天两个整天」。
+ * 没有「先点刷新」的空态，没有信心 / 裕度 / 风险读数。
  */
 
 const {
@@ -29,6 +35,7 @@ const {
   errorText,
   windowEnd,
   closed,
+  horizonHours,
   isStaff,
   needsStationPick,
   staffStation,
@@ -46,6 +53,7 @@ const {
   setQty,
   pickStation,
   setKind,
+  setHorizon,
   requestStationChange,
   toggleExpand,
 } = usePrepPlan()
@@ -62,10 +70,25 @@ const staffStationLabel = computed(
 const title = PREP_PLAN_TITLE
 workbenchDocumentTitle(title)
 
+/** 终点离今天几天：窗口是「现在起 N 小时」，48 小时可能落在明天、也可能后天。 */
+function endDayOffset(iso) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(iso))
+  if (!match) return 0
+  const end = Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]))
+  const now = new Date()
+  const today = Date.UTC(now.getFullYear(), now.getMonth(), now.getDate())
+  return Math.round((end - today) / 86400000)
+}
+
+/** 页头那句「现在 → 明天 13:59（未来 24 小时）」。超过后天就写日期，别数「大后天」。 */
 const windowText = computed(() => {
   if (!windowEnd.value) return ''
   const clock = windowEnd.value.slice(11, 16)
-  return `现在 → 明天 ${clock}（未来 24 小时）`
+  if (!clock) return ''
+  const offset = endDayOffset(windowEnd.value)
+  const day =
+    offset <= 0 ? '今天' : offset === 1 ? '明天' : offset === 2 ? '后天' : windowEnd.value.slice(5, 10).replace('-', '/')
+  return `现在 → ${day} ${clock}（未来 ${horizonLabel(horizonHours.value)}）`
 })
 
 const WEEKDAYS = ['日', '一', '二', '三', '四', '五', '六']
@@ -77,9 +100,9 @@ function weekdayOf(day) {
   return WEEKDAYS[new Date(Date.UTC(parts[0], parts[1] - 1, parts[2])).getUTCDay()]
 }
 
-/** 近 7 天用量：后端给的是「今天往前」的顺序，画图要从早到晚。 */
+/** 近 8 天用量（今天 + 前面 7 个完整营业日）：后端给的是「今天往前」的顺序，画图要从早到晚。 */
 function barPoints(entry) {
-  const history = Array.isArray(entry.history7) ? entry.history7 : []
+  const history = Array.isArray(entry.history) ? entry.history : []
   return history
     .map((row) => ({
       value: Number(row.qty || 0),
@@ -89,18 +112,74 @@ function barPoints(entry) {
     .reverse()
 }
 
-/** 保留 1 位小数（整数照常显示成整数）。师傅报的是约数，但 0.5 斤这类不能抹成 0。 */
-function roundQty(value) {
-  return Math.round((Number(value) || 0) * 10) / 10
+/** 同星期几的候选日用量：后端按「最近往前」给，画图从早到晚。 */
+function basisPoints(entry) {
+  const rows = Array.isArray(entry.basis?.weekdays) ? entry.basis.weekdays : []
+  return rows
+    .map((row) => ({
+      value: Number(row.qty || 0),
+      label: String(row.day || '').slice(5),
+      weekday: weekdayOf(row.day),
+    }))
+    .reverse()
+}
+
+/** 统计量的写法：整数就写整数，带小数留 1 位。分位落点走这个，不走「整份」口径。 */
+function statText(value) {
+  const num = Number(value) || 0
+  return Number.isInteger(num) ? String(num) : num.toFixed(1)
+}
+
+/** 均值写法与柱形图一致（1 位小数），给 caption 用。 */
+function historyMean(entry) {
+  const rows = Array.isArray(entry.history) ? entry.history : []
+  if (!rows.length) return 0
+  const total = rows.reduce((sum, row) => sum + (Number(row.qty) || 0), 0)
+  return total / rows.length
+}
+
+/**
+ * 同星期几柱形图的标题。多段（48 小时以上）时那根柱是「整窗口合计」，虚线是各段的
+ * 合计落点，标题就不写数字——「几段相加」写在下面的说明里，免得同一个数出现两遍。
+ */
+function weekdayCaption(entry) {
+  const basis = entry.basis || {}
+  const weeks = (basis.weekdays || []).length
+  const tag = quantileTag(entry)
+  if (isMultiSlice(basis)) return `同星期几（近 ${weeks} 周，整窗口合计）· ${tag} 合计`
+  return `同星期几（近 ${weeks} 周，同钟点区间）· ${tag} ${statText(basis.quantile_qty)}`
+}
+
+/** 参考值是不是按「每 24 小时一段」加起来算的（48 小时以上）。 */
+function isMultiSlice(basis) {
+  return Array.isArray(basis?.slices) && basis.slices.length > 1
+}
+
+/** 这一品用的档位标签（p50 / p70），柱形图虚线与说明共用。 */
+function quantileTag(entry) {
+  const pct = Math.round(Number(entry.basis?.quantile ?? 0.5) * 100)
+  return `p${pct}`
+}
+
+/** 数量收口：半成品只能整份做（后端也算成整数，这里再兜一层，翻旧单也不会冒出 58.7 份），
+ *  原料保留 1 位小数 —— 0.5 斤是真的能称出来的，抹成 0 就没人买了。 */
+function roundQty(value, kind) {
+  const number = Number(value) || 0
+  return kind === 'made' ? Math.ceil(number) : Math.round(number * 10) / 10
+}
+
+/** 这一行显示的数字（手改过的优先）。 */
+function entryQty(entry) {
+  return roundQty(entry.final_qty ?? entry.suggested_qty, entry.kind)
 }
 
 function qtyText(entry) {
-  return `${roundQty(entry.final_qty ?? entry.suggested_qty)}${entry.unit || ''}`
+  return `${entryQty(entry)}${entry.unit || ''}`
 }
 
 /** 参考值为 0 的品：数据照列（不替店长删信息），但整行降权，别和真要做的抢眼睛。 */
 function isZero(entry) {
-  return roundQty(entry.final_qty ?? entry.suggested_qty) === 0
+  return entryQty(entry) === 0
 }
 
 function isManual(entry) {
@@ -117,7 +196,8 @@ async function commitEdit(entry) {
   const next = editingValue.value
   editingId.value = null
   if (String(entry.final_qty) === String(next) || next === '') return
-  await setQty(entry, next)
+  // 半成品输入框本来就该按整份收，手打 2.4 也按 3 份算（后端同样向上取整，两边一致）
+  await setQty(entry, entry.kind === 'made' ? Math.ceil(Number(next)) : next)
 }
 
 function cancelEdit() {
@@ -134,7 +214,18 @@ function basisFormula(entry) {
   const pct = Math.round(Number(basis.quantile ?? 0.5) * 100)
   const factor = Number(basis.store_factor || 1)
   const tier = basis.is_major ? `p${pct}，${MAJOR_TAG}` : `p${pct}`
-  const parts = [`这 ${days} 天同样钟点里偏保守的那档（${tier}）`]
+  const slices = Array.isArray(basis.slices) ? basis.slices : []
+  const parts = []
+  if (isMultiSlice(basis)) {
+    // 多段：把「每天各多少、加起来多少」写出来，用户要的就是这个加法
+    const each = slices.map((part) => statText(part.quantile_qty)).join(' + ')
+    parts.push(
+      `${slices.length} 段相加：${each} = ${statText(basis.quantile_qty)}（每段各取 ${tier}）`,
+    )
+  } else {
+    // 单段：落点数字在上面那张图的 caption 里（「· p50 16」），这句只说规则
+    parts.push(`这 ${days} 天同样钟点里偏保守的那档（${tier}）`)
+  }
   if (basis.fallback_applied) parts.push(STALE_FALLBACK_TEXT)
   if (Math.abs(factor - 1) >= 0.05) parts.push(`× 整店水位 ${factor.toFixed(2)}`)
   return parts.join(' ')
@@ -157,6 +248,7 @@ function basisText(entry) {
 async function copyList() {
   const text = buildPrepPlanText({
     windowEnd: windowEnd.value,
+    horizonHours: horizonHours.value,
     stations: stationTabs.value.map((tab) => ({
       stationLabel: tab.label,
       items: groups.value
@@ -207,7 +299,7 @@ watch(activeStation, () => {
       <div class="pp-head-main">
         <p class="pp-kicker">备货计划 · 参考值</p>
         <h1 class="pp-title">
-          今天参考值
+          {{ horizonTitle(horizonHours) }}参考值
           <template v-if="!needsStationPick"><b>{{ remainingCount }}</b> 项</template>
         </h1>
         <p class="pp-sub">
@@ -226,6 +318,21 @@ watch(activeStation, () => {
         </button>
       </div>
     </header>
+
+    <nav class="pp-ranges" role="tablist" aria-label="参考值时间跨度">
+      <button
+        v-for="option in HORIZON_OPTIONS"
+        :key="option.hours"
+        type="button"
+        class="pp-range"
+        :class="{ 'is-on': option.hours === horizonHours }"
+        role="tab"
+        :aria-selected="option.hours === horizonHours"
+        @click="setHorizon(option.hours)"
+      >
+        {{ option.label }}
+      </button>
+    </nav>
 
     <p v-if="errorText" class="pp-error" role="status">{{ errorText }}</p>
 
@@ -250,7 +357,7 @@ watch(activeStation, () => {
       </div>
     </section>
 
-    <p v-else-if="state === 'loading'" class="pp-empty">正在按现在到打烊算…</p>
+    <p v-else-if="state === 'loading'" class="pp-empty">{{ loadingText(horizonHours) }}</p>
     <p v-else-if="!groups.length" class="pp-empty">今天不用做。</p>
 
     <template v-else>
@@ -304,9 +411,9 @@ watch(activeStation, () => {
               v-model="editingValue"
               class="pp-qty-input"
               type="number"
-              inputmode="decimal"
+              :inputmode="entry.kind === 'made' ? 'numeric' : 'decimal'"
               min="0"
-              step="0.1"
+              :step="entry.kind === 'made' ? 1 : 0.1"
               :aria-label="`${entry.item_name}的数量`"
               @keyup.enter="commitEdit(entry)"
               @blur="commitEdit(entry)"
@@ -319,7 +426,7 @@ watch(activeStation, () => {
               :disabled="isStaff"
               @click="!isStaff && startEdit(entry)"
             >
-              <b>{{ roundQty(entry.final_qty ?? entry.suggested_qty) }}</b>
+              <b>{{ entryQty(entry) }}</b>
               <small v-if="entry.unit" class="pp-qty-unit">{{ entry.unit }}</small>
               <i v-if="isManual(entry)" class="pp-manual">手改</i>
             </button>
@@ -336,22 +443,34 @@ watch(activeStation, () => {
             </button>
 
             <div v-if="expandedId === entry.id" class="pp-detail" @click.stop>
-              <div class="pp-chart">
-                <MiniBarChart :points="barPoints(entry)" />
+              <div class="pp-charts">
+                <figure class="pp-chart pp-chart--history">
+                  <figcaption class="pp-chart-cap">
+                    近 {{ entry.history?.length || 8 }} 天（今天只算到此刻）· 均
+                    {{ statText(historyMean(entry)) }}
+                  </figcaption>
+                  <MiniBarChart
+                    :points="barPoints(entry)"
+                    :aria-label="`近 ${entry.history?.length || 8} 天用量`"
+                  />
+                </figure>
+                <figure
+                  v-if="entry.basis?.status === 'ok' && entry.basis.weekdays?.length"
+                  class="pp-chart pp-chart--weekday"
+                >
+                  <figcaption class="pp-chart-cap">
+                    {{ weekdayCaption(entry) }}
+                  </figcaption>
+                  <MiniBarChart
+                    :points="basisPoints(entry)"
+                    tone="alt"
+                    :line="entry.basis.quantile_qty"
+                    :line-label="quantileTag(entry)"
+                    :highlight-last="false"
+                    :aria-label="`近 ${entry.basis.weekdays.length} 周同星期几用量，${quantileTag(entry)} 落在 ${entry.basis.quantile_qty}`"
+                  />
+                </figure>
               </div>
-
-              <p
-                v-if="entry.basis?.status === 'ok' && entry.basis.weekdays?.length"
-                class="pp-chart-cap"
-              >
-                同星期几
-              </p>
-              <ul v-if="entry.basis?.status === 'ok' && entry.basis.weekdays?.length" class="pp-days">
-                <li v-for="row in entry.basis.weekdays" :key="row.day">
-                  <span>{{ row.day.slice(5) }}</span>
-                  <b>{{ row.qty }}</b>
-                </li>
-              </ul>
               <p v-if="entry.basis?.status === 'ok'" class="pp-basis">{{ basisFormula(entry) }}</p>
               <p v-else class="pp-basis">{{ basisText(entry) }}</p>
 
@@ -378,7 +497,7 @@ watch(activeStation, () => {
               <span class="pp-name">{{ entry.item_name }}</span>
             </button>
             <span class="pp-qty">
-              <b>{{ roundQty(entry.final_qty ?? entry.suggested_qty) }}</b>
+              <b>{{ entryQty(entry) }}</b>
               <small v-if="entry.unit" class="pp-qty-unit">{{ entry.unit }}</small>
             </span>
             <button v-if="!isStaff" type="button" class="pp-check" @click="toggleDone(entry)">
@@ -389,7 +508,7 @@ watch(activeStation, () => {
       </section>
 
       <footer class="pp-foot">
-        <span class="pp-muted">{{ BASIS_HINT }}</span>
+        <span class="pp-muted">{{ basisHint(horizonHours) }}</span>
       </footer>
     </template>
   </div>
@@ -661,45 +780,27 @@ watch(activeStation, () => {
   color: var(--ink-dim);
 }
 
+.pp-charts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 22px;
+}
+
 .pp-chart {
   display: flex;
-  align-items: flex-start;
-  width: 100%;
+  flex: 1 1 300px;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  margin: 0;
   color: var(--ink-dim);
 }
 
 .pp-chart-cap {
-  margin: 2px 0 -4px;
+  margin: 0;
   font-size: var(--fs-11, 11px);
   color: var(--ink-faint);
   letter-spacing: var(--ls-2);
-}
-
-.pp-days {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  list-style: none;
-  margin: 0;
-  padding: 0;
-}
-
-.pp-days li {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 6px;
-  padding: 4px 9px;
-  border-radius: var(--r-1);
-  background: var(--surface-2);
-  font-size: var(--fs-11, 11px);
-  color: var(--ink-dim);
-  font-variant-numeric: tabular-nums;
-}
-
-.pp-days b {
-  font-size: var(--fs-13, 13px);
-  font-weight: 600;
-  color: var(--ink);
 }
 
 .pp-basis {
@@ -799,6 +900,46 @@ watch(activeStation, () => {
   background: var(--surface-1);
   color: var(--ink-dim);
   font-size: var(--fs-12);
+}
+
+/* 时间跨度：页头下面一排胶囊，四个都放得下；选中态与档口栏同一套（action-soft 底 + 淡边框）。
+   切换会重算整份清单，所以按钮保持 44px 触控高度，别做成小字链接。 */
+.pp-ranges {
+  display: flex;
+  gap: 4px;
+  min-width: 0;
+  max-width: 100%;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-full);
+  background: var(--surface-2);
+  align-self: flex-start;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scrollbar-width: none;
+}
+
+.pp-ranges::-webkit-scrollbar {
+  display: none;
+}
+
+.pp-range {
+  flex: 0 0 auto;
+  min-height: 44px;
+  padding: 0 14px;
+  border: 1px solid transparent;
+  border-radius: var(--r-full);
+  background: none;
+  color: var(--ink-dim);
+  font-size: var(--fs-13, 13px);
+  white-space: nowrap;
+}
+
+.pp-range.is-on {
+  border-color: var(--wb-tint-22);
+  background: var(--action-soft);
+  color: var(--ink);
+  font-weight: 600;
 }
 
 /* 档口筛选：容器是一条可以横着滑的胶囊栏。

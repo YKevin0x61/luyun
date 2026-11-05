@@ -56,3 +56,29 @@ describe('prep-plan copy', () => {
     expect(copy.BOUGHT_LABEL).toBe('原料')
   })
 })
+
+
+describe('时间跨度文案', () => {
+  it('四个选项按 24 / 48 / 72 / 168 排，长跨度用「7 天」而不是「168 小时」', () => {
+    expect(copy.HORIZON_OPTIONS.map((row) => [row.hours, row.label])).toEqual([
+      [24, '24 小时'],
+      [48, '48 小时'],
+      [72, '72 小时'],
+      [168, '7 天'],
+    ])
+  })
+
+  it('标题 24 小时说「今天」，其余直说跨度', () => {
+    expect(copy.horizonTitle(24)).toBe('今天')
+    expect(copy.horizonTitle(48)).toBe('未来 48 小时')
+    expect(copy.horizonTitle(168)).toBe('未来 7 天')
+  })
+
+  it('页脚口径跟着跨度走，24 小时那句与老文案一字不差', () => {
+    expect(copy.basisHint(24)).toBe(copy.BASIS_HINT)
+    expect(copy.BASIS_HINT).toContain('未来 24 小时要卖多少')
+    expect(copy.basisHint(168)).toContain('未来 7 天要卖多少')
+    // 算法口径不变：分位 × 整店水位、再减实物库存
+    expect(copy.basisHint(168)).toContain('近 8 周同星期几的分位量 × 整店水位')
+  })
+})

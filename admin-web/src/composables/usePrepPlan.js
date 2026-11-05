@@ -1,10 +1,25 @@
 import { computed, ref } from 'vue'
 import { api } from '../api/client'
+import {
+  DEFAULT_HORIZON_HOURS,
+  HORIZON_OPTIONS,
+  HORIZON_STORAGE_KEY,
+} from '../utils/prepPlanCopy'
+
+/** 上次选的参考值跨度（24 / 48 / 72 / 168 小时）。存不下来就回落 24 小时。 */
+function readStoredHorizon() {
+  try {
+    const value = Number(window.localStorage.getItem(HORIZON_STORAGE_KEY))
+    return HORIZON_OPTIONS.some((row) => row.hours === value) ? value : DEFAULT_HORIZON_HOURS
+  } catch {
+    return DEFAULT_HORIZON_HOURS
+  }
+}
 
 /** 备货计划（ADR 0117）的读路径与几个写动作。
  *
  *  进页面就要出清单（不再有「先点刷新」的空态）：`load()` 一进来就跑，
- *  后端按「现在 → 打烊」现算，勾选与手改落在当日计划里。
+ *  后端按「现在起 N 小时」现算（N 由页面上的跨度胶囊给），勾选与手改落在当日计划里。
  */
 export function usePrepPlan() {
   const state = ref('idle') // idle | loading | ready | error
@@ -13,6 +28,8 @@ export function usePrepPlan() {
   const windowStart = ref('')
   const windowEnd = ref('')
   const closed = ref(false)
+  /** 参考值覆盖的时间跨度（小时）。切换只改这一个数，其余口径全在后端同一套算法里。 */
+  const horizonHours = ref(readStoredHorizon())
   const entries = ref([])
   const missingRule = ref([])
   const isStaff = ref(false)
@@ -95,6 +112,9 @@ export function usePrepPlan() {
     windowStart.value = data.window?.start || ''
     windowEnd.value = data.window?.end || ''
     closed.value = Boolean(data.window?.closed)
+    const echoed = Number(data.window?.horizon_hours)
+    // 后端会把实际用的跨度回传：老接口不认这个参数时它是 24，此时不能把用户的选择改掉
+    if (HORIZON_OPTIONS.some((row) => row.hours === echoed)) horizonHours.value = echoed
     entries.value = data.entries || []
     stationOptions.value = Array.isArray(data.stations) ? data.stations : []
     missingRule.value = data.missing_rule || []
@@ -114,13 +134,26 @@ export function usePrepPlan() {
     try {
       // 先问清单再决定要不要拉管理端档口：员工会话调 `/api/stations` 是 401，
       // 而后端已经把「全部后厨档口」随清单下发，员工那一档不需要那条接口。
-      const data = await api.get('/api/prep-plan/today')
+      const data = await api.get('/api/prep-plan/today', { hours: horizonHours.value })
       applyPayload(data)
       state.value = 'ready'
     } catch (err) {
       state.value = 'error'
       errorText.value = err.message || '清单读不出来'
     }
+  }
+
+  /** 切换时间跨度：记住选择，再按新跨度重拉一份。 */
+  async function setHorizon(hours) {
+    const next = Number(hours)
+    if (!HORIZON_OPTIONS.some((row) => row.hours === next) || next === horizonHours.value) return
+    horizonHours.value = next
+    try {
+      window.localStorage.setItem(HORIZON_STORAGE_KEY, String(next))
+    } catch {
+      // 隐私模式写不进 localStorage：本次照样生效，下次回落默认值
+    }
+    await load()
   }
 
   function replaceEntry(patch) {
@@ -199,6 +232,7 @@ export function usePrepPlan() {
     windowStart,
     windowEnd,
     closed,
+    horizonHours,
     entries,
     missingRule,
     isStaff,
@@ -218,6 +252,7 @@ export function usePrepPlan() {
     setQty,
     pickStation,
     setKind,
+    setHorizon,
     requestStationChange,
     toggleExpand,
   }
