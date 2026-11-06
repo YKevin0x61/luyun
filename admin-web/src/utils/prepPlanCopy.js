@@ -84,3 +84,84 @@ export const PREP_REVIEW_KICKER = '备货复盘'
 export const PREP_REVIEW_TITLE = '那一次给的参考值，事后准不准'
 export const PREP_REVIEW_EMPTY =
   '这天还没有快照。整点快照从部署后开始累积，实际销量要等 24 小时窗口结束后才回填。'
+
+// ── 复盘页 · 90 天口径（票 06 前端）─────────────────────────────────────────
+// 三张新卡与「为什么不准」都读 `/review/summary`；NULL 表示分母为 0，不拿 0 充数。
+export const PREP_REVIEW_METRIC_ABS = '绝对偏差'
+export const PREP_REVIEW_METRIC_ABS_HINT = '建议与实际差多少（取绝对值），按实际销量加权'
+export const PREP_REVIEW_METRIC_DIR = '方向偏差'
+export const PREP_REVIEW_METRIC_DIR_HINT = '正 = 备多了，负 = 备少了'
+export const PREP_REVIEW_METRIC_COVERAGE = '数量口径够卖率'
+export const PREP_REVIEW_METRIC_COVERAGE_HINT = '按数量算 min(建议, 实际) ÷ 实际，不按品数'
+
+/** 期间小字：换日期时「截至选中日」跟着走，口径固定在 07:00 主口径。 */
+export function prepReviewPeriodHint(days, clock) {
+  return `近 ${days} 天（截至选中日），按 ${clock} 主口径；分母为 0 显示「—」`
+}
+
+export const PREP_REVIEW_WHY_TITLE = '为什么不准'
+export const PREP_REVIEW_WHY_HINT = '每组按有数据的天数 n 统计，右侧两列是方向偏差与绝对偏差；n < 5 天只标样本不足，不拿 0 顶替'
+export const PREP_REVIEW_SAMPLE_SHORT = '样本不足'
+export const PREP_REVIEW_WHY_DIMENSIONS = [
+  { key: 'weekday', label: '星期几' },
+  { key: 'holiday', label: '节假日' },
+  { key: 'weather', label: '天气' },
+  { key: 'staff', label: '档口人数' },
+  { key: 'note', label: '备注' },
+]
+
+export const PREP_REVIEW_COST_TITLE = '多备的代价'
+export const PREP_REVIEW_COST_HINT = '多出量 = 次日卖出 + 报废 + 未明；只在「建议 > 实际」的品-天上算'
+export const PREP_REVIEW_COST_TOTAL = '多出量'
+export const PREP_REVIEW_COST_ROWS = [
+  { key: 'next_day_sold', label: '次日卖出' },
+  { key: 'wastage', label: '报废' },
+  { key: 'unexplained', label: '未明' },
+]
+export const PREP_REVIEW_COST_ESTIMATED = '估算'
+export const PREP_REVIEW_COST_ESTIMATED_HINT = '按期间加权成交均价折出来的钱，不是成本核算'
+export const PREP_REVIEW_COST_LOSS_LINK = '去损耗分析'
+export const PREP_REVIEW_COST_RECORDED_HINT = (recorded, counted) =>
+  `同期登记报废 ${recorded}，其中 ${counted} 落在多备的品-天上`
+
+export function prepReviewPendingHint(pending) {
+  return `${pending} 个品-天的次日销量还在等回填`
+}
+
+// ── 复盘页 · 今日备注 / 环境信号 ────────────────────────────────────────────
+export const PREP_REVIEW_NOTE_LABEL = '备注'
+export const PREP_REVIEW_NOTE_EDIT = '改备注'
+export const PREP_REVIEW_NOTE_SAVE = '保存'
+export const PREP_REVIEW_NOTE_CANCEL = '取消'
+export const PREP_REVIEW_NOTE_PREFIX = '备注：'
+export const PREP_REVIEW_NOTE_PLACEHOLDER = '团餐、活动、设备故障，一行就够'
+export const PREP_REVIEW_NOTE_FAILED = '备注没存上，再试一次'
+export const PREP_REVIEW_CONTEXT_HOLIDAY = '节假日'
+export const PREP_REVIEW_CONTEXT_WEATHER = '天气'
+export const PREP_REVIEW_CONTEXT_STAFF = '在岗'
+
+export function prepReviewContextStaff(total) {
+  return `在岗 ${total} 人`
+}
+
+// ── 复盘页 · 明细与导出 ─────────────────────────────────────────────────────
+export const PREP_REVIEW_DETAIL_HINT =
+  '窗口后 = 累计轨迹 − 窗口内实际卖出，只算关闭后新增；退菜是近似值'
+export const PREP_REVIEW_TH_SOLD_OUT = '售罄'
+export const PREP_REVIEW_TH_AFTER_1H = '窗口后 +1h'
+export const PREP_REVIEW_TH_AFTER_2H = '窗口后 +2h'
+export const PREP_REVIEW_TH_NEXT_DAY = '次日'
+export const PREP_REVIEW_TH_REFUND = '退菜'
+export const PREP_REVIEW_REFUND_APPROX = '近似'
+export const PREP_REVIEW_EXPORT = '导出 CSV'
+export const PREP_REVIEW_EXPORT_FAILED = '导出失败，再试一次'
+
+export const PREP_REVIEW_DIR_OVER = '备多了'
+export const PREP_REVIEW_DIR_UNDER = '备少了'
+export const PREP_REVIEW_DIR_EVEN = '刚好'
+export const PREP_REVIEW_LOADING = '正在读快照…'
+export const PREP_REVIEW_LOAD_FAILED = '快照读不出来'
+export const PREP_REVIEW_SUMMARY_FAILED = '90 天汇总读不出来'
+export const PREP_REVIEW_EXPORT_EMPTY = '当前钟点没有明细可导出'
+
+export const PREP_REVIEW_COST_AMOUNT = '估算金额'
