@@ -1180,6 +1180,16 @@ class PrepPlanService:
                 )
                 written += 1
         await tdb.commit()
+        # 环境信号（节假日 / 天气 / 在岗人数）按天独立存一份。放在快照写完之后、
+        # 失败只记日志：复盘页少了外部原因还能看，整点快照不能因为它写不进去。
+        try:
+            from services.prep_plan_context import prep_plan_context
+
+            await prep_plan_context.refresh(db, computed["plan_day"], now=now)
+        except Exception:
+            logger.exception(
+                "刷新备货复盘环境信号失败 plan_day=%s", computed.get("plan_day")
+            )
         return {"success": True, "snapshot_at": stamp.isoformat(), "rows": written}
 
     async def backfill_actuals(self, db, now: Optional[datetime] = None) -> dict:

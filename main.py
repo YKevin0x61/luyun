@@ -1093,6 +1093,9 @@ app.include_router(auth_router)          # 登录 / 初始化
 app.include_router(hygiene_router)       # 员工端走 require_staff_session，管理端走 require_session
 app.include_router(recipes_reader_router)  # 配方阅读面：任一身份（管理端或员工会话）
 app.include_router(prep_plan.reader_router)  # 备货计划读面：任一身份（票 08）
+# 备货复盘备注：任一身份能进门（员工要拿到 403，而不是 verify_admin_token 的 401），
+# 端点里再判管理员；见 api/prep_plan.py 的 manager_router。
+app.include_router(prep_plan.manager_router)
 # —— 业务面：统一挂管理员凭据（会话 cookie / X-Admin-Token / Bearer）——
 app.include_router(orders.router, dependencies=[Depends(verify_admin_token)])
 app.include_router(dishes.router, dependencies=[Depends(verify_admin_token)])
