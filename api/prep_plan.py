@@ -26,6 +26,7 @@ from api.security import require_any_identity_session, verify_admin_token
 from database import CHINA_TZ, get_db
 from services.prep_plan_context import prep_plan_context
 from services.prep_plan_service import prep_plan_service
+from services.prep_review.summary import review_summary
 
 logger = logging.getLogger(__name__)
 
@@ -111,6 +112,23 @@ async def get_snapshots(day: str = Query(..., description="YYYY-MM-DD"), db=Depe
         logger.exception("读取备货复盘环境信号失败 day=%s", day)
         result["context"] = None
     return result
+
+
+@router.get("/review/summary", dependencies=_ADMIN_WRITE)
+async def get_review_summary(
+    end: Optional[str] = Query(None, description="YYYY-MM-DD，缺省今天"),
+    days: int = Query(90, ge=1, le=90, description="回看天数 1..90"),
+    db=Depends(get_db),
+):
+    """复盘聚合：偏差口径 / 分组对比 / 多备代价，只读，管理端。
+
+    口径（07:00 主口径、final_qty 优先、无实际的日子不算）见
+    `services/prep_review/summary.py` 的模块 docstring；这里只做参数与错误映射。
+    """
+    try:
+        return await review_summary(db, end=end, days=days)
+    except Exception as exc:
+        raise _wrap(exc, "读取备货复盘汇总")
 
 
 class ContextNoteRequest(BaseModel):
