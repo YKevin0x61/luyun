@@ -16,13 +16,15 @@
 """
 
 import logging
+from datetime import datetime
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from api.security import require_any_identity_session, verify_admin_token
-from database import get_db
+from database import CHINA_TZ, get_db
+from services.prep_plan_context import prep_plan_context
 from services.prep_plan_service import prep_plan_service
 
 logger = logging.getLogger(__name__)
@@ -35,6 +37,15 @@ reader_router = APIRouter(
 )
 
 _ADMIN_WRITE = [Depends(verify_admin_token)]
+
+# 「任一身份进门、端点里再判管理员」的写面。必须单独一个 router：`router` 在
+# main.py 注册时整体挂了 `verify_admin_token`，员工会话会先吃 401，而备注要求
+# 员工拿到 403 —— 得先过「任一身份」门拿到 `kind` 才能分得清。
+manager_router = APIRouter(
+    prefix="/api/prep-plan",
+    tags=["备货计划"],
+    dependencies=[Depends(require_any_identity_session)],
+)
 
 
 def _staff(identity: dict) -> tuple[Optional[int], str]:
@@ -88,11 +99,51 @@ async def get_summary(db=Depends(get_db)):
 
 @router.get("/snapshots", dependencies=_ADMIN_WRITE)
 async def get_snapshots(day: str = Query(..., description="YYYY-MM-DD"), db=Depends(get_db)):
-    """某一天的参考值快照 + 实际销量（ADR 0123），只读，管理端。"""
+    """某一天的参考值快照 + 实际销量（ADR 0123）+ 当天环境信号，只读，管理端。"""
     try:
-        return await prep_plan_service.get_snapshot_day(db, day)
+        result = await prep_plan_service.get_snapshot_day(db, day)
     except Exception as exc:
         raise _wrap(exc, "读取参考值快照")
+    # 环境信号是解释项，不是快照的主体：读失败只让这一栏为 null，页面照常打开。
+    try:
+        result["context"] = await prep_plan_context.get_context(db, day)
+    except Exception:
+        logger.exception("读取备货复盘环境信号失败 day=%s", day)
+        result["context"] = None
+    return result
+
+
+class ContextNoteRequest(BaseModel):
+    day: Optional[str] = None
+    note: str = ""
+
+
+@manager_router.put("/context/note")
+async def put_context_note(
+    payload: ContextNoteRequest,
+    identity: dict = Depends(require_any_identity_session),
+    db=Depends(get_db),
+):
+    """写某天的人工备注（缺省今天）。员工 403。
+
+    这里没有用 `_ADMIN_WRITE`：`verify_admin_token` 对员工会话只会给 401，
+    而票面要求「员工身份必须 403」。所以先过「任一身份」门拿到身份，再在
+    这里把员工挡成 403。代价是纯 API Token 调用方（不带会话 cookie）会被
+    401 拒绝——管理端页面走 cookie，不受影响。
+    """
+    if identity.get("kind") == "staff":
+        raise HTTPException(status_code=403, detail="员工不能修改备货复盘备注")
+
+    day = (payload.day or datetime.now(CHINA_TZ).date().isoformat()).strip()
+    try:
+        day = datetime.strptime(day, "%Y-%m-%d").date().isoformat()
+    except ValueError:
+        raise HTTPException(status_code=400, detail="day 必须是 YYYY-MM-DD")
+    try:
+        context = await prep_plan_context.set_note(db, day, payload.note)
+    except Exception as exc:
+        raise _wrap(exc, "保存备货复盘备注")
+    return {"success": True, "day": day, "context": context}
 
 
 @reader_router.get("/items")
