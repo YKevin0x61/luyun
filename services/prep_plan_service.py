@@ -254,6 +254,11 @@ def _parse_stamp(text) -> Optional[datetime]:
     return parsed.astimezone(CHINA_TZ)
 
 
+def _optional_float(value) -> Optional[float]:
+    """NULL 保持 NULL：轨迹列「还没到观测点」不能写成 0（写 0 会被读成「之后没人买」）。"""
+    return None if value is None else float(value)
+
+
 def _loads_json(raw: Optional[str]) -> dict:
     if not raw:
         return {}
@@ -1605,7 +1610,8 @@ class PrepPlanService:
                 SELECT s.snapshot_at, s.window_start, s.prep_item_id, s.item_name,
                        s.unit, s.station, s.suggested_qty, s.final_qty, s.store_factor,
                        s.rules_fingerprint, s.basis_json,
-                       a.sold_qty, a.rules_fingerprint AS actual_fingerprint
+                       a.sold_qty, a.sold_1h, a.sold_2h, a.sold_next_day,
+                       a.refund_qty, a.rules_fingerprint AS actual_fingerprint
                 FROM prep_plan_snapshots s
                 LEFT JOIN prep_plan_actuals a
                        ON a.window_start = s.window_start
@@ -1618,6 +1624,24 @@ class PrepPlanService:
             )
             rows = await cursor.fetchall()
 
+        # 当天首次售罄时刻（票 05 的 `sold_out` 事件）。直接读表、不依赖采集模块：
+        # 事件是旁路写入的，复盘要能读出「几点卖完」；没有事件就是 null，不能编。
+        sold_out_at: Dict[int, str] = {}
+        edb = db.table("prep_plan_events")
+        async with edb.conn.cursor() as cursor:
+            await cursor.execute(
+                """
+                SELECT prep_item_id, MIN(at) AS sold_out_at
+                FROM prep_plan_events
+                WHERE plan_day = ? AND kind = 'sold_out'
+                GROUP BY prep_item_id
+                """,
+                (day,),
+            )
+            for event in await cursor.fetchall():
+                if event["prep_item_id"] is not None:
+                    sold_out_at[int(event["prep_item_id"])] = event["sold_out_at"]
+
         by_item: Dict[Tuple[str, str], dict] = {}
         for row in rows:
             key = (row["item_name"] or "", row["unit"] or "")
@@ -1627,9 +1651,13 @@ class PrepPlanService:
                     "item_name": key[0],
                     "unit": key[1],
                     "station": row["station"] or "",
+                    "prep_item_id": row["prep_item_id"],
+                    "sold_out_at": None,
                     "hours": [],
                 },
             )
+            if bucket["prep_item_id"] is None and row["prep_item_id"] is not None:
+                bucket["prep_item_id"] = row["prep_item_id"]
             same_rules = (row["rules_fingerprint"] or "") == (row["actual_fingerprint"] or "")
             bucket["hours"].append(
                 {
@@ -1637,12 +1665,21 @@ class PrepPlanService:
                     "suggested_qty": float(row["suggested_qty"] or 0),
                     "final_qty": row["final_qty"],
                     "sold_qty": None if row["sold_qty"] is None else float(row["sold_qty"]),
+                    "sold_1h": _optional_float(row["sold_1h"]),
+                    "sold_2h": _optional_float(row["sold_2h"]),
+                    "sold_next_day": _optional_float(row["sold_next_day"]),
+                    "refund_qty": _optional_float(row["refund_qty"]),
                     "store_factor": float(row["store_factor"] or 1),
                     "same_rules": same_rules if row["sold_qty"] is not None else None,
                 }
             )
+        for bucket in by_item.values():
+            prep_item_id = bucket.get("prep_item_id")
+            bucket["sold_out_at"] = (
+                sold_out_at.get(int(prep_item_id)) if prep_item_id is not None else None
+            )
         items = sorted(by_item.values(), key=lambda b: (-len(b["hours"]), b["item_name"]))
-        snapshots = self._snapshot_groups(rows)
+        snapshots = self._snapshot_groups(rows, sold_out_at)
         return {
             "success": True,
             "day": day,
@@ -1655,7 +1692,7 @@ class PrepPlanService:
         }
 
     @staticmethod
-    def _snapshot_groups(rows) -> List[dict]:
+    def _snapshot_groups(rows, sold_out_at: Optional[Dict[int, str]] = None) -> List[dict]:
         """把一天的快照按「快照钟点」分组，并给每组算一份可判读的指标。
 
         一条快照 = 一个 24 小时窗口的一次预测，只能跟**它自己那个窗口**的实际销量比。
@@ -1670,6 +1707,7 @@ class PrepPlanService:
             except (TypeError, ValueError):
                 basis = {}
             sold = None if row["sold_qty"] is None else float(row["sold_qty"])
+            prep_item_id = row["prep_item_id"]
             bucket["items"].append(
                 {
                     "item_name": row["item_name"] or "",
@@ -1678,6 +1716,13 @@ class PrepPlanService:
                     "suggested_qty": float(row["suggested_qty"] or 0),
                     "final_qty": None if row["final_qty"] is None else float(row["final_qty"]),
                     "sold_qty": sold,
+                    "sold_1h": _optional_float(row["sold_1h"]),
+                    "sold_2h": _optional_float(row["sold_2h"]),
+                    "sold_next_day": _optional_float(row["sold_next_day"]),
+                    "refund_qty": _optional_float(row["refund_qty"]),
+                    "sold_out_at": (sold_out_at or {}).get(int(prep_item_id))
+                    if prep_item_id is not None
+                    else None,
                     "store_factor": float(row["store_factor"] or 1),
                     "quantile": basis.get("quantile"),
                     "is_major": bool(basis.get("is_major")),
