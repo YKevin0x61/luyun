@@ -1741,14 +1741,23 @@ async def _prep_snapshot_loop(db_manager):
 
     INTERVAL = 3600
     while True:
+        now = datetime.now(CHINA_TZ)
         try:
-            now = datetime.now(CHINA_TZ)
             await prep_plan_service.write_snapshot(db_manager, now)
             await prep_plan_service.backfill_actuals(db_manager, now)
         except asyncio.CancelledError:
             raise
         except Exception:
             logger.exception("备货参考值快照失败，下一轮再试")
+        # 售罄时刻推算挂在同一节拍上：旁路采集，失败只 warning，绝不拖垮快照/回填。
+        try:
+            from services.prep_review.sold_out import run_backfill as backfill_sold_out
+
+            await backfill_sold_out(db_manager, now)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning("售罄时刻回填失败，下一轮再试", exc_info=True)
         # 睡到下一个整点（误差再小也不打点，整点对齐是快照的语义）
         now = datetime.now(CHINA_TZ)
         await asyncio.sleep(INTERVAL - (now.minute * 60 + now.second) + 5)
