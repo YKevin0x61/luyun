@@ -431,6 +431,13 @@ async def lifespan(app: FastAPI):
         # 启动日志持久化（PostgreSQL logs 表，与业务表同库）
         if background_enabled and await log_storage.start():
             startup_results.append("日志存储")
+            # 备货复盘 90 天降采样挂在日志维护节拍上（默认 6h 经过一次，钩子内部
+            # 再按自然日门闩）。不为此新起常驻 task——单 worker 下常驻 task 数目
+            # 是显式清单（ADR 0130 / PERF-06）。
+            if db_manager:
+                log_storage.add_maintenance_hook(
+                    lambda: _prep_review_retention_maintenance(db_manager)
+                )
 
         # 启动内存管理器
         if background_enabled:
@@ -1708,6 +1715,16 @@ async def _send_scraper_health_alert(message: str) -> None:
         logger.warning(f"⚠️ 爬虫健康告警未入队: {result}")
     else:
         logger.warning(f"⚠️ 爬虫健康告警已入队: {message}")
+
+
+async def _prep_review_retention_maintenance(db_manager):
+    """日志维护节拍上的低频清理：备货复盘 90 天降采样（ADR 0130）。
+
+    真正的清理一天最多一次（`run_daily` 按自然日门闩），失败只记日志不抛。
+    """
+    from services.prep_review.retention import prep_review_retention
+
+    await prep_review_retention.run_daily(db_manager)
 
 
 # 餐厅数据爬取任务
