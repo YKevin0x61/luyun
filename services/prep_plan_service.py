@@ -34,6 +34,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from config import KITCHEN_STATIONS
 from database import CHINA_TZ
 from services.dish_normalize import normalize_dish_name
+from services.prep_review import events as prep_review_events
 
 logger = logging.getLogger(__name__)
 
@@ -946,9 +947,11 @@ class PrepPlanService:
         async with tdb.conn.cursor() as cursor:
             await cursor.execute(
                 """
-                SELECT e.id, e.prep_item_id, i.kind
+                SELECT e.id, e.prep_item_id, e.final_qty, e.suggested_qty,
+                       i.kind, d.plan_day
                   FROM prep_plan_entries e
                   LEFT JOIN prep_items i ON i.id = e.prep_item_id
+                  LEFT JOIN prep_plan_days d ON d.id = e.plan_day_id
                  WHERE e.id = ?
                 """,
                 (entry_id,),
@@ -956,6 +959,7 @@ class PrepPlanService:
             row = await cursor.fetchone()
             if row is None:
                 raise ValueError("entry_not_found")
+            staff_position = None
             if employee_id is not None:
                 staff_position = await self.get_staff_station(db, employee_id)
                 position = await self._item_position(db, int(row["prep_item_id"] or 0))
@@ -981,6 +985,40 @@ class PrepPlanService:
                     (stamp if done else None, done_by if done else "", stamp, entry_id),
                 )
         await tdb.commit()
+
+        # 事件采集（票 03）：手改 / 完成是现场真实动作，有就记；写失败只记日志，
+        # 不影响这次 PATCH 本身（`record_event` 内部已兜住异常）。
+        plan_day = row["plan_day"] or stamp[:10]
+        before_qty = float(
+            row["final_qty"] if row["final_qty"] is not None else row["suggested_qty"] or 0
+        )
+        after_qty = before_qty
+        if final_qty is not None:
+            after_qty = fit_qty(final_qty, row["kind"] or "")
+            await prep_review_events.record_event(
+                db,
+                at=stamp,
+                plan_day=plan_day,
+                kind=prep_review_events.MANUAL_EDIT,
+                prep_item_id=row["prep_item_id"],
+                qty_before=before_qty,
+                qty_after=after_qty,
+                employee_id=employee_id,
+                station=staff_position,
+            )
+        if done:
+            await prep_review_events.record_event(
+                db,
+                at=stamp,
+                plan_day=plan_day,
+                kind=prep_review_events.DONE,
+                prep_item_id=row["prep_item_id"],
+                qty_before=float(row["suggested_qty"] or 0),
+                qty_after=after_qty,
+                employee_id=employee_id,
+                station=staff_position,
+                meta={"done": True},
+            )
         return {"success": True, "id": entry_id}
 
     async def get_summary(self, db, now: Optional[datetime] = None) -> dict:
@@ -1203,11 +1241,12 @@ class PrepPlanService:
         async with tdb.conn.cursor() as cursor:
             await cursor.execute(
                 """
-                SELECT DISTINCT s.window_start, s.window_end
+                SELECT s.window_start, s.window_end, MIN(s.plan_day) AS plan_day
                 FROM prep_plan_snapshots s
                 LEFT JOIN prep_plan_actuals a
                        ON a.window_start = s.window_start AND a.window_end = s.window_end
                 WHERE a.id IS NULL AND s.window_end <= ?
+                GROUP BY s.window_start, s.window_end
                 ORDER BY s.window_start
                 """,
                 (now.isoformat(),),
@@ -1225,6 +1264,7 @@ class PrepPlanService:
             start = datetime.fromisoformat(row["window_start"])
             end = datetime.fromisoformat(row["window_end"])
             sold = await self._sold_qty_map(db, start, end)
+            window_rows = 0
             async with adb.conn.cursor() as cursor:
                 for item in items:
                     key = (item["item_name"], item["unit"])
@@ -1250,7 +1290,23 @@ class PrepPlanService:
                         ),
                     )
                     written += 1
+                    window_rows += 1
             await adb.commit()
+
+            # 事件采集（票 03）：一个窗口回填完成 = 一条窗口级事件。`prep_item_id`
+            # 留空（不对应某一个品），窗口边界与品数放 meta；重跑回填时上面的
+            # `a.id IS NULL` 已经把这个窗口排除了，`record_event` 的幂等再兜一层。
+            await prep_review_events.record_event(
+                db,
+                at=computed_at,
+                plan_day=row["plan_day"] or computed_at[:10],
+                kind=prep_review_events.WINDOW_END,
+                meta={
+                    "window_start": row["window_start"],
+                    "window_end": row["window_end"],
+                    "items": window_rows,
+                },
+            )
         return {"success": True, "windows": len(pending), "rows": written}
 
     async def get_snapshot_day(self, db, day: str) -> dict:
