@@ -268,3 +268,57 @@ def test_migration_hint_reports_pending(pg):
     assert hint["supported"] is True
     assert hint["versions"] == ["0002", "0003"]
     assert hint["filenames"] == ["0002_hygiene_indexes.sql", "0003_reason.sql"]
+
+
+# ── 0046 备货复盘信号（票 01）────────────────────────────────────────────
+
+
+def test_0046_prep_review_signals_is_shipped_and_applied():
+    """票 01：事件表 / context 表 / actuals 与 wastage 的加列必须在包里并真的生效。
+
+    conftest 在会话开始时把 ``migrations/pg/*.sql`` 全量应用到测试库，所以这里查
+    ``information_schema`` 就是「脚本应用后的形状」；文件没提交时先红第一条。
+    """
+    versions = [item.version for item in list_migration_files()]
+    assert "0046" in versions, "migrations/pg/0046_prep_review_signals.sql 未提交"
+
+    import pg_probe
+
+    assert set(pg_probe.table_columns("prep_plan_events")) == {
+        "tenant_id", "id", "at", "plan_day", "prep_item_id", "kind",
+        "qty_before", "qty_after", "employee_id", "station", "meta_json",
+    }
+
+    assert set(pg_probe.table_columns("prep_plan_context")) == {
+        "tenant_id", "plan_day", "holiday_name", "weather_json",
+        "staff_json", "note", "captured_at", "updated_at",
+    }
+    assert {
+        "sold_1h", "sold_2h", "sold_next_day", "dine_in_qty",
+        "delivery_qty", "refund_qty", "hourly_json",
+    } <= set(pg_probe.table_columns("prep_plan_actuals"))
+    assert {"prep_item_id", "window_start", "window_end"} <= set(
+        pg_probe.table_columns("wastage_records")
+    )
+
+
+def test_0046_prep_review_signals_can_be_applied_twice():
+    """票 01：空库与既有库上都能跑，重复执行不报错（纯 ``IF NOT EXISTS``）。"""
+    import asyncio
+
+    import asyncpg
+
+    from db_core.backend.pg import dsn_from_env
+
+    path = db_migrations.MIGRATIONS_DIR / "0046_prep_review_signals.sql"
+    sql = path.read_text(encoding="utf-8")
+
+    async def _apply_twice():
+        conn = await asyncpg.connect(dsn_from_env())
+        try:
+            await conn.execute(sql)
+            await conn.execute(sql)
+        finally:
+            await conn.close()
+
+    asyncio.run(_apply_twice())
