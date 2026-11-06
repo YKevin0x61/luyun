@@ -71,6 +71,7 @@ psql -d luyun -v ON_ERROR_STOP=1 -f migrations/pg/0002_hygiene_indexes.sql
 | `0039_prep_rules_fix_unit_drift.sql` | **例外：非加成性（数据修正）**。虾饺的三条配方系数（堂食 / 外卖 / 外卖1只）单位写「份」、备货品主数据是「个」—— 备货建议按 `(名字, 单位)` 配对，主菜销量全挂在 `虾饺(份)` 上，清单读 `虾饺(个)` 恒为 0。按店长口径把单位改成「个」、系数 1 → 3（一份虾饺皇 = 3 个虾饺） | 不应用也不报错：那三条规则照旧不产生参考值（页面显示 0），与「单位漂移」这个已知缺陷同症状；应用后虾饺的参考值立刻恢复正常 |
 | `0040_scheduling_overrides_voided.sql` | `scheduling_overrides."voided"`（排班面，2026-10-29）：**「清空这一天」** 的布尔式标志（BIGINT 0/1，`NOT NULL DEFAULT 0`）。`voided=1` 的覆盖行 = 这天不按轮转规则排、也没有排班结果行 —— 周表「清」笔写它（同时 DELETE 那天的 `staff_assignments` 行），`_expand_rows` 见到它跳过不重铺。空白本身仍由「没有结果行」表达，读取端不用改 | **排班 503 并点名这个文件**（`_expand_rows` 要 SELECT 这一列，缺列走 `not_migrated`）；周表「清」写不进去。不应用不会弄坏既有数据：加列带默认值，既有覆盖行一律回填 0（正常覆盖），应用前后读接口与展开行为完全一样 |
 | `0041_employee_resignation.sql` | `hygiene_employees."resigned_at"`（员工面，2026-10-29）：离职改成**带日期的状态**，取代二元开关 `disabled`（ADR 0123）。`NULL` = 在职、`''` = 已离职但日期待补、`YYYY-MM-DD` = 已离职（当天仍上班，次日切断）。同时把存量 `disabled = 1` 的人回填成 `''`；`disabled` 列**保留不读不写** | **花名册 / 登录 / 排班 / 考勤表 / 导出件一起 503 或报错并点名这个文件**：这些读路径都要 SELECT 这一列（`not_migrated` 出口）。不应用不会弄坏既有数据，但「登记离职」写不进去、存量停用的人也不会按离职算 |
+| `0046_prep_review_signals.sql` | 备货复盘信号（票 01）：新表 `prep_plan_events`（手改 / 完成 / 售罄 / 窗口结束事件）与 `prep_plan_context`（一天一行的节假日 / 天气 / 上班人数 / 备注快照），`prep_plan_actuals` 加 7 列销量轨迹（窗口后 1h / 2h、次日同钟点、堂食 / 外卖 / 退菜、逐小时曲线），`wastage_records` 加 3 列对齐备货品（`prep_item_id` / 窗口起止） | 不应用：事件、环境信号与销量轨迹无表无列，复盘采集侧写不进去；既有备货计划与复盘四指标照常 |
 
 **`0001` 带 `luyun:bootstrap-only` 标记**：它含 `DROP TABLE`，只用于初次建库，
 Admin 面板靠这行标记把它永久排除在待应用之外（`test_db_migrations.py` 会校验这个标记，
