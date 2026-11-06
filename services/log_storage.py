@@ -19,7 +19,7 @@ import logging
 import queue
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 import asyncpg
 
@@ -101,6 +101,9 @@ class LogStorage:
         self._last_flush_at: float = 0.0
         self._degraded: bool = False
         self._last_maintenance_at: float = 0.0
+        # 低频维护钩子：日志维护节拍（默认 6h）顺带跑别的清理，避免为每个清理
+        # 再起一个常驻 task（单 worker 约束，见 deploy/README.md）。
+        self._maintenance_hooks: List[Callable[[], Awaitable[Any]]] = []
         # start() 成功后才允许写：没起来（或已 stop）的存储不该在 _flush 里偷偷连库。
         self._started: bool = False
         self._next_reconnect_at: float = 0.0
@@ -109,6 +112,16 @@ class LogStorage:
     def consumer_task(self) -> Optional[asyncio.Task]:
         """落库消费者 task（未启动为 None）。只读访问器：`main.py` 用它登记常驻 task 清单。"""
         return self._consumer_task
+
+    def add_maintenance_hook(self, hook: Callable[[], Awaitable[Any]]) -> None:
+        """注册低频维护钩子（如备货复盘 90 天清理，ADR 0130）。
+
+        钩子挂在 `_run_maintenance` 的节拍上（`LOG_MAINTENANCE_INTERVAL_SECONDS`，
+        默认 6 小时），且**不依赖日志连接**：日志库暂时连不上时其他清理仍要跑。
+        钩子自己负责幂等与「一天最多一次」，这里只保证失败不影响下一个钩子和日志
+        维护本身。
+        """
+        self._maintenance_hooks.append(hook)
 
     # ── 生命周期 ─────────────────────────────────
 
@@ -439,25 +452,34 @@ class LogStorage:
             logger.error(f"批量写入日志失败，丢弃 {len(batch)} 条: {exc}")
 
     async def _run_maintenance(self) -> None:
-        """运行期日志维护：按保留天数清理过期记录。
+        """运行期维护：按保留天数清理过期日志，再跑注册的低频钩子。
 
         SQLite 时代这里还要 PASSIVE checkpoint 回收 WAL；PG 的空间回收交给
-        autovacuum，维护循环只负责保留天数这一件事。
+        autovacuum，维护循环只负责保留天数这一件事。钩子（备货复盘降采样等）与
+        日志连接解耦：日志表暂时连不上，不代表别的清理该停。
         """
-        if self._conn is None:
-            return
-        try:
-            if settings.LOG_RETENTION_DAYS > 0:
-                deleted = await self.cleanup_older_than(settings.LOG_RETENTION_DAYS)
-                if deleted:
-                    logger.info(
-                        f"🧹 运行期清理 {deleted} 条 "
-                        f"{settings.LOG_RETENTION_DAYS} 天前的日志"
-                    )
-        except Exception as exc:
-            self._last_error = str(exc)
-            logger.warning(f"⚠️ 运行期清理过期日志失败: {exc}")
-            await self._rollback_quietly()
+        if self._conn is not None:
+            try:
+                if settings.LOG_RETENTION_DAYS > 0:
+                    deleted = await self.cleanup_older_than(settings.LOG_RETENTION_DAYS)
+                    if deleted:
+                        logger.info(
+                            f"🧹 运行期清理 {deleted} 条 "
+                            f"{settings.LOG_RETENTION_DAYS} 天前的日志"
+                        )
+            except Exception as exc:
+                self._last_error = str(exc)
+                logger.warning(f"⚠️ 运行期清理过期日志失败: {exc}")
+                await self._rollback_quietly()
+        await self._run_maintenance_hooks()
+
+    async def _run_maintenance_hooks(self) -> None:
+        """逐个跑维护钩子；单个失败只记日志，不影响其他钩子。"""
+        for hook in self._maintenance_hooks:
+            try:
+                await hook()
+            except Exception as exc:  # noqa: BLE001 - 旁路清理不能拖垮日志维护
+                logger.warning(f"⚠️ 运行期维护钩子失败: {exc}")
 
     async def _flush_remaining(self) -> None:
         """stop 时把队列里所有记录写完。"""
