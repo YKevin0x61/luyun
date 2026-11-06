@@ -25,6 +25,7 @@ from typing import Any, Dict, Optional
 import httpx
 
 from database import CHINA_TZ
+from services.identity.zones import ZoneDirectory
 from services.prep_plan_service import POSITION_STATION_MAP
 
 logger = logging.getLogger(__name__)
@@ -275,24 +276,31 @@ class PrepPlanContextService:
             return None
 
     async def _staff_counts(self, db, plan_day: str) -> Dict[str, int]:
-        """当天有班次的人在岗数，按工作区名映射成岗位；认不出的落 other。"""
+        """当天有班次的人在岗数，按工作区名映射成岗位；认不出的落 other。
+
+        工作区名单走公共层的 `ZoneDirectory`（AGENTS.md：整店共享的区名单只有这一个
+        只读入口）。这里只查「按区数了几个人」，再去名单里把区 id 换成名字，
+        不 import 卫生的任何东西。
+        """
         tdb = db.table("staff_assignments")
         async with tdb.conn.cursor() as cursor:
             await cursor.execute(
                 """
-                SELECT z.name AS zone_name, COUNT(*) AS staff_count
-                FROM staff_assignments a
-                LEFT JOIN hygiene_zones z ON z.id = a.zone_id
-                WHERE a.business_date = ? AND a.shift_id IS NOT NULL
-                GROUP BY z.name
+                SELECT zone_id, COUNT(*) AS staff_count
+                FROM staff_assignments
+                WHERE business_date = ? AND shift_id IS NOT NULL
+                GROUP BY zone_id
                 """,
                 (plan_day,),
             )
             rows = await cursor.fetchall()
 
+        zone_names = {
+            zone["id"]: zone["name"] for zone in await ZoneDirectory(db).list_zones()
+        }
         counts: Dict[str, int] = {}
         for row in rows:
-            zone_name = str(row["zone_name"] or "").strip()
+            zone_name = str(zone_names.get(row["zone_id"]) or "").strip()
             position = zone_name if zone_name in POSITION_STATION_MAP else OTHER_POSITION
             counts[position] = counts.get(position, 0) + int(row["staff_count"] or 0)
         return counts

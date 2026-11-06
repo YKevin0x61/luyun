@@ -227,6 +227,33 @@ def test_done_is_recorded_only_once(staff_client):
     assert '"done": true' in events[0]["meta_json"]
 
 
+def test_done_dedupes_by_entry_id_when_item_missing():
+    """品主键为空（配方/品已删掉的历史行）：done 退到 meta.entry_id 判重，仍只留一条。"""
+    db = DatabaseManager()
+    _run(db.connect())
+    try:
+        at = _at(_today(), 8).isoformat()
+
+        async def record():
+            return await prep_review_events.record_event(
+                db,
+                at=at,
+                plan_day=_today(),
+                kind=prep_review_events.DONE,
+                prep_item_id=None,
+                meta={"done": True, "entry_id": 4211},
+            )
+
+        assert _run(record()) is True
+        assert _run(record()) is False
+        events = _events(db, kind="done")
+        assert len(events) == 1, events
+        assert events[0]["prep_item_id"] is None
+        assert '"entry_id": 4211' in events[0]["meta_json"]
+    finally:
+        _run(db.close())
+
+
 def test_backfill_records_one_window_end_per_window():
     """回填某窗口 → 一条 window_end（窗口级，prep_item_id 为空）；重跑不重复。"""
     db = DatabaseManager()

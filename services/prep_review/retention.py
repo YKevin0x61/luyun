@@ -112,10 +112,9 @@ class PrepReviewRetention:
         outcome: Dict[str, Any] = {"deleted": 0, "error": None}
         conn = None
         try:
-            # `prep_plan_events` / `prep_plan_context` 是 0046 新加的表，还没进
-            # `db_core/schema.py` 的表名清单，`db.table()` 取不到。这里走主连接：
-            # 本服务是 `DatabaseManager` 的持有者，与 repo mixin 同一姿势。
-            conn = db._conn
+            # 两张表都已在 `db_core/schema.py` 登记；走 `db.table()` 拿同一条主
+            # 连接，表名清单仍是唯一事实来源。
+            conn = db.table(table_name).conn
             async with conn.cursor() as cursor:
                 await cursor.execute(sql, (cutoff,))
                 outcome["deleted"] = max(0, int(cursor.rowcount or 0))

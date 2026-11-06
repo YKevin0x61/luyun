@@ -59,7 +59,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from database import CHINA_TZ
 from services.dish_normalize import normalize_dish_name
-from services.prep_plan_service import prep_plan_service
+from services.prep_plan_service import LOUMIAN_STATION, prep_plan_service
 from services.prep_review import retention
 
 logger = logging.getLogger(__name__)
@@ -287,10 +287,10 @@ async def _load_unit_prices(
             FROM orders
             WHERE order_time >= ? AND order_time < ?
               AND quantity > 0
-              AND station != 'loumian'
+              AND station != ?
               AND COALESCE(status, '') != '退菜'
             """,
-            (start, end),
+            (start, end, LOUMIAN_STATION),
         )
         raw = await cursor.fetchall()
 

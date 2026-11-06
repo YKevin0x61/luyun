@@ -8,8 +8,9 @@
 
 三条约定：
 
-- **幂等**（决策 22）：`done` 按 `(plan_day, prep_item_id, kind='done')`、`window_end`
-  按 `(plan_day, kind='window_end', meta_json.window_end)` 先查后插 —— 勾两次、回填
+- **幂等**（决策 22）：`done` 按 `(plan_day, prep_item_id, kind='done')`（品主键为空时
+  退到 `meta_json.entry_id`）、`window_end` 按 `(plan_day, kind='window_end',
+  meta_json.window_end)` 先查后插 —— 勾两次、回填
   重跑都不该多出第二条。单 worker 部署下「先查后插」够用，不为它加唯一索引/迁移。
   售罄（`sold_out`）相反：推算出的历史时刻可能因订单迟到而变早，所以同键只留
   **最早**一条，已有更晚的记录会被更早的覆盖，永远不会被改晚。
@@ -40,13 +41,12 @@ _IDEMPOTENT_KINDS = (DONE, WINDOW_END)
 
 
 def _connection(db):
-    """取主连接。
+    """事件表所在的主连接。
 
-    `prep_plan_events` 是 0046 新加的表，还没进 `db_core/schema.py` 的表名清单，
-    `db.table()` 取不到它 —— 与 `services/prep_review/retention.py` 同一姿势，走
-    `DatabaseManager` 持着的那条主连接。
+    表已在 `db_core/schema.py` 的 `ALL_TABLES` 里登记，走 `db.table()` 拿到的就是
+    同一条主连接；这样表名清单仍是唯一事实来源，改名/换库不会静默漏掉这张表。
     """
-    return db._conn
+    return db.table("prep_plan_events").conn
 
 
 async def _exists(
@@ -56,14 +56,31 @@ async def _exists(
     conn = _connection(db)
     async with conn.cursor() as cursor:
         if kind == DONE:
-            await cursor.execute(
-                """
-                SELECT 1 FROM prep_plan_events
-                 WHERE plan_day = ? AND prep_item_id = ? AND kind = ?
-                 LIMIT 1
-                """,
-                (plan_day, prep_item_id, DONE),
-            )
+            # 正常情况下 `prep_item_id` 就是品身份；但 `prep_plan_entries.prep_item_id`
+            # 允许为空（配方/品被删后的历史行），那时 `prep_item_id = ?` 永远匹配不上，
+            # 勾两次会写两条。这类行退到 meta 里的 `entry_id` 判重 —— 它同样唯一。
+            if prep_item_id is not None:
+                await cursor.execute(
+                    """
+                    SELECT 1 FROM prep_plan_events
+                     WHERE plan_day = ? AND prep_item_id = ? AND kind = ?
+                     LIMIT 1
+                    """,
+                    (plan_day, prep_item_id, DONE),
+                )
+            else:
+                entry_id = meta.get("entry_id")
+                if entry_id is None:
+                    return False
+                await cursor.execute(
+                    """
+                    SELECT 1 FROM prep_plan_events
+                     WHERE plan_day = ? AND kind = ? AND prep_item_id IS NULL
+                       AND meta_json::jsonb ->> 'entry_id' = ?
+                     LIMIT 1
+                    """,
+                    (plan_day, DONE, str(entry_id)),
+                )
         elif kind == WINDOW_END:
             window_end = meta.get("window_end")
             if not window_end:

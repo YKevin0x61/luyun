@@ -289,8 +289,10 @@ def test_0046_prep_review_signals_is_shipped_and_applied():
         "qty_before", "qty_after", "employee_id", "station", "meta_json",
     }
 
+    # `id` 是代理主键：通用后台表格页按 `rowid`（方言层改写为 `id`）定位行，
+    # 缺它会让 /api/admin/tables/prep_plan_context/rows 直接 500。
     assert set(pg_probe.table_columns("prep_plan_context")) == {
-        "tenant_id", "plan_day", "holiday_name", "weather_json",
+        "id", "tenant_id", "plan_day", "holiday_name", "weather_json",
         "staff_json", "note", "captured_at", "updated_at",
     }
     assert {

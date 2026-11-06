@@ -1089,7 +1089,7 @@ class PrepPlanService:
                 qty_after=after_qty,
                 employee_id=employee_id,
                 station=staff_position,
-                meta={"done": True},
+                meta={"done": True, "entry_id": entry_id},
             )
         return {"success": True, "id": entry_id}
 
