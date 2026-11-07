@@ -293,7 +293,8 @@ def test_0046_prep_review_signals_is_shipped_and_applied():
     # 缺它会让 /api/admin/tables/prep_plan_context/rows 直接 500。
     assert set(pg_probe.table_columns("prep_plan_context")) == {
         "id", "tenant_id", "plan_day", "holiday_name", "weather_json",
-        "staff_json", "note", "captured_at", "updated_at",
+        "staff_json", "data_quality_json", "runtime_json", "kitchen_json",
+        "is_workday", "note", "captured_at", "updated_at",
     }
     assert {
         "sold_1h", "sold_2h", "sold_next_day", "dine_in_qty",
@@ -357,6 +358,42 @@ def test_0047_dining_traffic_can_be_applied_twice():
     from db_core.backend.pg import dsn_from_env
 
     path = db_migrations.MIGRATIONS_DIR / "0047_dining_traffic.sql"
+    sql = path.read_text(encoding="utf-8")
+
+    async def _apply_twice():
+        conn = await asyncpg.connect(dsn_from_env())
+        try:
+            await conn.execute(sql)
+            await conn.execute(sql)
+        finally:
+            await conn.close()
+
+    asyncio.run(_apply_twice())
+
+
+# ── 0048 备货复盘环境信号补四项（票 08）──────────────────────────────────
+
+
+def test_0048_prep_context_quality_is_shipped_and_applied():
+    """票 08：数据质量 / 营业时段 / 厨房节奏 / 是否工作日四列必须在包里并生效。"""
+    versions = [item.version for item in list_migration_files()]
+    assert "0048" in versions, "migrations/pg/0048_prep_context_quality.sql 未提交"
+
+    import pg_probe
+
+    columns = set(pg_probe.table_columns("prep_plan_context"))
+    assert {"data_quality_json", "runtime_json", "kitchen_json", "is_workday"} <= columns
+
+
+def test_0048_prep_context_quality_can_be_applied_twice():
+    """票 08：既有库上重复执行不报错（纯 ``ADD COLUMN IF NOT EXISTS``）。"""
+    import asyncio
+
+    import asyncpg
+
+    from db_core.backend.pg import dsn_from_env
+
+    path = db_migrations.MIGRATIONS_DIR / "0048_prep_context_quality.sql"
     sql = path.read_text(encoding="utf-8")
 
     async def _apply_twice():

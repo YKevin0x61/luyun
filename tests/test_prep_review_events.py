@@ -274,8 +274,10 @@ def test_backfill_records_one_window_end_per_window():
         service = PrepPlanService()
         first = _run(service.backfill_actuals(db, now=now))
         assert first["windows"] >= 1
+        # 票 08 起，3 天内的窗口每次回填都会重算（计入 windows），但**不再记事件**：
+        # 否则每小时的刷新会把同一条「窗口结束」刷成几十条。
         second = _run(service.backfill_actuals(db, now=now))
-        assert second["windows"] == 0
+        assert second["refreshed"] >= 1
 
         events = _events(db, kind="window_end")
         assert len(events) == 1, events

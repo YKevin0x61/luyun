@@ -8,7 +8,8 @@
    文本键，并留下一条能定位到品名的日志。品名改了历史不断。
 2. **轨迹与拆分**：窗口结束后 1h / 2h / 24h 的**累计**量、堂食 / 外卖 / 退菜、
    逐小时曲线；累计量含窗口内，所以单调递增，页面用 `sold_1h - sold_qty` 得窗口后新增。
-3. **历史回填**：90 天内可重入，重复跑不产生重复行、不覆盖已有 `sold_qty`。
+3. **历史回填**：90 天内可重入，重复跑不产生重复行；窗口结束 3 天内的
+   `sold_qty` 随迟到订单重算（票 08），更早的窗口保持首次事实。
 
 测试直接查 `prep_plan_actuals` 是刻意的：本票只负责「入库」，页面读取是票 06 的事，
 落库的列就是这批数据对下游的全部契约。
@@ -340,8 +341,8 @@ class TrajectoryBackfillTests(PrepActualsFixture):
         self.assertIsNone(row["sold_2h"])
         self.assertIsNone(row["sold_next_day"])
 
-    async def test_backfill_is_idempotent_and_never_overwrites_sold_qty(self):
-        """验收④：90 天轨迹回填可重入、不重复插行、不覆盖首次写入的 sold_qty。"""
+    async def test_backfill_is_idempotent_and_refreshes_sold_qty_within_three_days(self):
+        """验收④（票 08 起）：回填可重入、不重复插行；3 天内 sold_qty 随订单重算。"""
         item_id = await self._seed_item()
         await self._seed_rule(prep_item_id=item_id)
         await self._seed_snapshot()
@@ -353,17 +354,18 @@ class TrajectoryBackfillTests(PrepActualsFixture):
         await self.service.backfill_actuals(self.db, WINDOW_END + timedelta(minutes=30))
         self.assertEqual((await self._actuals())[0]["sold_qty"], 10)
 
-        # 人为把首次事实改掉，证明轨迹回填的 UPDATE 不包含 sold_qty。
+        # 人为把首次事实改掉：3 天内的窗口会被重算回来（票 08），而不是永久冻结。
         actuals = self.db.table("prep_plan_actuals")
         async with actuals.conn.cursor() as cursor:
             await cursor.execute("UPDATE prep_plan_actuals SET sold_qty = 999")
         await actuals.commit()
 
         first = await self.service.backfill_actuals(self.db, NOW)
-        self.assertEqual(first["windows"], 0)  # 窗口已回填过，只剩轨迹补齐
+        self.assertEqual(first["windows"], 1)   # 已存在的窗口也算「待刷新」
+        self.assertEqual(first["refreshed"], 1)
         rows = await self._actuals()
         self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["sold_qty"], 999)
+        self.assertEqual(rows[0]["sold_qty"], 10)
         self.assertEqual(rows[0]["sold_1h"], 12)
         self.assertEqual(rows[0]["sold_2h"], 16)
         self.assertEqual(rows[0]["sold_next_day"], 16)
@@ -374,8 +376,30 @@ class TrajectoryBackfillTests(PrepActualsFixture):
         self.assertEqual(again["rows"], 0)
         rows = await self._actuals()
         self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["sold_qty"], 999)
+        self.assertEqual(rows[0]["sold_qty"], 10)
         self.assertEqual(rows[0]["sold_1h"], 12)
+
+    async def test_sold_qty_is_frozen_once_the_window_leaves_the_refresh_window(self):
+        """3 天外的窗口是历史事实：`backfill_actuals` 不再重算 `sold_qty`。"""
+        item_id = await self._seed_item()
+        await self._seed_rule(prep_item_id=item_id)
+        await self._seed_snapshot()
+        await self._seed_order(flow_id="in-09", at=_at(1), qty=10)
+        await self.service.backfill_actuals(self.db, WINDOW_END + timedelta(minutes=30))
+
+        actuals = self.db.table("prep_plan_actuals")
+        async with actuals.conn.cursor() as cursor:
+            await cursor.execute("UPDATE prep_plan_actuals SET sold_qty = 999")
+        await actuals.commit()
+
+        far_future = WINDOW_END + timedelta(days=4)
+        await self.service.backfill_actuals(self.db, far_future)
+        # 轨迹列照常补齐，sold_qty 保持首次事实。
+        await self.service.backfill_actual_trajectories(self.db, days=90, now=far_future)
+        rows = await self._actuals()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["sold_qty"], 999)
+        self.assertEqual(rows[0]["sold_1h"], 10)
 
     async def test_trajectory_backfill_ignores_windows_outside_the_day_range(self):
         item_id = await self._seed_item()
