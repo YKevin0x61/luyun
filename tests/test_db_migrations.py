@@ -324,3 +324,47 @@ def test_0046_prep_review_signals_can_be_applied_twice():
             await conn.close()
 
     asyncio.run(_apply_twice())
+
+
+# ── 0047 客流/翻台小时表（票 10）─────────────────────────────────────────
+
+
+def test_0047_dining_traffic_is_shipped_and_applied():
+    """票 10：按小时一行的客流表必须在包里并真的生效。
+
+    conftest 会话开始时把 ``migrations/pg/*.sql`` 全量应用到测试库，所以这里查
+    ``information_schema`` 就是「脚本应用后的形状」；文件没提交时先红第一条。
+    """
+    versions = [item.version for item in list_migration_files()]
+    assert "0047" in versions, "migrations/pg/0047_dining_traffic.sql 未提交"
+
+    import pg_probe
+
+    assert pg_probe.table_columns("dining_traffic") == [
+        "id", "tenant_id", "snapshot_at", "plan_day",
+        "in_seat_people", "open_tables", "total_tables", "created_at",
+    ]
+    # 复盘按「某天 → 小时顺序」翻页；唯一性另由 UNIQUE(tenant_id, snapshot_at) 保证。
+    assert "idx_dining_traffic_day_hour" in pg_probe.list_indexes("dining_traffic")
+
+
+def test_0047_dining_traffic_can_be_applied_twice():
+    """票 10：纯 ``IF NOT EXISTS``，空库与既有库都能重复执行。"""
+    import asyncio
+
+    import asyncpg
+
+    from db_core.backend.pg import dsn_from_env
+
+    path = db_migrations.MIGRATIONS_DIR / "0047_dining_traffic.sql"
+    sql = path.read_text(encoding="utf-8")
+
+    async def _apply_twice():
+        conn = await asyncpg.connect(dsn_from_env())
+        try:
+            await conn.execute(sql)
+            await conn.execute(sql)
+        finally:
+            await conn.close()
+
+    asyncio.run(_apply_twice())

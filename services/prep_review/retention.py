@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """备货复盘的 90 天保留策略（票 07 / ADR 0130）。
 
-三张表三种处理，理由见 `docs/adr/0130-prep-review-signals.md`：
+四张表四种处理，理由见 `docs/adr/0130-prep-review-signals.md`：
 
 - `prep_plan_snapshots`：近 90 天保留**全部小时行**；更早的只留 **07:00 主口径**
   那一条。复盘页的主指标只读 07:00（ADR 0129），旧钟点对结论没有增量，却把行数
@@ -11,6 +11,9 @@
   是下一步，本票不新开迁移，只做删除并留给 ADR 记 TODO。
 - `prep_plan_actuals`：**一行不动**。实际销量是复盘证据，和快照同期限；只降采样
   快照、删掉实际会让「多备少备的代价」这类回看永久失真。
+- `dining_traffic`（票 10，迁移 0047）：90 天前**整行删除**。它是按小时的客流
+  曲线，只服务复盘窗口；压缩成「一天一行」会丢掉小时形状，留着又按 24 行/天无限
+  增长，所以直接删。
 
 所有删除条件是纯时间窗 + 钟点，**幂等可重入**：重复跑第二次删 0 行。失败只记日志
 不抛——调用方是日志维护的常驻循环，清理失败不能拖垮日志维护或快照写入。
@@ -47,6 +50,11 @@ DELETE FROM prep_plan_events
 WHERE at::timestamptz < ?
 """
 
+_DELETE_DINING_TRAFFIC_SQL = """
+DELETE FROM dining_traffic
+WHERE snapshot_at::timestamptz < ?
+"""
+
 
 class PrepReviewRetention:
     """备货复盘的降采样 / 过期删除。
@@ -71,8 +79,8 @@ class PrepReviewRetention:
     async def purge(self, db, now: Optional[datetime] = None) -> Dict[str, Any]:
         """跑一轮清理；**不抛异常**，返回各表的删除行数。
 
-        `success` 只有在两张表都处理成功时才是 True。单表失败仍继续处理另一张，
-        避免一张表的短暂锁等待把另一张表的清理也停掉。
+        `success` 只有在每张表都处理成功时才是 True。单表失败仍继续处理其余表，
+        避免一张表的短暂锁等待把其他表的清理也停掉。
         """
         now = now or datetime.now(CHINA_TZ)
         cutoff = self.cutoff(now)
@@ -81,6 +89,7 @@ class PrepReviewRetention:
             "cutoff": cutoff.isoformat(),
             "snapshots_deleted": 0,
             "events_deleted": 0,
+            "dining_traffic_deleted": 0,
         }
 
         snapshots = await self._delete(
@@ -97,11 +106,24 @@ class PrepReviewRetention:
             result["success"] = False
             result["events_error"] = events["error"]
 
-        if result["snapshots_deleted"] or result["events_deleted"]:
+        traffic = await self._delete(
+            db, "dining_traffic", _DELETE_DINING_TRAFFIC_SQL, cutoff
+        )
+        result["dining_traffic_deleted"] = traffic["deleted"]
+        if traffic["error"]:
+            result["success"] = False
+            result["dining_traffic_error"] = traffic["error"]
+
+        if (
+            result["snapshots_deleted"]
+            or result["events_deleted"]
+            or result["dining_traffic_deleted"]
+        ):
             logger.info(
-                "🧹 备货复盘清理：降采样/删除 %s 条快照、%s 条事件（%s 之前）",
+                "🧹 备货复盘清理：降采样/删除 %s 条快照、%s 条事件、%s 条客流（%s 之前）",
                 result["snapshots_deleted"],
                 result["events_deleted"],
+                result["dining_traffic_deleted"],
                 cutoff.isoformat(),
             )
         return result
@@ -112,7 +134,7 @@ class PrepReviewRetention:
         outcome: Dict[str, Any] = {"deleted": 0, "error": None}
         conn = None
         try:
-            # 两张表都已在 `db_core/schema.py` 登记；走 `db.table()` 拿同一条主
+            # 这几张表都已在 `db_core/schema.py` 登记；走 `db.table()` 拿同一条主
             # 连接，表名清单仍是唯一事实来源。
             conn = db.table(table_name).conn
             async with conn.cursor() as cursor:
