@@ -176,13 +176,15 @@ export function usePrepPlan() {
     }
   }
 
-  async function setQty(entry, qty) {
+  async function setQty(entry, qty, reason = null) {
     const value = Number(qty)
     if (!Number.isFinite(value) || value < 0) return
     busyEntryId.value = entry.id
     errorText.value = ''
     try {
-      await api.patch(`/api/prep-plan/today/entries/${entry.id}`, { final_qty: value })
+      // 原因可空：不带时 body 与改造前一模一样（后端也只在这时保持空 meta）。
+      const body = reason ? { final_qty: value, reason } : { final_qty: value }
+      await api.patch(`/api/prep-plan/today/entries/${entry.id}`, body)
       replaceEntry({ id: entry.id, final_qty: value, qty_source: 'manual' })
     } catch (err) {
       errorText.value = err.message || '改数量失败'

@@ -54,7 +54,9 @@ import {
   prepReviewContextStaff,
   prepReviewPendingHint,
   prepReviewPeriodHint,
+  prepReviewQualityLine,
 } from '../utils/prepPlanCopy'
+import { qualityReasons } from '../utils/prepReviewQuality'
 import {
   buildReviewCsv,
   reviewAfterWindow,
@@ -146,6 +148,19 @@ const contextLine = computed(() => {
   const staffTotal = Object.values(staffInfo.value).reduce((sum, value) => sum + (Number(value) || 0), 0)
   if (staffTotal > 0) parts.push(prepReviewContextStaff(staffTotal))
   return parts.join(' · ')
+})
+
+/** 数据质量提示（票 09）：采集断档的日子，别把「没卖多少」读成「备多了」。
+ *  只读 `context.data_quality_json`（票 08）；字段缺失 / 坏 JSON 一律不提示。 */
+const qualityLine = computed(() => {
+  const ctx = context.value
+  if (!ctx) return ''
+  const raw = ctx.data_quality_json ?? ctx.data_quality
+  const reasons = qualityReasons(raw, {
+    isToday: day.value === new Date().toLocaleDateString('sv-SE'),
+    nowHour: new Date().getHours(),
+  })
+  return reasons.length ? prepReviewQualityLine(reasons) : ''
 })
 
 const summaryPeriodHint = computed(() =>
@@ -343,6 +358,7 @@ onMounted(() => {
     </header>
 
     <p v-if="contextLine" class="pr-context">{{ contextLine }}</p>
+    <p v-if="qualityLine" class="pr-quality" role="status">{{ qualityLine }}</p>
 
     <div v-if="noteEditing" class="pr-note-edit">
       <input
@@ -700,6 +716,20 @@ onMounted(() => {
   margin: 0;
   font-size: var(--fs-12);
   color: var(--ink-dim);
+}
+
+/* 数据质量提示（票 09）：一条提示条，横向铺满内容区。颜色全部走语义令牌，
+   左侧加粗边是「解释项」与正文的区分，不靠字号压人。 */
+.pr-quality {
+  margin: 6px 0 0;
+  padding: 8px 12px;
+  border: 1px solid var(--warn);
+  border-left-width: 3px;
+  border-radius: var(--r-1, 8px);
+  background: var(--warn-soft);
+  color: var(--warn);
+  font-size: var(--fs-12, 12px);
+  line-height: 1.5;
 }
 
 .pr-scope {

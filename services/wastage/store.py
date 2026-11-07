@@ -30,6 +30,7 @@ import asyncpg
 from db_core.errors import is_integrity_violation
 from db_core.utils import CHINA_TZ
 from services.identity import serialized_write
+from services.prep_review.retention import PRIMARY_CLOCK
 
 logger = logging.getLogger(__name__)
 
@@ -88,7 +89,8 @@ _MONTH_RE = re.compile(r"^\d{4}-\d{2}$")
 
 _RECORD_COLUMNS = (
     "id, item_name, quantity, unit, reason, remark, wastage_date,"
-    " operator_kind, employee_id, operator_name, created_at"
+    " operator_kind, employee_id, operator_name, created_at,"
+    " prep_item_id, window_start, window_end"
 )
 
 
@@ -234,6 +236,37 @@ def _clean_remark(value: Any) -> str:
     return text
 
 
+def _clean_prep_item_id(value: Any) -> Optional[int]:
+    """可选的备货品主键：空就是空，给了就必须是一个正整数。
+
+    是否**存在**由调用方查库确认（这里只有纯函数，不碰连接）；不存在的 id 挂上去，
+    复盘按 id 对齐时永远匹配不到，等于把这笔报废悄悄丢了。
+    """
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        raise WastageError("invalid_prep_item", "invalid_prep_item")
+    try:
+        item_id = int(str(value).strip())
+    except (TypeError, ValueError):
+        raise WastageError("invalid_prep_item", "invalid_prep_item")
+    if item_id <= 0:
+        raise WastageError("invalid_prep_item", "invalid_prep_item")
+    return item_id
+
+
+def _window_bounds(day: str) -> tuple[str, str]:
+    """自然日 ``YYYY-MM-DD`` → 当天的 07:00 窗口（`[day T07:00, day+1 T07:00)`）。
+
+    钟点复用复盘主口径（`services.prep_review.retention.PRIMARY_CLOCK`）：损耗落在哪个
+    品-天，与复盘读的是同一个 07:00 窗口，两处各写一个 "07:00" 就会漂。
+    """
+    hour, minute = (int(part) for part in PRIMARY_CLOCK.split(":"))
+    parsed = date.fromisoformat(day)
+    start = datetime(parsed.year, parsed.month, parsed.day, hour, minute, tzinfo=CHINA_TZ)
+    return start.isoformat(), (start + timedelta(days=1)).isoformat()
+
+
 def _clean_keyword(value: Any) -> str:
     """关键词：去空白、限长。它进的是 LIKE 的参数位，不做任何拼接。"""
     text = str(value or "").strip()
@@ -334,6 +367,13 @@ class WastageStore:
         )
         return int(rows[0]["total"]) if rows else 0
 
+    async def _prep_item_exists(self, item_id: int) -> bool:
+        """这个备货品还在不在主数据里。只查主键，不替调用方判断 active。"""
+        rows = await self._rows(
+            "SELECT id FROM prep_items WHERE id = ?", (int(item_id),)
+        )
+        return bool(rows)
+
     async def _images_for(self, record_ids: list[int]) -> dict[int, list[dict]]:
         """记录号 → 该条的图片（按上传顺序）。一次查完，不给每条记录打一次库。"""
         if not record_ids:
@@ -371,11 +411,17 @@ class WastageStore:
         remark: Any = "",
         wastage_date: Any = None,
         image_ids: Optional[list] = None,
+        prep_item_id: Any = None,
     ) -> dict:
         """登记一笔损耗。两种身份走同一条路，落库时带上「谁登记的」。
 
         日期默认今天；**未来的日子不收**（源项目把日期选择器卡在今天）。要改一笔已经
         登记的记录不在这一票里 —— 台账是「当时发生了什么」，发现写错了就再记一笔说明。
+
+        `prep_item_id` 可选：挂了就多一个「这笔报废是哪个备货品」的对齐，复盘算多备代价
+        时先按 id 匹配（没挂的旧行仍按品名兜底，见 `services/prep_review/summary.py`）。
+        `window_start` / `window_end` 每次都按 `wastage_date` 的 07:00 窗口写（两列可空，
+        只为历史行留的），这样一笔报废能落进某个品-天，而不是只躺在自然日上。
         """
         name = _clean_item_name(item_name)
         amount = _require_quantity(quantity)
@@ -389,6 +435,11 @@ class WastageStore:
         day = self.today() if wastage_date in (None, "") else _require_date(wastage_date)
         if day > self.today():
             raise WastageError("future_day", "future_day")
+
+        item_id = _clean_prep_item_id(prep_item_id)
+        if item_id is not None and not await self._prep_item_exists(item_id):
+            raise WastageError("unknown_prep_item", str(item_id))
+        window_start, window_end = _window_bounds(day)
 
         ids = [str(item) for item in (image_ids or []) if str(item or "").strip()]
         if len(ids) > MAX_IMAGES:
@@ -409,8 +460,9 @@ class WastageStore:
         cur = await self._conn.execute(
             "INSERT INTO wastage_records"
             " (item_name, quantity, unit, reason, remark, wastage_date,"
-            "  operator_kind, employee_id, operator_name, created_at, updated_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
+            "  operator_kind, employee_id, operator_name, created_at, updated_at,"
+            "  prep_item_id, window_start, window_end)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
             (
                 name,
                 amount,
@@ -423,6 +475,9 @@ class WastageStore:
                 actor.display_name,
                 stamp,
                 stamp,
+                item_id,
+                window_start,
+                window_end,
             ),
         )
         created = await cur.fetchone()

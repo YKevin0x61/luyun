@@ -422,3 +422,69 @@ describe('导出 CSV（纯函数）', () => {
     expect(reviewCsvFilename('2026-11-07', '07:00')).toBe('备货复盘_2026-11-07_0700.csv')
   })
 })
+
+describe('数据质量提示（票 09）', () => {
+  // 只伪造 Date：覆盖判据里有一项是「今天已经过去几个钟点」，不钉住时间这条用例就会
+  // 在清早跑出另一套预期。定时器保持真实，`flushPromises` 才不会被卡住。
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-11-07T19:00:00+08:00'))
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  function withQuality(quality) {
+    const payload = dayPayload()
+    return {
+      ...payload,
+      context: { ...payload.context, data_quality_json: quality },
+    }
+  }
+
+  it('订单明显偏少 / 快照覆盖很少时提示，并说清别把断档读成「备多了」', async () => {
+    const quality = JSON.stringify({ order_lines: 7, covered_hours: 2 })
+    vi.stubGlobal('fetch', probeFetch({ day: withQuality(quality) }))
+    const wrapper = await mountView()
+
+    const banner = wrapper.get('.pr-quality')
+    expect(banner.text()).toContain('数据可能不完整')
+    expect(banner.text()).toContain('快照只覆盖 2 个钟点')
+    expect(banner.text()).toContain('别把采集断档读成「备多了」')
+  })
+
+  it('数据正常时不出提示', async () => {
+    const quality = JSON.stringify({ order_lines: 420, covered_hours: 14 })
+    vi.stubGlobal('fetch', probeFetch({ day: withQuality(quality) }))
+    const wrapper = await mountView()
+
+    expect(wrapper.find('.pr-quality').exists()).toBe(false)
+  })
+
+  it('坏 JSON / 字段缺失都不炸，也不显示提示', async () => {
+    vi.stubGlobal('fetch', probeFetch({ day: withQuality('{not json') }))
+    let wrapper = await mountView()
+    expect(wrapper.find('.pr-quality').exists()).toBe(false)
+    expect(wrapper.text()).toContain('备货复盘')
+
+    // 字段缺失（已经上线的库还没写 data_quality_json）走同一条路。
+    vi.stubGlobal('fetch', probeFetch())
+    wrapper = await mountView()
+    expect(wrapper.find('.pr-quality').exists()).toBe(false)
+  })
+
+  it('读票 08 已解析的 data_quality 对象（orders_today / snapshot_hours）', async () => {
+    const payload = dayPayload()
+    payload.context = {
+      ...payload.context,
+      // 票 08 的 `_data_quality` 实际形状（接口已把 JSON 解析成对象）。
+      data_quality: { orders_today: 5, snapshot_hours: 1, first_order_at: null, last_order_at: null },
+    }
+    vi.stubGlobal('fetch', probeFetch({ day: payload }))
+    const wrapper = await mountView()
+
+    const banner = wrapper.get('.pr-quality').text()
+    expect(banner).toContain('快照只覆盖 1 个钟点')
+    expect(banner).toContain('当日订单只有 5 条')
+  })
+})

@@ -26,6 +26,7 @@ from api.security import require_any_identity_session, verify_admin_token
 from database import CHINA_TZ, get_db
 from services.prep_plan_context import prep_plan_context
 from services.prep_plan_service import prep_plan_service
+from services.prep_review import events as prep_review_events
 from services.prep_review.summary import review_summary
 
 logger = logging.getLogger(__name__)
@@ -210,6 +211,9 @@ async def set_staff_station(
 class UpdateEntryRequest(BaseModel):
     final_qty: Optional[float] = None
     done: Optional[bool] = None
+    # 「为什么改数量」的可选原因：键是数据面契约（`MANUAL_EDIT_REASONS`），
+    # 中文标签在前端（`prepPlanCopy.js`）。不选就是 None，与改造前一致。
+    reason: Optional[str] = None
 
 
 @reader_router.patch("/today/entries/{entry_id}")
@@ -220,6 +224,15 @@ async def update_entry(
     db=Depends(get_db),
 ):
     """改数量或勾选。默认带建议量、能改但不强制（ADR 0117）。"""
+    reason = payload.reason
+    if reason is not None:
+        # 空串按「没选」处理（前端不选时根本不带这个键；老客户端也不该因为空串 400）。
+        reason = str(reason).strip() or None
+        if reason is not None and reason not in prep_review_events.MANUAL_EDIT_REASONS:
+            raise HTTPException(
+                status_code=400,
+                detail="改数量的原因只能是 实盘库存 / 临时加单 / 经验判断 / 其他",
+            )
     try:
         employee_id, done_by = _staff(identity)
         return await prep_plan_service.update_entry(
@@ -229,11 +242,51 @@ async def update_entry(
             done=payload.done,
             done_by=done_by,
             employee_id=employee_id,
+            reason=reason,
         )
     except HTTPException:
         raise
     except Exception as exc:
         raise _wrap(exc, "更新备货项")
+
+
+class PlanEventRequest(BaseModel):
+    """复制清单埋点。`kind` 只收 `plan_copied`（见 `services/prep_review/events.py`）。"""
+
+    kind: Optional[str] = None
+    meta: Optional[dict] = None
+
+
+@manager_router.post("/events")
+async def record_plan_event(
+    payload: PlanEventRequest,
+    identity: dict = Depends(require_any_identity_session),
+    db=Depends(get_db),
+):
+    """记一条现场埋点（当前只有「复制清单」）。
+
+    管理端专属：员工拿到 403（不是 401 —— 他有会话，只是这条路不对他开放）。
+    与 `record_event` 的其余调用点一样，写失败只记日志、仍回 200：埋点是旁路证据，
+    页面 fire-and-forget，失败不该影响复制这个动作本身。
+    """
+    if identity.get("kind") == "staff":
+        raise HTTPException(status_code=403, detail="员工不能记录备货埋点")
+
+    kind = str(payload.kind or "").strip()
+    if kind != prep_review_events.PLAN_COPIED:
+        raise HTTPException(
+            status_code=400, detail="这个端点只收复制清单事件（kind=plan_copied）"
+        )
+    now = datetime.now(CHINA_TZ)
+    meta = payload.meta if isinstance(payload.meta, dict) else {}
+    recorded = await prep_review_events.record_event(
+        db,
+        at=now.isoformat(),
+        plan_day=now.date().isoformat(),
+        kind=prep_review_events.PLAN_COPIED,
+        meta=meta,
+    )
+    return {"success": True, "recorded": recorded}
 
 
 # --------------------------------------------------------------------- 管理端
