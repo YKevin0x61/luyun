@@ -165,6 +165,74 @@ async def put_context_note(
     return {"success": True, "day": day, "context": context}
 
 
+class WeatherSettingsRequest(BaseModel):
+    api_key: Optional[str] = None
+    city: str = ""
+    api_host: Optional[str] = None
+
+
+def _reject_staff(identity: dict, action: str) -> None:
+    if identity.get("kind") == "staff":
+        raise HTTPException(status_code=403, detail=f"员工不能{action}")
+
+
+@manager_router.get("/context/weather")
+async def get_weather_settings(
+    identity: dict = Depends(require_any_identity_session),
+    db=Depends(get_db),
+):
+    """天气采集配置：Key 只回脱敏值，明文永不出服务端。"""
+    _reject_staff(identity, "查看天气配置")
+    try:
+        return await prep_plan_context.read_weather_config(db)
+    except Exception as exc:
+        raise _wrap(exc, "读取天气配置")
+
+
+@manager_router.put("/context/weather")
+async def put_weather_settings(
+    payload: WeatherSettingsRequest,
+    identity: dict = Depends(require_any_identity_session),
+    db=Depends(get_db),
+):
+    """保存 Key / 城市 / Host。空 Key = 不改；任一关键项变化即清 location_id。"""
+    _reject_staff(identity, "修改天气配置")
+    try:
+        return await prep_plan_context.save_weather_config(
+            db,
+            api_key=payload.api_key,
+            city=payload.city,
+            api_host=payload.api_host,
+        )
+    except Exception as exc:
+        raise _wrap(exc, "保存天气配置")
+
+
+@manager_router.post("/context/weather/test")
+async def test_weather_settings(
+    payload: WeatherSettingsRequest,
+    identity: dict = Depends(require_any_identity_session),
+    db=Depends(get_db),
+):
+    """用当前表单跑一次 GEO + 今日预报，不写库。
+
+    「Key 不对」是业务结果，不是服务器故障：统一 200 + `{ok: false, error}`，
+    只有参数不合法（城市为空、Host 不是 https）才 400。
+    """
+    _reject_staff(identity, "测试天气配置")
+    try:
+        return await prep_plan_context.test_weather_config(
+            db,
+            api_key=payload.api_key,
+            city=payload.city,
+            api_host=payload.api_host,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise _wrap(exc, "测试天气配置")
+
+
 @reader_router.get("/items")
 async def list_items(db=Depends(get_db)):
     try:

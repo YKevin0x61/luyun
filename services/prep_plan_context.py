@@ -27,6 +27,7 @@ import logging
 import statistics
 from datetime import date, datetime, time, timedelta
 from typing import Any, Dict, Optional, Tuple
+from urllib.parse import urlparse
 
 import httpx
 
@@ -50,6 +51,70 @@ QWEATHER_GEO_URL = "https://geoapi.qweather.com/v2/city/lookup"
 QWEATHER_DAILY_URL = "https://devapi.qweather.com/v7/weather/3d"
 # 天气接口再慢也不能把整点快照或页面请求拖住；超时按「没有新值」处理。
 WEATHER_TIMEOUT_SECONDS = 5.0
+
+
+def _weather_urls(config: Optional[Dict[str, Any]]) -> Tuple[str, str]:
+    """按 `api_host` 算 GEO / 预报地址；宿主为空时回落老域名。
+
+    和风 2024-06 之后注册的账号只认 `https://<id>.re.qweatherapi.com`，老账号仍是
+    `geoapi` + `devapi` 两个域名。这里只做字符串拼接，不做探测 —— 填错 Host 由
+    「测试连通」当场给人话原因。
+    """
+    host = str((config or {}).get("api_host") or "").strip().rstrip("/")
+    if not host:
+        return QWEATHER_GEO_URL, QWEATHER_DAILY_URL
+    return f"{host}/geo/v2/city/lookup", f"{host}/v7/weather/3d"
+
+
+def _mask_api_key(api_key: Optional[str]) -> str:
+    """`abcdEFGH1234wxyz` → `abcd****wxyz`。
+
+    短 Key（≤ 8 位）首尾各 4 位就等于明文，直接全遮。空 Key 返回空串，页面据此
+    判断「还没配」。
+    """
+    key = str(api_key or "").strip()
+    if not key:
+        return ""
+    if len(key) <= 8:
+        return "****"
+    return f"{key[:4]}****{key[-4:]}"
+
+
+def _normalize_api_host(value: Optional[str]) -> str:
+    """校验并归一化 API Host；空值合法（表示走老域名）。
+
+    只收带主机的 https 地址：http / ftp / 缺主机 / 带 query 或 fragment 的一律
+    拒绝，避免拼出 `https://host?x/geo/...` 这种坏 URL。末尾斜杠去掉，落库只存
+    base，拼接规则由 `_weather_urls` 独占。
+    """
+    host = str(value or "").strip().rstrip("/")
+    if not host:
+        return ""
+    parsed = urlparse(host)
+    if (
+        parsed.scheme != "https"
+        or not parsed.netloc
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError(
+            "API Host 必须是 https:// 开头的地址，例如 https://xxxxxx.re.qweatherapi.com"
+        )
+    return host
+
+
+def _weather_payload(config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """对外形状（GET / PUT 共用）：只给脱敏 Key 与可公开的配置。"""
+    data = config if isinstance(config, dict) else {}
+    api_key = str(data.get("api_key") or "").strip()
+    city = str(data.get("city") or "").strip()
+    return {
+        "configured": bool(api_key and city),
+        "api_key_masked": _mask_api_key(api_key),
+        "city": city,
+        "api_host": str(data.get("api_host") or "").strip(),
+        "updated_at": str(data.get("updated_at") or ""),
+    }
 
 # 人力按岗位名（POSITION_STATION_MAP 的 key）聚；认不出的工作区与没配区的都落 other。
 OTHER_POSITION = "other"
@@ -142,9 +207,11 @@ class QWeatherClient:
             payload = response.json()
         return payload if isinstance(payload, dict) else {}
 
-    async def lookup_location(self, city: str, api_key: str) -> Optional[str]:
+    async def lookup_location(
+        self, city: str, api_key: str, url: str = QWEATHER_GEO_URL
+    ) -> Optional[str]:
         payload = await self._get_json(
-            QWEATHER_GEO_URL, {"location": city, "key": api_key, "number": 1}
+            url, {"location": city, "key": api_key, "number": 1}
         )
         locations = payload.get("location") or []
         if not locations:
@@ -153,10 +220,14 @@ class QWeatherClient:
         return location_id or None
 
     async def daily(
-        self, location_id: str, api_key: str, day: str
+        self,
+        location_id: str,
+        api_key: str,
+        day: str,
+        url: str = QWEATHER_DAILY_URL,
     ) -> Optional[Dict[str, Any]]:
         payload = await self._get_json(
-            QWEATHER_DAILY_URL, {"location": location_id, "key": api_key}
+            url, {"location": location_id, "key": api_key}
         )
         daily = payload.get("daily") or []
         entry = next((item for item in daily if item.get("fxDate") == day), None)
@@ -304,6 +375,159 @@ class PrepPlanContextService:
         await tdb.commit()
         return await self.get_context(db, plan_day)
 
+    # ---------------------------------------------------------- 天气配置
+
+    async def read_weather_config(self, db) -> Dict[str, Any]:
+        """读天气配置，只返回脱敏 Key 与页面需要的字段。"""
+        config = await db.settings_get_json(WEATHER_SETTINGS_KEY, {}) or {}
+        if not isinstance(config, dict):
+            config = {}
+        payload = _weather_payload(config)
+        if not payload["updated_at"]:
+            payload["updated_at"] = await db.settings_updated_at(WEATHER_SETTINGS_KEY) or ""
+        return payload
+
+    async def save_weather_config(
+        self,
+        db,
+        *,
+        api_key: Optional[str] = None,
+        city: str,
+        api_host: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """保存天气配置；空 Key 保留原值，任一关键项变了才清 `location_id`。
+
+        未知字段原样保留（别人的键不归这里管）。`api_host` 省略表示保持原值，
+        空串表示明确清空、回落老域名 —— 界面每次都会带这个字段，省略只服务脚本。
+        """
+        existing = await db.settings_get_json(WEATHER_SETTINGS_KEY, {}) or {}
+        if not isinstance(existing, dict):
+            existing = {}
+        city_text = str(city or "").strip()
+        if not city_text:
+            raise ValueError("城市不能为空")
+
+        old_key = str(existing.get("api_key") or "").strip()
+        typed_key = str(api_key or "").strip()
+        resolved_key = typed_key or old_key
+        old_city = str(existing.get("city") or "").strip()
+        old_host = str(existing.get("api_host") or "").strip()
+        source_host = existing.get("api_host") if api_host is None else api_host
+        resolved_host = _normalize_api_host(source_host)
+
+        changed = (
+            resolved_key != old_key
+            or city_text != old_city
+            or resolved_host != old_host
+        )
+        config = dict(existing)
+        config["api_key"] = resolved_key
+        config["city"] = city_text
+        config["api_host"] = resolved_host
+        if changed:
+            # 新 Key 查旧城市 id、新城市复用旧 id 都会拿到错的天气，宁可重查一次 GEO。
+            config["location_id"] = ""
+        config["updated_at"] = datetime.now(CHINA_TZ).isoformat()
+
+        if not await db.settings_set_json(WEATHER_SETTINGS_KEY, config):
+            raise RuntimeError("天气配置保存失败")
+        logger.info(
+            "天气配置已保存 city=%s host=%s key=%s",
+            city_text,
+            resolved_host or "默认域名",
+            _mask_api_key(resolved_key),
+        )
+        return _weather_payload(config)
+
+    async def test_weather_config(
+        self,
+        db,
+        *,
+        api_key: Optional[str] = None,
+        city: str,
+        api_host: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """跑一次「GEO 换 id → 拉今天预报」，不写库；失败是 200 + 人话原因。"""
+        city_text = str(city or "").strip()
+        if not city_text:
+            raise ValueError("城市不能为空")
+
+        existing = await db.settings_get_json(WEATHER_SETTINGS_KEY, {}) or {}
+        if not isinstance(existing, dict):
+            existing = {}
+        stored_key = str(existing.get("api_key") or "").strip()
+        resolved_key = str(api_key or "").strip() or stored_key
+        if not resolved_key:
+            raise ValueError("请先填写 API Key")
+        source_host = existing.get("api_host") if api_host is None else api_host
+        resolved_host = _normalize_api_host(source_host)
+        geo_url, daily_url = _weather_urls({"api_host": resolved_host})
+
+        try:
+            location_id = await self._weather_client.lookup_location(
+                city_text, resolved_key, url=geo_url
+            )
+        except Exception as exc:
+            return {"ok": False, "error": self._weather_error(exc)}
+        if not location_id:
+            return {
+                "ok": False,
+                "error": "没找到这个城市，换个写法试试（例如 广州）",
+            }
+
+        today = datetime.now(CHINA_TZ).date().isoformat()
+        try:
+            daily = await self._weather_client.daily(
+                location_id, resolved_key, today, url=daily_url
+            )
+        except Exception as exc:
+            return {"ok": False, "error": self._weather_error(exc)}
+        if not daily:
+            return {
+                "ok": False,
+                "error": "和风天气没返回今天的预报，检查 Key 权限或城市",
+            }
+        return {
+            "ok": True,
+            "location_id": location_id,
+            "sample": {
+                "fxDate": today,
+                "textDay": str(daily.get("text") or ""),
+                "tempMin": daily.get("temp_min"),
+                "tempMax": daily.get("temp_max"),
+            },
+        }
+
+    @staticmethod
+    def _weather_error(exc: Exception) -> str:
+        """把异常翻成人话；只记状态码与异常类型，不把 URL / 异常文本写进日志。
+
+        httpx 的异常文本带完整请求 URL（含 `key=`），原样落日志或回前端都等于
+        泄密，所以这里按类型分支，绝不 `str(exc)` 外传。
+        """
+        if isinstance(exc, httpx.HTTPStatusError):
+            status = exc.response.status_code
+            logger.warning("和风天气连通测试失败 status=%s", status)
+            if status in (401, 403):
+                return "Key 无效，或这个 Key 没有天气接口权限"
+            if status == 404:
+                return "和风天气没找到这个城市或接口地址"
+            if status == 429:
+                return "和风天气请求太频繁，稍后再试"
+            if 500 <= status < 600:
+                return "和风天气服务暂时不可用，稍后再试"
+            return f"和风天气拒绝了这次请求（HTTP {status}），检查城市与 API Host"
+        if isinstance(exc, httpx.TimeoutException):
+            logger.warning("和风天气连通测试超时")
+            return "连接和风天气超时，检查网络或 API Host"
+        if isinstance(exc, httpx.RequestError):
+            logger.warning(
+                "和风天气连通测试网络错误 type=%s", type(exc).__name__
+            )
+            return "连不上和风天气，检查网络或 API Host"
+        logger.warning("和风天气连通测试失败 type=%s", type(exc).__name__)
+        return "测试失败，检查 Key、城市和 API Host"
+
     # -------------------------------------------------------------- 三个来源
 
     async def _holiday_name(self, db, plan_day: str) -> Optional[str]:
@@ -334,10 +558,13 @@ class PrepPlanContextService:
             logger.debug("天气未配置，跳过 plan_day=%s", plan_day)
             return None
 
+        geo_url, daily_url = _weather_urls(config)
         location_id = str(config.get("location_id") or "").strip()
         try:
             if not location_id:
-                location_id = await self._weather_client.lookup_location(city, api_key)
+                location_id = await self._weather_client.lookup_location(
+                    city, api_key, url=geo_url
+                )
                 if not location_id:
                     logger.warning(
                         "和风 GEO 未找到城市，天气留空 plan_day=%s city=%s",
@@ -349,7 +576,9 @@ class PrepPlanContextService:
                 config["updated_at"] = now.isoformat()
                 await db.settings_set_json(WEATHER_SETTINGS_KEY, config)
 
-            daily = await self._weather_client.daily(location_id, api_key, plan_day)
+            daily = await self._weather_client.daily(
+                location_id, api_key, plan_day, url=daily_url
+            )
             if not daily:
                 logger.warning(
                     "和风天气无当天数据，保留原值 plan_day=%s city=%s",
@@ -362,11 +591,12 @@ class PrepPlanContextService:
             payload["fetched_at"] = now.isoformat()
             return payload
         except Exception as exc:  # 断网、超时、HTTP 4xx/5xx、坏 JSON 都走这里
+            # 异常文本可能带请求 URL（含 key），日志只留类型，不泄密。
             logger.warning(
-                "天气获取失败，保留原值 plan_day=%s city=%s err=%s",
+                "天气获取失败，保留原值 plan_day=%s city=%s type=%s",
                 plan_day,
                 city,
-                exc,
+                type(exc).__name__,
             )
             return None
 
@@ -565,3 +795,33 @@ class PrepPlanContextService:
 
 
 prep_plan_context = PrepPlanContextService()
+
+
+# 模块级入口：票面约定的服务层 API。路由与测试都走这里，注入的客户端统一来自
+# 上面的单例，避免在路由里 new 客户端、也避免两套配置。
+async def read_weather_config(db) -> Dict[str, Any]:
+    return await prep_plan_context.read_weather_config(db)
+
+
+async def save_weather_config(
+    db,
+    *,
+    api_key: Optional[str] = None,
+    city: str,
+    api_host: Optional[str] = None,
+) -> Dict[str, Any]:
+    return await prep_plan_context.save_weather_config(
+        db, api_key=api_key, city=city, api_host=api_host
+    )
+
+
+async def test_weather_config(
+    db,
+    *,
+    api_key: Optional[str] = None,
+    city: str,
+    api_host: Optional[str] = None,
+) -> Dict[str, Any]:
+    return await prep_plan_context.test_weather_config(
+        db, api_key=api_key, city=city, api_host=api_host
+    )

@@ -193,3 +193,37 @@ export function prepReviewQualityFewOrders(lines) {
 export function prepReviewQualityLine(reasons) {
   return `${PREP_REVIEW_QUALITY_TITLE}：${reasons.join(' · ')}——${PREP_REVIEW_QUALITY_SUFFIX}。`
 }
+
+// ── 复盘页 · 天气设置（票 11）──────────────────────────────────────────────
+export const WEATHER_SETTINGS_TITLE = '天气设置'
+export const WEATHER_SETTINGS_OPEN = '设置'
+export const WEATHER_SETTINGS_CLOSE = '关闭'
+export const WEATHER_SETTINGS_HINT = '配了才有天气；Key 来自和风天气控制台'
+export const WEATHER_SETTINGS_KEY_LABEL = 'API Key'
+export const WEATHER_SETTINGS_KEY_PLACEHOLDER = '留空 = 不修改'
+export const WEATHER_SETTINGS_CITY_LABEL = '城市'
+export const WEATHER_SETTINGS_CITY_PLACEHOLDER = '例如 广州'
+export const WEATHER_SETTINGS_HOST_LABEL = 'API Host'
+export const WEATHER_SETTINGS_HOST_PLACEHOLDER =
+  '留空用默认域名；新账号填 https://xxxxxx.re.qweatherapi.com'
+export const WEATHER_SETTINGS_TEST = '测试连通'
+export const WEATHER_SETTINGS_TESTING = '测试中…'
+export const WEATHER_SETTINGS_SAVE = '保存'
+export const WEATHER_SETTINGS_SAVING = '保存中…'
+export const WEATHER_SETTINGS_CITY_REQUIRED = '城市必填'
+export const WEATHER_SETTINGS_READ_FAILED = '天气配置读不出来，再试一次'
+export const WEATHER_SETTINGS_SAVE_FAILED = '保存失败，再试一次'
+export const WEATHER_SETTINGS_TEST_FAILED = '连通失败，检查 Key、城市和 Host'
+
+/** 已配置时把脱敏值放进占位，提醒「这里已经有 Key，留空不会覆盖」。 */
+export function weatherSettingsKeyPlaceholder(masked) {
+  return masked ? `留空 = 不修改（已配置 ${masked}）` : WEATHER_SETTINGS_KEY_PLACEHOLDER
+}
+
+/** 测试成功的一行话：有天气就带上，样本缺字段时不硬编「undefined」。 */
+export function weatherSettingsTestOk(sample) {
+  const text = sample?.textDay ? `${sample.textDay} ` : ''
+  const min = sample?.tempMin ?? '—'
+  const max = sample?.tempMax ?? '—'
+  return `连通成功：${text}${min}~${max}°C`
+}

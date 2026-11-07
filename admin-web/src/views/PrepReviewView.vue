@@ -51,7 +51,26 @@ import {
   PREP_REVIEW_WHY_DIMENSIONS,
   PREP_REVIEW_WHY_HINT,
   PREP_REVIEW_WHY_TITLE,
+  WEATHER_SETTINGS_CITY_LABEL,
+  WEATHER_SETTINGS_CITY_PLACEHOLDER,
+  WEATHER_SETTINGS_CITY_REQUIRED,
+  WEATHER_SETTINGS_CLOSE,
+  WEATHER_SETTINGS_HINT,
+  WEATHER_SETTINGS_HOST_LABEL,
+  WEATHER_SETTINGS_HOST_PLACEHOLDER,
+  WEATHER_SETTINGS_KEY_LABEL,
+  WEATHER_SETTINGS_OPEN,
+  WEATHER_SETTINGS_READ_FAILED,
+  WEATHER_SETTINGS_SAVE,
+  WEATHER_SETTINGS_SAVE_FAILED,
+  WEATHER_SETTINGS_SAVING,
+  WEATHER_SETTINGS_TEST,
+  WEATHER_SETTINGS_TEST_FAILED,
+  WEATHER_SETTINGS_TESTING,
+  WEATHER_SETTINGS_TITLE,
   prepReviewContextStaff,
+  weatherSettingsKeyPlaceholder,
+  weatherSettingsTestOk,
   prepReviewPendingHint,
   prepReviewPeriodHint,
   prepReviewQualityLine,
@@ -103,6 +122,23 @@ const noteSaving = ref(false)
 const noteDraft = ref('')
 const noteError = ref('')
 
+const weatherOpen = ref(false)
+const weatherLoading = ref(false)
+const weatherSaving = ref(false)
+const weatherTesting = ref(false)
+const weatherConfig = ref({
+  configured: false,
+  api_key_masked: '',
+  city: '',
+  api_host: '',
+  updated_at: '',
+})
+const weatherKeyDraft = ref('')
+const weatherCityDraft = ref('')
+const weatherHostDraft = ref('')
+const weatherStatus = ref('')
+const weatherStatusBad = ref(false)
+
 const current = computed(() => snapshots.value.find((g) => g.clock === clock.value) || null)
 
 const currentItems = computed(() => current.value?.items || [])
@@ -133,6 +169,10 @@ function contextObject(direct, raw) {
 
 const weatherInfo = computed(() => contextObject(context.value?.weather, context.value?.weather_json))
 const staffInfo = computed(() => contextObject(context.value?.staff, context.value?.staff_json))
+
+const weatherKeyPlaceholder = computed(() =>
+  weatherSettingsKeyPlaceholder(weatherConfig.value?.api_key_masked),
+)
 
 const contextLine = computed(() => {
   const ctx = context.value
@@ -309,6 +349,89 @@ async function saveNote() {
   }
 }
 
+async function openWeatherSettings() {
+  weatherOpen.value = true
+  weatherLoading.value = true
+  weatherStatus.value = ''
+  weatherStatusBad.value = false
+  weatherKeyDraft.value = ''
+  try {
+    const data = await api.get('/api/prep-plan/context/weather')
+    weatherConfig.value = data || {}
+    weatherCityDraft.value = data?.city || ''
+    weatherHostDraft.value = data?.api_host || ''
+  } catch (err) {
+    weatherStatus.value = err.message || WEATHER_SETTINGS_READ_FAILED
+    weatherStatusBad.value = true
+  } finally {
+    weatherLoading.value = false
+  }
+}
+
+function closeWeatherSettings() {
+  weatherOpen.value = false
+  weatherStatus.value = ''
+  weatherStatusBad.value = false
+}
+
+/** 表单 → 请求体：空 Key 不带字段（后端据此保留原 Key），城市去空白后必填。 */
+function weatherPayload() {
+  const city = weatherCityDraft.value.trim()
+  if (!city) {
+    weatherStatus.value = WEATHER_SETTINGS_CITY_REQUIRED
+    weatherStatusBad.value = true
+    return null
+  }
+  const payload = { city, api_host: weatherHostDraft.value.trim() }
+  const key = weatherKeyDraft.value.trim()
+  if (key) payload.api_key = key
+  return payload
+}
+
+async function saveWeatherSettings() {
+  if (weatherSaving.value || weatherTesting.value || weatherLoading.value) return
+  const payload = weatherPayload()
+  if (!payload) return
+  weatherSaving.value = true
+  weatherStatus.value = ''
+  weatherStatusBad.value = false
+  try {
+    await api.put('/api/prep-plan/context/weather', payload)
+    weatherOpen.value = false
+    // 只重拉快照，让头部天气行跟着新配置走；不整页刷新。
+    await load({ keepClock: true })
+  } catch (err) {
+    weatherStatus.value = err.message || WEATHER_SETTINGS_SAVE_FAILED
+    weatherStatusBad.value = true
+  } finally {
+    weatherSaving.value = false
+  }
+}
+
+async function testWeatherSettings() {
+  if (weatherTesting.value || weatherSaving.value || weatherLoading.value) return
+  const payload = weatherPayload()
+  if (!payload) return
+  weatherTesting.value = true
+  weatherStatus.value = ''
+  weatherStatusBad.value = false
+  try {
+    const data = await api.post('/api/prep-plan/context/weather/test', payload)
+    if (data?.ok) {
+      weatherStatus.value = weatherSettingsTestOk(data.sample)
+      weatherStatusBad.value = false
+    } else {
+      weatherStatus.value = data?.error || WEATHER_SETTINGS_TEST_FAILED
+      weatherStatusBad.value = true
+    }
+  } catch (err) {
+    weatherStatus.value = err.message || WEATHER_SETTINGS_TEST_FAILED
+    weatherStatusBad.value = true
+  } finally {
+    weatherTesting.value = false
+  }
+}
+
 function exportCsv() {
   const items = currentItems.value
   if (!items.length) return
@@ -357,7 +480,12 @@ onMounted(() => {
       </div>
     </header>
 
-    <p v-if="contextLine" class="pr-context">{{ contextLine }}</p>
+    <div class="pr-context-row">
+      <p v-if="contextLine" class="pr-context">{{ contextLine }}</p>
+      <button type="button" class="pr-weather-btn" aria-label="天气设置" @click="openWeatherSettings">
+        {{ WEATHER_SETTINGS_OPEN }}
+      </button>
+    </div>
     <p v-if="qualityLine" class="pr-quality" role="status">{{ qualityLine }}</p>
 
     <div v-if="noteEditing" class="pr-note-edit">
@@ -600,6 +728,93 @@ onMounted(() => {
         </div>
       </details>
     </template>
+
+    <div v-if="weatherOpen" class="pr-weather-mask" @click.self="closeWeatherSettings">
+      <form
+        class="pr-weather-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="pr-weather-title"
+        @submit.prevent="saveWeatherSettings"
+      >
+        <div class="pr-weather-head">
+          <h2 id="pr-weather-title" class="pr-weather-title">{{ WEATHER_SETTINGS_TITLE }}</h2>
+          <button
+            type="button"
+            class="pr-weather-close"
+            :aria-label="WEATHER_SETTINGS_CLOSE"
+            @click="closeWeatherSettings"
+          >
+            ×
+          </button>
+        </div>
+        <p class="pr-weather-hint">{{ WEATHER_SETTINGS_HINT }}</p>
+
+        <label class="pr-weather-field" for="pr-weather-key">
+          <span>{{ WEATHER_SETTINGS_KEY_LABEL }}</span>
+          <input
+            id="pr-weather-key"
+            v-model="weatherKeyDraft"
+            class="pr-weather-input"
+            type="password"
+            autocomplete="off"
+            :placeholder="weatherKeyPlaceholder"
+          />
+        </label>
+
+        <label class="pr-weather-field" for="pr-weather-city">
+          <span>{{ WEATHER_SETTINGS_CITY_LABEL }}</span>
+          <input
+            id="pr-weather-city"
+            v-model="weatherCityDraft"
+            class="pr-weather-input"
+            type="text"
+            autocomplete="off"
+            :placeholder="WEATHER_SETTINGS_CITY_PLACEHOLDER"
+          />
+        </label>
+
+        <label class="pr-weather-field" for="pr-weather-host">
+          <span>{{ WEATHER_SETTINGS_HOST_LABEL }}</span>
+          <input
+            id="pr-weather-host"
+            v-model="weatherHostDraft"
+            class="pr-weather-input"
+            type="text"
+            autocomplete="off"
+            spellcheck="false"
+            :placeholder="WEATHER_SETTINGS_HOST_PLACEHOLDER"
+          />
+        </label>
+
+        <div class="pr-weather-actions">
+          <button
+            type="button"
+            class="pr-weather-test"
+            :disabled="weatherTesting || weatherSaving || weatherLoading"
+            @click="testWeatherSettings"
+          >
+            {{ weatherTesting ? WEATHER_SETTINGS_TESTING : WEATHER_SETTINGS_TEST }}
+          </button>
+          <button
+            type="submit"
+            class="pr-weather-save"
+            :disabled="weatherSaving || weatherTesting || weatherLoading"
+          >
+            {{ weatherSaving ? WEATHER_SETTINGS_SAVING : WEATHER_SETTINGS_SAVE }}
+          </button>
+        </div>
+
+        <p
+          v-if="weatherStatus"
+          class="pr-weather-status"
+          :class="weatherStatusBad ? 'is-bad' : 'is-ok'"
+          role="status"
+        >
+          {{ weatherStatus }}
+        </p>
+      </form>
+    </div>
   </div>
 </template>
 
@@ -702,6 +917,159 @@ onMounted(() => {
   color: var(--ink);
   font: inherit;
   font-size: var(--fs-13);
+}
+
+
+.pr-context-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+
+/* 设置按钮就挂在天气行后面：没有天气时也要在，否则第一次配置没有入口。 */
+.pr-weather-btn {
+  min-height: var(--tap);
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-1);
+  background: var(--surface-1);
+  color: var(--ink-dim);
+  font: inherit;
+  font-size: var(--fs-12);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.pr-weather-btn:hover {
+  color: var(--ink);
+  border-color: var(--line-strong);
+}
+
+.pr-weather-mask {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-dialog);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--sp-4);
+  background: var(--scrim);
+}
+
+.pr-weather-dialog {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  width: 460px;
+  max-width: calc(100vw - 32px);
+  max-height: calc(100vh - 32px);
+  overflow: auto;
+  padding: var(--sp-4);
+  border: 1px solid var(--line);
+  border-radius: var(--r-2);
+  background: var(--surface-1);
+  color: var(--ink);
+}
+
+.pr-weather-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+}
+
+.pr-weather-title {
+  margin: 0;
+  font-size: var(--fs-16);
+}
+
+.pr-weather-close {
+  min-width: var(--tap);
+  min-height: var(--tap);
+  border: 1px solid transparent;
+  border-radius: var(--r-1);
+  background: transparent;
+  color: var(--ink-dim);
+  font: inherit;
+  font-size: var(--fs-20);
+  line-height: 1;
+  cursor: pointer;
+}
+
+.pr-weather-hint {
+  margin: 0;
+  font-size: var(--fs-12);
+  color: var(--ink-faint);
+}
+
+.pr-weather-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: var(--fs-12);
+  color: var(--ink-dim);
+}
+
+.pr-weather-input {
+  width: 100%;
+  min-width: 0;
+  min-height: var(--tap);
+  padding: 0 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-1);
+  background: var(--surface-1);
+  color: var(--ink);
+  font: inherit;
+  font-size: var(--fs-13);
+}
+
+.pr-weather-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+}
+
+.pr-weather-test,
+.pr-weather-save {
+  min-height: var(--tap);
+  padding: 0 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-1);
+  font: inherit;
+  font-size: var(--fs-13);
+  cursor: pointer;
+}
+
+.pr-weather-test {
+  background: var(--surface-1);
+  color: var(--ink-dim);
+}
+
+.pr-weather-save {
+  border-color: var(--action);
+  background: var(--action);
+  color: var(--action-ink);
+}
+
+.pr-weather-test:disabled,
+.pr-weather-save:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.pr-weather-status {
+  margin: 0;
+  font-size: var(--fs-12);
+  line-height: 1.5;
+}
+
+.pr-weather-status.is-ok {
+  color: var(--ok);
+}
+
+.pr-weather-status.is-bad {
+  color: var(--danger-bright);
 }
 
 .pr-context,
