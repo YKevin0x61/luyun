@@ -41,13 +41,13 @@ class FakeWeatherClient:
         self.lookups = []
         self.daily_calls = []
 
-    async def lookup_location(self, city, api_key):
+    async def lookup_location(self, city, api_key, url=None):
         self.lookups.append((city, api_key))
         if self.error is not None:
             raise self.error
         return self.location_id
 
-    async def daily(self, location_id, api_key, day):
+    async def daily(self, location_id, api_key, day, url=None):
         self.daily_calls.append((location_id, api_key, day))
         if self.error is not None:
             raise self.error
