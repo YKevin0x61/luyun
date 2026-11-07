@@ -77,7 +77,7 @@ UPLOAD_CHUNK_BYTES = 1024 * 1024
 _ERROR_DETAILS = {
     "not_migrated": (
         "损耗登记表还没建好：请在 Admin「系统更新 → 数据库迁移」应用 "
-        "migrations/pg/0029_wastage.sql（以及 0046_prep_review_signals.sql），然后刷新本页"
+        "migrations/pg/0029_wastage.sql（以及 0049_prep_review_signals.sql），然后刷新本页"
     ),
     "invalid_date": "日期格式应该是 YYYY-MM-DD：请重新选一天",
     "future_day": "还没到的日子登不了：损耗记的是已经发生的事",
@@ -128,7 +128,7 @@ class RecordRequest(BaseModel):
     # `image_ids` 收的是 `POST /images` 回来的 `capture_id`，不是自增主键 ——
     # 文件名才是磁盘上真正的那份东西。
     image_ids: Optional[list] = None
-    # 可选的「对应备货品」：挂了之后复盘算多备代价时按 id 对齐（见 0046 的注释）。
+    # 可选的「对应备货品」：挂了之后复盘算多备代价时按 id 对齐（见 0049 的注释）。
     prep_item_id: Optional[int] = None
 
 

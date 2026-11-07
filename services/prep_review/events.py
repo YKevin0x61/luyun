@@ -18,7 +18,7 @@
   500。写失败时顺手回滚这条连接上的空事务，否则 PostgreSQL 会把后续语句一起毒死。
 - **不编造**（决策 9）：查不到历史动作就留空，回填只补它真处理过的窗口。
 
-表名与列口径见 `migrations/pg/0046_prep_review_signals.sql`。
+表名与列口径见 `migrations/pg/0049_prep_review_signals.sql`。
 """
 
 import json
@@ -30,7 +30,7 @@ from database import CHINA_TZ
 
 logger = logging.getLogger(__name__)
 
-#: 事件类型（与 0046 的注释一致）。
+#: 事件类型（与 0049 的注释一致）。
 MANUAL_EDIT = "manual_edit"
 DONE = "done"
 SOLD_OUT = "sold_out"

@@ -300,7 +300,7 @@ def _sold_qty_for(totals: Dict[Any, float], item: dict) -> float:
 
 
 def _hourly_json(hourly: Dict[Any, Dict[str, float]], item: dict) -> str:
-    """把逐小时分桶序列化成 0046 的 `hourly_json`（`[{"hour":"07:00","qty":12}]`）。
+    """把逐小时分桶序列化成 0049 的 `hourly_json`（`[{"hour":"07:00","qty":12}]`）。
 
     与 `_sold_qty_for` 同一套键兼容：接了主数据的规则按 int 键、没接上的按
     (品名, 单位) 文本键，两处相加再按时间排序。小时用 `CHINA_TZ` 的墙上时间
@@ -1453,7 +1453,7 @@ class PrepPlanService:
         当前配方**写 —— 于是配方一改，最近 3 天旧窗口的 `drifted` 标记会跟着变（它们
         本来就该按新口径重算）；更早的窗口保持首次事实不动。
 
-        除窗口内 `sold_qty` 外，再写 0046 加的实际侧列：窗口后 1h / 2h / 24h 的
+        除窗口内 `sold_qty` 外，再写 0049 加的实际侧列：窗口后 1h / 2h / 24h 的
         **累计**量、堂食 / 外卖拆分、退菜近似量与逐小时曲线。轨迹列只在观测点真正
         到齐时写（窗口刚结束时 1h/2h/24h 还没发生），没到齐不写 —— 写 0 会被误读成
         「之后没人买」。刷新时同理：只覆盖已经到点的列，不把已有值抹回 NULL。
@@ -1618,7 +1618,7 @@ class PrepPlanService:
         24h 补 `sold_next_day`；没到的列不写（写 0 会被误读成「之后没人买」）。
         渠道 / 退菜 / 逐小时是窗口内的确定值，随第一次补齐一起写。
 
-        只 `UPDATE` 0046 新加的那几列：`sold_qty`、`rules_fingerprint`、`computed_at`
+        只 `UPDATE` 0049 新加的那几列：`sold_qty`、`rules_fingerprint`、`computed_at`
         都是首次回填的事实，重跑不改。三列都补齐后该行不再入选
         （`sold_1h IS NULL ...` 条件），所以每小时的常驻回填不会反复扫同一批窗口。
         """

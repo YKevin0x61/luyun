@@ -25,7 +25,7 @@ ALL_TABLES = [
     "prep_staff_station_picks",
     "prep_plan_context",
     "prep_plan_events",
-    # 客流/翻台按小时汇总（迁移 0047，票 10）：桌台快照的派生指标，给备货复盘当
+    # 客流/翻台按小时汇总（迁移 0050，票 10）：桌台快照的派生指标，给备货复盘当
     # 「为什么备多/备少」的解释信号。
     "dining_traffic",
     "wecom_push_webhooks",
@@ -188,7 +188,7 @@ TABLE_GROUPS = (
         "prep_staff_station_picks",
         "prep_plan_context",
         "prep_plan_events",
-        # 客流/翻台（迁移 0047，票 10）归这里而不是「点餐数据」：它是**派生的复盘
+        # 客流/翻台（迁移 0050，票 10）归这里而不是「点餐数据」：它是**派生的复盘
         # 解释信号**（在座人数 / 开台数 / 总桌数，一小时一行），唯一消费方是备货
         # 复盘页；点餐那一格放的是 POS 报上来的原始业务表（订单、桌台、档口）。
         "dining_traffic",

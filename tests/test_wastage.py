@@ -79,7 +79,7 @@ class WastageStoreTest(unittest.IsolatedAsyncioTestCase):
         return employee
 
     async def _prep_item(self, name="五花肉", unit="kg"):
-        """插一个备货品主数据：损耗记录可选地挂到它上面（0046 预留的 prep_item_id）。"""
+        """插一个备货品主数据：损耗记录可选地挂到它上面（0049 预留的 prep_item_id）。"""
         items = self.db.table("prep_items")
         async with items.conn.cursor() as cursor:
             await cursor.execute(
@@ -133,7 +133,7 @@ class WastageStoreTest(unittest.IsolatedAsyncioTestCase):
     async def test_record_can_link_a_prep_item_and_carries_its_0700_window(self):
         """登记时可选挂到备货品：复盘代价按 id 对齐；窗口按自然日的 07:00 起算。
 
-        `window_start` / `window_end` 是 0046 预留的两列（可空）：老行没有，新的登记
+        `window_start` / `window_end` 是 0049 预留的两列（可空）：老行没有，新的登记
         一律写 —— 复盘要的「这笔报废落在哪个品-天」就是靠它和 07:00 主口径对齐。
         """
         employee = await self._employee()

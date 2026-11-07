@@ -9,7 +9,7 @@
 3. 汇总口径：在座人数 = 各行人数之和，开台数 = 有客的桌数，总桌数 = 行数；
 4. 90 天清理与既有保留策略同一套门闩。
 
-表来自 `migrations/pg/0047_dining_traffic.sql`（conftest 已全量应用）。
+表来自 `migrations/pg/0050_dining_traffic.sql`（conftest 已全量应用）。
 """
 
 import unittest

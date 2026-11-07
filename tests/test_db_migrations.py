@@ -270,17 +270,17 @@ def test_migration_hint_reports_pending(pg):
     assert hint["filenames"] == ["0002_hygiene_indexes.sql", "0003_reason.sql"]
 
 
-# ── 0046 备货复盘信号（票 01）────────────────────────────────────────────
+# ── 0049 备货复盘信号（票 01）────────────────────────────────────────────
 
 
-def test_0046_prep_review_signals_is_shipped_and_applied():
+def test_0049_prep_review_signals_is_shipped_and_applied():
     """票 01：事件表 / context 表 / actuals 与 wastage 的加列必须在包里并真的生效。
 
     conftest 在会话开始时把 ``migrations/pg/*.sql`` 全量应用到测试库，所以这里查
     ``information_schema`` 就是「脚本应用后的形状」；文件没提交时先红第一条。
     """
     versions = [item.version for item in list_migration_files()]
-    assert "0046" in versions, "migrations/pg/0046_prep_review_signals.sql 未提交"
+    assert "0049" in versions, "migrations/pg/0049_prep_review_signals.sql 未提交"
 
     import pg_probe
 
@@ -305,7 +305,7 @@ def test_0046_prep_review_signals_is_shipped_and_applied():
     )
 
 
-def test_0046_prep_review_signals_can_be_applied_twice():
+def test_0049_prep_review_signals_can_be_applied_twice():
     """票 01：空库与既有库上都能跑，重复执行不报错（纯 ``IF NOT EXISTS``）。"""
     import asyncio
 
@@ -313,7 +313,7 @@ def test_0046_prep_review_signals_can_be_applied_twice():
 
     from db_core.backend.pg import dsn_from_env
 
-    path = db_migrations.MIGRATIONS_DIR / "0046_prep_review_signals.sql"
+    path = db_migrations.MIGRATIONS_DIR / "0049_prep_review_signals.sql"
     sql = path.read_text(encoding="utf-8")
 
     async def _apply_twice():
@@ -327,17 +327,17 @@ def test_0046_prep_review_signals_can_be_applied_twice():
     asyncio.run(_apply_twice())
 
 
-# ── 0047 客流/翻台小时表（票 10）─────────────────────────────────────────
+# ── 0050 客流/翻台小时表（票 10）─────────────────────────────────────────
 
 
-def test_0047_dining_traffic_is_shipped_and_applied():
+def test_0050_dining_traffic_is_shipped_and_applied():
     """票 10：按小时一行的客流表必须在包里并真的生效。
 
     conftest 会话开始时把 ``migrations/pg/*.sql`` 全量应用到测试库，所以这里查
     ``information_schema`` 就是「脚本应用后的形状」；文件没提交时先红第一条。
     """
     versions = [item.version for item in list_migration_files()]
-    assert "0047" in versions, "migrations/pg/0047_dining_traffic.sql 未提交"
+    assert "0050" in versions, "migrations/pg/0050_dining_traffic.sql 未提交"
 
     import pg_probe
 
@@ -349,7 +349,7 @@ def test_0047_dining_traffic_is_shipped_and_applied():
     assert "idx_dining_traffic_day_hour" in pg_probe.list_indexes("dining_traffic")
 
 
-def test_0047_dining_traffic_can_be_applied_twice():
+def test_0050_dining_traffic_can_be_applied_twice():
     """票 10：纯 ``IF NOT EXISTS``，空库与既有库都能重复执行。"""
     import asyncio
 
@@ -357,7 +357,7 @@ def test_0047_dining_traffic_can_be_applied_twice():
 
     from db_core.backend.pg import dsn_from_env
 
-    path = db_migrations.MIGRATIONS_DIR / "0047_dining_traffic.sql"
+    path = db_migrations.MIGRATIONS_DIR / "0050_dining_traffic.sql"
     sql = path.read_text(encoding="utf-8")
 
     async def _apply_twice():
@@ -371,13 +371,13 @@ def test_0047_dining_traffic_can_be_applied_twice():
     asyncio.run(_apply_twice())
 
 
-# ── 0048 备货复盘环境信号补四项（票 08）──────────────────────────────────
+# ── 0051 备货复盘环境信号补四项（票 08）──────────────────────────────────
 
 
-def test_0048_prep_context_quality_is_shipped_and_applied():
+def test_0051_prep_context_quality_is_shipped_and_applied():
     """票 08：数据质量 / 营业时段 / 厨房节奏 / 是否工作日四列必须在包里并生效。"""
     versions = [item.version for item in list_migration_files()]
-    assert "0048" in versions, "migrations/pg/0048_prep_context_quality.sql 未提交"
+    assert "0051" in versions, "migrations/pg/0051_prep_context_quality.sql 未提交"
 
     import pg_probe
 
@@ -385,7 +385,7 @@ def test_0048_prep_context_quality_is_shipped_and_applied():
     assert {"data_quality_json", "runtime_json", "kitchen_json", "is_workday"} <= columns
 
 
-def test_0048_prep_context_quality_can_be_applied_twice():
+def test_0051_prep_context_quality_can_be_applied_twice():
     """票 08：既有库上重复执行不报错（纯 ``ADD COLUMN IF NOT EXISTS``）。"""
     import asyncio
 
@@ -393,7 +393,7 @@ def test_0048_prep_context_quality_can_be_applied_twice():
 
     from db_core.backend.pg import dsn_from_env
 
-    path = db_migrations.MIGRATIONS_DIR / "0048_prep_context_quality.sql"
+    path = db_migrations.MIGRATIONS_DIR / "0051_prep_context_quality.sql"
     sql = path.read_text(encoding="utf-8")
 
     async def _apply_twice():
