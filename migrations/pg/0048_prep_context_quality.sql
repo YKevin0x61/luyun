@@ -20,9 +20,13 @@
 --   · `is_workday` —— 自然日 + `statutory_holidays`：节假日为非工作日。**周末按工作日**
 --     （店里周末照常营业），**调休 / 补班暂不可知**（日历表只有节假日、没有补班）。
 --     可空：只有备注、还没有任何信号的行不知道就是不知道，不编一个 true。
---   · `kitchen_json` —— {ready_lines, median_ready_minutes, rushed_lines, hold_lines}。
---     从当日 `orders` 聚合：`ready_time` 非空才算已出餐，中位时长按
---     `ready_time - order_time` 取分钟；`is_rushed` / `is_hold` 计行数。
+--   · `kitchen_json` —— {available, reason?, ready_lines, median_ready_minutes,
+--     rushed_lines, hold_lines}。从当日 `orders` 聚合：`ready_time` 非空才算已出餐，
+--     中位时长按 `ready_time - order_time` 取分钟；`is_rushed` / `is_hold` 计行数。
+--     **门店 KDS 尚未上线**（2026-11-07 用户确认）：这四项的信号源只有 KDS 的出餐动作，
+--     库里那点 `ready_time` 是试用期批量补的，所以采集在 `services/prep_plan_context.py`
+--     的 `KDS_LIVE` 开关后面，现在恒写 `{"available": false, "reason": "kds_not_live"}`
+--     并跳过整天订单扫描。KDS 上线后把开关改成 True 即恢复真实聚合，无需改表。
 --
 -- 幂等：全部 `ADD COLUMN IF NOT EXISTS`，可重复执行。纯加成性变更：不动既有列、
 -- 不删行；加列带默认值，应用前后既有 context 行读出来仍是原来的四项。schema 不随

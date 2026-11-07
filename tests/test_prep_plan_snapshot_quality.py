@@ -16,7 +16,9 @@
 
 import unittest
 from datetime import datetime, timedelta
+from unittest.mock import patch
 
+import services.prep_plan_context as prep_plan_context_module
 from database import CHINA_TZ, DatabaseManager
 from services.prep_plan_context import PrepPlanContextService
 from services.prep_plan_service import ACTUALS_REFRESH_DAYS, PrepPlanService
@@ -353,9 +355,12 @@ class ContextSignalTests(PrepQualityFixture):
         # 还没出餐的行：不计入 ready_lines，也不参与中位数。
         await self._seed_raw_order(flow_id="k-raw", at=_at(4))
 
-        await self.context.refresh(self.db, DAY, now=WINDOW_START)
+        # 门店 KDS 未上线，厨房节奏默认关（见 KDS_LIVE）；这里显式打开来测聚合口径。
+        with patch.object(prep_plan_context_module, "KDS_LIVE", True):
+            await self.context.refresh(self.db, DAY, now=WINDOW_START)
 
         kitchen = (await self._context())["kitchen"]
+        self.assertTrue(kitchen["available"])
         self.assertEqual(kitchen["ready_lines"], 3)
         self.assertEqual(kitchen["median_ready_minutes"], 20.0)
         self.assertEqual(kitchen["rushed_lines"], 1)
@@ -374,7 +379,8 @@ class ContextSignalTests(PrepQualityFixture):
             )
         await tdb.commit()
 
-        await self.context.refresh(self.db, DAY, now=WINDOW_START)
+        with patch.object(prep_plan_context_module, "KDS_LIVE", True):
+            await self.context.refresh(self.db, DAY, now=WINDOW_START)
 
         kitchen = (await self._context())["kitchen"]
         self.assertEqual(kitchen["ready_lines"], 2)
@@ -388,6 +394,26 @@ class ContextSignalTests(PrepQualityFixture):
             )
         await tdb.commit()
         self.assertEqual((await self._context())["data_quality"], {})
+
+    async def test_kitchen_stats_stay_off_until_kds_goes_live(self):
+        # 库里已经有 KDS 试用期留下的 ready_time，默认仍然是「不采」——那批行是一次性
+        # 批量确认，算出来的中位时长会把复盘带偏（见 services/prep_plan_context.py 的
+        # KDS_LIVE 注释）。
+        await self._seed_raw_order(
+            flow_id="kds-on", at=_at(1), ready_time=_at(1) + timedelta(minutes=10)
+        )
+
+        await self.context.refresh(self.db, DAY, now=WINDOW_START)
+        kitchen = (await self._context())["kitchen"]
+        self.assertFalse(kitchen["available"])
+        self.assertEqual(kitchen["ready_lines"], 0)
+
+        with patch.object(prep_plan_context_module, "KDS_LIVE", True):
+            await self.context.refresh(self.db, DAY, now=WINDOW_START)
+        kitchen = (await self._context())["kitchen"]
+        self.assertTrue(kitchen["available"])
+        self.assertEqual(kitchen["ready_lines"], 1)
+        self.assertEqual(kitchen["median_ready_minutes"], 10.0)
 
     async def test_write_snapshot_persists_all_four_signals(self):
         item_id = await self._seed_item()
@@ -403,6 +429,9 @@ class ContextSignalTests(PrepQualityFixture):
         self.assertTrue(context["is_workday"])
         self.assertEqual(context["kitchen"]["ready_lines"], 0)
         self.assertIsNone(context["kitchen"]["median_ready_minutes"])
+        # KDS 未上线：写 `available: false` 而不是「量到了但没测出来」的全 0。
+        self.assertFalse(context["kitchen"]["available"])
+        self.assertEqual(context["kitchen"]["reason"], "kds_not_live")
 
 
 if __name__ == "__main__":

@@ -54,6 +54,13 @@ WEATHER_TIMEOUT_SECONDS = 5.0
 # 人力按岗位名（POSITION_STATION_MAP 的 key）聚；认不出的工作区与没配区的都落 other。
 OTHER_POSITION = "other"
 
+# 门店 KDS 尚未上线（用户 2026-11-07 确认）。`orders.ready_time` / `is_rushed` / `is_hold`
+# 只由 KDS 出餐动作写入，现在库里那几行是试用期的一次性批量确认（2026-11-07 查库：近 30
+# 天 100 行、ready 与 order 相差数小时），拿它们算中位出餐时长会得出「出一份要几小时」。
+# 所以厨房节奏先不采集：写 `available: false` 并跳过整天订单扫描，避免既做无用功又给出
+# 假信号。采集逻辑与用例都留着，KDS 正式上线后把这里改成 True 即生效。
+KDS_LIVE = False
+
 
 def _loads_object(raw: Optional[str]) -> Dict[str, Any]:
     """把 JSON 文本读成 dict；坏值当空对象（不抛）。"""
@@ -496,13 +503,21 @@ class PrepPlanContextService:
         `ready_time` 非空才算已出餐；时长 = `ready_time - order_time`，坏时间戳与
         「ready 早于 order」的坏行跳过、不参与中位数。一行有效时长都没有时中位数是
         None —— 写 0 会被读成「瞬间出餐」。
+
+        **KDS 未上线时不做采集**（见 `KDS_LIVE`）：这四项的信号源只有 KDS 的出餐动作，
+        现在库里那点 `ready_time` 是试用期批量补出来的，算出来的中位时长会把复盘带偏。
+        此时返回 `available: false` + 全 0，并跳过整天订单扫描；KDS 上线后把
+        `KDS_LIVE` 改成 True 就恢复真实聚合。
         """
         empty = {
+            "available": False,
             "ready_lines": 0,
             "median_ready_minutes": None,
             "rushed_lines": 0,
             "hold_lines": 0,
         }
+        if not KDS_LIVE:
+            return {**empty, "reason": "kds_not_live"}
         bounds = _day_bounds(plan_day)
         if bounds is None:
             return empty
@@ -539,6 +554,7 @@ class PrepPlanContextService:
                 continue
             durations.append(minutes)
         return {
+            "available": True,
             "ready_lines": ready_lines,
             "median_ready_minutes": (
                 round(statistics.median(durations), 1) if durations else None
