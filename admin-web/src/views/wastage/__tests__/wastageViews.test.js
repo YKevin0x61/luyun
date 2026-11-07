@@ -159,6 +159,15 @@ describe('损耗登记页（员工端）', () => {
       }
       if (url === '/api/wastage/suggestions') return Promise.resolve({ suggestions: ['五花肉', '豆腐'] })
       if (url === '/api/wastage/records') return Promise.resolve(RECORDS)
+      if (url === '/api/prep-plan/items') {
+        return Promise.resolve({
+          success: true,
+          items: [
+            { id: 3, item_name: '五花肉', unit: 'kg', station: 'shulong', kind: 'bought', category: '原料' },
+            { id: 4, item_name: '河粉', unit: '斤', station: 'shulong', kind: 'made', category: '半成品' },
+          ],
+        })
+      }
       return Promise.resolve({})
     })
     post.mockResolvedValue({
@@ -176,6 +185,8 @@ describe('损耗登记页（员工端）', () => {
       '/api/wastage/templates',
       '/api/wastage/suggestions',
       '/api/wastage/records',
+      // 「对应备货品」的候选项来自备货品主数据（同一道「任一身份」门，不新开权限）。
+      '/api/prep-plan/items',
     ])
     // 员工档的页面每个请求都声明 `?identity=staff`：共用电脑上两套 cookie 都在时，
     // 后端默认「管理端优先」会让员工页的归属与可见范围都是错的（Slice A 修复）。
@@ -211,8 +222,33 @@ describe('损耗登记页（员工端）', () => {
     expect(body.unit).toBe('kg')
     expect(body.reason).toBe('spoiled')
     expect(body.image_ids).toEqual([])
+    // 没选备货品时显式传 null（复盘侧按品名兜底）。
+    expect(body.prep_item_id).toBeNull()
     // 登记的这一天默认是服务端给的今天。
     expect(body.wastage_date).toBe('2026-10-17')
+  })
+
+  it('可选「对应备货品」：选了下拉就把 prep_item_id 一起提交', async () => {
+    const wrapper = await mountView(WastageRegisterView, '/workbench/staff/loss')
+    await flushPromises()
+
+    // 第一个 select 是单位（既有行为不动），第二个才是备货品。
+    const selects = wrapper.findAll('select')
+    expect(selects).toHaveLength(2)
+    expect(wrapper.text()).toContain('对应备货品')
+    // 默认留空 —— 不选就和改造前一模一样。
+    expect(selects[1].element.value).toBe('')
+
+    await wrapper.get('input[type="text"]').setValue('五花肉')
+    await wrapper.get('input[type="number"]').setValue('1.5')
+    await selects[0].setValue('kg')
+    await wrapper.findAll('.loss-reason')[4].trigger('click') // 备货过量
+    await selects[1].setValue('3')
+    await wrapper.get('form').trigger('submit')
+    await flushPromises()
+
+    const [, body] = post.mock.calls[0]
+    expect(body.prep_item_id).toBe(3)
   })
 
   it('选了「其他」时把备注标成必填（判据仍在服务端）', async () => {
@@ -270,6 +306,7 @@ describe('损耗登记页（员工端）', () => {
       '/api/wastage/templates',
       '/api/wastage/suggestions',
       '/api/wastage/records',
+      '/api/prep-plan/items',
     ])
     for (const [, params] of get.mock.calls) {
       expect(params).toMatchObject({ identity: 'admin' })

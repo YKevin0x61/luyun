@@ -3,13 +3,14 @@
 """备货计划 API（ADR 0117）：契约与越权边界。"""
 
 import asyncio
+import json
 from datetime import datetime
 
 import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
-from api.prep_plan import reader_router, router
+from api.prep_plan import manager_router, reader_router, router
 from api.security import require_any_identity_session, verify_admin_token
 from database import CHINA_TZ, DatabaseManager, get_db
 
@@ -34,6 +35,7 @@ def _deny_admin():
 def _build_app(db, identity, *, admin=True):
     app = FastAPI()
     app.include_router(reader_router)
+    app.include_router(manager_router)
     app.include_router(router)
     app.dependency_overrides[get_db] = lambda: db
     app.dependency_overrides[verify_admin_token] = (lambda: True) if admin else _deny_admin
@@ -238,3 +240,119 @@ def test_unsupported_horizon_is_a_400(admin_client):
     resp = client.get("/api/prep-plan/today", params={"hours": 30})
     assert resp.status_code == 400
     assert "24 / 48 / 72 / 168" in resp.json()["detail"]
+
+
+# ── 手改原因 / 复制埋点（票 09）─────────────────────────────────────────────
+
+def _events(db):
+    """直接读事件表（事件的读面还没做，这张表就是接口的契约）。"""
+
+    async def work():
+        table = db.table("prep_plan_events")
+        async with table.conn.cursor() as cursor:
+            await cursor.execute(
+                "SELECT kind, plan_day, prep_item_id, qty_before, qty_after, meta_json"
+                " FROM prep_plan_events ORDER BY id"
+            )
+            return [dict(row) for row in await cursor.fetchall()]
+
+    return _run(work())
+
+
+def _entry_id(client, name="虾饺馅"):
+    body = client.get("/api/prep-plan/today").json()
+    return [row for row in body["entries"] if row["item_name"] == name][0]["id"]
+
+
+def test_manual_edit_records_the_reason_in_the_event_meta(admin_client):
+    """改数量时选的原因写进 `manual_edit` 事件的 meta.reason。"""
+    client, db = admin_client
+    _seed(db)
+    entry_id = _entry_id(client)
+
+    resp = client.patch(
+        f"/api/prep-plan/today/entries/{entry_id}",
+        json={"final_qty": 95, "reason": "physical_stock"},
+    )
+    assert resp.status_code == 200, resp.text
+
+    events = [row for row in _events(db) if row["kind"] == "manual_edit"]
+    assert len(events) == 1
+    assert json.loads(events[0]["meta_json"]) == {"reason": "physical_stock"}
+    assert events[0]["qty_after"] == 95
+
+
+def test_manual_edit_without_reason_keeps_the_old_event_shape(admin_client):
+    """不带 reason：行为与改造前一致（meta 仍是空对象）。"""
+    client, db = admin_client
+    _seed(db)
+    entry_id = _entry_id(client)
+
+    resp = client.patch(
+        f"/api/prep-plan/today/entries/{entry_id}", json={"final_qty": 90}
+    )
+    assert resp.status_code == 200, resp.text
+
+    events = [row for row in _events(db) if row["kind"] == "manual_edit"]
+    assert len(events) == 1
+    assert json.loads(events[0]["meta_json"]) == {}
+
+
+def test_manual_edit_rejects_an_unknown_reason(admin_client):
+    """原因只认那四个键，别的值 400（不是静默丢掉）。"""
+    client, db = admin_client
+    _seed(db)
+    entry_id = _entry_id(client)
+
+    resp = client.patch(
+        f"/api/prep-plan/today/entries/{entry_id}",
+        json={"final_qty": 95, "reason": "if_i_feel_like_it"},
+    )
+    assert resp.status_code == 400, resp.text
+    assert "原因" in resp.json()["detail"]
+    # 被拒的 PATCH 不该留下事件
+    assert [row for row in _events(db) if row["kind"] == "manual_edit"] == []
+
+
+def test_plan_copied_event_is_recorded_and_not_idempotent(admin_client):
+    """复制清单埋点：管理端可打，连打两次就是两条（它不是幂等事件）。"""
+    client, db = admin_client
+    _seed(db)
+
+    for _ in range(2):
+        resp = client.post(
+            "/api/prep-plan/events",
+            json={"kind": "plan_copied", "meta": {"horizon_hours": 48, "station": "熟笼"}},
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["recorded"] is True
+
+    events = [row for row in _events(db) if row["kind"] == "plan_copied"]
+    assert len(events) == 2
+    assert events[0]["plan_day"] == datetime.now(CHINA_TZ).date().isoformat()
+    assert json.loads(events[0]["meta_json"])["horizon_hours"] == 48
+
+
+def test_plan_event_rejects_other_kinds(admin_client):
+    """这个端点只收 `plan_copied`：别的事件各有自己的真实动作入口。"""
+    client, db = admin_client
+    _seed(db)
+
+    resp = client.post(
+        "/api/prep-plan/events", json={"kind": "done", "meta": {}}
+    )
+    assert resp.status_code == 400, resp.text
+    assert "plan_copied" in resp.json()["detail"]
+    assert _events(db) == []
+
+
+def test_staff_cannot_post_plan_events(staff_client):
+    """员工不能打埋点：403（不是 401 —— 他有会话，只是没这个权限）。"""
+    client, db = staff_client
+    _seed(db)
+
+    resp = client.post(
+        "/api/prep-plan/events", json={"kind": "plan_copied", "meta": {}}
+    )
+    assert resp.status_code == 403, resp.text
+    assert _events(db) == []

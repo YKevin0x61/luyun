@@ -78,6 +78,16 @@ export const EXPIRED_ACTION = '报废'
 export const DEMAND_LABEL = '今天要卖'
 export const REMAIN_LABEL = '还要做'
 
+// ── 手改原因（票 09）───────────────────────────────────────────────────────
+// 键是后端 `services/prep_review/events.py::MANUAL_EDIT_REASONS` 的契约，中文只住在这里。
+// 默认不选：不选就是改造前的行为（只改数、不解释为什么）。
+export const MANUAL_EDIT_REASONS = [
+  { value: 'physical_stock', label: '实盘库存' },
+  { value: 'addon_order', label: '临时加单' },
+  { value: 'experience', label: '经验判断' },
+  { value: 'other', label: '其他' },
+]
+
 // ── 备货复盘（ADR 0129）──────────────────────────────────────────────────
 // 这一页的易错点：一条快照只对应它自己那个 24 小时窗口，绝不能把一天 24 条平均起来。
 export const PREP_REVIEW_KICKER = '备货复盘'
@@ -165,3 +175,21 @@ export const PREP_REVIEW_SUMMARY_FAILED = '90 天汇总读不出来'
 export const PREP_REVIEW_EXPORT_EMPTY = '当前钟点没有明细可导出'
 
 export const PREP_REVIEW_COST_AMOUNT = '估算金额'
+
+// ── 复盘页 · 数据质量提示（票 09）─────────────────────────────────────────
+// 采集断档的日子，数字会「看起来像备多了/卖得少」；这条提示把归因抢在前面说清楚。
+// 判据来自 context.data_quality_json（票 08），字段缺失就不提示 —— 不拿猜测报警。
+export const PREP_REVIEW_QUALITY_TITLE = '数据可能不完整'
+export const PREP_REVIEW_QUALITY_SUFFIX = '别把采集断档读成「备多了」'
+
+export function prepReviewQualitySparseHours(hours) {
+  return `快照只覆盖 ${hours} 个钟点`
+}
+
+export function prepReviewQualityFewOrders(lines) {
+  return `当日订单只有 ${lines} 条`
+}
+
+export function prepReviewQualityLine(reasons) {
+  return `${PREP_REVIEW_QUALITY_TITLE}：${reasons.join(' · ')}——${PREP_REVIEW_QUALITY_SUFFIX}。`
+}

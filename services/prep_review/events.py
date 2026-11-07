@@ -35,6 +35,13 @@ MANUAL_EDIT = "manual_edit"
 DONE = "done"
 SOLD_OUT = "sold_out"
 WINDOW_END = "window_end"
+#: 复制清单（票 09）：师傅把参考值复制到群里/纸上，说明这一版真的被用了。
+#: **非幂等** —— 复制多少次就是多少次，不进 `_IDEMPOTENT_KINDS`。
+PLAN_COPIED = "plan_copied"
+
+#: 手改原因（票 09）：只回答「为什么改」，不参与任何计算。
+#: 这是**契约**：接口只认这四个键，页面上的中文标签在 `prepPlanCopy.js`。
+MANUAL_EDIT_REASONS = ("physical_stock", "addon_order", "experience", "other")
 
 #: 需要幂等的事件：同一个键只留最先落库的那条。
 _IDEMPOTENT_KINDS = (DONE, WINDOW_END)

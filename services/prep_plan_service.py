@@ -1017,6 +1017,7 @@ class PrepPlanService:
         done: Optional[bool] = None,
         done_by: str = "",
         employee_id: Optional[int] = None,
+        reason: Optional[str] = None,
     ) -> dict:
         # ADR 0121：不再登记产量，勾选只是「这项处理过了」的标记。
         tdb = db.table("prep_plan_entries")
@@ -1081,6 +1082,9 @@ class PrepPlanService:
                 qty_after=after_qty,
                 employee_id=employee_id,
                 station=staff_position,
+                # 原因只回答「为什么改」，不参与计算；不带原因时 meta 仍是空对象，
+                # 与改造前的事件形状一致（票 09）。
+                meta={"reason": reason} if reason else {},
             )
         if done:
             await prep_review_events.record_event(

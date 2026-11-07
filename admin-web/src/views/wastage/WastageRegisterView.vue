@@ -54,6 +54,9 @@ const unitCustom = ref('')
 const reason = ref('')
 const remark = ref('')
 const day = ref('')
+/** 可选的「对应备货品」：留空 = 不挂，复盘按品名兜底（0046 的 prep_item_id 可空）。 */
+const prepItems = ref([])
+const prepItemId = ref('')
 const images = ref([])
 const uploading = ref(false)
 /** 页内相机是否展开：点「拍一张」就地打开取景框（不跳系统相机），拍满 3 张自动收起。 */
@@ -129,11 +132,16 @@ async function load(quiet = false) {
   if (!quiet) state.value = 'loading'
   try {
     const params = identityParams()
-    const [meta, tpl, sug, list] = await Promise.all([
+    const [meta, tpl, sug, list, items] = await Promise.all([
       api.get('/api/wastage/meta', params),
       api.get('/api/wastage/templates', params),
       api.get('/api/wastage/suggestions', params),
       api.get('/api/wastage/records', { ...params, limit: 8 }),
+      // 「对应备货品」的候选项来自备货品主数据（同一个「任一身份」门，不新开权限）。
+      // 它读不到不该把整页拖成错误态：下拉留空，登记照常能提交。
+      api
+        .get('/api/prep-plan/items', params)
+        .catch(() => ({ items: [] })),
     ])
     reasons.value = meta.meta.reasons
     units.value = meta.meta.units
@@ -145,6 +153,7 @@ async function load(quiet = false) {
     today.value = meta.today
     templates.value = tpl.templates || []
     suggestions.value = sug.suggestions || []
+    prepItems.value = Array.isArray(items.items) ? items.items : []
     records.value = list.records || []
     total.value = list.total || 0
     if (!day.value) day.value = meta.today
@@ -272,6 +281,7 @@ function resetForm() {
   quantity.value = ''
   reason.value = ''
   remark.value = ''
+  prepItemId.value = ''
   images.value = []
   // 日期与单位留着：连着记几笔时那两样通常是一样的。
   day.value = today.value || day.value
@@ -293,6 +303,8 @@ async function submit() {
         remark: remark.value.trim(),
         wastage_date: day.value,
         image_ids: images.value.map((row) => row.capture_id),
+        // 不选就显式传 null：复盘按品名兜底，不会把空串当成一个 id。
+        prep_item_id: prepItemId.value ? Number(prepItemId.value) : null,
       },
       identityParams(),
     )
@@ -469,6 +481,18 @@ onMounted(async () => {
         </div>
 
         <label class="loss-field">
+          <span class="loss-label">
+            对应备货品<span class="loss-hint">选填 · 复盘按它对齐数量</span>
+          </span>
+          <select v-model="prepItemId" class="loss-input loss-select-tap">
+            <option value="">不选（复盘按品名兜底）</option>
+            <option v-for="item in prepItems" :key="item.id" :value="String(item.id)">
+              {{ item.item_name }}<template v-if="item.unit"> · {{ item.unit }}</template>
+            </option>
+          </select>
+        </label>
+
+        <label class="loss-field">
           <span class="loss-label">哪一天</span>
           <LuyunDatePicker v-model="day" :max-date="today" placeholder="选择日期" aria-label="损耗日期" />
         </label>
@@ -572,6 +596,8 @@ onMounted(async () => {
 }
 .loss-input:focus { border-color: var(--action); }
 .loss-textarea { resize: vertical; }
+/* 下拉是手机上常点的控件：与 `--tap` 对齐，别比一指窄。 */
+.loss-select-tap { min-height: var(--tap); }
 .loss-row { display: flex; gap: 10px; }
 .loss-grow { flex: 1 1 auto; }
 .loss-unit { flex: 0 0 108px; }
