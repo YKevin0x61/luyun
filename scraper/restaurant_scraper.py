@@ -310,6 +310,14 @@ class RestaurantScraper:
         elif tables_data and db:
             await db.save_table_data(tables_data)
             self.logger.info("✅ 保存 %s 条餐桌数据", len(tables_data))
+            # 客流/翻台按小时汇总（票 10）：同一小时只留一行，失败只是一行 warning ——
+            # 这是常驻循环的热路径，落库失败绝不能把这一轮采集带停。
+            try:
+                from services.dining_traffic import record_hourly
+
+                await record_hourly(db, tables_data)
+            except Exception as exc:  # noqa: BLE001 - 汇总失败不影响采集
+                self.logger.warning("⚠️ 客流/翻台落库失败（不影响采集）: %s", exc)
             await realtime_hub.broadcast_nudge("tables", {"count": len(tables_data)})
 
             self.logger.info("🎯 调用智能监控方法 monitor_table_orders()")

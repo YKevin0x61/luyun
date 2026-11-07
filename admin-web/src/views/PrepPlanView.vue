@@ -9,6 +9,7 @@ import {
   COPY_LABEL,
   HORIZON_OPTIONS,
   MAJOR_TAG,
+  MANUAL_EDIT_REASONS,
   MISSING_RULE_TEXT,
   NO_HISTORY_TEXT,
   PREP_PLAN_TITLE,
@@ -61,6 +62,8 @@ const {
 
 const editingId = ref(null)
 const editingValue = ref('')
+/** 这次手改的原因（`MANUAL_EDIT_REASONS` 里的键）：默认空 = 不选，行为与改造前一致。 */
+const editingReason = ref('')
 const copied = ref(false)
 const modeBar = ref(null)
 
@@ -201,19 +204,28 @@ function isManual(entry) {
 function startEdit(entry) {
   editingId.value = entry.id
   editingValue.value = String(Number(entry.final_qty ?? entry.suggested_qty ?? 0))
+  editingReason.value = ''
+}
+
+/** 选/取消一个原因。点原因**不提交**（不选原因时仍是回车 / 失焦提交的老路）。 */
+function pickReason(value) {
+  editingReason.value = editingReason.value === value ? '' : value
 }
 
 async function commitEdit(entry) {
   if (editingId.value !== entry.id) return
   const next = editingValue.value
+  const reason = editingReason.value || null
   editingId.value = null
+  editingReason.value = ''
   if (String(entry.final_qty) === String(next) || next === '') return
   // 半成品输入框本来就该按整份收，手打 2.4 也按 3 份算（后端同样向上取整，两边一致）
-  await setQty(entry, entry.kind === 'made' ? Math.ceil(Number(next)) : next)
+  await setQty(entry, entry.kind === 'made' ? Math.ceil(Number(next)) : next, reason)
 }
 
 function cancelEdit() {
   editingId.value = null
+  editingReason.value = ''
 }
 
 /**
@@ -273,6 +285,16 @@ async function copyList() {
     await navigator.clipboard.writeText(text)
     copied.value = true
     window.setTimeout(() => (copied.value = false), 1600)
+    // 埋点：复制成功才记（说明这一版参考值真的被拿去用了）。fire-and-forget —— 失败
+    // 静默，复制这个动作本身不受影响。员工不能打埋点（后端 403），页面这里就不发。
+    if (!isStaff.value) {
+      void api
+        .post('/api/prep-plan/events', {
+          kind: 'plan_copied',
+          meta: { horizon_hours: horizonHours.value, station: activeStation.value },
+        })
+        .catch(() => {})
+    }
   } catch {
     copied.value = false
   }
@@ -453,6 +475,33 @@ watch(activeStation, () => {
             >
               做完
             </button>
+
+            <!-- 手改原因（票 09）：只在编辑态出现，默认一个都不选。点原因只选中、不提交；
+                 提交仍走回车 / 失焦（或这颗「确定」）。`mousedown.prevent` 保证点这些
+                 按钮时输入框不失焦 —— 否则失焦那一下会先按「没有原因」提交掉。 -->
+            <div
+              v-if="editingId === entry.id"
+              class="pp-edit-reasons"
+              role="group"
+              :aria-label="`${entry.item_name}改数量的原因（可不选）`"
+            >
+              <button
+                v-for="row in MANUAL_EDIT_REASONS"
+                :key="row.value"
+                type="button"
+                class="pp-edit-reason"
+                :class="{ 'is-on': editingReason === row.value }"
+                :aria-pressed="editingReason === row.value"
+                @mousedown.prevent
+                @click="pickReason(row.value)"
+              >{{ row.label }}</button>
+              <button
+                type="button"
+                class="pp-edit-ok"
+                @mousedown.prevent
+                @click="commitEdit(entry)"
+              >确定</button>
+            </div>
 
             <div v-if="expandedId === entry.id" class="pp-detail" @click.stop>
               <div class="pp-charts">
@@ -760,6 +809,40 @@ watch(activeStation, () => {
   color: var(--ink);
   font-size: var(--fs-16, 16px);
   text-align: right;
+}
+
+.pp-edit-reasons {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2, 8px);
+  padding-bottom: 4px;
+}
+
+/* 原因 chips 与「确定」都按 `--tap` 给触控面积：手机上这几颗是点得最频繁的。 */
+.pp-edit-reason,
+.pp-edit-ok {
+  min-height: var(--tap);
+  padding: 0 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--ink-dim);
+  font-family: inherit;
+  font-size: var(--fs-12, 12px);
+}
+
+.pp-edit-reason.is-on {
+  border-color: var(--action);
+  color: var(--action);
+  font-weight: 600;
+}
+
+.pp-edit-ok {
+  margin-left: auto;
+  border-radius: var(--r-1, 8px);
+  color: var(--ink);
 }
 
 .pp-check {

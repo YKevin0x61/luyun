@@ -86,6 +86,24 @@ class WastageStoreTest(unittest.IsolatedAsyncioTestCase):
         await self.accounts.approve(employee["id"])
         return employee
 
+    async def _prep_item(self, name="五花肉", unit="kg"):
+        """插一个备货品主数据：损耗记录可选地挂到它上面（0049 预留的 prep_item_id）。"""
+        items = self.db.table("prep_items")
+        async with items.conn.cursor() as cursor:
+            await cursor.execute(
+                """
+                INSERT INTO prep_items (
+                    item_name, station, position, category, unit, kind, active,
+                    shelf_life_hours, lead_time_hours, min_batch_qty,
+                    safety_stock_ratio, notes, created_at, updated_at
+                ) VALUES (?, 'shulong', '熟笼', '原料', ?, 'bought', 1, 24, 0, 0, 0.15, '', ?, ?)
+                """,
+                (name, unit, FIXED_NOW.isoformat(), FIXED_NOW.isoformat()),
+            )
+            item_id = cursor.lastrowid
+        await items.commit()
+        return int(item_id)
+
     # ── 登记与归属 ──────────────────────────────────────────────────────────
     async def test_employee_records_one_and_sees_only_own(self):
         """员工登记一笔：自己看得到，另一位员工看不到（归属是服务层一处判的）。"""
@@ -118,6 +136,64 @@ class WastageStoreTest(unittest.IsolatedAsyncioTestCase):
 
         other = await self.store.list_records(_staff(second["id"]))
         self.assertEqual(other["total"], 0)
+
+    # ── 挂备货品与 07:00 窗口（票 09）──────────────────────────────────────
+    async def test_record_can_link_a_prep_item_and_carries_its_0700_window(self):
+        """登记时可选挂到备货品：复盘代价按 id 对齐；窗口按自然日的 07:00 起算。
+
+        `window_start` / `window_end` 是 0049 预留的两列（可空）：老行没有，新的登记
+        一律写 —— 复盘要的「这笔报废落在哪个品-天」就是靠它和 07:00 主口径对齐。
+        """
+        employee = await self._employee()
+        item_id = await self._prep_item()
+
+        created = await self.store.add_record(
+            _staff(employee["id"]),
+            item_name="五花肉",
+            quantity=1.5,
+            unit="kg",
+            reason="excess",
+            wastage_date=TODAY,
+            prep_item_id=item_id,
+        )
+
+        self.assertEqual(created["prep_item_id"], item_id)
+        # 2026-09-24 07:00 → 次日 07:00（自然日的一个 24 小时窗口）。
+        self.assertEqual(created["window_start"], "2026-09-24T07:00:00+08:00")
+        self.assertEqual(created["window_end"], "2026-09-25T07:00:00+08:00")
+
+        listed = await self.store.list_records(_staff(employee["id"]))
+        self.assertEqual(listed["records"][0]["prep_item_id"], item_id)
+
+    async def test_record_without_a_prep_item_leaves_the_link_empty(self):
+        """不选备货品：与改造前一个字都不差（两列为空，复盘用品名兜底）。"""
+        employee = await self._employee()
+        created = await self.store.add_record(
+            _staff(employee["id"]),
+            item_name="青菜",
+            quantity=1,
+            unit="份",
+            reason="expired",
+            wastage_date=TODAY,
+        )
+        self.assertIsNone(created["prep_item_id"])
+        # 窗口照样写：没有备货品的报废也要落进某一天（品名兜底时用它对齐）。
+        self.assertEqual(created["window_start"], "2026-09-24T07:00:00+08:00")
+
+    async def test_rejects_an_unknown_prep_item(self):
+        """挂一个不存在的备货品 = 复盘里对齐不到任何品，直接拒（中文 400）。"""
+        employee = await self._employee()
+        with self.assertRaises(WastageError) as caught:
+            await self.store.add_record(
+                _staff(employee["id"]),
+                item_name="五花肉",
+                quantity=1,
+                unit="kg",
+                reason="excess",
+                wastage_date=TODAY,
+                prep_item_id=999999,
+            )
+        self.assertEqual(caught.exception.code, "unknown_prep_item")
 
     async def test_admin_sees_the_whole_shop(self):
         """管理端那一档不加人过滤：谁的损耗都在分析页里。"""
@@ -795,6 +871,83 @@ def test_staff_records_and_cannot_read_statistics(wastage_http):
 
     forbidden = client.get("/api/wastage/statistics", params={"month": "2026-09"})
     assert forbidden.status_code == 403, forbidden.text
+
+
+def _prep_item(db, name="五花肉", unit="kg"):
+    """插一个备货品主数据，返回 id（登记页下拉的候选项就是它）。"""
+
+    async def work():
+        items = db.table("prep_items")
+        async with items.conn.cursor() as cursor:
+            await cursor.execute(
+                """
+                INSERT INTO prep_items (
+                    item_name, station, position, category, unit, kind, active,
+                    shelf_life_hours, lead_time_hours, min_batch_qty,
+                    safety_stock_ratio, notes, created_at, updated_at
+                ) VALUES (?, 'shulong', '熟笼', '原料', ?, 'bought', 1, 24, 0, 0, 0.15, '', ?, ?)
+                """,
+                (name, unit, FIXED_NOW.isoformat(), FIXED_NOW.isoformat()),
+            )
+            item_id = cursor.lastrowid
+        await items.commit()
+        return int(item_id)
+
+    return _run(work())
+
+
+def test_record_can_carry_a_prep_item(wastage_http):
+    """登记页可选「对应备货品」：接口收 prep_item_id，落库并回传 07:00 窗口。"""
+    client, db, accounts = wastage_http
+    _employee_id(accounts)
+    _staff_cookie(client, accounts)
+    item_id = _prep_item(db)
+
+    created = client.post(
+        "/api/wastage/records",
+        json={
+            "item_name": "五花肉",
+            "quantity": 1.5,
+            "unit": "kg",
+            "reason": "excess",
+            "wastage_date": TODAY,
+            "prep_item_id": item_id,
+        },
+    )
+    assert created.status_code == 200, created.text
+    record = created.json()["record"]
+    assert record["prep_item_id"] == item_id
+    assert record["window_start"] == "2026-09-24T07:00:00+08:00"
+    assert record["window_end"] == "2026-09-25T07:00:00+08:00"
+
+    # 留空照旧能登记：prep_item_id 为 null，窗口照样有。
+    blank = client.post(
+        "/api/wastage/records",
+        json={
+            "item_name": "青菜",
+            "quantity": 1,
+            "unit": "份",
+            "reason": "spoiled",
+            "wastage_date": TODAY,
+        },
+    )
+    assert blank.status_code == 200, blank.text
+    assert blank.json()["record"]["prep_item_id"] is None
+
+    # 挂一个不存在的备货品：中文 400，不是 500。
+    bad = client.post(
+        "/api/wastage/records",
+        json={
+            "item_name": "五花肉",
+            "quantity": 1,
+            "unit": "kg",
+            "reason": "excess",
+            "wastage_date": TODAY,
+            "prep_item_id": 999999,
+        },
+    )
+    assert bad.status_code == 400, bad.text
+    assert "备货品" in bad.json()["detail"]
 
 
 def test_admin_reads_statistics_and_sees_every_record(wastage_http):

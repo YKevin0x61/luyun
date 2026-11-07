@@ -268,3 +268,140 @@ def test_migration_hint_reports_pending(pg):
     assert hint["supported"] is True
     assert hint["versions"] == ["0002", "0003"]
     assert hint["filenames"] == ["0002_hygiene_indexes.sql", "0003_reason.sql"]
+
+
+# ── 0049 备货复盘信号（票 01）────────────────────────────────────────────
+
+
+def test_0049_prep_review_signals_is_shipped_and_applied():
+    """票 01：事件表 / context 表 / actuals 与 wastage 的加列必须在包里并真的生效。
+
+    conftest 在会话开始时把 ``migrations/pg/*.sql`` 全量应用到测试库，所以这里查
+    ``information_schema`` 就是「脚本应用后的形状」；文件没提交时先红第一条。
+    """
+    versions = [item.version for item in list_migration_files()]
+    assert "0049" in versions, "migrations/pg/0049_prep_review_signals.sql 未提交"
+
+    import pg_probe
+
+    assert set(pg_probe.table_columns("prep_plan_events")) == {
+        "tenant_id", "id", "at", "plan_day", "prep_item_id", "kind",
+        "qty_before", "qty_after", "employee_id", "station", "meta_json",
+    }
+
+    # `id` 是代理主键：通用后台表格页按 `rowid`（方言层改写为 `id`）定位行，
+    # 缺它会让 /api/admin/tables/prep_plan_context/rows 直接 500。
+    assert set(pg_probe.table_columns("prep_plan_context")) == {
+        "id", "tenant_id", "plan_day", "holiday_name", "weather_json",
+        "staff_json", "data_quality_json", "runtime_json", "kitchen_json",
+        "is_workday", "note", "captured_at", "updated_at",
+    }
+    assert {
+        "sold_1h", "sold_2h", "sold_next_day", "dine_in_qty",
+        "delivery_qty", "refund_qty", "hourly_json",
+    } <= set(pg_probe.table_columns("prep_plan_actuals"))
+    assert {"prep_item_id", "window_start", "window_end"} <= set(
+        pg_probe.table_columns("wastage_records")
+    )
+
+
+def test_0049_prep_review_signals_can_be_applied_twice():
+    """票 01：空库与既有库上都能跑，重复执行不报错（纯 ``IF NOT EXISTS``）。"""
+    import asyncio
+
+    import asyncpg
+
+    from db_core.backend.pg import dsn_from_env
+
+    path = db_migrations.MIGRATIONS_DIR / "0049_prep_review_signals.sql"
+    sql = path.read_text(encoding="utf-8")
+
+    async def _apply_twice():
+        conn = await asyncpg.connect(dsn_from_env())
+        try:
+            await conn.execute(sql)
+            await conn.execute(sql)
+        finally:
+            await conn.close()
+
+    asyncio.run(_apply_twice())
+
+
+# ── 0050 客流/翻台小时表（票 10）─────────────────────────────────────────
+
+
+def test_0050_dining_traffic_is_shipped_and_applied():
+    """票 10：按小时一行的客流表必须在包里并真的生效。
+
+    conftest 会话开始时把 ``migrations/pg/*.sql`` 全量应用到测试库，所以这里查
+    ``information_schema`` 就是「脚本应用后的形状」；文件没提交时先红第一条。
+    """
+    versions = [item.version for item in list_migration_files()]
+    assert "0050" in versions, "migrations/pg/0050_dining_traffic.sql 未提交"
+
+    import pg_probe
+
+    assert pg_probe.table_columns("dining_traffic") == [
+        "id", "tenant_id", "snapshot_at", "plan_day",
+        "in_seat_people", "open_tables", "total_tables", "created_at",
+    ]
+    # 复盘按「某天 → 小时顺序」翻页；唯一性另由 UNIQUE(tenant_id, snapshot_at) 保证。
+    assert "idx_dining_traffic_day_hour" in pg_probe.list_indexes("dining_traffic")
+
+
+def test_0050_dining_traffic_can_be_applied_twice():
+    """票 10：纯 ``IF NOT EXISTS``，空库与既有库都能重复执行。"""
+    import asyncio
+
+    import asyncpg
+
+    from db_core.backend.pg import dsn_from_env
+
+    path = db_migrations.MIGRATIONS_DIR / "0050_dining_traffic.sql"
+    sql = path.read_text(encoding="utf-8")
+
+    async def _apply_twice():
+        conn = await asyncpg.connect(dsn_from_env())
+        try:
+            await conn.execute(sql)
+            await conn.execute(sql)
+        finally:
+            await conn.close()
+
+    asyncio.run(_apply_twice())
+
+
+# ── 0051 备货复盘环境信号补四项（票 08）──────────────────────────────────
+
+
+def test_0051_prep_context_quality_is_shipped_and_applied():
+    """票 08：数据质量 / 营业时段 / 厨房节奏 / 是否工作日四列必须在包里并生效。"""
+    versions = [item.version for item in list_migration_files()]
+    assert "0051" in versions, "migrations/pg/0051_prep_context_quality.sql 未提交"
+
+    import pg_probe
+
+    columns = set(pg_probe.table_columns("prep_plan_context"))
+    assert {"data_quality_json", "runtime_json", "kitchen_json", "is_workday"} <= columns
+
+
+def test_0051_prep_context_quality_can_be_applied_twice():
+    """票 08：既有库上重复执行不报错（纯 ``ADD COLUMN IF NOT EXISTS``）。"""
+    import asyncio
+
+    import asyncpg
+
+    from db_core.backend.pg import dsn_from_env
+
+    path = db_migrations.MIGRATIONS_DIR / "0051_prep_context_quality.sql"
+    sql = path.read_text(encoding="utf-8")
+
+    async def _apply_twice():
+        conn = await asyncpg.connect(dsn_from_env())
+        try:
+            await conn.execute(sql)
+            await conn.execute(sql)
+        finally:
+            await conn.close()
+
+    asyncio.run(_apply_twice())

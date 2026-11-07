@@ -203,6 +203,15 @@ describe('损耗登记页（员工端）', () => {
       if (url === '/api/wastage/templates') return Promise.resolve(TEMPLATES)
       if (url === '/api/wastage/suggestions') return Promise.resolve({ suggestions: ['五花肉', '豆腐'] })
       if (url === '/api/wastage/records') return Promise.resolve(RECORDS)
+      if (url === '/api/prep-plan/items') {
+        return Promise.resolve({
+          success: true,
+          items: [
+            { id: 3, item_name: '五花肉', unit: 'kg', station: 'shulong', kind: 'bought', category: '原料' },
+            { id: 4, item_name: '河粉', unit: '斤', station: 'shulong', kind: 'made', category: '半成品' },
+          ],
+        })
+      }
       return Promise.resolve({})
     })
     post.mockResolvedValue({
@@ -236,6 +245,8 @@ describe('损耗登记页（员工端）', () => {
       '/api/wastage/templates',
       '/api/wastage/suggestions',
       '/api/wastage/records',
+      // 「对应备货品」的候选项来自备货品主数据（同一道「任一身份」门，不新开权限）。
+      '/api/prep-plan/items',
     ])
     // 员工档的页面每个请求都声明 identity=staff：共用电脑上两套 cookie 都在时，
     // 后端默认「管理端优先」会让员工页的归属与可见范围都是错的。
@@ -298,7 +309,8 @@ describe('损耗登记页（员工端）', () => {
     const wrapper = await mountView(WastageRegisterView, '/workbench/staff/loss')
     await flushPromises()
 
-    expect(wrapper.find('select').exists()).toBe(false)
+    // 单位是 chips，没有原生 select（页面上唯一的 select 是下面的「对应备货品」）。
+    expect(wrapper.findAll('.loss-units select')).toHaveLength(0)
     // 只摆前 6 个常用单位 + 「其他…」。
     const chips = wrapper.findAll('.loss-unit-chip')
     expect(chips).toHaveLength(7)
@@ -328,8 +340,28 @@ describe('损耗登记页（员工端）', () => {
     expect(body.unit).toBe('kg')
     expect(body.reason).toBe('spoiled')
     expect(body.image_ids).toEqual([])
+    // 没选备货品时显式传 null（复盘侧按品名兜底）。
+    expect(body.prep_item_id).toBeNull()
     // 登记的这一天默认是服务端给的今天。
     expect(body.wastage_date).toBe('2026-10-17')
+  })
+
+  it('可选「对应备货品」：选了下拉就把 prep_item_id 一起提交', async () => {
+    const wrapper = await mountView(WastageRegisterView, '/workbench/staff/loss')
+    await flushPromises()
+
+    // 唯一的原生 select 就是这个下拉（单位已经改成 chips）。
+    const select = wrapper.get('select')
+    expect(wrapper.text()).toContain('对应备货品')
+    expect(select.element.value).toBe('')
+
+    await fillRequired(wrapper)
+    await select.setValue('3')
+    await wrapper.get('form').trigger('submit')
+    await flushPromises()
+
+    const [, body] = post.mock.calls[0]
+    expect(body.prep_item_id).toBe(3)
   })
 
   it('按钮不再 disabled：只有 busy 时禁用（4.1.6）', async () => {
@@ -747,6 +779,8 @@ describe('损耗登记页（员工端）', () => {
       '/api/wastage/templates',
       '/api/wastage/suggestions',
       '/api/wastage/records',
+      // 「对应备货品」的候选项来自备货品主数据（同一道「任一身份」门，不新开权限）。
+      '/api/prep-plan/items',
     ])
     for (const [, params] of get.mock.calls) {
       expect(params).toMatchObject({ identity: 'admin' })
@@ -760,6 +794,15 @@ describe('损耗分析页（管理端）', () => {
       if (url === '/api/wastage/meta') return Promise.resolve(META)
       if (url === '/api/wastage/statistics') return Promise.resolve(STATS)
       if (url === '/api/wastage/records') return Promise.resolve(RECORDS)
+      if (url === '/api/prep-plan/items') {
+        return Promise.resolve({
+          success: true,
+          items: [
+            { id: 3, item_name: '五花肉', unit: 'kg', station: 'shulong', kind: 'bought', category: '原料' },
+            { id: 4, item_name: '河粉', unit: '斤', station: 'shulong', kind: 'made', category: '半成品' },
+          ],
+        })
+      }
       return Promise.resolve({})
     })
   })

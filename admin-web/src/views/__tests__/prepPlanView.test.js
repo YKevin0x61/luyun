@@ -83,6 +83,9 @@ function probeFetch({ today = TODAY, stations = [{ id: 'shulong', name: '熟笼'
     if (path.includes('/api/prep-plan/today/entries/')) {
       return jsonResponse({ success: true, id: 1 })
     }
+    if (path.includes('/api/prep-plan/events')) {
+      return jsonResponse({ success: true, recorded: true })
+    }
     if (path.includes('/api/prep-plan/today')) return jsonResponse(today)
     return jsonResponse({}, 404)
   })
@@ -646,5 +649,101 @@ describe('时间跨度切换', () => {
     expect(fetchMock.calls[0].path).toContain('hours=48')
     expect(wrapper.text()).toContain('未来 48 小时参考值')
     expect(wrapper.find('.pp-range.is-on').text()).toBe('48 小时')
+  })
+})
+
+describe('手改原因（票 09）', () => {
+  it('改数量的编辑态给四个可选原因，默认一个都不选', async () => {
+    vi.stubGlobal('fetch', probeFetch())
+    const wrapper = await mountView()
+
+    await wrapper.get('.pp-qty').trigger('click')
+    const reasons = wrapper.findAll('.pp-edit-reason')
+    expect(reasons).toHaveLength(4)
+    expect(reasons.map((node) => node.text())).toEqual(['实盘库存', '临时加单', '经验判断', '其他'])
+    // 默认不选：不选 = 与改造前完全一样。
+    expect(reasons.every((node) => node.attributes('aria-pressed') === 'false')).toBe(true)
+  })
+
+  it('选一个原因再提交：PATCH body 带上 reason', async () => {
+    const fetchMock = probeFetch()
+    vi.stubGlobal('fetch', fetchMock)
+    const wrapper = await mountView()
+
+    await wrapper.get('.pp-qty').trigger('click')
+    const input = wrapper.get('.pp-qty-input')
+    await input.setValue('95')
+    // 点原因只是选中，不提交；输入框不失焦（mousedown.prevent）。
+    await wrapper.findAll('.pp-edit-reason')[0].trigger('click')
+    await input.trigger('keyup.enter')
+    await flushPromises()
+
+    const patch = fetchMock.calls.find((call) => call.method === 'PATCH')
+    expect(patch.path).toContain('/api/prep-plan/today/entries/1')
+    expect(JSON.parse(patch.body)).toEqual({ final_qty: 95, reason: 'physical_stock' })
+  })
+
+  it('不选原因提交时 body 与改造前一致（只有 final_qty）', async () => {
+    const fetchMock = probeFetch()
+    vi.stubGlobal('fetch', fetchMock)
+    const wrapper = await mountView()
+
+    await wrapper.get('.pp-qty').trigger('click')
+    const input = wrapper.get('.pp-qty-input')
+    await input.setValue('95')
+    await input.trigger('keyup.enter')
+    await flushPromises()
+
+    const patch = fetchMock.calls.find((call) => call.method === 'PATCH')
+    expect(JSON.parse(patch.body)).toEqual({ final_qty: 95 })
+  })
+})
+
+describe('复制清单埋点（票 09）', () => {
+  it('复制成功后 fire-and-forget 打一条 plan_copied', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(navigator, 'clipboard', {
+      value: { writeText },
+      configurable: true,
+    })
+    const fetchMock = probeFetch()
+    vi.stubGlobal('fetch', fetchMock)
+    const wrapper = await mountView()
+
+    await wrapper.get('.pp-copy').trigger('click')
+    await flushPromises()
+
+    expect(writeText).toHaveBeenCalledTimes(1)
+    const event = fetchMock.calls.find((call) => call.path.includes('/api/prep-plan/events'))
+    expect(event).toBeTruthy()
+    expect(event.method).toBe('POST')
+    const body = JSON.parse(event.body)
+    expect(body.kind).toBe('plan_copied')
+    expect(body.meta.horizon_hours).toBe(24)
+    expect(wrapper.text()).toContain('已复制')
+  })
+
+  it('埋点失败不影响复制（不弹错、仍然显示已复制）', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(navigator, 'clipboard', {
+      value: { writeText },
+      configurable: true,
+    })
+    const fetchMock = probeFetch()
+    const realFetch = fetchMock
+    vi.stubGlobal('fetch', (url, options = {}) => {
+      if (String(url).includes('/api/prep-plan/events')) {
+        realFetch.calls.push({ path: String(url), method: options.method || 'GET', body: options.body })
+        return Promise.reject(new Error('offline'))
+      }
+      return realFetch(url, options)
+    })
+    const wrapper = await mountView()
+
+    await wrapper.get('.pp-copy').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('已复制')
+    expect(wrapper.find('.pp-error').exists()).toBe(false)
   })
 })

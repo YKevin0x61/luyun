@@ -84,6 +84,9 @@ const unitChoice = ref('')
 const unitCustom = ref('')
 const reason = ref('')
 const remark = ref('')
+/** 可选的「对应备货品」：留空 = 不挂，复盘按品名兜底（0049 的 prep_item_id 可空）。 */
+const prepItems = ref([])
+const prepItemId = ref('')
 const day = ref('')
 const images = ref([])
 const uploading = ref(false)
@@ -410,11 +413,14 @@ async function load(quiet = false) {
   if (!quiet) state.value = 'loading'
   try {
     const params = identityParams()
-    const [meta, tpl, sug, list] = await Promise.all([
+    const [meta, tpl, sug, list, items] = await Promise.all([
       api.get('/api/wastage/meta', params),
       api.get('/api/wastage/templates', params),
       api.get('/api/wastage/suggestions', params),
       api.get('/api/wastage/records', { ...params, limit: 8 }),
+      // 「对应备货品」的候选项来自备货品主数据（同一个「任一身份」门，不新开权限）。
+      // 它读不到不该把整页拖成错误态：下拉留空，登记照常能提交。
+      api.get('/api/prep-plan/items', params).catch(() => ({ items: [] })),
     ])
     reasons.value = meta.meta.reasons
     units.value = meta.meta.units
@@ -427,6 +433,7 @@ async function load(quiet = false) {
     today.value = meta.today
     templates.value = tpl.templates || []
     suggestions.value = sug.suggestions || []
+    prepItems.value = Array.isArray(items.items) ? items.items : []
     records.value = list.records || []
     total.value = list.total || 0
     if (!day.value) day.value = meta.today
@@ -638,6 +645,7 @@ function resetForm() {
   itemName.value = ''
   quantity.value = ''
   remark.value = ''
+  prepItemId.value = ''
   images.value = []
   // 日期、单位**与原因**留着：连着记同一批损耗时那三样通常一样（2026-11-07 审查：原来
   // 原因被清空，同一天记三样烂菜要重选三次）。
@@ -773,6 +781,8 @@ async function createRecord() {
       remark: remark.value.trim(),
       wastage_date: day.value,
       image_ids: images.value.map((row) => row.capture_id),
+      // 不选就显式传 null：复盘按品名兜底，不会把空串当成一个 id。
+      prep_item_id: prepItemId.value ? Number(prepItemId.value) : null,
     },
     identityParams(),
   )
@@ -1033,6 +1043,19 @@ onUnmounted(() => {
             placeholder="填单位，例如：罐"
           />
         </div>
+
+        <!-- 选填：对应备货品。只在新建时给入口 —— 更正接口按契约只改字段，不换关联。 -->
+        <label v-if="!editingId" class="loss-field">
+          <span class="loss-label">
+            对应备货品<span class="loss-hint">选填 · 复盘按它对齐数量</span>
+          </span>
+          <select v-model="prepItemId" class="loss-input loss-select-tap">
+            <option value="">不选（复盘按品名兜底）</option>
+            <option v-for="item in prepItems" :key="item.id" :value="String(item.id)">
+              {{ item.item_name }}<template v-if="item.unit"> · {{ item.unit }}</template>
+            </option>
+          </select>
+        </label>
 
         <!-- 必填三：原因。三列两行（6 个按钮），首屏省一行。 -->
         <div class="loss-field">
@@ -1298,6 +1321,8 @@ onUnmounted(() => {
 /* 必填那三项的输入框大一号：手机上点开就填，字号 16 也不会触发 iOS 缩放。 */
 .loss-input-lg { padding: 11px 12px; font-size: 16px; }
 .loss-input:focus { border-color: var(--action); }
+/* 下拉是手机上常点的控件：与 `--tap` 对齐，别比一指窄。 */
+.loss-select-tap { min-height: var(--tap); }
 .loss-textarea { resize: vertical; }
 /* 单位 chips：常用的前 6 个 + 「其他…」，选中用 --action 描边（spec 4.1.3）。 */
 .loss-units { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }

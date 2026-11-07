@@ -43,6 +43,8 @@ CHINA_TZ = timezone(timedelta(hours=8))
 
 _ADMIN_READ_ONLY_TABLES = frozenset({
     "dish_stations",
+    # 客流小时行是采集侧派生的遥测数据（票 10）：没有人工修正的场景，后台只读。
+    "dining_traffic",
     *AUTH_PHYSICAL_TABLES,
     *RECIPE_TABLES,
     *HYGIENE_TABLES,

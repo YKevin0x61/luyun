@@ -431,6 +431,13 @@ async def lifespan(app: FastAPI):
         # 启动日志持久化（PostgreSQL logs 表，与业务表同库）
         if background_enabled and await log_storage.start():
             startup_results.append("日志存储")
+            # 备货复盘 90 天降采样挂在日志维护节拍上（默认 6h 经过一次，钩子内部
+            # 再按自然日门闩）。不为此新起常驻 task——单 worker 下常驻 task 数目
+            # 是显式清单（ADR 0130 / PERF-06）。
+            if db_manager:
+                log_storage.add_maintenance_hook(
+                    lambda: _prep_review_retention_maintenance(db_manager)
+                )
 
         # 启动内存管理器
         if background_enabled:
@@ -1086,6 +1093,9 @@ app.include_router(auth_router)          # 登录 / 初始化
 app.include_router(hygiene_router)       # 员工端走 require_staff_session，管理端走 require_session
 app.include_router(recipes_reader_router)  # 配方阅读面：任一身份（管理端或员工会话）
 app.include_router(prep_plan.reader_router)  # 备货计划读面：任一身份（票 08）
+# 备货复盘备注：任一身份能进门（员工要拿到 403，而不是 verify_admin_token 的 401），
+# 端点里再判管理员；见 api/prep_plan.py 的 manager_router。
+app.include_router(prep_plan.manager_router)
 # —— 业务面：统一挂管理员凭据（会话 cookie / X-Admin-Token / Bearer）——
 app.include_router(orders.router, dependencies=[Depends(verify_admin_token)])
 app.include_router(dishes.router, dependencies=[Depends(verify_admin_token)])
@@ -1710,6 +1720,16 @@ async def _send_scraper_health_alert(message: str) -> None:
         logger.warning(f"⚠️ 爬虫健康告警已入队: {message}")
 
 
+async def _prep_review_retention_maintenance(db_manager):
+    """日志维护节拍上的低频清理：备货复盘 90 天降采样（ADR 0130）。
+
+    真正的清理一天最多一次（`run_daily` 按自然日门闩），失败只记日志不抛。
+    """
+    from services.prep_review.retention import prep_review_retention
+
+    await prep_review_retention.run_daily(db_manager)
+
+
 # 餐厅数据爬取任务
 async def _prep_snapshot_loop(db_manager):
     """备货参考值每小时快照（ADR 0123）。
@@ -1721,14 +1741,23 @@ async def _prep_snapshot_loop(db_manager):
 
     INTERVAL = 3600
     while True:
+        now = datetime.now(CHINA_TZ)
         try:
-            now = datetime.now(CHINA_TZ)
             await prep_plan_service.write_snapshot(db_manager, now)
             await prep_plan_service.backfill_actuals(db_manager, now)
         except asyncio.CancelledError:
             raise
         except Exception:
             logger.exception("备货参考值快照失败，下一轮再试")
+        # 售罄时刻推算挂在同一节拍上：旁路采集，失败只 warning，绝不拖垮快照/回填。
+        try:
+            from services.prep_review.sold_out import run_backfill as backfill_sold_out
+
+            await backfill_sold_out(db_manager, now)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning("售罄时刻回填失败，下一轮再试", exc_info=True)
         # 睡到下一个整点（误差再小也不打点，整点对齐是快照的语义）
         now = datetime.now(CHINA_TZ)
         await asyncio.sleep(INTERVAL - (now.minute * 60 + now.second) + 5)
