@@ -19,6 +19,7 @@ import {
   loadingText,
 } from '../utils/prepPlanCopy'
 import { buildPrepPlanText } from '../utils/prepPlanText'
+import { WASTAGE_REGISTER_PATH } from '../utils/wastagePaths'
 import { workbenchDocumentTitle } from '../utils/workbenchCopy'
 
 /**
@@ -171,6 +172,17 @@ function roundQty(value, kind) {
 /** 这一行显示的数字（手改过的优先）。 */
 function entryQty(entry) {
   return roundQty(entry.final_qty ?? entry.suggested_qty, entry.kind)
+}
+
+/** 员工在备货清单里发现某样已经用不掉了：带着物料名与单位去损耗页，数量到那边填。
+ *  两页之间原来没有桥（ADR 0121 把「报废」动作从备货页删掉，注释写的是「走已有的损耗
+ *  台账页」，但一次跳转都没做），员工只有在首页碰巧看到「损耗」才知道该记。
+ */
+function wastageLink(entry) {
+  return {
+    path: WASTAGE_REGISTER_PATH,
+    query: { from: 'prep', item: entry.item_name, unit: entry.unit || '' },
+  }
 }
 
 function qtyText(entry) {
@@ -474,6 +486,9 @@ watch(activeStation, () => {
               <p v-if="entry.basis?.status === 'ok'" class="pp-basis">{{ basisFormula(entry) }}</p>
               <p v-else class="pp-basis">{{ basisText(entry) }}</p>
 
+              <div v-if="isStaff" class="pp-actions">
+                <router-link class="pp-act" :to="wastageLink(entry)">这一份用不掉了 · 记损耗</router-link>
+              </div>
               <div v-if="!isStaff" class="pp-actions">
                 <router-link class="pp-act" :to="{ path: '/admin' }">改配方系数</router-link>
                 <button

@@ -24,6 +24,10 @@
 `POST /images` 落盘并记一行元数据，返回 `capture_id`；提交记录时把它放进 `image_ids`。
 未绑定的图是孤儿行（`record_id IS NULL`），留着可查、可清。
 
+**更正**：`PATCH /records/{id}` 改字段、`DELETE /records/{id}` 撤回，都只对「本人 24
+小时内记的那一笔」生效（归属与窗口在服务层判，这里只翻译 403 / 409）；照片不可改不可
+增删，PATCH body 里的 `image_ids` 被忽略。
+
 **不发实时 nudge**：损耗是「记一笔、事后看」的事，没有「另一台设备上有人等着它」的
 那种紧迫；工作台那个 topic 白名单（`services/realtime/hub.py` 的 `VALID_TOPICS` 与员工
 那三档）也不该为它多开一格。页面自己提交后刷新，别人记的那几笔靠页面上的刷新。
@@ -46,6 +50,7 @@ from db_core.utils import CHINA_TZ
 from services.hygiene.images import sniff_image_content_type
 from services.identity.capabilities import CAP_WASTAGE, has_cap
 from services.wastage.store import (
+    AMEND_WINDOW_HOURS,
     KIND_ADMIN,
     KIND_STAFF,
     MAX_IMAGES,
@@ -77,7 +82,8 @@ UPLOAD_CHUNK_BYTES = 1024 * 1024
 _ERROR_DETAILS = {
     "not_migrated": (
         "损耗登记表还没建好：请在 Admin「系统更新 → 数据库迁移」应用 "
-        "migrations/pg/0029_wastage.sql，然后刷新本页"
+        "migrations/pg/ 下还没应用的脚本（0029_wastage.sql / "
+        "0046_wastage_amendments.sql），然后刷新本页"
     ),
     "invalid_date": "日期格式应该是 YYYY-MM-DD：请重新选一天",
     "future_day": "还没到的日子登不了：损耗记的是已经发生的事",
@@ -101,11 +107,20 @@ _ERROR_DETAILS = {
     "too_many_templates": "最多存 {} 个常用模板：先删掉不用的再来存",
     "template_exists": "这个模板已经存过了",
     "unknown_template": "这个模板不存在：可能已经被删掉了，刷新看看",
+    "unknown_record": "找不到这条登记：可能已经撤回了",
+    "not_owner": "只能改自己记的那几条",
+    "amend_window_closed": "超过 24 小时了，这一笔不能再改；如果记错了，另记一笔说明",
 }
 
 _ERROR_STATUS = {
     "unknown_template": 404,
     "unknown_image": 404,
+    # 撤回过的登记对读接口就是「不存在」，改它也是同一个 404。
+    "unknown_record": 404,
+    # 看得到不等于改得了：不是本人记的，403 比 404 诚实（这条不是没了，是不归你）。
+    "not_owner": 403,
+    # 窗口过了不是请求写错，是此刻不允许 —— 409 让前端能和 400 的「参数错」分开提示。
+    "amend_window_closed": 409,
     # `not_migrated` 不是「参数写错了」，是这台机器还没升级完 —— 503 比 400 诚实。
     "not_migrated": 503,
     "images_unavailable": 503,
@@ -210,6 +225,8 @@ def _meta() -> dict:
         "max_quantity": float(MAX_QUANTITY),
         "max_templates": MAX_TEMPLATES,
         "max_image_bytes": MAX_IMAGE_BYTES,
+        # 更正窗口由服务端给：前端文案里的「24 小时」不该是另一份写死的数字。
+        "amend_window_hours": AMEND_WINDOW_HOURS,
     }
 
 
@@ -246,6 +263,52 @@ async def create_record(
             wastage_date=payload.wastage_date,
             image_ids=payload.image_ids,
         )
+    except WastageError as exc:
+        raise _bad_request(exc) from exc
+    return {"record": record}
+
+
+@router.patch("/records/{record_id}")
+async def amend_record(
+    record_id: int,
+    payload: RecordRequest,
+    db=Depends(get_db),
+    identity: dict = Depends(require_any_identity_session),
+) -> dict:
+    """更正本人 24 小时内记的那一笔：只改传了值的字段，照片不参与（body 里的
+    `image_ids` 会被忽略 —— 照片不可换，见服务层）。
+
+    归属与窗口都在服务层判：不是本人的 403、过了 24 小时的 409。这两个错分开，
+    前端才知道该提示「找管理员」还是「另记一笔」。响应带回整条记录（新值 +
+    `can_amend` / `amend_deadline_at`）。
+    """
+    store = _store(db)
+    try:
+        record = await store.amend_record(
+            _actor(identity),
+            record_id,
+            item_name=payload.item_name,
+            quantity=payload.quantity,
+            unit=payload.unit,
+            reason=payload.reason,
+            remark=payload.remark,
+            wastage_date=payload.wastage_date,
+        )
+    except WastageError as exc:
+        raise _bad_request(exc) from exc
+    return {"record": record}
+
+
+@router.delete("/records/{record_id}")
+async def revoke_record(
+    record_id: int,
+    db=Depends(get_db),
+    identity: dict = Depends(require_any_identity_session),
+) -> dict:
+    """撤回本人 24 小时内记的那一笔（软删）：读接口从此看不到它，修订里留整行快照。"""
+    store = _store(db)
+    try:
+        record = await store.revoke_record(_actor(identity), record_id)
     except WastageError as exc:
         raise _bad_request(exc) from exc
     return {"record": record}

@@ -10,6 +10,11 @@
 照片不走库里的大字段：字节由 `FileCaptureStore` 落盘（与卫生现场照片同一套设施），
 库里只存 `capture_id` 与元数据。上传与登记是两步，所以图可以先传、提交时再绑。
 
+登记后 **24 小时内本人可更正**（改字段或整笔撤回，见 `amend_record` / `revoke_record`；
+表与修订表见 `migrations/pg/0046_wastage_amendments.sql`）：窗口从 `created_at`（登记
+时刻）算，每次更正往 `wastage_record_revisions` 写一条前后快照。
+撤回是软删（`revoked_at`），所有读路径都把它当成不存在；照片不参与更正。
+
 **统计口径照源项目**（`cloudfunctions/manageWastage` 的 `statistics`）：按**自然日**的
 范围取记录，算四样 —— 总笔数、物料种类数、按原因分布、按物料排行、逐日趋势。
 没有「总金额」：损耗记的是数量，单位还各不相同（kg 与 份 加不到一起）。
@@ -18,6 +23,7 @@
 from __future__ import annotations
 
 import functools
+import json
 import logging
 import re
 from dataclasses import dataclass
@@ -34,6 +40,7 @@ from services.identity import serialized_write
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "AMEND_WINDOW_HOURS",
     "KIND_ADMIN",
     "KIND_STAFF",
     "MAX_IMAGES",
@@ -82,13 +89,16 @@ MAX_IMAGES = 3
 MAX_TEMPLATES = 20
 # 数量上限：防手滑多打几个 9，不替业务定政策。
 MAX_QUANTITY = Decimal("99999")
+# 更正窗口（小时）：从登记时刻 `created_at` 算的 24 小时，见 `amend_record` / `revoke_record`。
+AMEND_WINDOW_HOURS = 24
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _MONTH_RE = re.compile(r"^\d{4}-\d{2}$")
 
 _RECORD_COLUMNS = (
     "id, item_name, quantity, unit, reason, remark, wastage_date,"
-    " operator_kind, employee_id, operator_name, created_at"
+    " operator_kind, employee_id, operator_name, created_at, updated_at,"
+    " revoked_at, revoked_by_kind, revoked_by_employee_id"
 )
 
 
@@ -256,12 +266,70 @@ def _month_range(month: str) -> tuple[str, str]:
     return first.isoformat(), (following - timedelta(days=1)).isoformat()
 
 
+def _parse_stamp(value: Any) -> Optional[datetime]:
+    """库里的时刻列（ISO 字符串、带北京时区）→ datetime；解析不了返回 ``None``。
+
+    更正窗口的唯一判据，所以解析失败必须 **fail-closed**：调用方拿到 ``None`` 就按
+    「不可更正」处理，不能把它悄悄当成「刚登记的」放行。
+    """
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        # 老行都经由本应用写入，只会是北京时；naive 的补上时区再比，免得 aware/naive 相减报错。
+        parsed = parsed.replace(tzinfo=CHINA_TZ)
+    return parsed
+
+
+def _amend_deadline(created_at: Any) -> Optional[datetime]:
+    """登记时刻 + 24h。窗口从 ``created_at`` 算 —— 改的是「那一刻记错了」，与损耗发生日无关。"""
+    created = _parse_stamp(created_at)
+    if created is None:
+        return None
+    return created + timedelta(hours=AMEND_WINDOW_HOURS)
+
+
+# revision 快照的字段：整条记录（含撤回痕迹），**不含 images** —— 照片不可更正，
+# 快照里带 url / 字节数只会让审计文本变长，还会让人误以为照片被换过。
+_SNAPSHOT_FIELDS = (
+    "id",
+    "item_name",
+    "quantity",
+    "unit",
+    "reason",
+    "remark",
+    "wastage_date",
+    "operator_kind",
+    "employee_id",
+    "operator_name",
+    "created_at",
+    "updated_at",
+    "revoked_at",
+    "revoked_by_kind",
+    "revoked_by_employee_id",
+)
+
+
+def _snapshot(record: dict) -> dict:
+    return {key: record.get(key) for key in _SNAPSHOT_FIELDS}
+
+
 def _record_row(row: Any) -> dict:
-    """一行 → 接口要的形状：Decimal 折成 float、原因补中文标签、图片先给空数组。"""
+    """一行 → 接口要的形状：Decimal 折成 float、原因补中文标签、图片先给空数组。
+
+    ``amend_deadline_at`` 在这里派生（只依赖 created_at）：明细与详情都带它，
+    前端不用自己拿本机时钟去猜窗口。``can_amend`` 要看「谁在看」，由带 actor 的
+    调用点补（见 ``record_by_id`` / ``list_records``）。
+    """
     record = dict(row)
     quantity = record.get("quantity")
     record["quantity"] = float(quantity) if quantity is not None else 0.0
     record["reason_text"] = reason_label(record.get("reason"))
+    deadline = _amend_deadline(record.get("created_at"))
+    record["amend_deadline_at"] = deadline.isoformat() if deadline else None
     record["images"] = []
     return record
 
@@ -317,6 +385,31 @@ class WastageStore:
     def tomorrow(self) -> str:
         """明天 —— 登记日期选择器的上界（源项目也是「不许选未来」）。"""
         return (self._now_dt().date() + timedelta(days=1)).isoformat()
+
+    def _owns_record(self, record: dict, actor: WastageActor) -> bool:
+        """这笔登记是不是他记的 —— 更正与撤回的归属判据只有这一处。
+
+        员工比 ``employee_id``；管理端那台共享账号比 ``operator_kind``（它没有员工号，
+        所以「管理端记的」整档都算它记的）。看全店的能力（``sees_all``）**不放宽**这一条：
+        看得到不等于改得了。
+        """
+        if actor.is_admin:
+            return record.get("operator_kind") == KIND_ADMIN
+        if actor.employee_id is None:
+            return False
+        employee_id = record.get("employee_id")
+        return employee_id is not None and int(employee_id) == int(actor.employee_id)
+
+    def _can_amend(self, record: dict, actor: WastageActor) -> bool:
+        """此刻能不能更正：本人 + 未撤回 + 窗口内。created_at 解析不出的按不可更正。"""
+        if record.get("revoked_at"):
+            return False
+        if not self._owns_record(record, actor):
+            return False
+        deadline = _amend_deadline(record.get("created_at"))
+        if deadline is None:
+            return False
+        return self._now_dt() <= deadline
 
     async def _rollback_quietly(self) -> None:
         try:
@@ -374,8 +467,9 @@ class WastageStore:
     ) -> dict:
         """登记一笔损耗。两种身份走同一条路，落库时带上「谁登记的」。
 
-        日期默认今天；**未来的日子不收**（源项目把日期选择器卡在今天）。要改一笔已经
-        登记的记录不在这一票里 —— 台账是「当时发生了什么」，发现写错了就再记一笔说明。
+        日期默认今天；**未来的日子不收**（源项目把日期选择器卡在今天）。登记后
+        **24 小时内本人可更正**（``amend_record`` 改字段 / ``revoke_record`` 撤回，
+        每次都留一条 revision）；过了窗口就只能另记一笔说明。
         """
         name = _clean_item_name(item_name)
         amount = _require_quantity(quantity)
@@ -436,21 +530,187 @@ class WastageStore:
             )
 
         await self._conn.commit()
-        record = await self.record_by_id(record_id)
+        record = await self.record_by_id(record_id, actor=actor)
         assert record is not None  # 刚写进去的那一行
         return record
 
     @_needs_migration
-    async def record_by_id(self, record_id: int) -> Optional[dict]:
+    async def record_by_id(
+        self, record_id: int, actor: Optional[WastageActor] = None
+    ) -> Optional[dict]:
+        """按号取一条，**已撤回的当不存在**（撤回是软删，读路径一律不返回它）。
+
+        传 ``actor`` 时顺带算 ``can_amend`` —— 它取决于「谁在看」，所以不能由
+        ``_record_row`` 替所有人算一个值。不传就只给 ``amend_deadline_at``。
+        """
+        record = await self._raw_record(record_id)
+        if record is None:
+            return None
+        images = await self._images_for([int(record["id"])])
+        record["images"] = images.get(int(record["id"]), [])
+        if actor is not None:
+            record["can_amend"] = self._can_amend(record, actor)
+        return record
+
+    async def _raw_record(self, record_id: int) -> Optional[dict]:
+        """取未撤回的原始行（`_record_row` 形状、无图片）。"""
         rows = await self._rows(
-            f"SELECT {_RECORD_COLUMNS} FROM wastage_records WHERE id = ?",
+            f"SELECT {_RECORD_COLUMNS} FROM wastage_records"
+            " WHERE id = ? AND revoked_at IS NULL",
             (int(record_id),),
         )
-        if not rows:
-            return None
-        record = _record_row(rows[0])
-        images = await self._images_for([record["id"]])
-        record["images"] = images.get(int(record["id"]), [])
+        return _record_row(rows[0]) if rows else None
+
+    async def _write_revision(
+        self,
+        *,
+        record_id: int,
+        action: str,
+        actor: WastageActor,
+        before: dict,
+        after: dict,
+    ) -> None:
+        """留一条修订：谁、什么时候、改前改后（快照不含照片）。"""
+        await self._conn.execute(
+            "INSERT INTO wastage_record_revisions"
+            ' (record_id, "action", operator_kind, employee_id, operator_name,'
+            "  before_json, after_json, created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                int(record_id),
+                action,
+                actor.kind,
+                actor.employee_id,
+                actor.display_name,
+                json.dumps(before, ensure_ascii=False),
+                json.dumps(after, ensure_ascii=False),
+                self._now_iso(),
+            ),
+        )
+
+    # ── 更正：24 小时内、仅限本人 ──────────────────────────────────────────
+    @_needs_migration
+    @serialized_write
+    async def amend_record(
+        self,
+        actor: WastageActor,
+        record_id: int,
+        *,
+        item_name: Any = None,
+        quantity: Any = None,
+        unit: Any = None,
+        reason: Any = None,
+        remark: Any = None,
+        wastage_date: Any = None,
+    ) -> dict:
+        """更正本人 24 小时内登记的一笔：只改传了值的字段（``None`` = 不动），照片不参与。
+
+        校验顺序是刻意的：先「这条还在不在」、再「是不是他的」、最后「窗口关没关」。
+        把「不是你的」与「过期了」分成两个错，店员才知道下一步该找谁。字段规则与
+        登记复用同一批函数，两条路不会各有一套「什么算合法」。
+        """
+        record = await self._raw_record(record_id)
+        if record is None:
+            # 不存在与已撤回对调用方是同一件事：这一笔不能再改，也不该被读出来。
+            raise WastageError("unknown_record", str(record_id))
+        if not self._owns_record(record, actor):
+            raise WastageError("not_owner", str(record_id))
+        deadline = _amend_deadline(record.get("created_at"))
+        if deadline is None or self._now_dt() > deadline:
+            # created_at 解析不了也走这里：拿不准就不许改（fail-closed）。
+            raise WastageError("amend_window_closed", str(AMEND_WINDOW_HOURS))
+
+        changes: dict[str, Any] = {}
+        if item_name is not None:
+            changes["item_name"] = _clean_item_name(item_name)
+        if quantity is not None:
+            changes["quantity"] = _require_quantity(quantity)
+        if unit is not None:
+            changes["unit"] = _clean_unit(unit)
+        if reason is not None:
+            changes["reason"] = _require_reason(reason)
+        if remark is not None:
+            changes["remark"] = _clean_remark(remark)
+        if wastage_date is not None:
+            day = _require_date(wastage_date)
+            if day > self.today():
+                raise WastageError("future_day", "future_day")
+            changes["wastage_date"] = day
+
+        # 「其他」必须带说明：改原因或改备注都可能把这句话抹掉，改完仍要成立。
+        final_reason = changes.get("reason", record.get("reason"))
+        final_remark = changes.get("remark", record.get("remark"))
+        if final_reason == "other" and not final_remark:
+            raise WastageError("missing_remark", "missing_remark")
+
+        if not changes:
+            # 什么都没给不算一次更正：不写库，也不凭空留一条 revision。
+            return await self.record_by_id(record_id, actor=actor)
+
+        stamp = self._now_iso()
+        assignments = ", ".join(f"{column} = ?" for column in changes)
+        await self._conn.execute(
+            f"UPDATE wastage_records SET {assignments}, updated_at = ? WHERE id = ?",
+            tuple(changes.values()) + (stamp, int(record_id)),
+        )
+        before = _snapshot(record)
+        # 写锁内不会有人把这条撤回（撤回同在锁里），读回空只可能是库被动过。
+        updated = await self._raw_record(record_id)
+        if updated is None:  # pragma: no cover - 防御，正常走不到
+            raise WastageError("unknown_record", str(record_id))
+        await self._write_revision(
+            record_id=int(record_id),
+            action="edit",
+            actor=actor,
+            before=before,
+            after=_snapshot(updated),
+        )
+        await self._conn.commit()
+        refreshed = await self.record_by_id(record_id, actor=actor)
+        if refreshed is None:  # pragma: no cover - 防御，正常走不到
+            raise WastageError("unknown_record", str(record_id))
+        return refreshed
+
+    @_needs_migration
+    @serialized_write
+    async def revoke_record(self, actor: WastageActor, record_id: int) -> dict:
+        """撤回本人 24 小时内登记的一笔。软删：读路径从此看不到它，修订里留整行快照。
+
+        不物理删 —— 统计与模板都从记录里长出来，物理删会让「昨天那个数字怎么变的」
+        无处可查；照片也通过外键挂在记录上，会跟着丢。
+        """
+        record = await self._raw_record(record_id)
+        if record is None:
+            raise WastageError("unknown_record", str(record_id))
+        if not self._owns_record(record, actor):
+            raise WastageError("not_owner", str(record_id))
+        deadline = _amend_deadline(record.get("created_at"))
+        if deadline is None or self._now_dt() > deadline:
+            raise WastageError("amend_window_closed", str(AMEND_WINDOW_HOURS))
+
+        stamp = self._now_iso()
+        await self._conn.execute(
+            "UPDATE wastage_records"
+            " SET revoked_at = ?, revoked_by_kind = ?, revoked_by_employee_id = ?,"
+            " updated_at = ?"
+            " WHERE id = ?",
+            (stamp, actor.kind, actor.employee_id, stamp, int(record_id)),
+        )
+        await self._write_revision(
+            record_id=int(record_id),
+            action="revoke",
+            actor=actor,
+            before=_snapshot(record),
+            after={},
+        )
+        await self._conn.commit()
+        record["revoked_at"] = stamp
+        record["revoked_by_kind"] = actor.kind
+        record["revoked_by_employee_id"] = actor.employee_id
+        record["updated_at"] = stamp
+        record["can_amend"] = False
+        images = await self._images_for([int(record_id)])
+        record["images"] = images.get(int(record_id), [])
         return record
 
     # ── 查询 ────────────────────────────────────────────────────────────────
@@ -468,7 +728,9 @@ class WastageStore:
         员工那一档按 `employee_id` 过滤（管理端在员工手机上登记的那几笔不算他的）；
         管理端那一档、以及开了「损耗分析」能力的员工（`can_see_all`）不加这一条，看全店。
         """
-        where: list[str] = []
+        # 撤回是软删：明细 / 补全 / 模板历史都从 `_scope_clause` 过，所以撤回过滤只加这一处。
+        # 统计不走这里（见 `statistics` 自己的子句），那边单独加同样的一条。
+        where: list[str] = ["revoked_at IS NULL"]
         params: list[Any] = []
         if not actor.can_see_all:
             where.append("employee_id = ?")
@@ -530,6 +792,7 @@ class WastageStore:
         images = await self._images_for([int(item["id"]) for item in records])
         for record in records:
             record["images"] = images.get(int(record["id"]), [])
+            record["can_amend"] = self._can_amend(record, actor)
         return {
             "total": total,
             "offset": start,
@@ -555,7 +818,8 @@ class WastageStore:
                 raise WastageError("invalid_range", "invalid_range")
 
         params = (first, last)
-        clause = " WHERE wastage_date >= ? AND wastage_date <= ?"
+        # 统计也按「撤回的不算」：这里自己拼子句，所以撤回过滤得单独加（不在 _scope_clause）。
+        clause = " WHERE revoked_at IS NULL AND wastage_date >= ? AND wastage_date <= ?"
 
         totals = await self._rows(
             "SELECT COUNT(*) AS total, COUNT(DISTINCT item_name) AS item_types"

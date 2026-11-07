@@ -11,9 +11,10 @@
 
 import asyncio
 import io
+import json
 import tempfile
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pytest
 from fastapi import FastAPI
@@ -29,6 +30,7 @@ from services.app_runtime import AppRuntime, set_runtime
 from services.hygiene.accounts import EmployeeAccounts
 from services.hygiene.captures import FakeCaptureStore
 from services.wastage.store import (
+    AMEND_WINDOW_HOURS,
     MAX_IMAGES,
     MAX_TEMPLATES,
     WastageActor,
@@ -54,6 +56,10 @@ def _staff(employee_id, name=NAME):
 
 ADMIN_ACTOR = WastageActor(kind="admin", employee_id=None, name="管理端")
 
+# 可变时钟：24h 窗口的边界用例要把「现在」往前推。store 用例与 HTTP fixture 共用它，
+# 每个用例开始时回到 FIXED_NOW —— 一个用例推过的钟不能污染下一个。
+_CLOCK = {"now": FIXED_NOW}
+
 
 class WastageStoreTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -64,11 +70,13 @@ class WastageStoreTest(unittest.IsolatedAsyncioTestCase):
         await self.db.connect()
         self.accounts = EmployeeAccounts(self.db, now=lambda: FIXED_NOW)
         self.captures = FakeCaptureStore()
+        _CLOCK["now"] = FIXED_NOW
         self.store = WastageStore(
-            self.db, captures=self.captures, now=lambda: FIXED_NOW
+            self.db, captures=self.captures, now=lambda: _CLOCK["now"]
         )
 
     async def asyncTearDown(self):
+        _CLOCK["now"] = FIXED_NOW
         await self.db.close()
         settings.DATABASE_DIR = self._old_database_dir
         self._tmpdir.cleanup()
@@ -389,6 +397,241 @@ class WastageStoreTest(unittest.IsolatedAsyncioTestCase):
             sorted(await self.store.suggestions(ADMIN_ACTOR)), sorted(["五花肉", "豆腐"])
         )
 
+    # ── 更正：24 小时内、仅限本人 ────────────────────────────────────────────
+    async def _revisions(self, record_id):
+        cur = await self.db._conn.execute(
+            'SELECT "action", operator_kind, employee_id, operator_name,'
+            " before_json, after_json, created_at"
+            " FROM wastage_record_revisions WHERE record_id = ? ORDER BY id",
+            (int(record_id),),
+        )
+        return await cur.fetchall()
+
+    async def test_owner_amends_within_window_and_leaves_a_revision(self):
+        """本人 24h 内改数量与原因：值变、仍可改、修订里留改前改后（照片不在快照里）。"""
+        employee = await self._employee()
+        actor = _staff(employee["id"])
+        created = await self.store.add_record(
+            actor,
+            item_name="五花肉",
+            quantity=1.5,
+            unit="kg",
+            reason="spoiled",
+            wastage_date=TODAY,
+        )
+        self.assertTrue(created["can_amend"])
+        self.assertEqual(created["amend_deadline_at"], "2026-09-25T10:00:00+08:00")
+
+        amended = await self.store.amend_record(
+            actor, created["id"], quantity=2.25, reason="expired"
+        )
+        self.assertEqual(amended["quantity"], 2.25)
+        self.assertEqual(amended["reason"], "expired")
+        self.assertEqual(amended["reason_text"], "过期丢弃")
+        self.assertTrue(amended["can_amend"])
+        # 没传的字段不动（partial update，不是整条覆盖）。
+        self.assertEqual(amended["item_name"], "五花肉")
+        self.assertEqual(amended["unit"], "kg")
+        self.assertEqual(amended["wastage_date"], TODAY)
+
+        rows = await self._revisions(created["id"])
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["action"], "edit")
+        self.assertEqual(rows[0]["operator_kind"], "staff")
+        self.assertEqual(rows[0]["employee_id"], employee["id"])
+        self.assertEqual(rows[0]["operator_name"], NAME)
+        self.assertEqual(rows[0]["created_at"], FIXED_NOW.isoformat())
+        before = json.loads(rows[0]["before_json"])
+        after = json.loads(rows[0]["after_json"])
+        self.assertEqual((before["quantity"], before["reason"]), (1.5, "spoiled"))
+        self.assertEqual((after["quantity"], after["reason"]), (2.25, "expired"))
+        self.assertNotIn("images", before)
+        self.assertNotIn("images", after)
+
+        # 改完仍要满足登记时的规则：「其他」必须带说明、日子不能是明天。
+        with self.assertRaises(WastageError) as caught:
+            await self.store.amend_record(actor, created["id"], reason="other")
+        self.assertEqual(caught.exception.code, "missing_remark")
+        with self.assertRaises(WastageError) as caught:
+            await self.store.amend_record(actor, created["id"], wastage_date="2026-09-25")
+        self.assertEqual(caught.exception.code, "future_day")
+
+        # 什么都没传不算一次更正：不写库，也不凭空留一条修订。
+        untouched = await self.store.amend_record(actor, created["id"])
+        self.assertEqual(untouched["quantity"], 2.25)
+        self.assertEqual(len(await self._revisions(created["id"])), 1)
+
+    async def test_only_the_owner_can_amend(self):
+        """别人记的那一笔：改不了（403 not_owner），也撤回不了。"""
+        first = await self._employee()
+        second = await self._employee(PHONE2, NAME2)
+        created = await self.store.add_record(
+            _staff(first["id"]),
+            item_name="五花肉",
+            quantity=1,
+            unit="kg",
+            reason="spoiled",
+        )
+
+        with self.assertRaises(WastageError) as caught:
+            await self.store.amend_record(_staff(second["id"]), created["id"], quantity=2)
+        self.assertEqual(caught.exception.code, "not_owner")
+        with self.assertRaises(WastageError) as caught:
+            await self.store.revoke_record(_staff(second["id"]), created["id"])
+        self.assertEqual(caught.exception.code, "not_owner")
+
+        # 失败的那两次没有留下任何痕迹：值没变、也没修订。
+        still = await self.store.record_by_id(created["id"])
+        self.assertEqual(still["quantity"], 1.0)
+        self.assertEqual(await self._revisions(created["id"]), [])
+
+    async def test_window_closes_after_24_hours(self):
+        """从 created_at 算的 24h：过了就 409；明细里的 can_amend 也跟着变 false。"""
+        employee = await self._employee()
+        actor = _staff(employee["id"])
+        created = await self.store.add_record(
+            actor, item_name="五花肉", quantity=1, unit="kg", reason="spoiled"
+        )
+
+        _CLOCK["now"] = FIXED_NOW + timedelta(hours=24, seconds=1)
+        self.assertLess(created["amend_deadline_at"], _CLOCK["now"].isoformat())
+        with self.assertRaises(WastageError) as caught:
+            await self.store.amend_record(actor, created["id"], quantity=2)
+        self.assertEqual(caught.exception.code, "amend_window_closed")
+        with self.assertRaises(WastageError) as caught:
+            await self.store.revoke_record(actor, created["id"])
+        self.assertEqual(caught.exception.code, "amend_window_closed")
+
+        listed = await self.store.list_records(actor)
+        self.assertFalse(listed["records"][0]["can_amend"])
+        # 窗口关的是「更正」，不是「读」：这一笔还在明细里。
+        self.assertEqual(listed["total"], 1)
+
+    async def test_window_boundary_just_inside_is_still_open(self):
+        """恰好在 24h 内（+23h59m）还能改；卡在 24h 整点也还算「24 小时内」。"""
+        employee = await self._employee()
+        actor = _staff(employee["id"])
+        created = await self.store.add_record(
+            actor, item_name="五花肉", quantity=1, unit="kg", reason="spoiled"
+        )
+
+        _CLOCK["now"] = FIXED_NOW + timedelta(hours=23, minutes=59)
+        amended = await self.store.amend_record(actor, created["id"], quantity=2)
+        self.assertEqual(amended["quantity"], 2.0)
+
+        _CLOCK["now"] = FIXED_NOW + timedelta(hours=24)
+        again = await self.store.amend_record(actor, created["id"], quantity=3)
+        self.assertEqual(again["quantity"], 3.0)
+        self.assertTrue(again["can_amend"])
+        self.assertEqual(len(await self._revisions(created["id"])), 2)
+
+    async def test_revoke_hides_the_record_from_every_read_path(self):
+        """软删：明细、统计、补全、模板历史都不再看见它，但行还在库里（留痕）。"""
+        employee = await self._employee()
+        actor = _staff(employee["id"])
+        keep = await self.store.add_record(
+            actor, item_name="豆腐", quantity=1, unit="盒", reason="expired",
+            wastage_date=TODAY,
+        )
+        gone = await self.store.add_record(
+            actor, item_name="青菜", quantity=2, unit="份", reason="spoiled",
+            wastage_date=TODAY,
+        )
+
+        revoked = await self.store.revoke_record(actor, gone["id"])
+        self.assertIsNotNone(revoked["revoked_at"])
+        self.assertFalse(revoked["can_amend"])
+        self.assertIsNone(await self.store.record_by_id(gone["id"]))
+
+        listed = await self.store.list_records(actor)
+        self.assertEqual([row["id"] for row in listed["records"]], [keep["id"]])
+
+        stats = await self.store.statistics(month="2026-09")
+        self.assertEqual(stats["total_count"], 1)
+        self.assertEqual([row["item_name"] for row in stats["top_items"]], ["豆腐"])
+
+        self.assertEqual(await self.store.suggestions(actor), ["豆腐"])
+        templates = await self.store.templates(actor)
+        self.assertEqual(
+            [t["item_name"] for t in templates["templates"]], ["豆腐"]
+        )
+
+        # 行没有被物理删：撤回时间与撤回人都在。
+        cur = await self.db._conn.execute(
+            'SELECT revoked_at, revoked_by_kind, revoked_by_employee_id'
+            " FROM wastage_records WHERE id = ?",
+            (int(gone["id"]),),
+        )
+        row = await cur.fetchone()
+        self.assertIsNotNone(row["revoked_at"])
+        self.assertEqual(row["revoked_by_kind"], "staff")
+        self.assertEqual(row["revoked_by_employee_id"], employee["id"])
+
+    async def test_revoke_writes_a_revision_with_the_whole_snapshot(self):
+        """撤回也留修订：before = 撤回前的整行快照，after 是空对象。"""
+        employee = await self._employee()
+        actor = _staff(employee["id"])
+        created = await self.store.add_record(
+            actor, item_name="五花肉", quantity=1.5, unit="kg", reason="spoiled",
+            wastage_date=TODAY,
+        )
+
+        await self.store.revoke_record(actor, created["id"])
+        rows = await self._revisions(created["id"])
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["action"], "revoke")
+        self.assertEqual(rows[0]["employee_id"], employee["id"])
+        before = json.loads(rows[0]["before_json"])
+        self.assertEqual(before["item_name"], "五花肉")
+        self.assertEqual(before["quantity"], 1.5)
+        self.assertEqual(json.loads(rows[0]["after_json"]), {})
+
+    async def test_revoked_record_cannot_be_amended_or_revoked_again(self):
+        """撤回过的对写接口就是「不存在」：再改再撤回都报 unknown_record。"""
+        employee = await self._employee()
+        actor = _staff(employee["id"])
+        created = await self.store.add_record(
+            actor, item_name="五花肉", quantity=1, unit="kg", reason="spoiled"
+        )
+        await self.store.revoke_record(actor, created["id"])
+
+        with self.assertRaises(WastageError) as caught:
+            await self.store.amend_record(actor, created["id"], quantity=2)
+        self.assertEqual(caught.exception.code, "unknown_record")
+        with self.assertRaises(WastageError) as caught:
+            await self.store.revoke_record(actor, created["id"])
+        self.assertEqual(caught.exception.code, "unknown_record")
+
+    async def test_admin_amend_and_revoke_are_limited_to_admin_records(self):
+        """管理端只能改「管理端记的」；员工的记录他改不了（员工也改不了管理端的）。"""
+        employee = await self._employee()
+        staff_actor = _staff(employee["id"])
+        staff_record = await self.store.add_record(
+            staff_actor, item_name="五花肉", quantity=1, unit="kg", reason="spoiled"
+        )
+        admin_record = await self.store.add_record(
+            ADMIN_ACTOR, item_name="鸡蛋", quantity=6, unit="个", reason="damaged"
+        )
+
+        with self.assertRaises(WastageError) as caught:
+            await self.store.amend_record(ADMIN_ACTOR, staff_record["id"], quantity=2)
+        self.assertEqual(caught.exception.code, "not_owner")
+        with self.assertRaises(WastageError) as caught:
+            await self.store.revoke_record(ADMIN_ACTOR, staff_record["id"])
+        self.assertEqual(caught.exception.code, "not_owner")
+        with self.assertRaises(WastageError) as caught:
+            await self.store.amend_record(staff_actor, admin_record["id"], quantity=1)
+        self.assertEqual(caught.exception.code, "not_owner")
+
+        amended = await self.store.amend_record(
+            ADMIN_ACTOR, admin_record["id"], remark="搬货时磕了"
+        )
+        self.assertEqual(amended["remark"], "搬货时磕了")
+        revoked = await self.store.revoke_record(ADMIN_ACTOR, admin_record["id"])
+        self.assertEqual(revoked["revoked_by_kind"], "admin")
+        self.assertIsNone(revoked["revoked_by_employee_id"])
+        self.assertEqual(len(await self._revisions(admin_record["id"])), 2)
+
 
 class WastageTableContractTest(unittest.TestCase):
     """新表进表名清单，Admin 的数据浏览器里只读（写入口在 HTTP 那一侧钉）。"""
@@ -438,13 +681,14 @@ def wastage_http(tmp_path, monkeypatch):
     real_init = WastageStore.__init__
 
     def _pinned_init(self, *args, **kwargs):
-        kwargs.setdefault("now", lambda: FIXED_NOW)
+        kwargs.setdefault("now", lambda: _CLOCK["now"])
         return real_init(self, *args, **kwargs)
 
     monkeypatch.setattr(WastageStore, "__init__", _pinned_init)
     # 照片目录：这一轮指到 tmp_path（`_captures()` 是模块级单例，先清掉上一次的）。
     monkeypatch.setattr(wastage_module, "_capture_store", None)
 
+    _CLOCK["now"] = FIXED_NOW
     old = settings.DATABASE_DIR
     settings.DATABASE_DIR = str(tmp_path)
     db = DatabaseManager()
@@ -469,6 +713,7 @@ def wastage_http(tmp_path, monkeypatch):
     set_runtime(None)
     monkeypatch.setattr(wastage_module, "_capture_store", None)
     settings.DATABASE_DIR = old
+    _CLOCK["now"] = FIXED_NOW
 
 
 def _employee_id(accounts, phone=PHONE, name=NAME):
@@ -880,3 +1125,124 @@ def test_employee_with_wastage_cap_sees_the_whole_shop(wastage_http):
         "/api/wastage/statistics", params={"month": "2026-09"}
     ).status_code == 403
     assert client.get("/api/wastage/records").json()["total"] == 1
+
+
+# ── 更正（HTTP 面）：本人 24h 内可改可撤，别人不行、过了窗口不行 ─────────────
+
+
+def test_amend_endpoint_returns_new_values_and_list_flags_can_amend(wastage_http):
+    """PATCH 回了整条新记录；列表每条都带服务端算好的 can_amend / deadline。"""
+    client, _db, accounts = wastage_http
+    _employee_id(accounts)
+    _staff_cookie(client, accounts)
+
+    meta = client.get("/api/wastage/meta").json()
+    assert meta["meta"]["amend_window_hours"] == AMEND_WINDOW_HOURS == 24
+
+    created = client.post("/api/wastage/records", json=_record_body("五花肉", 1.5))
+    assert created.status_code == 200, created.text
+    record_id = created.json()["record"]["id"]
+    assert created.json()["record"]["can_amend"] is True
+
+    amended = client.patch(
+        f"/api/wastage/records/{record_id}",
+        json={"quantity": 2.25, "reason": "spoiled"},
+    )
+    assert amended.status_code == 200, amended.text
+    record = amended.json()["record"]
+    assert record["quantity"] == 2.25
+    assert record["reason"] == "spoiled"
+    assert record["can_amend"] is True
+
+    listed = client.get("/api/wastage/records").json()
+    assert listed["total"] == 1
+    row = listed["records"][0]
+    assert row["can_amend"] is True
+    assert row["amend_deadline_at"] == "2026-09-25T10:00:00+08:00"
+
+
+def test_amend_and_revoke_reject_other_people_and_the_closed_window(wastage_http):
+    """归属 403 与窗口 409 是两个错：前者说明「不是你的」，后者说明「太晚了」。"""
+    client, _db, accounts = wastage_http
+    _employee_id(accounts)
+    _employee_id(accounts, PHONE2, NAME2)
+
+    _staff_cookie(client, accounts)
+    created = client.post("/api/wastage/records", json=_record_body())
+    assert created.status_code == 200, created.text
+    record_id = created.json()["record"]["id"]
+
+    # 李四改不了、也撤不了张三记的这一笔。
+    _staff_cookie(client, accounts, PHONE2)
+    denied = client.patch(f"/api/wastage/records/{record_id}", json={"quantity": 2})
+    assert denied.status_code == 403, denied.text
+    assert denied.json()["detail"] == "只能改自己记的那几条"
+    assert client.delete(f"/api/wastage/records/{record_id}").status_code == 403
+
+    # 换回张三，把钟推到 25 小时后：窗口关了。
+    _staff_cookie(client, accounts)
+    _CLOCK["now"] = FIXED_NOW + timedelta(hours=25)
+    late = client.patch(f"/api/wastage/records/{record_id}", json={"quantity": 2})
+    assert late.status_code == 409, late.text
+    assert "超过 24 小时" in late.json()["detail"]
+    assert client.delete(f"/api/wastage/records/{record_id}").status_code == 409
+    # 窗口关的是「更正」，不是「读」：明细里还在，只是不能再改。
+    listed = client.get("/api/wastage/records").json()
+    assert listed["total"] == 1
+    assert listed["records"][0]["can_amend"] is False
+
+
+def test_owner_revokes_and_the_record_disappears(wastage_http):
+    """DELETE 是软删：明细与统计都不再算它；再撤一次是 404。"""
+    client, _db, accounts = wastage_http
+    _employee_id(accounts)
+    _staff_cookie(client, accounts)
+    created = client.post("/api/wastage/records", json=_record_body())
+    assert created.status_code == 200, created.text
+    record_id = created.json()["record"]["id"]
+
+    revoked = client.delete(f"/api/wastage/records/{record_id}")
+    assert revoked.status_code == 200, revoked.text
+    record = revoked.json()["record"]
+    assert record["revoked_at"]
+    assert record["can_amend"] is False
+    assert client.get("/api/wastage/records").json()["total"] == 0
+
+    again = client.delete(f"/api/wastage/records/{record_id}")
+    assert again.status_code == 404, again.text
+    assert "找不到这条登记" in again.json()["detail"]
+
+    _admin_cookie(client)
+    stats = client.get("/api/wastage/statistics", params={"month": "2026-09"}).json()
+    assert stats["total_count"] == 0
+
+
+def test_amend_and_revoke_need_a_session(wastage_http):
+    client, _db, _accounts = wastage_http
+    client.cookies.clear()
+    assert client.patch("/api/wastage/records/1", json={"quantity": 2}).status_code == 401
+    assert client.delete("/api/wastage/records/1").status_code == 401
+
+
+def test_admin_amends_and_revokes_only_his_own_records(wastage_http):
+    """管理端记的账归管理端；员工的账他改不了（员工也改不了管理端的）。"""
+    client, _db, accounts = wastage_http
+    _employee_id(accounts)
+    _staff_cookie(client, accounts)
+    staff_created = client.post("/api/wastage/records", json=_record_body())
+    assert staff_created.status_code == 200, staff_created.text
+    staff_id = staff_created.json()["record"]["id"]
+
+    _admin_cookie(client)
+    admin_created = client.post("/api/wastage/records", json=_record_body("鸡蛋", 6))
+    assert admin_created.status_code == 200, admin_created.text
+    admin_id = admin_created.json()["record"]["id"]
+
+    amended = client.patch(f"/api/wastage/records/{admin_id}", json={"quantity": 5})
+    assert amended.status_code == 200, amended.text
+    assert amended.json()["record"]["quantity"] == 5.0
+
+    denied = client.patch(f"/api/wastage/records/{staff_id}", json={"quantity": 2})
+    assert denied.status_code == 403, denied.text
+    assert "只能改自己记的那几条" in denied.json()["detail"]
+    assert client.delete(f"/api/wastage/records/{staff_id}").status_code == 403

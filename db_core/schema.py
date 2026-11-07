@@ -136,10 +136,17 @@ OVERTIME_TABLES = (
 ATTENDANCE_TABLES = ("statutory_holidays", "attendance_ledger")
 
 # 日常损耗登记（迁移 0029，从 worktool2 那个小程序搬过来）：登记台账、现场照片的
-# 元数据、每人的常用模板。与 SCHEDULING_TABLES 同一个理由不进 ALL_TABLES —— 三张表
-# 只有 `services/wastage/store.py`（WastageStore）一个写入口，不该出现在 Admin 的
-# 通用业务表写入口；数据浏览器里只读列出（分组「损耗」）。
-WASTAGE_TABLES = ("wastage_records", "wastage_images", "wastage_templates")
+# 元数据、每人的常用模板；外加迁移 0046 的更正留痕 `wastage_record_revisions`
+# （每次改字段 / 撤回一条整行快照，只追加、没有单独的写入口）。与 SCHEDULING_TABLES
+# 同一个理由不进 ALL_TABLES —— 四张表只有 `services/wastage/store.py`
+# （WastageStore）一个写入口，不该出现在 Admin 的通用业务表写入口；数据浏览器里
+# 只读列出（分组「损耗」），于是「这笔昨天怎么变了」在页面上查得到。
+WASTAGE_TABLES = (
+    "wastage_records",
+    "wastage_images",
+    "wastage_templates",
+    "wastage_record_revisions",
+)
 
 # Admin DataTable exposes these tables read-only; their owning feature pages
 # remain the only supported write paths.

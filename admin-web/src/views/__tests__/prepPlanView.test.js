@@ -97,7 +97,7 @@ async function mountView(preset = {}) {
   const pinia = createPinia()
   setActivePinia(pinia)
   const wrapper = mount(PrepPlanView, {
-    global: { plugins: [pinia], stubs: { RouterLink: true } },
+    global: { plugins: [pinia], stubs: { RouterLink: { template: '<a><slot /></a>' } } },
   })
   await flushPromises()
   await flushPromises()
@@ -327,6 +327,25 @@ describe('员工这一档', () => {
 
     await wrapper.get('.pp-row-main').trigger('click')
     expect(wrapper.text()).not.toContain('这个其实是买的')
+  })
+
+  it('员工展开能看到「这一份用不掉了 · 记损耗」，这是备货页到损耗页唯一的桥', async () => {
+    const picked = { ...TODAY, staff: true, staff_station: 'shulong', needs_station_pick: false }
+    vi.stubGlobal('fetch', probeFetch({ today: picked }))
+    const wrapper = await mountView()
+
+    await wrapper.get('.pp-row-main').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.pp-detail').text()).toContain('记损耗')
+  })
+
+  it('管理端展开没有「记损耗」入口（管理端记的损耗不归某个员工、员工端看不到）', async () => {
+    vi.stubGlobal('fetch', probeFetch())
+    const wrapper = await mountView()
+
+    await wrapper.get('.pp-row-main').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.pp-detail').text()).not.toContain('记损耗')
   })
 })
 
