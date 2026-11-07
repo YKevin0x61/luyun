@@ -50,6 +50,7 @@ export const TABLE_LABELS = {
   prep_plan_actuals: '备货实际销量',
   prep_plan_context: '备货复盘环境信号',
   prep_plan_events: '备货现场事件',
+  dining_traffic: '客流翻台（按小时）',
   staff_shifts: '排班班次',
   staff_assignments: '排班结果',
   scheduling_rules: '轮转规则',
@@ -123,6 +124,7 @@ export const TABLE_ICONS = {
   prep_plan_actuals: 'clipboard',
   prep_plan_context: 'calendar',
   prep_plan_events: 'timer',
+  dining_traffic: 'armchair',
   staff_shifts: 'calendar',
   staff_assignments: 'calendar',
   scheduling_rules: 'receipt',
@@ -300,6 +302,7 @@ export const COLUMN_LABELS = {
   hire_date: '入职日期', seniority_bonus: '工龄奖',
   steamer_id: '蒸笼ID', port_index: '笼位', stack_order: '叠放顺序',
   loaded_at: '上笼时间', is_hold: '叫起', is_rushed: '催菜', fired_at: '起菜时间',
+  in_seat_people: '在座人数', open_tables: '开台数', total_tables: '总桌数',
 }
 
 /** 自增/自动维护列：新增记录表单中永不展示；编辑记录表单中始终隐藏（不可篡改）。 */
