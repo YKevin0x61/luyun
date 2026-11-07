@@ -48,6 +48,10 @@ RUNTIME_SETTINGS_KEY = "prep_plan_runtime"
 FORECAST_SETTINGS_KEY = "prep_plan_forecast"
 FALLBACK_RUNTIME_SETTINGS_KEY = "scraper_runtime"
 LOUMIAN_STATION = "loumian"
+# 已回填窗口的 `sold_qty` 允许重算的天数（票 08）。迟到订单 / 对账补录会在窗口结束
+# 之后才进库，而轨迹列本来就会重算；只冻结 `sold_qty` 会让复盘里的「实际量」长期偏小。
+# 3 天足够覆盖补录与隔日对账，再往前就是历史事实，不再动。
+ACTUALS_REFRESH_DAYS = 3
 
 # 预测口径（ADR 0128：分品分档取需求分位，不加任何安全缓冲）
 #
@@ -1327,12 +1331,41 @@ class PrepPlanService:
         )
         return hashlib.md5("\n".join(parts).encode("utf-8")).hexdigest()
 
+    async def _manual_final_qty(self, db, plan_day: str) -> Dict[int, float]:
+        """当日计划里**手改过**的最终量，按 `prep_item_id` 索引。
+
+        只有 `qty_source = 'manual'` 的行才算手改：`_persist_entries` 会把建议量写进
+        `final_qty`，光看数值分不出「人改成了 80」还是「算出来本来就是 80」。快照抄的
+        是店长当时真正照着做的数，没手改就用自己的 `suggested_qty`（见 `write_snapshot`）。
+        """
+        tdb = db.table("prep_plan_entries")
+        async with tdb.conn.cursor() as cursor:
+            await cursor.execute(
+                """
+                SELECT e.prep_item_id, e.final_qty
+                FROM prep_plan_entries e
+                JOIN prep_plan_days d ON d.id = e.plan_day_id
+                WHERE d.plan_day = ? AND e.qty_source = 'manual'
+                """,
+                (plan_day,),
+            )
+            rows = await cursor.fetchall()
+        return {
+            int(row["prep_item_id"]): float(row["final_qty"] or 0)
+            for row in rows
+            if row["prep_item_id"] is not None
+        }
+
     async def write_snapshot(self, db, now: Optional[datetime] = None) -> dict:
         """整点写一份参考值快照。同一天同一整点重复调用按 upsert 处理。
 
         快照**固定 24 小时**：复盘页按「一条快照 = 它自己那个 24 小时窗口」对账
         （ADR 0123/0129），页面上的时间跨度切换不改变这条口径，否则同一天不同钟点
         的快照窗口长短不一，复盘没法横向比。
+
+        `final_qty` / `qty_source`（票 08）：当天计划里被店长手改过的品，抄那份最终量；
+        其余行 `final_qty = suggested_qty`、`qty_source = 'suggested'`。这样复盘聚合的
+        「建议量优先 final_qty」才真的能读到东西——在此之前这两列永远是 NULL。
         """
         now = now or datetime.now(CHINA_TZ)
         stamp = now.replace(minute=0, second=0, microsecond=0)
@@ -1340,6 +1373,7 @@ class PrepPlanService:
             db, stamp, horizon_hours=FORECAST_HORIZON_HOURS
         )
         fingerprint = await self._rules_fingerprint(db)
+        manual_final = await self._manual_final_qty(db, computed["plan_day"])
         created = datetime.now(CHINA_TZ).isoformat()
         window = computed["window"]
         tdb = db.table("prep_plan_snapshots")
@@ -1347,14 +1381,21 @@ class PrepPlanService:
         async with tdb.conn.cursor() as cursor:
             for entry in computed["entries"]:
                 basis = entry.get("basis") or {}
+                manual_qty = manual_final.get(int(entry["prep_item_id"]))
+                if manual_qty is not None:
+                    final_qty = manual_qty
+                    qty_source = "manual"
+                else:
+                    final_qty = entry["suggested_qty"]
+                    qty_source = "suggested"
                 await cursor.execute(
                     """
                     INSERT INTO prep_plan_snapshots (
                         snapshot_at, window_start, window_end, plan_day,
                         prep_item_id, item_name, unit, station,
-                        suggested_qty, demand_qty, store_factor, quantile,
-                        basis_json, rules_fingerprint, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        suggested_qty, final_qty, qty_source, demand_qty,
+                        store_factor, quantile, basis_json, rules_fingerprint, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT (tenant_id, snapshot_at, prep_item_id) DO NOTHING
                     """,
                     (
@@ -1367,6 +1408,8 @@ class PrepPlanService:
                         entry["unit"],
                         entry["station"],
                         entry["suggested_qty"],
+                        final_qty,
+                        qty_source,
                         basis.get("demand_qty", entry["suggested_qty"]),
                         basis.get("store_factor", 1.0),
                         basis.get("quantile", FORECAST_QUANTILE),
@@ -1390,30 +1433,44 @@ class PrepPlanService:
         return {"success": True, "snapshot_at": stamp.isoformat(), "rows": written}
 
     async def backfill_actuals(self, db, now: Optional[datetime] = None) -> dict:
-        """把「窗口已经结束、实际还缺」的快照窗口补算出来。
+        """回填已结束窗口的实际量；最近 `ACTUALS_REFRESH_DAYS` 天的窗口允许重算。
 
         实际销量 = 卖出菜品 × 配方系数，与参考值同源口径；用当前配方算，
         因此把当前指纹一起存下来，复盘页据此判断两边是否同源。
 
+        一次遍历同时处理两种窗口（票 08）：
+
+        · **待回填**：窗口结束、还没有 actuals 行 —— `INSERT ... ON CONFLICT DO NOTHING`；
+        · **待刷新**：已有 actuals 行、且 `window_end` 在最近 `ACTUALS_REFRESH_DAYS`
+          天内 —— 插一遍（冲突行不动）再 `UPDATE` 实际量与轨迹列。
+
+        为什么要刷新：迟到订单 / 对账补录会在窗口结束后才进库，原先 `sold_qty` 首次写入
+        后就永久冻结，复盘里的「实际量」只会偏小。`rules_fingerprint` 按**重算时的
+        当前配方**写 —— 于是配方一改，最近 3 天旧窗口的 `drifted` 标记会跟着变（它们
+        本来就该按新口径重算）；更早的窗口保持首次事实不动。
+
         除窗口内 `sold_qty` 外，再写 0046 加的实际侧列：窗口后 1h / 2h / 24h 的
         **累计**量、堂食 / 外卖拆分、退菜近似量与逐小时曲线。轨迹列只在观测点真正
-        到齐时写（窗口刚结束时 1h/2h/24h 还没发生），没到齐留 NULL，由
-        `backfill_actual_trajectories` 随后补齐 —— 写 0 会被误读成「之后没人买」。
+        到齐时写（窗口刚结束时 1h/2h/24h 还没发生），没到齐不写 —— 写 0 会被误读成
+        「之后没人买」。刷新时同理：只覆盖已经到点的列，不把已有值抹回 NULL。
         """
         now = now or datetime.now(CHINA_TZ)
+        refresh_cutoff = (now - timedelta(days=ACTUALS_REFRESH_DAYS)).isoformat()
         tdb = db.table("prep_plan_snapshots")
         async with tdb.conn.cursor() as cursor:
             await cursor.execute(
                 """
-                SELECT s.window_start, s.window_end, MIN(s.plan_day) AS plan_day
+                SELECT s.window_start, s.window_end, MIN(s.plan_day) AS plan_day,
+                       COUNT(a.id) > 0 AS has_actuals
                 FROM prep_plan_snapshots s
                 LEFT JOIN prep_plan_actuals a
                        ON a.window_start = s.window_start AND a.window_end = s.window_end
-                WHERE a.id IS NULL AND s.window_end <= ?
+                WHERE s.window_end <= ?
                 GROUP BY s.window_start, s.window_end
+                HAVING COUNT(a.id) = 0 OR s.window_end >= ?
                 ORDER BY s.window_start
                 """,
-                (now.isoformat(),),
+                (now.isoformat(), refresh_cutoff),
             )
             pending = await cursor.fetchall()
 
@@ -1421,6 +1478,7 @@ class PrepPlanService:
         computed_at = datetime.now(CHINA_TZ).isoformat()
         items = await self._load_items(db)
         written = 0
+        refreshed = 0
         adb = db.table("prep_plan_actuals")
         for row in pending:
             start = datetime.fromisoformat(row["window_start"])
@@ -1436,10 +1494,18 @@ class PrepPlanService:
             one_hour_ready = now >= end + timedelta(hours=1)
             two_hours_ready = now >= end + timedelta(hours=2)
             next_day_ready = now >= end + timedelta(hours=24)
+            is_refresh = bool(row["has_actuals"])
             window_rows = 0
             async with adb.conn.cursor() as cursor:
                 for item in items:
                     hourly = _hourly_json(stats["hourly"], item)
+                    sold_qty = round(_sold_qty_for(stats["window"], item), 2)
+                    sold_1h = round(_sold_qty_for(stats["sold_1h"], item), 2)
+                    sold_2h = round(_sold_qty_for(stats["sold_2h"], item), 2)
+                    sold_next_day = round(_sold_qty_for(stats["sold_next_day"], item), 2)
+                    dine_in = round(_sold_qty_for(stats["dine_in"], item), 2)
+                    delivery = round(_sold_qty_for(stats["delivery"], item), 2)
+                    refund = round(_sold_qty_for(stats["refund"], item), 2)
                     await cursor.execute(
                         """
                         INSERT INTO prep_plan_actuals (
@@ -1458,28 +1524,64 @@ class PrepPlanService:
                             item["item_name"],
                             item["unit"],
                             item["station"] or POSITION_STATION_MAP.get(item["position"], ""),
-                            round(_sold_qty_for(stats["window"], item), 2),
+                            sold_qty,
                             fingerprint,
                             computed_at,
-                            round(_sold_qty_for(stats["sold_1h"], item), 2)
-                            if one_hour_ready else None,
-                            round(_sold_qty_for(stats["sold_2h"], item), 2)
-                            if two_hours_ready else None,
-                            round(_sold_qty_for(stats["sold_next_day"], item), 2)
-                            if next_day_ready else None,
-                            round(_sold_qty_for(stats["dine_in"], item), 2),
-                            round(_sold_qty_for(stats["delivery"], item), 2),
-                            round(_sold_qty_for(stats["refund"], item), 2),
+                            sold_1h if one_hour_ready else None,
+                            sold_2h if two_hours_ready else None,
+                            sold_next_day if next_day_ready else None,
+                            dine_in,
+                            delivery,
+                            refund,
                             hourly,
                         ),
                     )
                     written += 1
                     window_rows += 1
+
+                    if not is_refresh:
+                        continue
+                    # 刷新窗口：实际量与轨迹按当前配方 / 当前订单重算；观测点没到的
+                    # 轨迹列不进 SET，避免把已经写过的值抹回 NULL。
+                    columns = [
+                        "sold_qty = ?", "rules_fingerprint = ?", "computed_at = ?",
+                        "dine_in_qty = ?", "delivery_qty = ?", "refund_qty = ?",
+                        "hourly_json = ?",
+                    ]
+                    values: List[Any] = [
+                        sold_qty, fingerprint, computed_at,
+                        dine_in, delivery, refund, hourly,
+                    ]
+                    if one_hour_ready:
+                        columns.append("sold_1h = ?")
+                        values.append(sold_1h)
+                    if two_hours_ready:
+                        columns.append("sold_2h = ?")
+                        values.append(sold_2h)
+                    if next_day_ready:
+                        columns.append("sold_next_day = ?")
+                        values.append(sold_next_day)
+                    await cursor.execute(
+                        "UPDATE prep_plan_actuals SET " + ", ".join(columns) + """
+                        WHERE tenant_id = 1
+                          AND window_start = ? AND window_end = ?
+                          AND prep_item_id = ?
+                        """,
+                        (
+                            *values,
+                            row["window_start"],
+                            row["window_end"],
+                            int(item["prep_item_id"]),
+                        ),
+                    )
+                    refreshed += cursor.rowcount
             await adb.commit()
 
-            # 事件采集（票 03）：一个窗口回填完成 = 一条窗口级事件。`prep_item_id`
-            # 留空（不对应某一个品），窗口边界与品数放 meta；重跑回填时上面的
-            # `a.id IS NULL` 已经把这个窗口排除了，`record_event` 的幂等再兜一层。
+            if is_refresh:
+                continue
+            # 事件采集（票 03）：一个窗口首次回填完成 = 一条窗口级事件。`prep_item_id`
+            # 留空（不对应某一个品），窗口边界与品数放 meta；刷新窗口不再记事件，
+            # 否则每小时的 3 天重算会把同一条「窗口结束」刷成几十条。
             await prep_review_events.record_event(
                 db,
                 at=computed_at,
@@ -1499,6 +1601,7 @@ class PrepPlanService:
             "success": True,
             "windows": len(pending),
             "rows": written,
+            "refreshed": refreshed,
             "trajectories": trajectories,
         }
 
