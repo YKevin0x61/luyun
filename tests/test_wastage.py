@@ -468,9 +468,12 @@ class WastageStoreTest(unittest.IsolatedAsyncioTestCase):
         await self.store.add_record(a, item_name="五花肉", quantity=1, unit="kg", reason="spoiled")
         await self.store.add_record(b, item_name="豆腐", quantity=1, unit="盒", reason="expired")
 
-        self.assertEqual(await self.store.suggestions(a), ["五花肉"])
         self.assertEqual(
-            sorted(await self.store.suggestions(ADMIN_ACTOR)), sorted(["五花肉", "豆腐"])
+            await self.store.suggestions(a), [{"item_name": "五花肉", "unit": "kg"}]
+        )
+        self.assertEqual(
+            sorted(await self.store.suggestions(ADMIN_ACTOR), key=lambda d: d["item_name"]),
+            [{"item_name": "五花肉", "unit": "kg"}, {"item_name": "豆腐", "unit": "盒"}],
         )
 
     # ── 更正：24 小时内、仅限本人 ────────────────────────────────────────────
@@ -626,7 +629,9 @@ class WastageStoreTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stats["total_count"], 1)
         self.assertEqual([row["item_name"] for row in stats["top_items"]], ["豆腐"])
 
-        self.assertEqual(await self.store.suggestions(actor), ["豆腐"])
+        self.assertEqual(
+            await self.store.suggestions(actor), [{"item_name": "豆腐", "unit": "盒"}]
+        )
         templates = await self.store.templates(actor)
         self.assertEqual(
             [t["item_name"] for t in templates["templates"]], ["豆腐"]
@@ -1270,7 +1275,9 @@ def test_employee_with_wastage_cap_sees_the_whole_shop(wastage_http):
     assert client.get(f"/api/wastage/images/{capture_id}").status_code == 200
     # 补全也跟着看全店（他登记时该认得店里所有会坏的物料）。
     suggestions = client.get("/api/wastage/suggestions").json()["suggestions"]
-    assert set(suggestions) >= {"五花肉", "生菜"}
+    assert {row["item_name"] for row in suggestions} >= {"五花肉", "生菜"}
+    # 点一下 chip 连单位一起填：每条建议都带着这个名字最近一次用的单位。
+    assert all(row["unit"] for row in suggestions)
 
     # 收回就当场收回：下一次请求 403，明细回到只看自己的那几笔。
     _run(accounts.set_admin_caps(other_id, []))

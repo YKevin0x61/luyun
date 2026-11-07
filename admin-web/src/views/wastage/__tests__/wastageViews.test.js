@@ -201,7 +201,15 @@ describe('损耗登记页（员工端）', () => {
     get.mockImplementation((url) => {
       if (url === '/api/wastage/meta') return Promise.resolve(META)
       if (url === '/api/wastage/templates') return Promise.resolve(TEMPLATES)
-      if (url === '/api/wastage/suggestions') return Promise.resolve({ suggestions: ['五花肉', '豆腐'] })
+      // 带单位：chips 点一下要能把「五花肉 + kg」一起填好（2026-11-07）。
+      if (url === '/api/wastage/suggestions') {
+        return Promise.resolve({
+          suggestions: [
+            { item_name: '五花肉', unit: 'kg' },
+            { item_name: '豆腐', unit: '盒' },
+          ],
+        })
+      }
       if (url === '/api/wastage/records') return Promise.resolve(RECORDS)
       if (url === '/api/prep-plan/items') {
         return Promise.resolve({
@@ -276,11 +284,14 @@ describe('损耗登记页（员工端）', () => {
     // 选填三项收在必填之后，一行三颗小按钮。
     expect(html.indexOf('loss-reasons')).toBeLessThan(html.indexOf('loss-more'))
     const moreButtons = wrapper.findAll('.loss-more-btn')
-    expect(moreButtons).toHaveLength(3)
+    // 四颗：照片 / 备注 / 日期 / 对应备货品。「对应备货品」原本插在必填三项中间，
+    // 70px 会把「原因」挤出首屏 —— 2026-11-07 挪进这一行，一行横滑不换行。
+    expect(moreButtons).toHaveLength(4)
     expect(moreButtons.map((node) => node.text())).toEqual([
       '＋现场照片',
       '＋备注',
       '改日期 · 今天',
+      '＋对应备货品',
     ])
     // 默认全收着：照片区、备注框、日期快捷都不在 DOM 里（首屏一屏看完）。
     expect(wrapper.find('.loss-photo').exists()).toBe(false)
@@ -309,7 +320,7 @@ describe('损耗登记页（员工端）', () => {
     const wrapper = await mountView(WastageRegisterView, '/workbench/staff/loss')
     await flushPromises()
 
-    // 单位是 chips，没有原生 select（页面上唯一的 select 是下面的「对应备货品」）。
+    // 单位是 chips，没有原生 select（原生 select 只剩收在选填里的「对应备货品」）。
     expect(wrapper.findAll('.loss-units select')).toHaveLength(0)
     // 只摆前 6 个常用单位 + 「其他…」。
     const chips = wrapper.findAll('.loss-unit-chip')
@@ -350,8 +361,10 @@ describe('损耗登记页（员工端）', () => {
     const wrapper = await mountView(WastageRegisterView, '/workbench/staff/loss')
     await flushPromises()
 
-    // 唯一的原生 select 就是这个下拉（单位已经改成 chips）。
-    const select = wrapper.get('select')
+    // 原生 select 只剩这一个，且收在选填行里：点开才有（首屏不占位）。
+    expect(wrapper.find('select').exists()).toBe(false)
+    await moreButton(wrapper, '对应备货品').trigger('click')
+    const select = wrapper.get('form select')
     expect(wrapper.text()).toContain('对应备货品')
     expect(select.element.value).toBe('')
 
@@ -489,14 +502,54 @@ describe('损耗登记页（员工端）', () => {
     expect(document.activeElement).toBe(wrapper.get('textarea').element)
   })
 
-  it('物料名可以点「最近记过的」直接填，不用手打', async () => {
+  it('物料名可以点「最近记过的」直接填，名字和单位一起好（2026-11-07）', async () => {
     const wrapper = await mountView(WastageRegisterView, '/workbench/staff/loss')
     await flushPromises()
 
     const chips = wrapper.findAll('.loss-quick-chip')
     expect(chips.length).toBeGreaterThan(0)
+    // chip 上带单位：员工看得见「五花肉 kg」，不是填完名字还得再猜一次单位。
+    expect(chips[0].text()).toContain('五花肉')
+    expect(chips[0].find('.loss-quick-unit').text()).toBe('kg')
     await chips[0].trigger('click')
     expect(wrapper.get('#wastage-item-name').element.value).toBe('五花肉')
+    // 一下就把单位也选好了（省掉一次点击，这正是这一页存在的意义）。
+    expect(unitChip(wrapper, 'kg').classes()).toContain('on')
+  })
+
+  it('「从备货单选」：品名和单位一起填好，还挂上对应备货品', async () => {
+    const wrapper = await mountView(WastageRegisterView, '/workbench/staff/loss')
+    await flushPromises()
+
+    // 默认没有弹层（它挂在 body 层，不在表单里）。
+    expect(wrapper.find('.loss-picker').exists()).toBe(false)
+    await wrapper.get('.loss-link-btn').trigger('click')
+    expect(wrapper.find('.loss-picker').exists()).toBe(true)
+    // 备货品主数据来的两项都列着，带单位与分类。
+    const rows = wrapper.findAll('.loss-picker-item')
+    expect(rows).toHaveLength(2)
+    expect(rows[0].text()).toContain('五花肉')
+    expect(rows[0].text()).toContain('kg')
+
+    // 搜「河」只剩河粉（员工记得住名字就行）。
+    await wrapper.get('.loss-picker input[type="search"]').setValue('河')
+    expect(wrapper.findAll('.loss-picker-item')).toHaveLength(1)
+    await wrapper.get('.loss-picker-item').trigger('click')
+
+    // 弹层关了，物料与单位都填好，来源说得清是哪一条。
+    expect(wrapper.find('.loss-picker').exists()).toBe(false)
+    expect(wrapper.get('#wastage-item-name').element.value).toBe('河粉')
+    expect(unitChip(wrapper, '斤').classes()).toContain('on')
+    expect(wrapper.get('.loss-source').text()).toContain('河粉 斤')
+
+    // 提交时把对应备货品一起带上（复盘按它对齐数量）。材料齐了就能提交，
+    // 数量只有现场知道 —— 所以弹层只填品名与单位。
+    await wrapper.get('input[type="number"]').setValue('2')
+    await wrapper.findAll('.loss-reason')[0].trigger('click')
+    await wrapper.get('form').trigger('submit')
+    await flushPromises()
+    expect(post).toHaveBeenCalledTimes(1)
+    expect(post.mock.calls[0][1].prep_item_id).toBe(4)
   })
 
   it('提交成功后：不滚页面、提示在吸底条里、表单清空但原因留着、焦点回物料框（4.1.7）', async () => {

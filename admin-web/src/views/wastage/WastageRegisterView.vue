@@ -87,6 +87,11 @@ const remark = ref('')
 /** 可选的「对应备货品」：留空 = 不挂，复盘按品名兜底（0049 的 prep_item_id 可空）。 */
 const prepItems = ref([])
 const prepItemId = ref('')
+/** 「从备货单选」面板（2026-11-07）：物料不一定要手打 —— 备货品主数据里已经有品名和单位，
+ *  选中就把两件一起填好，还顺带挂上「对应备货品」的关联。只在新建时给入口。 */
+const prepPickerOpen = ref(false)
+const prepPickerSearch = ref('')
+const prepPickerInput = ref(null)
 const day = ref('')
 const images = ref([])
 const uploading = ref(false)
@@ -97,6 +102,9 @@ const cameraOpen = ref(false)
 const photoOpen = ref(false)
 const remarkOpen = ref(false)
 const dateOpen = ref(false)
+/** 「对应备货品」也是选填：不选时复盘按品名兜底（0049 的 prep_item_id 可空）。
+ *  2026-11-07 从必填三项中间挪进选填行 —— 它占 70px，会把「原因」挤出首屏。 */
+const prepSelectOpen = ref(false)
 
 // 就地校验要聚焦的那几个控件。
 const formBox = ref(null)
@@ -204,7 +212,16 @@ const todayCountText = computed(() => {
  *  datalist 补全在 iOS 上基本不弹（这一页的员工绝大多数拿 iPhone）。 */
 const quickItems = computed(() => {
   const current = itemName.value.trim()
-  return suggestions.value.filter((name) => name !== current).slice(0, 8)
+  return suggestions.value.filter((row) => row && row.item_name !== current).slice(0, 8)
+})
+
+/** 「从备货单选」的列表：按名字搜索（员工记得住「餐包」，不一定记得分类）。 */
+const prepPickerList = computed(() => {
+  const keyword = prepPickerSearch.value.trim()
+  const rows = prepItems.value.filter(
+    (row) => row && (!keyword || String(row.item_name || '').includes(keyword)),
+  )
+  return rows.slice(0, 80)
 })
 
 /** 还差哪一项（按钮上那句小字「还差原因」）—— 只用于文案，校验仍是 firstMissing()。 */
@@ -285,7 +302,8 @@ function applyQueryPrefill() {
   if (!name) return false
   itemName.value = name.slice(0, maxItemName.value)
   if (unitValue) applyUnitChoice(unitValue)
-  prepSource.value = [itemName.value, unitValue].filter(Boolean).join(' ')
+  prepSource.value =
+    '从备货计划带过来：' + [itemName.value, unitValue].filter(Boolean).join(' ') + '（数量自己填）'
   return true
 }
 
@@ -366,8 +384,40 @@ function pickDay(value) {
   day.value = value
 }
 
-function pickItem(name) {
+/** 点「最近记过」：名字和单位一起填好（2026-11-07）。chip 上写着「五花肉 kg」，只填名字
+ *  就还得再点一次单位 —— 而这一页存在的意义就是少点。单位取服务端给的最近一次写法。 */
+function pickItem(name, itemUnit) {
   itemName.value = name
+  if (itemUnit) applyUnitChoice(itemUnit)
+}
+
+/** 打开「从备货单选」：顺手锁住背后页面的滚动（弹层是 fixed，手指划过遮罩会带着背景跑）。 */
+function openPrepPicker() {
+  prepPickerSearch.value = ''
+  prepPickerOpen.value = true
+  if (typeof document !== 'undefined') document.body.style.overflow = 'hidden'
+  // 打开就把光标放进搜索框：手机上少点一次，也能直接弹键盘筛。
+  nextTick(() => {
+    if (prepPickerInput.value) prepPickerInput.value.focus()
+  })
+}
+
+function closePrepPicker() {
+  prepPickerOpen.value = false
+  prepPickerSearch.value = ''
+  if (typeof document !== 'undefined') document.body.style.overflow = ''
+}
+
+/** 选中一份备货品：品名 + 单位一起填，顺带挂上「对应备货品」。**不填数量** —— 坏了多少
+ *  只有站在现场的人知道。 */
+function pickPrepItem(row) {
+  if (!row) return
+  itemName.value = String(row.item_name || '')
+  if (row.unit) applyUnitChoice(row.unit)
+  prepItemId.value = row.id === undefined || row.id === null ? '' : String(row.id)
+  prepSource.value =
+    '从备货清单选的：' + [row.item_name, row.unit].filter(Boolean).join(' ') + '（数量自己填）'
+  closePrepPicker()
 }
 
 function pickUnit(value) {
@@ -594,6 +644,17 @@ function toggleRemark() {
 function toggleDate() {
   dateOpen.value = !dateOpen.value
 }
+function togglePrepSelect() {
+  prepSelectOpen.value = !prepSelectOpen.value
+}
+
+/** 选填行那颗按钮的文案：没挂就是「＋对应备货品」，挂上了就报出是哪一个（否则员工看不出
+ *  自己刚才那一下挂没挂上）。 */
+const prepPickedLabel = computed(() => {
+  if (!prepItemId.value) return '＋对应备货品'
+  const hit = prepItems.value.find((row) => String(row.id) === String(prepItemId.value))
+  return hit ? '备货品 · ' + [hit.item_name, hit.unit].filter(Boolean).join(' ') : '＋对应备货品'
+})
 
 /** 点「拍一张」：就地展开取景框（页内相机，不跳系统相机）。 */
 function openCamera() {
@@ -658,6 +719,7 @@ function afterSaved() {
   photoOpen.value = false
   remarkOpen.value = false
   dateOpen.value = false
+  prepSelectOpen.value = false
   cameraOpen.value = false
   prepSource.value = ''
   clearDraft()
@@ -898,6 +960,7 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+  document.body.style.overflow = ''
   document.removeEventListener('click', onDocumentClick)
   if (templateTimer) clearTimeout(templateTimer)
   if (revokeTimer) clearTimeout(revokeTimer)
@@ -920,7 +983,7 @@ onUnmounted(() => {
         <span v-if="editingId" class="loss-status-edit">正在改 {{ editingDateLabel }} 那一笔</span>
       </p>
       <!-- 从备货计划带过来（spec 4.5）：说清这物料/单位是哪来的，数量仍然要现场填。 -->
-      <p v-if="prepSource" class="loss-source">从备货计划带过来：{{ prepSource }}（数量自己填）</p>
+      <p v-if="prepSource" class="loss-source">{{ prepSource }}</p>
       <p v-if="draftRestored" class="loss-hint loss-draft">上次没提交完的那一笔已恢复</p>
 
       <!-- 常用模板：我存过的（可删）在前，我最近常这么记的在后。 -->
@@ -971,9 +1034,17 @@ onUnmounted(() => {
         <!-- 必填一：物料。手输仍是主路（名字可能很长、可能是新东西），下面把「最近记过的」
              摆成一排可点的 chips —— 手机上的 datalist 补全在 iOS 基本不弹（2026-11-07）。 -->
         <div class="loss-field">
-          <label class="loss-label" for="wastage-item-name">
-            物料 <span class="loss-required">必填</span>
-          </label>
+          <div class="loss-label-row">
+            <label class="loss-label" for="wastage-item-name">
+              物料 <span class="loss-required">必填</span>
+            </label>
+            <button
+              v-if="!editingId && prepItems.length"
+              type="button"
+              class="loss-link-btn"
+              @click="openPrepPicker"
+            >从备货单选 ›</button>
+          </div>
           <input
             id="wastage-item-name"
             ref="itemInput"
@@ -986,18 +1057,18 @@ onUnmounted(() => {
             autocomplete="off"
           />
           <datalist id="wastage-item-names">
-            <option v-for="name in suggestions" :key="name" :value="name" />
+            <option v-for="row in suggestions" :key="row.item_name" :value="row.item_name" />
           </datalist>
           <div v-if="quickItems.length" class="loss-quick">
             <span class="loss-quick-hd">最近记过</span>
             <div class="loss-quick-list">
               <button
-                v-for="name in quickItems"
-                :key="name"
+                v-for="row in quickItems"
+                :key="row.item_name"
                 type="button"
                 class="loss-quick-chip"
-                @click="pickItem(name)"
-              >{{ name }}</button>
+                @click="pickItem(row.item_name, row.unit)"
+              >{{ row.item_name }}<em v-if="row.unit" class="loss-quick-unit">{{ row.unit }}</em></button>
             </div>
           </div>
         </div>
@@ -1044,19 +1115,6 @@ onUnmounted(() => {
           />
         </div>
 
-        <!-- 选填：对应备货品。只在新建时给入口 —— 更正接口按契约只改字段，不换关联。 -->
-        <label v-if="!editingId" class="loss-field">
-          <span class="loss-label">
-            对应备货品<span class="loss-hint">选填 · 复盘按它对齐数量</span>
-          </span>
-          <select v-model="prepItemId" class="loss-input loss-select-tap">
-            <option value="">不选（复盘按品名兜底）</option>
-            <option v-for="item in prepItems" :key="item.id" :value="String(item.id)">
-              {{ item.item_name }}<template v-if="item.unit"> · {{ item.unit }}</template>
-            </option>
-          </select>
-        </label>
-
         <!-- 必填三：原因。三列两行（6 个按钮），首屏省一行。 -->
         <div class="loss-field">
           <span class="loss-label">原因 <span class="loss-required">必填</span></span>
@@ -1098,7 +1156,29 @@ onUnmounted(() => {
             :aria-expanded="dateOpen"
             @click="toggleDate"
           >改日期 · {{ dayLabel }}</button>
+          <button
+            v-if="!editingId && prepItems.length"
+            type="button"
+            class="loss-more-btn"
+            :class="{ on: prepSelectOpen || prepItemId }"
+            :aria-expanded="prepSelectOpen"
+            @click="togglePrepSelect"
+          >{{ prepPickedLabel }}</button>
         </div>
+
+        <!-- 对应备货品（展开后）：选了就把这笔挂到备货主数据上，复盘能按它对齐数量。
+             从「备货单选」进来时已经自动挂好，这里给手打名字的人留一个补挂的出口。 -->
+        <label v-if="prepSelectOpen && !editingId" class="loss-field">
+          <span class="loss-label">
+            对应备货品<span class="loss-hint">选填 · 复盘按它对齐数量，不选按品名兜底</span>
+          </span>
+          <select v-model="prepItemId" class="loss-input loss-select-tap">
+            <option value="">不选（复盘按品名兜底）</option>
+            <option v-for="item in prepItems" :key="item.id" :value="String(item.id)">
+              {{ item.item_name }}<template v-if="item.unit"> · {{ item.unit }}</template>
+            </option>
+          </select>
+        </label>
 
         <!-- 现场照片（展开后）：仍是页内相机，一次一张、最多三张，拍满自动收起。 -->
         <div v-if="photoOpen && !editingId" class="loss-photo">
@@ -1263,6 +1343,40 @@ onUnmounted(() => {
         记错了不用憋着：{{ amendWindowHours }} 小时内本人可以「改」或「撤回」。
       </p>
     </template>
+
+    <!-- 从备货单选（2026-11-07）：备货品主数据里已有品名与单位，点一下两件一起填，
+         还顺带挂上「对应备货品」的关联。数量仍由现场按实际报损填。 -->
+    <div v-if="prepPickerOpen" class="loss-picker-scrim" @click="closePrepPicker"></div>
+    <section
+      v-if="prepPickerOpen"
+      class="loss-picker"
+      role="dialog"
+      aria-modal="true"
+      aria-label="从备货单选"
+      @keydown.esc="closePrepPicker"
+    >
+      <div class="loss-picker-hd">
+        <span>从备货单选</span>
+        <button type="button" class="loss-picker-x" @click="closePrepPicker">关闭</button>
+      </div>
+      <input
+        ref="prepPickerInput"
+        v-model="prepPickerSearch"
+        class="loss-input"
+        type="search"
+        placeholder="搜名字，例如：餐包"
+        autocomplete="off"
+      />
+      <ul v-if="prepPickerList.length" class="loss-picker-list">
+        <li v-for="row in prepPickerList" :key="row.id">
+          <button type="button" class="loss-picker-item" @click="pickPrepItem(row)">
+            <b>{{ row.item_name }}</b>
+            <em>{{ [row.unit, row.category].filter(Boolean).join(' · ') }}</em>
+          </button>
+        </li>
+      </ul>
+      <p v-else class="loss-muted">没有匹配的备货品，直接在上面手打名字也行。</p>
+    </section>
   </div>
 </template>
 
@@ -1347,7 +1461,17 @@ onUnmounted(() => {
 .loss-reason.on { border-color: var(--action); color: var(--action); font-weight: 600; }
 /* 选填三项收成一行小按钮（spec 4.1.5）：虚线 = 还没展开，实线 --action = 已展开。 */
 /* 与上面原因区留一口气：首屏里吸底条正好切在这一行上沿时，别露出半截虚线按钮。 */
-.loss-more { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0 12px; }
+/* 选填行也单行横滑（2026-11-07）：第 4 颗「对应备货品」加进来后换行会多占 50px，
+   而这一行必须只有一行高 —— 首屏要留给三项必填。 */
+.loss-more {
+  display: flex; flex-wrap: nowrap; gap: 8px; margin: 10px 0 12px;
+  overflow-x: auto; padding-bottom: 2px; -webkit-overflow-scrolling: touch;
+  scrollbar-width: none; scroll-snap-type: x proximity;
+  -webkit-mask-image: linear-gradient(to right, currentColor calc(100% - 18px), transparent);
+  mask-image: linear-gradient(to right, currentColor calc(100% - 18px), transparent);
+}
+.loss-more::-webkit-scrollbar { display: none; }
+.loss-more > * { flex: 0 0 auto; scroll-snap-align: start; }
 .loss-more-btn {
   min-height: var(--tap); padding: 0 12px;
   font-size: 12.5px; font-family: inherit;
@@ -1402,6 +1526,46 @@ onUnmounted(() => {
   border: 1px solid var(--line); border-radius: 999px; cursor: pointer;
 }
 .loss-quick-chip:active { border-color: var(--action); color: var(--action); }
+/* 「最近记过」chip 上的单位（2026-11-07）：名字是主角，单位灰一档 —— 点一下两件一起填。 */
+.loss-quick-unit { font-style: normal; margin-left: 3px; font-size: 11px; color: var(--ink-dim); }
+/* 「从备货单选」入口：与「必填」同一行右侧的轻量链接，点开是底部弹层。
+   不占 44px 行高 —— 首屏每一像素都要留给三项必填（主路径是手输与「最近记过」）。 */
+.loss-label-row { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.loss-label-row .loss-label { margin-bottom: 5px; }
+.loss-link-btn {
+  padding: 2px 0; margin: 0;
+  font-size: 12px; font-family: inherit; font-weight: 600;
+  color: var(--action); background: transparent; border: 0; cursor: pointer;
+}
+/* 从备货单选：遮罩挡住底栏，弹层压在它上面；列表自己滚（备货品几十个）。 */
+.loss-picker-scrim { position: fixed; inset: 0; z-index: var(--z-scrim); background: var(--scrim); }
+.loss-picker {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: var(--z-dialog);
+  display: flex; flex-direction: column; gap: 10px;
+  max-height: 76vh; padding: 14px 14px calc(14px + var(--safe-b, 0px));
+  background: var(--surface-0);
+  border-top: 1px solid var(--line);
+  border-top-left-radius: 16px; border-top-right-radius: 16px;
+}
+.loss-picker-hd {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
+  font-size: 14px; font-weight: 600; color: var(--ink);
+}
+.loss-picker-x {
+  min-height: var(--tap); padding: 0 4px;
+  font-size: 12px; font-family: inherit;
+  color: var(--action); background: transparent; border: 0; cursor: pointer;
+}
+.loss-picker-list { list-style: none; margin: 0; padding: 0; overflow-y: auto; -webkit-overflow-scrolling: touch; }
+.loss-picker-item {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 10px;
+  width: 100%; min-height: var(--tap); padding: 0 2px;
+  font-family: inherit; font-size: 13px; color: var(--ink); text-align: left;
+  background: transparent; border: 0; border-top: 1px solid var(--line); cursor: pointer;
+}
+.loss-picker-item:first-child { border-top: 0; }
+.loss-picker-item b { font-size: 14px; }
+.loss-picker-item em { font-style: normal; font-size: 12px; color: var(--ink-dim); }
 /* 日期快捷：今天 / 昨天。 */
 .loss-days { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 8px; }
 .loss-day {

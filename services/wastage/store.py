@@ -941,26 +941,33 @@ class WastageStore:
 
     # ── 历史建议 ────────────────────────────────────────────────────────────
     @_needs_migration
-    async def suggestions(self, actor: WastageActor, *, days: int = 30, limit: int = 10) -> list[str]:
-        """物料名称建议：近 N 天登记过的名字，去重、保留最近的顺序。
+    async def suggestions(self, actor: WastageActor, *, days: int = 30, limit: int = 10) -> list[dict]:
+        """物料建议：近 N 天登记过的名字 + 这个名字最近一次用的单位，去重、保留最近的顺序。
 
         员工那一档只看自己登记过的（他填的多半是自己经手过的东西）；管理端看全店
         —— 他登记时该认得店里所有会坏的物料。开了「损耗分析」能力的员工也看全店
         （他看得到全店的明细，补全就不该只给一半）。源项目的 `getSuggestions` 只给员工
         自己那一份，这里多出来的一档是给「店长也能登记」这条定的。
+
+        **带单位**（2026-11-07）：页面把这几条摆成「最近记过」的 chips，点一下就该把
+        「五花肉 + kg」一起填好 —— 只给名字的话员工还得再点一次单位，而这一页的
+        全部意义就是少点几次。单位取这个名字**最近一次**登记的写法（排序后首次出现即
+        最近），跟人当下的习惯一致；名字在 30 天里只出现过一次也有单位。
         """
         since = (self._now_dt().date() - timedelta(days=max(1, int(days)))).isoformat()
         clause, params = self._scope_clause(actor, start_date=since)
         rows = await self._rows(
-            f"SELECT item_name FROM wastage_records{clause}"
+            f"SELECT item_name, unit FROM wastage_records{clause}"
             " ORDER BY wastage_date DESC, id DESC LIMIT 200",
             tuple(params),
         )
-        seen: list[str] = []
+        seen: list[dict] = []
+        names: set[str] = set()
         for row in rows:
             name = row["item_name"]
-            if name and name not in seen:
-                seen.append(name)
+            if name and name not in names:
+                names.add(name)
+                seen.append({"item_name": name, "unit": str(row["unit"] or "")})
             if len(seen) >= max(1, min(int(limit), 20)):
                 break
         return seen
