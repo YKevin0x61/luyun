@@ -130,3 +130,7 @@ docs/adr/*
 
 # AgentTeams 团队协作状态目录（本地运行期产物，不进版本控制）
 .agent-teams/
+
+# Agent 记忆与本地工具运行期状态（含个人偏好记录，不进版本控制）
+.mnemon/
+.dsh/
