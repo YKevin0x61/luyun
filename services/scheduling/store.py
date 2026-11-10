@@ -434,7 +434,7 @@ def _swap_couple_text(row: dict, people: dict) -> str:
     state = (
         "还在等对方同意"
         if row["status"] == STATUS_PENDING_PEER
-        else "还在等店长批"
+        else "还在等管理员批"
     )
     return f"{name(row['employee_id'])} 和 {name(row['peer_employee_id'])}（{state}）"
 

@@ -67,3 +67,44 @@ describe('加班与补钟（/workbench/staff/overtime）', () => {
     }
   })
 })
+
+describe('员工端「我的时间」三页走查修复（2026-11-09 A 组）', () => {
+  const overtime = read('../../overtime/MeOvertimeView.vue')
+  const month = read('../../today/TodayMonthView.vue')
+  const today = read('../../today/TodayView.vue')
+
+  it('负零不再出现：0 小时写成 0，不写成「−0」', () => {
+    expect(overtime).toMatch(/function hoursLabel\(/)
+    expect(overtime).toMatch(/text === '−0' \? '0' : text/)
+    expect(overtime).toMatch(/\{\{ hoursLabel\(summary\.approved\.net_half_hours\) \}\}/)
+    expect(overtime).toMatch(/\{\{ hoursLabel\(summary\.pending\.net_half_hours\) \}\}/)
+    // 抵扣卡的「本月已批补钟 0 小时」也走同一个包装。
+    expect(overtime).toMatch(/hoursLabel\(c\.makeup_half_hours\)/)
+  })
+
+  it('批准前先确认：店长在这里撤不回，误点一次就落账', () => {
+    expect(overtime).toContain("import ConfirmDialog from '../../components/admin/ConfirmDialog.vue'")
+    expect(overtime).toMatch(/askApprove\('entry', entry\)/)
+    expect(overtime).toMatch(/askApprove\('deduction', item\)/)
+    expect(overtime).toContain('批准这一笔？')
+    expect(overtime).toContain('你自己撤不回')
+    expect(overtime).toContain('confirmApprove')
+  })
+
+  it('提交按钮灰着时写清为什么（事由为空是唯一原因）', () => {
+    expect(overtime).toMatch(/class="oRule oFormHint"/)
+    expect(overtime).toContain('填了事由就能提交。')
+    expect(overtime).toContain('选好日期、填了事由就能提交。')
+  })
+
+  it('整月存假的「明细」是 ≥44px 的触控行，不再是一条 19px 的小字', () => {
+    expect(month).toMatch(/\.leaveMore summary\s*\{[^}]*display:\s*flex/s)
+    expect(month).toMatch(/\.leaveMore summary\s*\{[^}]*min-height:\s*var\(--tap\)/s)
+  })
+
+  it('今日成绩空态给出下一步（去卫生交一项），且不新增卫生数据请求', () => {
+    expect(today).toContain('去卫生交一项 ›')
+    expect(today).toMatch(/to="\/workbench\/staff\/clean"/)
+    expect(today).not.toMatch(/staffRequest\('\/api\/hygiene\/staff\/daily-work'\)/)
+  })
+})

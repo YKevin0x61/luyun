@@ -49,8 +49,8 @@ SUPER = {"kind": "super"}
 # 固定时钟 2026-09-13 10:00 所属的营业日（06:00 切日，10:00 已经过了切日点）。
 DAY = "2026-09-13"
 NEXT_DAY = "2026-09-14"
-ASSIGNMENT_FROM_SCHEDULE = "今天上哪个班、在哪个区由排班决定：去「今天」页看你的班，要改请找店长"
-SHIFT_FROM_SCHEDULE = "今天的班次由排班决定：去「今天」页看你的班，要改请找店长"
+ASSIGNMENT_FROM_SCHEDULE = "今天上哪个班、在哪个区由排班决定：去「今天」页看你的班，要改请找管理员"
+SHIFT_FROM_SCHEDULE = "今天的班次由排班决定：去「今天」页看你的班，要改请找管理员"
 
 
 def _run(coro):

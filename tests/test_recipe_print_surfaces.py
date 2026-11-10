@@ -80,9 +80,14 @@ def test_qr_view_lists_stations_and_encodes_detail_slug():
     岗位码从未张贴过，改地址没有存量风险 —— 但正因如此，地址写错不会有人当场发现，
     这里就得把「印出去的是哪条路径」钉死：常量来自 `recipePaths.js` 那一份（页面里的
     router-link 与登录回跳白名单也引它），不是页面里各自抄的字面量。
+
+    读的是 `/api/recipes/qr-stations` 而不是管理端的 `/api/recipes/stations`：2026-11-10
+    起这一页也开给只勾了「岗位二维码」能力的管理员（只读、不读配方正文），所以单独一条
+    最小读面 —— 这里顺便钉住它别再退回需要完整配方读权限的那条。
     """
     src = QR_VIEW.read_text(encoding="utf-8")
-    assert "/api/recipes/stations" in src
+    assert "/api/recipes/qr-stations" in src
+    assert "'/api/recipes/stations'" not in src
     # 拼地址用的是那份常量，而不是再抄一遍 `/recipe/detail`。
     assert "origin}${RECIPE_DETAIL_PATH}?slug=" in src
     assert "from '../../utils/recipePaths'" in src

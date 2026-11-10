@@ -4,8 +4,9 @@
 
 **这是投影，不是打卡系统**（`docs/adr/0112`）：不记上下班时刻、不判迟到早退、不算
 实际工时。三个输入是排班结果（`staff_assignments`）、净时长（`overtime_entries` 里
-**已批准**的那几笔，正负相抵）与花名册（公共层 `services.identity`）。这一层**只读**，
-而且只算当月 —— 不提供历史月份的参数，选不到过去。
+**已批准**的那几笔，正负相抵）与花名册（公共层 `services.identity`）。这一层**只读**：
+缺省算当月，也可以按 `month=YYYY-MM` 回看历史月 —— 历史月的数字仍是按现有排班 /
+加班 / 台账**重算**，不是封账快照；写路径仍只认当月。
 
 口径（票 01；假期那一套是票 03 的事）：
 
@@ -549,14 +550,30 @@ class AttendanceStore:
         }
 
     @_needs_migration
-    async def sheet(self) -> dict:
-        """当月那一张考勤表：月框 + 一人一张卡。**唯一的读口**，没有月份参数。"""
+    async def sheet(self, month: Optional[str] = None) -> dict:
+        """某一个月的那张考勤表：月框 + 一人一张卡。管理端唯一的读口。
+
+        `month` 省略就是本月（与 2026-11-10 之前的行为逐字一致）；给了 `YYYY-MM` 就
+        算那个月 —— 历史月**重算**（排班 / 加班 / 台账都按现有数据），不是封账快照。
+        未来月（大于真实今天的年月）拒绝：考勤表不预读还没开始的月。
+
+        `is_today` / `is_future` 仍以**真实今天**为基准：历史月里它们全为 false。
+        假期台账的 `today` 参数取 `as_of = min(今天, 目标月末)`，与 `leave_summary()` /
+        `seal()` 同一口径（生日假 / 年假按目标月判）。
+        """
         today = self.today()
-        month = today[:7]
+        current_month = today[:7]
+        target = _validated_month(month) if month else current_month
+        if target > current_month:
+            raise AttendanceError("future_month", target)
+        month = target
         start = date.fromisoformat(f"{month}-01")
         next_month = _next_month(start)
         # 区间右开：`[本月一号, 下月一号)` —— 不自己数月份长度（2 月与 31 天的月各一次坑）。
         first, until = start.isoformat(), next_month.isoformat()
+        # 计算历史月的时点：过去月顶到月末（与封账同口径），当月就是今天。
+        month_end = (next_month - timedelta(days=1)).isoformat()
+        as_of = min(today, month_end)
 
         rows, half_rests = await self._assignment_rows(first, until)
         totals, recorded = await self._month_entries(first, until)
@@ -644,11 +661,14 @@ class AttendanceStore:
                     # （手填 ?? 公式），公式值另给 `balance_computed`。
                     "leave": _with_manual_balance(
                         _leave_terms(
-                            today=today,
+                            # 历史月按月末算（与封账同口径），当月就是今天 —— 出生日期
+                            # 与年资都是按目标月判的，不能拿「今天所在月」去套历史月。
+                            today=as_of,
                             theirs=theirs,
                             half_rest_days=their_half_rests,
                             holidays=holidays,
                             employee=employee,
+                            month=month,
                             # **本月在岗天数**（2026-10-29）：入职当月从他入职那天算起，
                             # 不是整月自然天数 —— 见 `_on_duty_days`。
                             month_days=_on_duty_days(
@@ -717,13 +737,20 @@ class AttendanceStore:
                 }
             )
 
+        # 该目标月是否已经封账（票 04 写的那一行）：封账状态只读台账 `sealed_at`，
+        # 不做封账快照 —— 历史月的表格内容仍是按现有排班/加班/台账重算的结果。
+        sealed_at = _sealed_at(ledger, month)
         return {
             "month": month,
             "today": today,
             # 当月只算不落库（`docs/adr/0113`）：这个月的每一个数都还会随排班与加班变，
             # 页面照着这一位标「暂算值（未封账）」。封账封的是**已经过完的**月份
-            # （票 04 写台账那一行），当月永远不封 —— 所以这一位眼下恒为 True。
-            "provisional": True,
+            # （票 04 写台账那一行），当月永远不封 —— 所以当月的这一位恒为 True。
+            # 历史月则看台账里有没有 `sealed_at`：封过账的月不再变（只读回看）。
+            "provisional": sealed_at is None,
+            # 封账时刻（票 04）：历史月用它标「已封账 · 封账时间」；当月恒为 None。
+            # 注意这是**状态**，不是这一页数字的出处 —— 数字仍是重算值。
+            "sealed_at": sealed_at,
             # 上月封账（票 04）：`sealed_at` 是那一刻的定稿时刻，有它才说明卡片上的
             # 「上月存假」来自结转而不是人工期初。没有这一位（老载荷）时页面按「还没封」画。
             "previous_month": {

@@ -11,7 +11,7 @@
  *
  * 驳回必须写原因：员工照着那句话重拍（跟日常驳回同一条口径）。
  */
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { api } from '../../api/client'
 import { useHygieneRealtime } from '../../composables/useHygieneRealtime'
 import { useImageUploadQueueStore } from '../../stores/imageUploadQueue'
@@ -31,6 +31,14 @@ const busyId = ref(null)
 const rejectFor = ref(null)
 const rejectNote = ref('')
 const notice = ref('')
+
+/** 标准图文件不在盘上时（被清理 / 换机后没带图），<img> 只会裂开 —— 没有兜底时
+ *  超级管理员看到一块「裂图」，既不知道是不是自己网差，也不知道该做什么。 */
+const standardBroken = ref(false)
+watch(
+  () => `${day.value.has_standard}|${day.value.standard_updated_at}`,
+  () => { standardBroken.value = false },
+)
 
 const imageUploads = useImageUploadQueueStore()
 
@@ -183,10 +191,14 @@ function pickStandard(event) {
         </header>
         <div class="standard-body">
           <div v-if="day.has_standard" class="standard-shot">
-            <a :href="standardUrl()" target="_blank" rel="noopener">
-              <img :src="standardUrl('preview')" alt="仪容仪表标准图">
+            <a v-if="!standardBroken" :href="standardUrl()" target="_blank" rel="noopener">
+              <img :src="standardUrl('preview')" alt="仪容仪表标准图" @error="standardBroken = true">
             </a>
-            <p class="wbx-sub">换过 {{ stamp(day.standard_updated_at) }}。点图看原图。</p>
+            <p v-if="standardBroken" class="wbx-sub standard-missing" role="status">
+              这张标准图的文件不在了（可能刚被清理），现在打不开。点下面「换一张标准图」重传，
+              员工那边才有得照。
+            </p>
+            <p v-else class="wbx-sub">换过 {{ stamp(day.standard_updated_at) }}。点图看原图。</p>
           </div>
           <p v-else class="wbx-sub">
             先传一张标准图：员工拍之前要照着它看（没传时他们那边拍不了）。
@@ -327,6 +339,7 @@ function pickStandard(event) {
 .standard-shot { display: flex; flex-direction: column; gap: 8px; }
 .standard-shot img { display: block; width: 100%; max-width: 220px; border-radius: var(--r-1); border: 1px solid var(--line); }
 .standard-body .wbx-sub { margin: 0; font-size: 10.5px; }
+.standard-body .wbx-sub.standard-missing { color: var(--warn); }
 .standard-body .upload-btn { position: relative; overflow: hidden; cursor: pointer; align-self: flex-start; white-space: nowrap; }
 .upload-input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
 

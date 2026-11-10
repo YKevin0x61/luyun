@@ -79,7 +79,7 @@ function openTeaching(row) {
         </header>
         <div v-if="loading" class="wbx-empty-bar">正在加载…</div>
         <div v-else-if="errorText" class="wbx-empty-bar">加载失败，点上方「刷新」重试。</div>
-        <div v-else-if="!boards.people.length" class="wbx-empty-bar">这一周还没有人的次数。</div>
+        <div v-else-if="!boards.people.length" class="wbx-empty-bar">这一周还没有人的记录（实拍、驳回、一次通过、逾期都算）。榜空不是没加载，是这一周还没发生。</div>
         <ul v-else class="wbx-rows">
           <li v-for="row in boards.people" :key="row.employee_id" class="wbx-row is-person">
             <div class="wbx-row-main">
@@ -100,7 +100,7 @@ function openTeaching(row) {
         </header>
         <div v-if="loading" class="wbx-empty-bar">正在加载…</div>
         <div v-else-if="errorText" class="wbx-empty-bar">加载失败，点上方「刷新」重试。</div>
-        <div v-else-if="!boards.zones.length" class="wbx-empty-bar">这一周还没有卫生工作区的次数。</div>
+        <div v-else-if="!boards.zones.length" class="wbx-empty-bar">这一周所有工作区都没有逾期记录。</div>
         <ul v-else class="wbx-rows">
           <li v-for="row in boards.zones" :key="row.zone_id" class="wbx-row is-zone">
             <div class="wbx-row-main">
@@ -152,7 +152,7 @@ function openTeaching(row) {
         </div>
       </div>
     </section>
-    <p v-else-if="!loading" class="wbx-empty-bar">还没有卫生教材。店长在验收时点「标为卫生教材」就会出现在这里。</p>
+    <p v-else-if="!loading" class="wbx-empty-bar">还没有卫生教材。管理员在验收时点「标为卫生教材」就会出现在这里。</p>
   </div>
 </template>
 

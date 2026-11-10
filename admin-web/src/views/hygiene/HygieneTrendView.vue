@@ -300,7 +300,7 @@ function pointTitle(point) {
             算好，与红黑榜、按区表同一个口径；本页不另算。
           </p>
           <p>
-            逾期是**另一条轴**：它不参与通过率，只看次数（顶部汇总一次、按工作区各一列）。
+            逾期单独看：它不参与通过率，只看次数（顶部汇总一次、按工作区各一列）。
             图上的曲线只画通过率。
           </p>
           <p>
@@ -345,7 +345,7 @@ function pointTitle(point) {
       </span>
       <span class="wbx-read"><span>一次通过</span><b>{{ totals.first_pass }}</b><em>项</em></span>
       <span class="wbx-read"><span>被驳回</span><b>{{ totals.rejected }}</b><em>次</em></span>
-      <span class="wbx-read"><span>逾期（次）· 另一条轴</span><b class="is-missed">{{ totals.missed }}</b></span>
+      <span class="wbx-read"><span>逾期（次）</span><b class="is-missed">{{ totals.missed }}</b><em>不计入通过率</em></span>
     </div>
     <p v-if="weekCompare" class="trend-wow" :class="{ 'is-better': weekCompare.better }" role="status">
       最近 7 天 {{ weekCompare.recentText }} · 前 7 天 {{ weekCompare.previousText }}

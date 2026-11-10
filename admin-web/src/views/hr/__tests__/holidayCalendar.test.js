@@ -159,4 +159,78 @@ describe('节假日日历（考勤表导出 票 02）', () => {
     // 「国庆」在这份源码里只作为输入框的示例文案出现，不是数据。
     expect(view).toContain('placeholder="比如：国庆"')
   })
+
+  it('影响面常显在网格上方，不用先展开「怎么用」', async () => {
+    const year = new Date().getFullYear()
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ year, days: [] })))
+
+    const View = (await import('../HolidayCalendarView.vue')).default
+    const wrapper = mount(View)
+    await flushPromises()
+
+    expect(wrapper.get('.hNotice').text()).toContain('补休、加班的口径只认这里')
+    // 整年空白时给的是「一年还一天都没标」，不是按月那条。
+    expect(wrapper.find('.hEmptyLine').exists()).toBe(true)
+    expect(wrapper.find('.hMonthHint').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('整年标过、当月空白：网格上方提示「点下面任意一天」', async () => {
+    const now = new Date()
+    const year = now.getFullYear()
+    // 挑一个肯定不是当月的日子，只让「全年已标」有数。
+    const other = now.getMonth() === 0 ? `${year}-12-01` : `${year}-01-01`
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => jsonResponse({ year, days: [{ day: other, name: '元旦' }] })),
+    )
+
+    const View = (await import('../HolidayCalendarView.vue')).default
+    const wrapper = mount(View)
+    await flushPromises()
+
+    expect(wrapper.get('.hMonthHint').text()).toContain('这个月还没有标记')
+    wrapper.unmount()
+  })
+
+  it('取消标记先弹确认框，确认之后才发 DELETE', async () => {
+    const now = new Date()
+    const year = now.getFullYear()
+    const month = now.getMonth() + 1
+    const day = `${year}-${String(month).padStart(2, '0')}-15`
+    const calls = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url, init = {}) => {
+        const method = init.method || 'GET'
+        calls.push({ url: String(url), method })
+        if (method === 'GET') return jsonResponse({ year, days: [{ day, name: '国庆' }] })
+        return jsonResponse({ ok: true })
+      }),
+    )
+
+    const View = (await import('../HolidayCalendarView.vue')).default
+    const wrapper = mount(View)
+    await flushPromises()
+
+    await wrapper.get('.hCell.is-marked').trigger('click')
+    await flushPromises()
+    const cancelBtn = wrapper
+      .findAll('.hEditorBar button')
+      .find((button) => button.text() === '取消标记')
+    expect(cancelBtn).toBeTruthy()
+
+    await cancelBtn.trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.modal-box').exists()).toBe(true)
+    expect(wrapper.get('.modal-box').text()).toContain('取消这一天的法定节假日')
+    expect(calls.filter((call) => call.method === 'DELETE')).toHaveLength(0)
+
+    await wrapper.get('.modal-footer .btn-danger').trigger('click')
+    await flushPromises()
+    const deletes = calls.filter((call) => call.method === 'DELETE')
+    expect(deletes).toHaveLength(1)
+    expect(deletes[0].url).toContain(`/api/attendance/holidays/${day}`)
+    wrapper.unmount()
+  })
 })

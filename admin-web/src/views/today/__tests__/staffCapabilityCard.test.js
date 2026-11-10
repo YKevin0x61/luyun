@@ -16,12 +16,12 @@ const TODAY = readFileSync(join(here, '..', 'TodayView.vue'), 'utf8')
  * 「你能做的事」能力卡（票 01 / ADR 0093）。
  *
  * 病灶：被放权的员工在系统里看不见自己是谁 —— 能做什么、**还缺哪一项**都得靠撞墙试。
- * 这一块卡把十二项开关里**员工端真有执行点的五项**逐条摊开（开了的给说明，没开的写
+ * 这一块卡把十四项开关里**员工端真有执行点的七项**逐条摊开（开了的给说明，没开的写
  * 「超级管理员还没开给你」），并说清这些事都在手机端「卫生」页里做。
  *
  * 这一条跟同目录 `todayAccount.test.js` 一样**真挂一遍**页，断言只压外部行为：
  * 渲染出了什么文案、哪几行、整块在不在。不碰内部结构，也不断言那七项未接线的键。
- * 先例：`hygiene/__tests__/rosterAdminCaps.test.js`（可勾的五项 + 只读的七项）、
+ * 先例：`hygiene/__tests__/rosterAdminCaps.test.js`（可勾的七项 + 只读的七项）、
  * `hygiene/__tests__/staffRoleTier.test.js`（同一页在**不同开关**下的差别）。
  */
 
@@ -156,7 +156,7 @@ describe('「我的」页 · 你能做的事（能力卡）', () => {
     // 开了的那一项反过来：给的是说明，不是「还没开给你」。
     expect(rowFor(wrapper, '日常验收').text()).toContain('判别人交的日常检查，看原图与标准图对照')
     expect(rowFor(wrapper, '日常验收').text()).not.toContain('超级管理员还没开给你')
-    // 五项都在卡上（不是只列开了的那一项）。
+    // 七项都在卡上（不是只列开了的那一项）。
     expect(card.text()).toContain('日常验收')
     expect(card.text()).toContain('专项验收')
     expect(card.text()).toContain('整改单')
@@ -191,22 +191,22 @@ describe('「我的」页 · 你能做的事（能力卡）', () => {
     expect(wrapper.text()).not.toContain('你能做的事')
   })
 
-  it('能力卡计 5 项，逐项各有落点（§12 第 1 条）', async () => {
+  it('能力卡计 7 项，逐项各有落点（§12 第 1 条）', async () => {
     const { wrapper, router } = await mountToday({
-      caps: ['daily_review', 'deep_review', 'fix', 'schedule', 'wastage'],
+      caps: ['daily_review', 'deep_review', 'fix', 'schedule', 'wastage', 'prep_review', 'recipe_qr'],
       permission: '管理员',
     })
     const card = wrapper.get('.tA-card.caps')
 
-    // 5 项都摊开（开的给说明，没开的写「超级管理员还没开给你」）
-    expect(card.findAll('.cap-row')).toHaveLength(5)
+    // 7 项都摊开（开的给说明，没开的写「超级管理员还没开给你」）
+    expect(card.findAll('.cap-row')).toHaveLength(7)
 
     // 旧脚注那句已删：它说的是「这三项」，在三项时成立、多一项就成了假话
     expect(card.text()).not.toContain('这三项都在手机端')
 
     // 每一项各有自己的入口，落点写在按钮上（不是页尾一句概括）
     const gos = card.findAll('.cap-go')
-    expect(gos).toHaveLength(5)
+    expect(gos).toHaveLength(7)
     const tos = gos.map((btn) => btn.attributes('data-to'))
     expect(new Set(tos).size).toBeGreaterThan(1)
 
@@ -224,7 +224,7 @@ describe('「我的」页 · 你能做的事（能力卡）', () => {
 
     // 那张卡上带着档位（同一件事只说一遍的地方）。
     // 2026-10-14 起措辞从「现场复核」改成「管理权限」：卡上现在有人事管理与损耗分析
-    // 两项不是复核（花名册可勾的共五项）。
+    // 四项不是复核（花名册可勾的共七项）。
     expect(card.text()).toContain('管理权限')
     // 账号信息回到纯资料：档位那一行没了。
     expect(meta.text()).not.toContain('卫生权限')
@@ -241,10 +241,11 @@ describe('「我的」页 · 你能做的事（能力卡）', () => {
     expect(moreText(wrapper)).toContain('领班')
   })
 
-  it('只列员工端真有执行点的那五项：库里存着未接线的那七项也不画成能力', async () => {
-    // 花名册上可勾的只有五项（2026-11-03 把「加班与补钟审批」并进了「人事管理」），
-    // 但库列里可能存着未接线那七项的键（键保留是契约层的向后兼容）。它们对应的全是超级
-    // 管理员在电脑端的活，员工端零执行点 —— 画出来就是"勾了不生效"那类缺陷的另一面。
+  it('只列员工端真有执行点的七项：库里存着只读那七项也不画成能力', async () => {
+    // 花名册上可勾的是七项（2026-11-03 把「加班与补钟审批」并进「人事管理」；2026-11-10
+    // 新增备货复盘 / 岗位二维码），库列里可能还存着只读那七项的键（键保留是契约层的向后兼容）。
+    // 它们对应的全是超级管理员在电脑端的活，员工端仍无入口 —— 画出来就是"勾了不生效"那类
+    // 缺陷的另一面。
     const { wrapper } = await mountToday({
       caps: ['daily_review', 'data', 'roster', 'standard'],
       permission: '管理员',
@@ -261,8 +262,8 @@ describe('「我的」页 · 你能做的事（能力卡）', () => {
     ]) {
       expect(card.text()).not.toContain(label)
     }
-    // 卡上就五行，一项不多。
-    expect(wrapper.findAll('.cap-row')).toHaveLength(5)
+    // 卡上就七行，一项不多。
+    expect(wrapper.findAll('.cap-row')).toHaveLength(7)
   })
 })
 

@@ -44,7 +44,7 @@ describe('考勤表页（票 01 / 票 06 / 票 04 / 票 05 / 票 08）', () => {
     ].map((match) => `${match[1]} ${match[2]}`)
     // 顺序不钉（页面里谁先写不影响契约），集合钉死。
     expect([...new Set(calls)].sort()).toEqual([
-      'download /api/attendance/sheet.xlsx',
+      'download /api/attendance/sheet.xlsx${query}',
       'get /api/attendance/sheet',
       'post /api/attendance/seal',
       'put /api/attendance/sheet/${person.id}/${cell.business_date}',
@@ -52,17 +52,27 @@ describe('考勤表页（票 01 / 票 06 / 票 04 / 票 05 / 票 08）', () => {
     ].sort())
   })
 
-  it('不提供月份选择：打开就是当月', () => {
-    // 月份选择器（原生 month 与站内那个组件）一个都不许有：打开就是当月。
+  it('打开就是当月；换月只走同一条 GET 的 month 参数', () => {
+    // 不装原生 `<input type="month">` / 站内日期组件：换月是页头那几颗按钮的事，
+    // 参数走同一条 GET 的 `month`（页面不自己拼 URL —— 拼接会让编码逻辑出现第二份）。
     expect(view).not.toMatch(/month-picker/)
     expect(view).not.toMatch(/LuyunDatePicker/)
     expect(view).not.toMatch(/type="month"/)
-    // 导出（票 08）不自己拼文件名 —— 名字由服务端的 `Content-Disposition` 带回来，
-    // 页面这一侧写死的月份迟早与服务端算的那个对不上：那条下载请求必须是**一条写死的
-    // 路径**（没有模板占位、没有拼接）。
-    expect([...view.matchAll(/api\.download\(\s*([^)]*)\)/g)].map((m) => m[1].trim())).toEqual([
-      "'/api/attendance/sheet.xlsx'",
-    ])
+    expect(view).toMatch(/aria-label="切换考勤表月份"/)
+    expect(view).toMatch(/@click="previousMonth"/)
+    expect(view).toMatch(/@click="nextMonth"/)
+    expect(view).toMatch(/@click="backToCurrentMonth"/)
+    // 两条读口：`load(month)`（切月）与 `refreshSheet()`（写后重拉正在看的那个月）。
+    expect(view).toMatch(
+      /api\.get\(\s*'\/api\/attendance\/sheet',\s*month \? \{ month \} : undefined,/,
+    )
+    expect(view).toMatch(/\{ month: shownMonth\.value \}/)
+    // 导出（票 08）不自己拼**文件名** —— 名字仍由服务端的 `Content-Disposition` 带回来；
+    // 回看历史月时那条下载路径只多一个 `?month=`（导出的是正在看的那张表）。
+    expect(view).toMatch(/api\.download\(`\/api\/attendance\/sheet\.xlsx\$\{query\}`\)/)
+    // 390 触控：上 / 下 / 本月三颗按钮的最小高度与宽度都走 `--tap`（44px）。
+    expect(view).toMatch(/\.aMonthBtn\s*\{[^}]*min-height:\s*var\(--tap\)/s)
+    expect(view).toMatch(/\.aMonthBtn\s*\{[^}]*min-width:\s*var\(--tap\)/s)
   })
 
   it('三态与两列的说法从 util 来，页面不自己写第二份', () => {
@@ -201,22 +211,37 @@ function jsonResponse(data, status = 200) {
  *  **改过的**表 —— 页面在这一页上立刻变，靠的就是「重拉一次」，这条 mock 必须真的跟着变，
  *  否则验的就只是本地状态自己骗自己。封账也一样：封下的结余成为每张卡上的「上月存假」。
  */
-function attendanceServer({ refuse = null, sheet = SHEET, sealRefuse = null, exportRefuse = null } = {}) {
+function attendanceServer({
+  refuse = null,
+  sheet = SHEET,
+  sealRefuse = null,
+  exportRefuse = null,
+  // 回看历史月（R2）：按 `?month=` 回那个月的表。没给（或没命中）就仍回当月那一份 ——
+  // 老用例一个字都不用改。
+  monthSheets = null,
+} = {}) {
   let current = JSON.parse(JSON.stringify(sheet))
   const puts = []
   const seals = []
   const exports = []
+  const gets = []
   const fetchMock = vi.fn(async (url, options = {}) => {
-    const path = String(url).split('?')[0]
+    const rawUrl = String(url)
+    const [path, search = ''] = rawUrl.split('?')
+    const query = new URLSearchParams(search)
     if (path === '/api/attendance/sheet' && (options.method || 'GET') === 'GET') {
+      const month = query.get('month')
+      // 记下每次读的是哪个月（`null` = 没带参数，即服务端的当月）。
+      gets.push({ month })
       // 每次 GET 都给一个**新的**对象（真 HTTP 响应本来就是一串新解析出来的 JSON）：
       // 回同一个引用的话，页面里 `sheet.value = await api.get(...)` 那一下是同一个值、
       // 不触发重渲染，重拉之后的改动就永远画不出来（票 04 的封账回执正是这么发现的）。
-      return jsonResponse(JSON.parse(JSON.stringify(current)))
+      const payload = month && monthSheets && monthSheets[month] ? monthSheets[month] : current
+      return jsonResponse(JSON.parse(JSON.stringify(payload)))
     }
     // 导出（票 08）：一条 GET，服务端把工作簿当附件下发 —— 前端只看响应头里那个名字。
     if (path === '/api/attendance/sheet.xlsx') {
-      exports.push(path)
+      exports.push(rawUrl)
       if (exportRefuse) return jsonResponse({ detail: exportRefuse }, 503)
       return {
         ok: true,
@@ -285,7 +310,7 @@ function attendanceServer({ refuse = null, sheet = SHEET, sealRefuse = null, exp
     }
     return jsonResponse({ detail: 'not found' }, 404)
   })
-  return { fetchMock, puts, seals, exports }
+  return { fetchMock, puts, seals, exports, gets }
 }
 
 async function mountSheet(server = attendanceServer()) {
@@ -464,7 +489,7 @@ describe('考勤表页渲染（票 01 / 票 06）', () => {
   })
 
   it('服务端拒绝时把理由写在编辑带里，页面不装作改成功了', async () => {
-    const refused = attendanceServer({ refuse: '那天有一条待批的请假在等店长批' })
+    const refused = attendanceServer({ refuse: '那天有一条待批的请假在等管理员批' })
     const { wrapper } = await mountSheet(refused)
     const cells = wrapper.findAll('.aCard')[0].findAll('.aDay')
     await cells[1].find('button.aDayBtn').trigger('click')
@@ -476,7 +501,7 @@ describe('考勤表页渲染（票 01 / 票 06）', () => {
 
     // 理由留在**这条带子**里（被拒时带子不收，店长正好接着改），并且带 `role="alert"`。
     const err = bandOf(wrapper).find('.aDayErr')
-    expect(err.text()).toBe('那天有一条待批的请假在等店长批')
+    expect(err.text()).toBe('那天有一条待批的请假在等管理员批')
     expect(err.attributes('role')).toBe('alert')
     // 那一格给红边（`is-error`），且**不许**变样子。
     const after = wrapper.findAll('.aCard')[0].findAll('.aDay')
@@ -1640,5 +1665,167 @@ describe('今天之后、但已经排了班的格子（2026-10-29）', () => {
     const { wrapper } = await mountSheet()
     const cells = wrapper.findAll('.aCard')[0].findAll('.aDay')
     expect(cells[3].find('.aDayText').text()).toBe('')
+  })
+})
+
+// B 组（2026-11-09）：点开的编辑带挂在网格下方，卡片靠下时会落在首屏之外（1440 实测
+// 带子 top=849 高 87，首屏只露 51px，五颗 chip 全在折线以下）；「休」这种单字 chip 只给
+// 高度时实测 29px 宽。两条都是触屏上「点不中 / 以为没反应」的回归点。
+describe('编辑带的可达性与触控面积（B 组 2026-11-09）', () => {
+  it('打开某一天的编辑带后把它滚进视口', () => {
+    expect(view).toMatch(/function revealEditor\(\)/)
+    expect(view).toMatch(/document\.querySelector\('\.aEditBar'\)/)
+    expect(view).toMatch(/scrollIntoView\(\{ block: 'nearest', behavior: 'smooth' \}\)/)
+    expect(view).toMatch(/if \(!same\) revealEditor\(\)/)
+  })
+
+  it('chips 的宽高都按 --tap 兜底（「休」只有 29px 宽点不中）', () => {
+    expect(view).toMatch(/\.aChip\s*\{\s*\n\s*min-width:\s*var\(--tap\); min-height:\s*var\(--tap\);/)
+  })
+})
+
+// ── 月份回看（R2，2026-11-10）─────────────────────────────────────────────
+// 一份「打开就是当月、可以往前翻」的考勤表：2026-09 是今天所在月（可改），2026-08 已
+// 封账，2026-07 没封过账（更早的同样只读 —— 服务端那条逐日闸只放当月）。历史月不改
+// `today`：整月没有「今天」、也没有「还没到」的格子。
+
+const HISTORY_SEALED_SHEET = {
+  month: '2026-08',
+  today: '2026-09-03',
+  provisional: false,
+  sealed_at: SEALED_AT,
+  previous_month: { month: '2026-07', sealed_at: null },
+  days: [
+    { day: 1, business_date: '2026-08-01', is_today: false, is_future: false },
+    { day: 2, business_date: '2026-08-02', is_today: false, is_future: false },
+  ],
+  employees: [
+    {
+      ...SHEET.employees[0],
+      days: [
+        { business_date: '2026-08-01', state: 'work', shift_id: 1 },
+        { business_date: '2026-08-02', state: 'rest', shift_id: null },
+      ],
+    },
+  ],
+}
+
+const HISTORY_OPEN_SHEET = {
+  ...HISTORY_SEALED_SHEET,
+  month: '2026-07',
+  provisional: true,
+  sealed_at: null,
+  previous_month: { month: '2026-06', sealed_at: null },
+}
+
+/** 页头三颗月份按钮：`[‹ 上月, › 下月, 本月]`（模板里的顺序）。 */
+function monthButtons(wrapper) {
+  return wrapper.findAll('.aMonthBtn')
+}
+
+describe('考勤表页的月份回看（R2）', () => {
+  it('打开就是当月：不请求 month；下月与「本月」都不可用', async () => {
+    const server = attendanceServer()
+    const { wrapper } = await mountSheet(server)
+    expect(server.gets).toEqual([{ month: null }])
+    expect(wrapper.find('.aMonthNow').text()).toContain('2026-09')
+    const buttons = monthButtons(wrapper)
+    expect(buttons[0].attributes('disabled')).toBeUndefined()
+    expect(buttons[1].attributes('disabled')).toBeDefined()
+    expect(buttons[2].attributes('disabled')).toBeDefined()
+    expect(wrapper.find('.aHistoryNote').exists()).toBe(false)
+  })
+
+  it('点 ‹ 上月 → 带 month=2026-08 重新读，页头与整页换到那个月', async () => {
+    const server = attendanceServer({ monthSheets: { '2026-08': HISTORY_SEALED_SHEET } })
+    const { wrapper } = await mountSheet(server)
+    await monthButtons(wrapper)[0].trigger('click')
+    await flushPromises()
+    expect(server.gets).toEqual([{ month: null }, { month: '2026-08' }])
+    expect(wrapper.find('.aMonthNow').text()).toContain('2026-08')
+    // 封账月：封账时刻 + 「按现有数据重算、不是快照」那句。
+    const note = wrapper.find('.aHistoryNote').text()
+    expect(note).toContain('2026-08 已封账')
+    expect(note).toContain('不是封账那一刻的快照')
+  })
+
+  it('点「本月」回到当月：不带 month 参数', async () => {
+    const server = attendanceServer({ monthSheets: { '2026-08': HISTORY_SEALED_SHEET } })
+    const { wrapper } = await mountSheet(server)
+    await monthButtons(wrapper)[0].trigger('click')
+    await flushPromises()
+    await monthButtons(wrapper)[2].trigger('click')
+    await flushPromises()
+    expect(server.gets).toEqual([{ month: null }, { month: '2026-08' }, { month: null }])
+    expect(wrapper.find('.aMonthNow').text()).toContain('2026-09')
+    expect(wrapper.find('.aHistoryNote').exists()).toBe(false)
+  })
+
+  it('封账的历史月只读：没有可点的格子，手填列与两条结余全禁用，封账按钮不出现', async () => {
+    const server = attendanceServer({ monthSheets: { '2026-08': HISTORY_SEALED_SHEET } })
+    const { wrapper } = await mountSheet(server)
+    await monthButtons(wrapper)[0].trigger('click')
+    await flushPromises()
+    expect(wrapper.findAll('.aDayBtn').length).toBe(0)
+    expect(wrapper.findAll('.aEditBar').length).toBe(0)
+    // 一张卡：手填三项 + 期初 + 期末 = 5 个输入口，历史月一个都不给写。
+    const inputs = wrapper.findAll('.aManualInput, .aOpeningInput, .aClosingInput')
+    expect(inputs.length).toBe(5)
+    inputs.forEach((input) => expect(input.attributes('disabled')).toBeDefined())
+    // 封账那一对只在当月出现（回看时它很容易被当成「封正在看的这个月」）。
+    expect(wrapper.text()).not.toContain('封账上月')
+  })
+
+  it('未封账的历史月同样只读，并说清这张表是按现有数据重算的', async () => {
+    const server = attendanceServer({
+      monthSheets: { '2026-08': HISTORY_SEALED_SHEET, '2026-07': HISTORY_OPEN_SHEET },
+    })
+    const { wrapper } = await mountSheet(server)
+    await monthButtons(wrapper)[0].trigger('click')
+    await flushPromises()
+    await monthButtons(wrapper)[0].trigger('click')
+    await flushPromises()
+    expect(server.gets.map((row) => row.month)).toEqual([null, '2026-08', '2026-07'])
+    const note = wrapper.find('.aHistoryNote').text()
+    expect(note).toContain('2026-07（未封账）')
+    expect(note).toContain('按现有排班 / 加班 / 台账重算')
+    expect(wrapper.findAll('.aDayBtn').length).toBe(0)
+  })
+
+  it('整月没有排班 / 加班记录时给空态，而不是一整月的「待补」', async () => {
+    const blank = JSON.parse(JSON.stringify(HISTORY_OPEN_SHEET))
+    blank.month = '2026-08'
+    blank.employees[0].days = blank.employees[0].days.map((cell) => ({
+      ...cell,
+      state: 'todo',
+      shift_id: null,
+    }))
+    const server = attendanceServer({ monthSheets: { '2026-08': blank } })
+    const { wrapper } = await mountSheet(server)
+    await monthButtons(wrapper)[0].trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.aEmpty').text()).toContain('这个月没有排班或加班记录')
+  })
+
+  it('一个员工都没有的历史月给一句「没有可回看的员工记录」', async () => {
+    const empty = { ...HISTORY_SEALED_SHEET, month: '2026-08', employees: [] }
+    const server = attendanceServer({ monthSheets: { '2026-08': empty } })
+    const { wrapper } = await mountSheet(server)
+    await monthButtons(wrapper)[0].trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.aEmpty').text()).toContain('没有可回看的员工记录')
+  })
+
+  it('回看历史月时导出的是那个月：下载路径带 ?month=', async () => {
+    const server = attendanceServer({ monthSheets: { '2026-08': HISTORY_SEALED_SHEET } })
+    const { wrapper } = await mountSheet(server)
+    await monthButtons(wrapper)[0].trigger('click')
+    await flushPromises()
+    const exportBtn = wrapper
+      .findAll('button')
+      .find((button) => button.text().includes('导出这个月'))
+    await exportBtn.trigger('click')
+    await flushPromises()
+    expect(server.exports).toEqual(['/api/attendance/sheet.xlsx?month=2026-08'])
   })
 })

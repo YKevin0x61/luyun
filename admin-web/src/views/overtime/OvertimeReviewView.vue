@@ -85,6 +85,10 @@ const rejectTarget = ref(null)
 const rejectReason = ref('')
 const rejectDeductionTarget = ref(null)
 const voidTarget = ref(null)
+/** 等确认的「批准」：`{ kind: 'entry' | 'deduction', item }`。批准是**落账**动作 ——
+ *  店长这一侧没有台账、也没有作废入口（ADR 0098），批错只能找超管改；所以与待办页
+ *  请假批准一致，先弹一次确认。驳回本来就要求写理由，不再多一道。 */
+const approveTarget = ref(null)
 
 // 上限随响应下发（`/pending` 带 `max_*`）：页面不写死第二份。
 const maxReason = ref(MAX_REASON)
@@ -106,6 +110,18 @@ const canBackfill = computed(
 )
 const pickable = computed(() => employees.value.filter((person) => !person.resigned))
 const pendingCount = computed(() => queue.value.length + pendingDeductions.value.length)
+
+/** 确认框里那句话：说清批的是谁/哪天/多少、批完会怎样。两项都从当前行取，不再查一次。 */
+const approveMessage = computed(() => {
+  const target = approveTarget.value
+  if (!target) return ''
+  const item = target.item || {}
+  const who = item.employee_name || '这位员工'
+  if (target.kind === 'deduction') {
+    return `批准「${who}」${item.month} 的 ${item.days} 天存假抵扣后，这笔就记成已抵扣；员工手机上会看到「已批准」。`
+  }
+  return `批准「${who}」${item.entry_date} 的 ${formatHalfHours(item.half_hours)} 小时${entryKindText(item.kind)}后，这笔就计入加班账（本月净时长与加班费）；员工手机上会看到「已批准」。`
+})
 
 const modeHint = computed(() => {
   if (mode.value === 'anonymous') {
@@ -242,6 +258,19 @@ async function confirmVoid() {
   const entry = voidTarget.value
   voidTarget.value = null
   if (entry) await decide(entry, 'void')
+}
+
+/** 「批准」先落进确认框，不直接发请求：这一行两边（加班登记 / 存假抵扣）共用。 */
+function startApprove(kind, item) {
+  approveTarget.value = { kind, item }
+}
+
+async function confirmApprove() {
+  const target = approveTarget.value
+  approveTarget.value = null
+  if (!target) return
+  if (target.kind === 'deduction') await decideDeduction(target.item, 'approve')
+  else await decide(target.item, 'approve')
 }
 
 async function decideDeduction(item, action) {
@@ -422,7 +451,7 @@ useNudgePull({
                     class="btn btn-primary"
                     type="button"
                     :disabled="busyId !== 0"
-                    @click="decide(entry, 'approve')"
+                    @click="startApprove('entry', entry)"
                   >
                     批准
                   </button>
@@ -471,7 +500,7 @@ useNudgePull({
                     class="btn btn-primary"
                     type="button"
                     :disabled="busyId !== 0"
-                    @click="decideDeduction(item, 'approve')"
+                    @click="startApprove('deduction', item)"
                   >
                     批准
                   </button>
@@ -684,6 +713,15 @@ useNudgePull({
     </template>
 
     <ConfirmDialog
+      v-if="approveTarget"
+      title="批准这一笔"
+      :message="approveMessage"
+      confirm-label="批准"
+      @confirm="confirmApprove"
+      @cancel="approveTarget = null"
+    />
+
+    <ConfirmDialog
       v-if="voidTarget"
       title="作废这一笔"
       :message="`作废「${voidTarget.employee_name || '这位员工'}」${voidTarget.entry_date} 的 ${formatHalfHours(voidTarget.half_hours)} 小时${entryKindText(voidTarget.kind)}之后，它不再算数；记录不会删掉，员工手机上会看到「已作废」。`"
@@ -806,6 +844,11 @@ useNudgePull({
 .oStep {
   width: 32px; height: 32px; border: 1px solid var(--line); border-radius: 50%;
   background: transparent; font-size: 17px; line-height: 1; color: var(--ink);
+}
+/* 手机档把「−/+」撑到 44：这是代录时唯一要连点的控件，32px 的圆圈在 390 上实测
+   （2026-11-09 B 组）比旁边 44px 的输入框难按得多。桌面保持紧凑的 32。 */
+@media (max-width: 720px) {
+  .oStep { width: var(--tap); height: var(--tap); font-size: 19px; }
 }
 .oHours {
   min-width: 92px; text-align: center; font-size: 15px; color: var(--ink);

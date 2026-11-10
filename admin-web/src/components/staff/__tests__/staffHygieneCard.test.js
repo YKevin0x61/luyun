@@ -110,7 +110,7 @@ describe('今天要交什么 · 源码契约（跟着块从「我的今天」页
     // 判据是服务端给的 `required`（排班那天有班次）：休假的与没排到的整行不显示。
     expect(CARD).toMatch(/v-if="attire\.required"/)
     expect(CARD).toContain('超级管理员还没传标准图')
-    expect(CARD).toContain('已交，等店长验收')
+    expect(CARD).toContain('已交，等管理员验收')
   })
 
   it('上传带 live=true，并进上传队列（断网不丢）', () => {
@@ -232,6 +232,16 @@ describe('今天要交什么 · 真挂一遍', () => {
     await flushPromises()
 
     expect(wrapper.findAll('button').map((node) => node.text())).toContain('重试')
+  })
+
+  it('合计不冒充日常的读数；没拍的仪容用黄灯不用绿灯（2026-11-09 走查）', async () => {
+    const { wrapper } = await mountCard({ items: DAILY_ITEMS })
+    // 行首是「日常 2/5」，行尾的 3 是三块合计 —— 一定带上「合计」，否则会被读成日常还差 3。
+    expect(wrapper.text()).toContain('合计还差 3 项')
+    // 「今天还没拍」等的是员工自己动手，不是已完成：不能是绿点。
+    const led = wrapper.get('.shc-row .led')
+    expect(led.classes()).toContain('warn')
+    expect(led.classes()).not.toContain('ok')
   })
 
   it('「工作卫生 ›」把人送到员工卫生待办那一页', async () => {

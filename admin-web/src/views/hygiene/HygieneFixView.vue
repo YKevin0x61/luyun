@@ -106,6 +106,13 @@ async function loadTickets() {
   }
 }
 
+/** 退出相机、回到表单：字段保留，只丢掉还没提交的取景/照片。 */
+function cancelOpening() {
+  opening.value = false
+  clearPreview()
+  markup.value = []
+}
+
 function onCaptured(blob) {
   clearPreview()
   capturedBlob.value = blob
@@ -311,6 +318,11 @@ async function confirmDelete() {
           <template v-else>
             <p class="wbx-lead">必须现场拍摄，不能选择相册。</p>
             <HygieneLiveCamera v-if="!previewUrl" @captured="onCaptured" />
+            <!-- 相机打开后原来只有「拍」这一条路：不想开了 / 发现选错工作区，只能刷页
+                 或离开这一页，表单里刚写的字全丢。给一条回表单的出口。 -->
+            <div v-if="!previewUrl" class="review-actions">
+              <button type="button" class="btn" @click="cancelOpening">取消拍摄</button>
+            </div>
             <template v-else>
               <div class="capture-preview">
                 <HygieneStandardOverlay

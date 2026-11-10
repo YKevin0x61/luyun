@@ -56,6 +56,8 @@ function reviewRow(itemId, name) {
 
 /** 服务端此刻的「待我验收」内容：刷新前后改它，页面必须跟着变。 */
 let pendingReviews = []
+/** 往期（pending_past）：首页计数与 `?review=1` 那一档都要算进来。 */
+let pendingPastReviews = []
 /** 刷新那一刻 `/me` 通不通。横幅说的正是"和服务器断了"这种时候，它对员工是同一个按钮。 */
 let meFails = false
 
@@ -91,7 +93,10 @@ async function mountHome(caps) {
     }
     if (path === '/api/hygiene/staff/daily-work') {
       // 不带 query 的是他自己的日常队列；`?review=1` 才是「待我验收」那一档。
-      return jsonResponse({ items: query.includes('review=1') ? pendingReviews : [] })
+      return jsonResponse({
+        items: query.includes('review=1') ? pendingReviews : [],
+        pending_past: query.includes('review=1') ? pendingPastReviews : [],
+      })
     }
     if (path === '/api/hygiene/staff/deep-clean') return jsonResponse({ items: [], status: '待办' })
     if (path === '/api/hygiene/staff/fix') return jsonResponse({ items: [] })
@@ -150,6 +155,7 @@ afterEach(() => {
   vi.unstubAllGlobals()
   vi.restoreAllMocks()
   pendingReviews = []
+  pendingPastReviews = []
   meFails = false
 })
 
@@ -170,6 +176,27 @@ describe('员工卫生页 · 手动刷新覆盖「待我验收」', () => {
     wrapper.unmount()
   })
 
+
+  it('往期没验的旧账也算进「待我验收」：首页数字与点进来的列表同一口径', async () => {
+    pendingPastReviews = [{
+      item_id: 11,
+      item_name: '工作台2',
+      zone_id: ZONE.id,
+      zone_name: '西饼',
+      shift: '白班',
+      business_date: '2026-11-09',
+      status: '待验收',
+      submitter_id: 3,
+      submitter_name: '张织纷',
+    }]
+    const { wrapper } = await mountHome(['daily_review'])
+
+    expect(wrapper.text()).toContain('待我验收 1')
+    expect(wrapper.text()).toContain('工作台2')
+    // 往期行要说清是哪天交的，别和今天的新活混在一起。
+    expect(wrapper.text()).toContain('2026-11-09 交的')
+    wrapper.unmount()
+  })
   it('只开「日常验收」的人点刷新：列表是新读的那一份（条数跟着变）', async () => {
     pendingReviews = [reviewRow(1, '台面')]
     const { wrapper } = await mountHome(['daily_review'])

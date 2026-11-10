@@ -26,6 +26,8 @@ const keyword = ref('')
 const positionFilter = ref('')
 const kindFilter = ref('')
 const statusFilter = ref('')
+// 「没有换算规则」是个可点的筛选：手机档把规则数列收掉了，缺口只能靠这个入口找。
+const missingOnly = ref(false)
 
 const editing = ref(null)
 const form = reactive({
@@ -61,6 +63,7 @@ const filtered = computed(() => {
     if (kindFilter.value && row.kind !== kindFilter.value) return false
     if (statusFilter.value === 'active' && !row.active) return false
     if (statusFilter.value === 'inactive' && row.active) return false
+    if (missingOnly.value && row.rule_count) return false
     return true
   })
 })
@@ -156,8 +159,16 @@ onMounted(load)
           备货品清单 <b>{{ counts.total }}</b> 个
         </h1>
         <p class="pi-sub">
-          在用 {{ counts.active }} 个 · 没有换算规则 {{ counts.unused }} 个 ·
-          名称、单位、岗位改在这一页，备货计划和换算规则都读它
+          在用 {{ counts.active }} 个 ·
+          <button
+            type="button"
+            class="pi-gap"
+            :class="{ 'is-on': missingOnly }"
+            :aria-pressed="missingOnly"
+            :title="missingOnly ? '取消筛选，看全部备货品' : '只看没有换算规则的备货品（列表里只留这些）'"
+            @click="missingOnly = !missingOnly"
+          >没有换算规则 {{ counts.unused }} 个</button>
+          · 名称、单位、岗位改在这一页，备货计划和换算规则都读它
         </p>
       </div>
       <button type="button" class="pi-refresh" @click="load">刷新</button>
@@ -317,6 +328,31 @@ onMounted(load)
   font-size: var(--fs-12, 12px);
   color: var(--ink-faint);
   font-variant-numeric: tabular-nums;
+}
+
+/* 副标题里内联的「没有换算规则 N 个」：点一下只看缺口，再点恢复。
+   做成可点的最小控件，但仍保留文字链外观，不抢页头「刷新」的层级。 */
+.pi-gap {
+  display: inline;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-variant-numeric: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.pi-gap:hover {
+  color: var(--ink);
+}
+
+.pi-gap.is-on {
+  color: var(--warn);
+  text-decoration-thickness: 2px;
 }
 
 .pi-refresh {

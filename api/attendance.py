@@ -95,6 +95,9 @@ _ERROR_DETAILS = {
     "half_rest_needs_shift": "那天没有班次（休 / 还没排到），标不上「休半天」：先给那天排一个班次",
     # 员工端读自己那个月（ADR 0124）：月份格式写错直说该怎么写。
     "invalid_month": "月份格式应该是 YYYY-MM（例如 2026-10）",
+    # 月份选择器（R2-A）：能回看历史月，但不预读还没开始的月。`{}` 是服务层放在
+    # `args[0]` 的目标月份。
+    "future_month": "只能看已经开始的月份：{} 还没到，考勤表不预读未来月",
 }
 
 _ERROR_STATUS = {
@@ -122,7 +125,7 @@ _WRITE_DETAILS = {
     "rest_with_details": "「改成休」的那天不能再带班次或工作区：请把这两项留空",
     # 这一页多出来的那条闸（票 06 验收 3）：口头说清楚「谁在等、等什么」，
     # 让店长知道该先去待办里把那条申请处理掉。`{}` 由 `_write_error` 填。
-    "pending_request": "{}在等店长批：先把它批掉或驳回，再改这一天",
+    "pending_request": "{}在等管理员批：先把它批掉或驳回，再改这一天",
     # **复用同一个 code 的两句**：那两条是 `set_day_override` 自己抛的
     # `SchedulingError`，但这句话是给在考勤表页点格子的店长听的，不是给月历上的。
     "missing_shift": "请选一个班次；要改成休就用「改成休」",
@@ -261,17 +264,20 @@ class ManualColumnsRequest(BaseModel):
 
 @router.get("/sheet")
 async def attendance_sheet(
+    month: Optional[str] = None,
     db=Depends(get_db),
     _: dict = Depends(_require_scheduler),
 ) -> dict:
-    """当月那一张考勤表（一人一张卡）。
+    """某一个月那一张考勤表（一人一张卡）。
 
-    **接口上没有月份参数**，这是刻意的：这一页只算当月，选不到历史月份
-    （`spec.md` 的 Implementation Decisions）。带 `?month=` 也不会被认。
+    `month=YYYY-MM` 可选：省略就是**本月**（与 2026-11-10 之前的行为一致）；给了
+    就是那一个月 —— 历史月只读回看，数字仍按现有排班/加班/台账**重算**，不是封账
+    快照（封账状态/时间只从台账的 `sealed_at` 读）。未来月拒绝（400 `future_month`），
+    格式不对 400 `invalid_month`。权限与这一页其它门口径相同（`_require_scheduler`）。
     """
     store = AttendanceStore(db)
     try:
-        return await store.sheet()
+        return await store.sheet(month)
     except AttendanceError as exc:
         raise _bad_request(exc) from exc
 
@@ -298,13 +304,15 @@ async def my_leave(
 
 @router.get("/sheet.xlsx")
 async def export_attendance_sheet(
+    month: Optional[str] = None,
     db=Depends(get_db),
     _: dict = Depends(_require_scheduler),
 ) -> Response:
-    """一键导出当月考勤表（票 08）：一份 `.xlsx` 直接下发，**不落服务器、不推送**。
+    """一键导出某个月的考勤表（票 08）：一份 `.xlsx` 直接下发，**不落服务器、不推送**。
 
     读的还是 `AttendanceStore.sheet()` 那**同一个读口** —— 页面上看到的与导出的表是同一份
     投影，不存在「导出的数跟页面对不上」这条路。版式在 `services/attendance/export.py`。
+    `month` 与页面的月份选择器同步：回看哪个月就导出哪个月，省略仍是本月。
 
     月份取**响应上的** `month`（不拿服务器时钟另算）：文件名与表内月份因此与那张卡片
     同源。文件名按 RFC 5987 的 `filename*=UTF-8''…` 给（中文名不靠 ASCII 兜底），前端
@@ -315,7 +323,7 @@ async def export_attendance_sheet(
     """
     store = AttendanceStore(db)
     try:
-        sheet = await store.sheet()
+        sheet = await store.sheet(month)
     except AttendanceError as exc:
         raise _bad_request(exc) from exc
 

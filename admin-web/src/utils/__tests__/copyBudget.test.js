@@ -51,6 +51,8 @@ const SKIP_CLASS = new Set([
   // v2 版式统一：员工卫生页的页头眉标（HYGIENE · 员工端）与 wbh-kicker 同一口径。
   'hy-wb-kicker',
   'wbh-quick', 'wbh-rem-row', 'wbh-rem-go', 'wbh-empty', 'wbh-led',
+  // 2026-11-09 工作台走查：首页管理员条三格是入口/控件文本（同 wbh-kf 口径），不是说明性文案。
+  'wbh-team-lab',
   // 注意：**不排除 `.tA-sub`** —— 真实代码里说明性文案正是在这个类上（原型 check-copy.py 排的是
   // 数据标注 `sub`，两边的语义不同）。排除它等于把这一条规则做成空的（t49 实测踩过）。
 

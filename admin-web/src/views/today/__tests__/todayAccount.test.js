@@ -90,6 +90,8 @@ async function mountToday({ onPatch } = {}) {
       { path: '/workbench/staff/today', component: { template: '<div />' } },
       // 「重新选择区域和班次」按 IA 第二层改送到整月（那一页点开每一天就是名单与工作区）。
       { path: '/workbench/staff/month', component: { template: '<div />' } },
+      // 成绩空态「去卫生交一项」落到员工自己的卫生页（A 组走查修复）。
+      { path: '/workbench/staff/clean', component: { template: '<div />' } },
     ],
   })
   await router.push('/workbench/staff/today')

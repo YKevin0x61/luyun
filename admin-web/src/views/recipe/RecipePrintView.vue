@@ -319,7 +319,7 @@ function doPrint() {
         <button type="button" class="btn btn-primary" :disabled="!canPrint" @click="doPrint">
           {{ pageCount > 1 ? `打印已选页` : '打印' }}
         </button>
-        <router-link class="btn btn-ghost" :to="RECIPE_HOME_PATH">关闭</router-link>
+        <router-link class="btn btn-ghost print-close" :to="RECIPE_HOME_PATH">关闭</router-link>
       </div>
     </header>
     <div class="sop-print-preview-measure-host no-print" aria-hidden="true">
@@ -502,12 +502,34 @@ function doPrint() {
   .print-page {
     padding-bottom: calc(12px + var(--safe-b));
   }
+  /* 手机档：kicker 与 H1 重复，收掉；「返回」已经能回详情（详情再回列表），
+     「关闭」是同一件事的第二颗出口，收掉。动作行强制一行：返回 / 缩放 / 打印
+     —— 页头从 164px 压到约 110px，预览首屏多出半张纸。 */
+  .print-kicker {
+    display: none;
+  }
   .print-head-pills {
     display: none;
   }
   .print-head-actions {
     margin-left: 0;
-    flex-wrap: wrap;
+    flex: 1 1 100%;
+    flex-wrap: nowrap;
+    gap: 6px;
+  }
+  /* 页头按钮在手机档统一 44px 高（工作台壳的 `.hygiene-admin .btn` 与这里同特异性，
+     它后加载会赢，所以用两级选择器压回来），一行放下 返回 / 缩放 / 打印。 */
+  .print-head-actions .print-close {
+    display: none;
+  }
+  .print-head-actions .btn {
+    min-height: 44px;
+    padding: 0 10px;
+  }
+  .print-head-actions .btn-primary {
+    flex: 1 1 auto;
+    min-width: 0;
+    white-space: nowrap;
   }
   .print-title {
     font-size: 18px;

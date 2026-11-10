@@ -336,6 +336,21 @@ watch(identity, keepViewAllowed)
   padding: var(--wb-inset-top, 0px) var(--wb-inset-inline, 0px) var(--wb-inset-bottom, 0px);
 }
 
+/* 平板 / 小笔电（721–1024）：这一档导航收了组门（`WorkbenchNav` 的 1024 段），顶栏不再
+   溢出；同时它是触屏，把「‹ 后台」抬到 44px（退出在 `WorkbenchExitButton` 里各自抬），
+   间距略收一点，给右侧导航留余量。 */
+@media (max-width: 1024px) {
+  .wb-top { gap: 8px; padding-left: 16px; padding-right: 16px; }
+  .wb-back { min-height: 44px; padding: 5px 12px; }
+}
+
+/* 隐藏配方页自带的那条页内页头（2026-11-10 用户裁定）。
+   桌面档：壳顶栏 + 左 rail 已经把「岗位列表 / 配方管理」给出来了，页内再画一条
+   `.sop-site-header` 就是三重导航。手机档本来就不显示它（`public/recipe.css` 的
+   `@media (max-width:720px){ .hygiene-admin header.site-header{display:none} }`），
+   所以这里直接一刀切，不再按断点判。 */
+.wb-main :deep(.sop-site-header) { display: none; }
+
 /* 窄屏：顶上那一条整个收进 `WorkbenchMobileHead` 的一行（方案 C）。是 `display: none`
    不是删组件：桌面档（>720px）还是它在干活。
    内容区那份底部让位**不在这里**了（票 03）：底栏高与安全区由壳算成一个数

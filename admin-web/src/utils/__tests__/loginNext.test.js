@@ -185,8 +185,6 @@ describe('resolveStaffNext', () => {
     expect(resolveStaffNext('/workbench/floor/zones')).toBe('/workbench')
     expect(resolveStaffNext('/workbench/staffx')).toBe('/workbench')
     expect(resolveStaffNext('/login?next=/admin')).toBe('/workbench')
-    // 票 04：印码页是 `admin` 那一档，也不再是员工落点（跟配方管理一个待遇）。
-    expect(resolveStaffNext('/workbench/kitchen/recipe/qr')).toBe('/workbench')
   })
 
   it('票 07：配方阅读面也是员工落点 —— 扫码的厨师登录后回到那条配方', () => {
@@ -199,9 +197,8 @@ describe('resolveStaffNext', () => {
       .toBe('/workbench/kitchen/recipe/detail?slug=changfen')
     expect(resolveStaffNext('/workbench/kitchen/recipe/print?slug=changfen'))
       .toBe('/workbench/kitchen/recipe/print?slug=changfen')
-    // 管理页与印码页都不是员工落点（两页都只给管理端），照旧回落到员工默认落点。
-    expect(resolveStaffNext('/workbench/kitchen/recipe/manage'))
-      .toBe('/workbench')
+    // 配方管理页没有 staffCap（仍只给管理端），照旧回落到员工默认落点。
+    expect(resolveStaffNext('/workbench/kitchen/recipe/manage')).toBe('/workbench')
   })
 
   it('2026-10-14：带 staffCap 的店长页也是员工落点（员工会话 + 那项能力能进）', () => {
@@ -211,6 +208,9 @@ describe('resolveStaffNext', () => {
     expect(resolveStaffNext('/workbench/hr/inbox')).toBe('/workbench/hr/inbox')
     expect(resolveStaffNext('/workbench/hr/shifts')).toBe('/workbench/hr/shifts')
     expect(resolveStaffNext('/workbench/kitchen/loss')).toBe('/workbench/kitchen/loss')
+    // 2026-11-10：备货复盘 / 岗位二维码也进了可授权只读页，员工会话 + 那项能力进得去。
+    expect(resolveStaffNext('/workbench/kitchen/prep-review')).toBe('/workbench/kitchen/prep-review')
+    expect(resolveStaffNext('/workbench/kitchen/recipe/qr')).toBe('/workbench/kitchen/recipe/qr')
     // 花名册没有 staffCap（身份证与底薪不下发员工端）：仍不是员工落点。
     expect(resolveStaffNext('/workbench/hr/roster')).toBe('/workbench')
   })
@@ -286,12 +286,14 @@ describe('resolveLoginTab（面板默认开在哪一栏）', () => {
     expect(resolveLoginTab('/recipe/detail?slug=changfen', 'admin')).toBe('staff')
   })
 
-  it('票 04：印码页不是阅读面，跟配方管理一样开管理栏', () => {
-    // 印码是店长布置岗位码的动作：未登录访问它默认开管理栏，不必先切一次身份。
-    // 老地址 /recipe/qr 在入口换成新地址之后同样开管理栏。
-    expect(resolveLoginTab('/workbench/kitchen/recipe/qr', 'staff')).toBe('admin')
-    expect(resolveLoginTab('/workbench/kitchen/recipe/qr', null)).toBe('admin')
-    expect(resolveLoginTab('/recipe/qr', 'staff')).toBe('admin')
+  it('印码页 2026-11-10 起带 staffCap：跟排班页一样不强制档位、跟记住值走', () => {
+    // 印码页仍不是阅读面（isRecipeReaderPath 为 false），但它已对「员工会话 + recipe_qr」
+    // 放开只读打印 —— 两种身份都可能开这一页，所以不能再写死管理栏；没记住过默认员工栏。
+    expect(resolveLoginTab('/workbench/kitchen/recipe/qr', 'admin')).toBe('admin')
+    expect(resolveLoginTab('/workbench/kitchen/recipe/qr', 'staff')).toBe('staff')
+    expect(resolveLoginTab('/workbench/kitchen/recipe/qr', null)).toBe('staff')
+    // 老地址 /recipe/qr 换成新地址之后判据一致。
+    expect(resolveLoginTab('/recipe/qr', 'staff')).toBe('staff')
   })
 
   it('配方管理不是阅读面：它照旧跟着记住值走', () => {

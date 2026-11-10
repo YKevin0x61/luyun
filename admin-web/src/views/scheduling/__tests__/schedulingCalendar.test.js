@@ -390,3 +390,21 @@ describe('C 方向：人事壳把工作台级导航让到底栏', () => {
     expect(rules).not.toMatch(/\.wb-main\s*\{[^}]*padding-bottom/)
   })
 })
+
+// B 组（2026-11-09）：宽屏点日期时右栏「当天名单」被一个只给手机用的遮罩 div 挤走
+// （实测 `.gSide` 从 x958,y201 掉到 x345,y1010，桌面看起来像名单消失、且没有收起入口）。
+// base 把它移出布局、手机档再显式摆回 fixed 遮罩 —— 两边缺一条都会回归。
+describe('当天名单遮罩与单日编辑卡（B 组 2026-11-09）', () => {
+  it('抽屉遮罩在桌面档不占布局，只在手机档变成 fixed 遮罩', () => {
+    expect(view).toMatch(/\.gDrawerScrim\s*\{\s*display:\s*none;\s*\}/)
+    expect(view).toMatch(/\.gDrawerScrim\s*\{\s*display:\s*block;\s*position:\s*fixed;/)
+  })
+
+  it('点人打开单日编辑后，把卡片滚进视口（宽屏会落在首屏外）', () => {
+    expect(view).toMatch(/import \{[^}]*nextTick[^}]*\} from 'vue'/)
+    expect(view).toMatch(/function revealDayEditor\(\)/)
+    expect(view).toMatch(/document\.querySelector\('\.gD'\)/)
+    expect(view).toMatch(/scrollIntoView\(\{ block: 'nearest', behavior: 'smooth' \}\)/)
+    expect(view).toMatch(/revealDayEditor\(\)/)
+  })
+})

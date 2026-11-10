@@ -185,7 +185,7 @@ export const COLUMN_LABELS = {
   'prep_plan_context.staff_json': '在岗人数',
   'prep_plan_context.data_quality_json': '数据质量',
   'prep_plan_context.runtime_json': '营业时段', 'prep_plan_context.kitchen_json': '厨房节奏',
-  'prep_plan_context.is_workday': '是否工作日', 'prep_plan_context.note': '店长备注',
+  'prep_plan_context.is_workday': '是否工作日', 'prep_plan_context.note': '管理员备注',
   'prep_plan_context.captured_at': '首次采集时间', 'prep_plan_context.updated_at': '更新时间',
   'prep_plan_events.tenant_id': '租户ID', 'prep_plan_events.at': '发生时间',
   'prep_plan_events.plan_day': '营业日', 'prep_plan_events.prep_item_id': '备货品ID',
@@ -361,11 +361,11 @@ const CELL_VALUE_LABELS = {
   // 排班
   'staff_shifts.duty_slot': { day: '白班', night: '夜班' },
   'staff_assignments.source': { rule: '规则轮转', override: '单日覆盖' },
-  'scheduling_overrides.kind': { manual: '店长手改', leave: '请假', swap: '换班' },
+  'scheduling_overrides.kind': { manual: '管理员手改', leave: '请假', swap: '换班' },
   'scheduling_requests.kind': { leave: '请假', swap: '换班' },
   'scheduling_requests.status': {
     pending_peer: '待对方确认',
-    pending_manager: '待店长审批',
+    pending_manager: '待管理员审批',
     approved: '已批准',
     rejected: '已驳回',
     cancelled: '已撤回',

@@ -21,6 +21,7 @@ import {
 } from '../utils/prepPlanCopy'
 import { buildPrepPlanText } from '../utils/prepPlanText'
 import { WASTAGE_REGISTER_PATH } from '../utils/wastagePaths'
+import { PREP_RULES_PATH } from '../utils/prepRulePaths'
 import { workbenchDocumentTitle } from '../utils/workbenchCopy'
 
 /**
@@ -465,13 +466,14 @@ watch(activeStation, () => {
               <i v-if="isManual(entry)" class="pp-manual">手改</i>
             </button>
 
+            <!-- 员工也能勾自己档口的项（ADR 0117 决策 5：只看自己那一档、能勾；后端
+                 PATCH 按员工身份只放行本档口）。整行挂了展开动作，按钮必须 `.stop`。 -->
             <button
-              v-if="!isStaff"
               type="button"
               class="pp-check"
               :disabled="busyEntryId === entry.id"
               :aria-label="`${entry.item_name}做完了`"
-              @click="toggleDone(entry)"
+              @click.stop="toggleDone(entry)"
             >
               做完
             </button>
@@ -539,7 +541,7 @@ watch(activeStation, () => {
                 <router-link class="pp-act" :to="wastageLink(entry)">这一份用不掉了 · 记损耗</router-link>
               </div>
               <div v-if="!isStaff" class="pp-actions">
-                <router-link class="pp-act" :to="{ path: '/admin' }">改配方系数</router-link>
+                <router-link class="pp-act" :to="{ path: PREP_RULES_PATH, query: { q: entry.item_name } }">改配方系数</router-link>
                 <button
                   type="button"
                   class="pp-act"
@@ -564,7 +566,7 @@ watch(activeStation, () => {
               <b>{{ entryQty(entry) }}</b>
               <small v-if="entry.unit" class="pp-qty-unit">{{ entry.unit }}</small>
             </span>
-            <button v-if="!isStaff" type="button" class="pp-check" @click="toggleDone(entry)">
+            <button type="button" class="pp-check" @click="toggleDone(entry)">
               撤回
             </button>
           </li>

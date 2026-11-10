@@ -20,6 +20,7 @@
  */
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
+import ConfirmDialog from '../../components/admin/ConfirmDialog.vue'
 import LuyunDatePicker from '../../components/ui/LuyunDatePicker.vue'
 import { useNudgePull } from '../../composables/useNudgePull'
 import { loginRedirectTarget } from '../../utils/loginNext'
@@ -86,10 +87,35 @@ const maxRejectReason = ref(MAX_REJECT_REASON)
 // 代录：「替谁记」。空串 = 我自己（走员工那条路），否则是别人的员工号。
 const backfillFor = ref('')
 
+// 批准是这一页唯一「一键就生效」的写操作；店长走员工会话，没有作废入口
+// （作废只在管理端 `/api/overtime/admin/entries/{id}/void`）。误点不可逆，所以先问一句。
+// 驳回本身是两段式（必须先写理由），这里不再重复确认。
+const approveTarget = ref(null) // { kind: 'entry' | 'deduction', item }
+const approveCopy = computed(() => {
+  const target = approveTarget.value
+  if (!target) return { title: '', message: '' }
+  const who = target.item.employee_name ? `${target.item.employee_name} ` : ''
+  return target.kind === 'deduction'
+    ? {
+        title: '批准这张抵扣？',
+        message: `${who}这张抵扣批了就从存假里扣，你自己撤不回；要改只能找超管作废。`,
+      }
+    : {
+        title: '批准这一笔？',
+        message: `${who}这一笔批了就算数，你自己撤不回；要改只能找超管作废。`,
+      }
+})
+
 const dayOptions = computed(() =>
   entryDayOptions({ today: today.value, yesterday: yesterday.value })
 )
 const hoursText = computed(() => formatHalfHours(halfHours.value))
+// `formatHalfHours` 在 utils 里把 0 也带上了负号（sign 只看 `> 0`），汇总读数是 0 时
+// 页面会写成「−0 小时」。0 不是一笔登记，这里归零；共享 utils 的改动走报告，不在这页动。
+function hoursLabel(halfHours) {
+  const text = formatHalfHours(halfHours)
+  return text === '−0' ? '0' : text
+}
 const canSubmit = computed(() => !!day.value && !!reason.value.trim() && !busy.value)
 
 // 存假抵扣（ADR 0124）：8.5 小时 = 1 天，只能整天 —— 与加班费公式、考勤表同一个分母。
@@ -102,7 +128,7 @@ const applyPreview = computed(() => {
 const capacityText = computed(() => {
   const c = capacity.value
   if (!c) return ''
-  return `本月已批补钟 ${formatHalfHours(c.makeup_half_hours)} 小时，已用存假抵 ${c.deducted_days} 天；当前存假 ${formatDays(c.leave_balance)}。`
+  return `本月已批补钟 ${hoursLabel(c.makeup_half_hours)} 小时，已用存假抵 ${c.deducted_days} 天；当前存假 ${formatDays(c.leave_balance)}。`
 })
 const deductionEmptyText = computed(() => {
   const c = capacity.value
@@ -174,7 +200,7 @@ async function submit() {
       method: 'POST',
       body,
     })
-    note.value = target ? '替他记上了，等审批' : '提上去了，等店长批'
+    note.value = target ? '替他记上了，等审批' : '提上去了，等管理员批'
     reason.value = ''
     halfHours.value = 1
     await load(true)
@@ -225,7 +251,7 @@ async function applyDeduction() {
       method: 'POST',
       body: { month: summary.value?.month, days: applyDays.value },
     })
-    note.value = '抵扣申请提上去了，等店长批'
+    note.value = '抵扣申请提上去了，等管理员批'
     applyOpen.value = false
     await load(true)
   } catch (err) {
@@ -350,6 +376,19 @@ async function decide(entry, action, body = {}) {
   }
 }
 
+function askApprove(kind, item) {
+  if (reviewBusyId.value) return
+  approveTarget.value = { kind, item }
+}
+
+async function confirmApprove() {
+  const target = approveTarget.value
+  approveTarget.value = null
+  if (!target) return
+  if (target.kind === 'deduction') await decideDeduction(target.item, 'approve')
+  else await decide(target.item, 'approve')
+}
+
 onMounted(() => {
   document.title = workbenchDocumentTitle('加班与补钟')
   load()
@@ -388,11 +427,11 @@ useNudgePull({ id: 'me-overtime', topics: ['overtime'], pull: () => load(true) }
         <dl class="stats">
           <div class="stat">
             <dt><span class="badge ok">净时长</span></dt>
-            <dd>{{ formatHalfHours(summary.approved.net_half_hours) }}<i>小时</i></dd>
+            <dd>{{ hoursLabel(summary.approved.net_half_hours) }}<i>小时</i></dd>
           </div>
           <div class="stat">
             <dt><span class="badge warn">待批</span></dt>
-            <dd>{{ formatHalfHours(summary.pending.net_half_hours) }}<i>小时</i></dd>
+            <dd>{{ hoursLabel(summary.pending.net_half_hours) }}<i>小时</i></dd>
           </div>
           <div class="stat">
             <dt><span class="badge">已抵存假</span></dt>
@@ -427,7 +466,7 @@ useNudgePull({ id: 'me-overtime', topics: ['overtime'], pull: () => load(true) }
                 class="btn oAct ok"
                 type="button"
                 :disabled="reviewBusyId === entry.id"
-                @click="decide(entry, 'approve')"
+                @click="askApprove('entry', entry)"
               >
                 批准
               </button>
@@ -474,7 +513,7 @@ useNudgePull({ id: 'me-overtime', topics: ['overtime'], pull: () => load(true) }
                 class="btn oAct ok"
                 type="button"
                 :disabled="reviewBusyId === item.id"
-                @click="decideDeduction(item, 'approve')"
+                @click="askApprove('deduction', item)"
               >
                 批准
               </button>
@@ -603,9 +642,13 @@ useNudgePull({ id: 'me-overtime', topics: ['overtime'], pull: () => load(true) }
           <button class="btn btn-primary btn-block" type="submit" :disabled="!canSubmit">
             {{ busy ? '提交中…' : '提交登记' }}
           </button>
+          <!-- 灰按钮不解释为什么不给点，员工只能挨个试。这里把缺的那一项说出来。 -->
+          <p v-if="!busy && !canSubmit" class="oRule oFormHint">
+            {{ day ? '填了事由就能提交。' : '选好日期、填了事由就能提交。' }}
+          </p>
           <p class="oRule">
             加班记正数、补钟记负数，1 格 = 0.5 小时，单笔最多 {{ maxHalfHours / 2 }} 小时。
-            只能登记今天与昨天，更早的请找店长补录。用存假抵补钟：8.5 小时 = 1 天、只能整天，
+            只能登记今天与昨天，更早的请找管理员补录。用存假抵补钟：8.5 小时 = 1 天、只能整天，
             归到补钟所在那个月，封账后不能再抵；净时长已扣掉抵过的那部分。
           </p>
         </div>
@@ -691,7 +734,7 @@ useNudgePull({ id: 'me-overtime', topics: ['overtime'], pull: () => load(true) }
             <!-- 驳回之后「重提一笔」并不总是可行：这笔要是前天以前的，员工自己已经登不了
                  （窗口只有今天与昨天）。不说这一句，员工会以为随时能补，然后卡在日期上。 -->
             <p v-if="entry.status === 'rejected'" class="mSub">
-              这一笔不算数。重提一笔就行；日期已经过了窗口（只能登今天与昨天）的话，请店长补录。
+              这一笔不算数。重提一笔就行；日期已经过了窗口（只能登今天与昨天）的话，请管理员补录。
             </p>
             <button
               v-if="entry.status === 'pending'"
@@ -741,6 +784,17 @@ useNudgePull({ id: 'me-overtime', topics: ['overtime'], pull: () => load(true) }
         <p v-else class="mSub oEmpty">暂无抵扣</p>
       </section>
     </div>
+
+    <!-- 批准前确认（见 script 里的 approveTarget）：批了之后店长这里撤不回。 -->
+    <ConfirmDialog
+      v-if="approveTarget"
+      :title="approveCopy.title"
+      :message="approveCopy.message"
+      confirm-label="批准"
+      cancel-label="再看看"
+      @confirm="confirmApprove"
+      @cancel="approveTarget = null"
+    />
   </div>
 </template>
 
@@ -992,6 +1046,12 @@ useNudgePull({ id: 'me-overtime', topics: ['overtime'], pull: () => load(true) }
   font-size: 11px;
   line-height: 1.7;
   color: var(--ink-faint);
+}
+
+/* 提交按钮禁用时旁边那句「缺什么」：比页脚口径更近、更具体。 */
+.oFormHint {
+  margin-top: 8px;
+  color: var(--ink-dim);
 }
 
 /* 直接挂在面板里（不在 .oPad 里）的那一句：自己让出横向内边距，别贴着面板边。 */

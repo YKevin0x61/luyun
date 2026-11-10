@@ -51,7 +51,12 @@
  * 台账九项里的「上月存假 / 存假」**两处都留**（用户与父级已确认接受这处重复显示），
  * 九项那个「存假」念的仍是**有效值**（人工优先）。
  *
- * 这一页只算当月：没有月份选择器。
+ * 2026-11-10（R2）加了**月份回看**：页头可以 ‹ 上月 / 下月 › 翻，封账月与更早的月都能
+ * 打开。历史月**只读**（服务端 `ensure_day_editable` 本来也只放当月的格子）—— 那一页
+ * 的数是按**现有**排班 / 加班 / 台账**重算**出来的，不是封账那一刻的快照：封账落进台账的
+ * 只有存假结余与封账时刻，历史月的出勤、待补这些位没有快照可读。封过的月因此只多一句
+ * 「某月已封账（某时）· 按现有数据重算」的告示，绝不冒充定稿快照。缺省仍是当月，当月
+ * 的行为一个字没改（照旧可改格、可封账、可导）。
  */
 import { computed, nextTick, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
@@ -94,6 +99,72 @@ const sealError = ref('')
 
 /** 上月封账的那句回执（没封过时是空串，页面上画按钮）。 */
 const sealStamp = computed(() => sealedMonthText(sheet.value?.previous_month))
+
+/** 页面上正在看的是哪个月：服务端回执里的那个 `month`，页面不自己按日期算 —— 跨零点
+ *  那一刻页头、表内天数与导出的文件名必须是同一份月份。 */
+const shownMonth = computed(() => sheet.value?.month || '')
+/** 「今天」所在的那个自然月：月份切换的上界，也是「本月」那颗按钮的判据。
+ *  `today` 永远按真实今天下发，历史月也不改它 —— 今天 / 还没到仍以真实今天为准。 */
+const todayMonth = computed(() => (sheet.value?.today || '').slice(0, 7))
+/** 正在看的是不是当月：**只有当月可改**（服务端那条闸也只放当月）。历史月一律只读回看，
+ *  封没封账都一样 —— 没封账的历史月同样错过可补记窗口，页面不该给出一个只会换回 400 的控件。 */
+const isCurrentMonth = computed(
+  () => Boolean(shownMonth.value) && shownMonth.value === todayMonth.value,
+)
+/** 还能不能往后翻：到当月就停。服务端也拒绝未来月，这里是第一道（按钮直接不可用）。 */
+const canNextMonth = computed(
+  () => Boolean(shownMonth.value) && shownMonth.value < todayMonth.value,
+)
+/** 历史月只读（封账月是其中一种，另行标出封账时刻）。 */
+const readOnly = computed(() => !isCurrentMonth.value)
+/** 历史月那一句告示：封过账的写清「什么时候封的」，并明说这张表是**按现有排班 / 加班 /
+ *  台账重算**的，不是封账那一刻的快照 —— 封账落进台账的只有存假结余与封账时刻。 */
+const historyNote = computed(() => {
+  if (!readOnly.value) return ''
+  const sealed = sealedMonthText(sheet.value)
+  if (sealed) {
+    return `${sealed} · 只读回看：这张表按现有排班 / 加班 / 台账重算，不是封账那一刻的快照。`
+  }
+  return `回看 ${shownMonth.value}（未封账）：这张表按现有排班 / 加班 / 台账重算，与当时看到的数可能不同。`
+})
+/** 这个月有没有任何一天真排过班 / 记过休：整月都没记录时给一句空态说明，
+ *  而不是把一整月的「待补」当成三十天缺口摆出来。 */
+const monthHasRecords = computed(() =>
+  employees().some((person) =>
+    (person.cells || []).some((cell) => cell.state === 'work' || cell.state === 'rest'),
+  ),
+)
+
+/** `YYYY-MM` 加减月份：只用于拼上一个 / 下一个月的参数，不碰服务端时钟。 */
+function shiftMonth(month, delta) {
+  const [year, mon] = month.split('-').map(Number)
+  const target = new Date(Date.UTC(year, mon - 1 + delta, 1))
+  return `${target.getUTCFullYear()}-${String(target.getUTCMonth() + 1).padStart(2, '0')}`
+}
+
+/** 换月：省略 month = 本月（保持原来「打开就是当月」那条路径原样）。 */
+function goToMonth(month) {
+  if (state.value === 'loading') return
+  load(month || undefined)
+}
+function previousMonth() {
+  if (shownMonth.value) goToMonth(shiftMonth(shownMonth.value, -1))
+}
+function nextMonth() {
+  if (canNextMonth.value) goToMonth(shiftMonth(shownMonth.value, 1))
+}
+function backToCurrentMonth() {
+  if (!isCurrentMonth.value) goToMonth('')
+}
+
+/** 写完重拉**正在看的那个月**：历史月里裸 GET 会跳回当月，页头、卡片与刚写的那一格
+ *  就会各说一套。当月不额外带参数（与原先那几处裸 GET 逐字等价）。 */
+function refreshSheet() {
+  return api.get(
+    '/api/attendance/sheet',
+    shownMonth.value ? { month: shownMonth.value } : undefined,
+  )
+}
 
 /** 表头那一份月框（哪一天是今天 / 还没到）按营业日索引，卡片上的日子从它取号与标记 ——
  *  页面不自己从 1 数到 30（那样 2 月与 31 天的月份会各错一次）。 */
@@ -162,9 +233,10 @@ function cellLabel(person, cell) {
   return dayStateText(cell.state)
 }
 
-/** 这一格能不能点：今天之后留空、没到的那天不给改。 */
+/** 这一格能不能点：今天之后留空；历史月（封没封账）整页只读 —— 服务端那条逐日闸也只放
+ *  当月，这里不给一个点下去只会换回「只算当月 / 已封账」的控件。 */
 function editable(cell) {
-  return Boolean(cell.state) && !cell.is_future
+  return Boolean(cell.state) && !cell.is_future && isCurrentMonth.value
 }
 
 function openEditor(person, cell) {
@@ -173,6 +245,20 @@ function openEditor(person, cell) {
   const same =
     editing.value?.employeeId === person.id && editing.value?.date === cell.business_date
   editing.value = same ? null : { employeeId: person.id, date: cell.business_date }
+  if (!same) revealEditor()
+}
+
+/** 点开编辑带之后把它送进视口。带子挂在 `.aDays` **下面**，而点的是网格里的某一格 ——
+ *  卡片靠下时带子会落在首屏之外（2026-11-09 B 组实测：1440 点一行 11/5，带子 top=849、
+ *  高 87，首屏只看得见 51px，五颗 chip 全在折线以下），店长会以为没反应。`block:'nearest'`
+ *  是刻意的：带子已经完整可见时不做任何滚动，别把视线从刚点的那一格上拽走。 */
+function revealEditor() {
+  nextTick(() => {
+    const band = document.querySelector('.aEditBar')
+    if (band && typeof band.scrollIntoView === 'function') {
+      band.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+    }
+  })
 }
 
 /** 收起编辑带（带子里那颗「取消」）：店长自己撤了，理由也一并收掉。 */
@@ -220,7 +306,7 @@ async function pick(person, cell, value) {
     // **写成了才收工**：重拉一次整表（不走 `load()` —— 那条路会把 `state` 打回
     // `loading`，整页闪一下），那天（与「待补」计数）立刻变。
     editing.value = null
-    sheet.value = await api.get('/api/attendance/sheet')
+    sheet.value = await refreshSheet()
   } catch (err) {
     // 被拒时**带子留着**：理由就写在带子里（票 06 的「不装作改成功」），那一格给红边；
     // 页面上已经渲染的那一份一个字都不动 —— 显示一个没落库的班次比报错更糟。
@@ -247,7 +333,7 @@ async function toggleHalf(person, cell) {
       half_rest: !cell.half_rest,
     })
     editing.value = null
-    sheet.value = await api.get('/api/attendance/sheet')
+    sheet.value = await refreshSheet()
   } catch (err) {
     dayError.value = {
       employeeId: person.id,
@@ -337,7 +423,7 @@ async function saveManual(person, event) {
     await api.put(`/api/attendance/sheet/${person.id}/manual`, body)
     // 与逐日改格同一条路：自己重拉一次（nudge 不带数据，这一页也不等它）——
     // 写进去的那几项立刻在卡片上；**失败时不改页面上已经渲染的那一份**。
-    sheet.value = await api.get('/api/attendance/sheet')
+    sheet.value = await refreshSheet()
   } catch (err) {
     // 被拒时这一块要**摊开**：理由写在 body 里，收着的话店长只看到按钮闪了一下，
     // 不知道是没写上还是写上了。
@@ -491,7 +577,7 @@ async function saveOpening(person, event) {
   try {
     await api.put(`/api/attendance/sheet/${person.id}/manual`, body)
     // 与手填那四列同一条路：自己重拉一次（nudge 不带数据，这一页也不等它）。
-    sheet.value = await api.get('/api/attendance/sheet')
+    sheet.value = await refreshSheet()
   } catch (err) {
     openManualId.value = person.id
     openingError.value = {
@@ -526,7 +612,7 @@ async function sealLastMonth() {
   sealError.value = ''
   try {
     await api.post('/api/attendance/seal')
-    sheet.value = await api.get('/api/attendance/sheet')
+    sheet.value = await refreshSheet()
   } catch (err) {
     sealError.value = err.message || '这个月没封成'
   } finally {
@@ -534,14 +620,20 @@ async function sealLastMonth() {
   }
 }
 
-async function load() {
+/** 读某个月的考勤表：省略 `month` = 服务端的当月（打开页面 / 点「本月」走的就是这条
+ *  原路径）。历史月只读，但**读**走同一条口，只是多带一个 `month` 参数。 */
+async function load(month) {
   state.value = 'loading'
   errorText.value = ''
   try {
-    sheet.value = await api.get('/api/attendance/sheet')
+    sheet.value = await api.get(
+      '/api/attendance/sheet',
+      month ? { month } : undefined,
+    )
     state.value = 'ready'
   } catch (err) {
-    errorText.value = err.message || '读不出这个月的考勤表'
+    errorText.value =
+      err.message || (month ? `读不出 ${month} 的考勤表` : '读不出这个月的考勤表')
     state.value = 'error'
   }
 }
@@ -560,7 +652,12 @@ async function exportSheet() {
   exporting.value = true
   exportError.value = ''
   try {
-    await api.download('/api/attendance/sheet.xlsx')
+    // 回看历史月时导出**那个月**：服务端按 `month` 生成工作簿与「考勤表-YYYY-MM.xlsx」
+    // 的文件名（页面仍然不自己拼文件名）。当月不拼参数，保持原先「一条写死的路径」。
+    const query = isCurrentMonth.value
+      ? ''
+      : `?month=${encodeURIComponent(shownMonth.value)}`
+    await api.download(`/api/attendance/sheet.xlsx${query}`)
   } catch (err) {
     exportError.value = err.message || '这个月的考勤表没导出来'
   } finally {
@@ -582,18 +679,22 @@ onMounted(() => {
         <div class="aTitleRow">
           <h1>考勤表</h1>
         <div class="aActions">
-          <!-- 封过账的月只交代一句「什么时候封的」（验收 5）；没封过才给那颗按钮。
-               回执取自服务端下发的封账时刻，页面不自己记一个「我刚封过」的本地状态。 -->
-          <span v-if="sealStamp" class="aSealed" role="status">{{ sealStamp }}</span>
-          <button
-            v-else
-            class="btn"
-            type="button"
-            :disabled="sealing"
-            @click="sealLastMonth"
-          >
-            {{ sealing ? '封账中…' : '封账上月' }}
-          </button>
+          <!-- 封账（票 04）只对**当月**有意义：它封的是「上月」，回看历史月时这一对
+               留在页面上，店长会以为封的是正在看的那个月。 -->
+          <template v-if="isCurrentMonth">
+            <!-- 封过账的月只交代一句「什么时候封的」（验收 5）；没封过才给那颗按钮。
+                 回执取自服务端下发的封账时刻，页面不自己记一个「我刚封过」的本地状态。 -->
+            <span v-if="sealStamp" class="aSealed" role="status">{{ sealStamp }}</span>
+            <button
+              v-else
+              class="btn"
+              type="button"
+              :disabled="sealing"
+              @click="sealLastMonth"
+            >
+              {{ sealing ? '封账中…' : '封账上月' }}
+            </button>
+          </template>
           <button class="btn" type="button" @click="router.push(WORKBENCH_HR_HOME)">
             回到月历
           </button>
@@ -612,12 +713,43 @@ onMounted(() => {
         <details class="aHelp">
           <summary>怎么用</summary>
           <p class="aSub">
-            <template v-if="sheet">当月 {{ sheet.month }} · 今天 {{ sheet.today }} · </template>
+            <template v-if="sheet">表内月份 {{ sheet.month }} · 今天 {{ sheet.today }} · </template>
             员工面板默认折叠，点「待补排行」里的人或右边「展开」看明细。
-            点一个已经过去的日子就能改它 —— 只改那一天，不动轮转规则。
+            <template v-if="readOnly">历史月只读回看，不能改格子。</template>
+            <template v-else>点一个已经过去的日子就能改它 —— 只改那一天，不动轮转规则。</template>
           </p>
         </details>
-        <span class="aScope">{{ sheet ? sheet.month : '—' }} 月</span>
+        <!-- 月份切换（R2）：换月只是给同一条 GET 多带一个 `month`；缺省仍是当月。
+             到当月为止（服务端也拒绝未来月），这里用禁用按钮挡住第一道。 -->
+        <nav class="aMonthNav" aria-label="切换考勤表月份">
+          <button
+            class="aMonthBtn"
+            type="button"
+            aria-label="上一个月"
+            :disabled="state === 'loading'"
+            @click="previousMonth"
+          >
+            ‹
+          </button>
+          <span class="aMonthNow" aria-live="polite">{{ shownMonth ? `${shownMonth} 月` : '—' }}</span>
+          <button
+            class="aMonthBtn"
+            type="button"
+            aria-label="下一个月"
+            :disabled="state === 'loading' || !canNextMonth"
+            @click="nextMonth"
+          >
+            ›
+          </button>
+          <button
+            class="aMonthBtn aMonthBack"
+            type="button"
+            :disabled="state === 'loading' || isCurrentMonth"
+            @click="backToCurrentMonth"
+          >
+            本月
+          </button>
+        </nav>
       </div>
     </header>
 
@@ -626,11 +758,15 @@ onMounted(() => {
     <p v-if="sealError" class="aErr" role="alert">{{ sealError }}</p>
     <p v-if="exportError" class="aErr" role="alert">{{ exportError }}</p>
 
+    <!-- 历史月（R2）：封过的月把「什么时候封的」写出来，并明说是**按现有排班 / 加班 /
+         台账重算**的只读回看 —— 不冒充封账那一刻的快照。没封过的历史月也走这一条。 -->
+    <p v-if="sheet && readOnly" class="aHistoryNote" role="status">{{ historyNote }}</p>
+
     <!-- 卡片这一棵**不进 `v-if/v-else`**（用 `v-show` 藏）：它是改完一格要立刻重画的那
          一棵，而重挂一棵 `v-else` 子树会让里面的格子停在旧值上（实测：整页重新挂载的
          那一拍，格子还是改之前的班次名）。 -->
     <!-- 当月只算不落库（票 03 / ADR 0113）：这一条要看得见，否则半个月的数会被拿去结账。 -->
-    <p v-if="sheet && sheet.provisional" class="aProvisional" role="status">
+    <p v-if="sheet && sheet.provisional && !readOnly" class="aProvisional" role="status">
       暂算值（未封账）：这个月的数还会随排班与加班变，封账之后才定稿。
     </p>
 
@@ -638,7 +774,7 @@ onMounted(() => {
     <div v-if="state === 'ready'" class="aKpis">
       <span class="aKpi"><i>在职</i><b>{{ employees().length }}</b><em>人</em></span>
       <span class="aKpi"><i>待补</i><b>{{ todoTotal }}</b><em>天</em></span>
-      <span class="aKpi"><i>本月</i><b>{{ monthDayCount }}</b><em>天</em></span>
+      <span class="aKpi"><i>{{ readOnly ? '月内' : '本月' }}</i><b>{{ monthDayCount }}</b><em>天</em></span>
     </div>
 
     <!-- 页头下第一块：待补排行（降序，点人展开他的面板）。 -->
@@ -663,7 +799,10 @@ onMounted(() => {
 
     <div v-show="state === 'ready'" class="aSheet">
       <p v-if="!employees().length" class="aEmpty">
-        这个月还没有在职员工，也没有人有排班或加班记录。
+        {{ readOnly ? '这个月没有可回看的员工记录。' : '这个月还没有在职员工，也没有人有排班或加班记录。' }}
+      </p>
+      <p v-else-if="readOnly && !monthHasRecords" class="aEmpty">
+        这个月没有排班或加班记录：每一天都显示「待补」，没有可回看的班。
       </p>
       <article
         v-for="person in employees()"
@@ -706,8 +845,14 @@ onMounted(() => {
           </span>
         </p>
         <div class="aDaysHead">
-          <span>当月明细</span>
-          <span class="aDaysHint">{{ person.cells.length }} 天 · 点过去的日子改</span>
+          <span>{{ readOnly ? '月内明细（只读）' : '当月明细' }}</span>
+          <span class="aDaysHint">
+            {{
+              readOnly
+                ? `${person.cells.length} 天 · 只读回看，不能改`
+                : `${person.cells.length} 天 · 点过去的日子改`
+            }}
+          </span>
         </div>
         <div class="aDays">
           <span
@@ -845,6 +990,9 @@ onMounted(() => {
             class="aManualBody"
           >
           <p class="aManualHelp">这几项系统里没有，填一次就进台账，导出的表直接用它。</p>
+          <p v-if="readOnly" class="aManualHelp">
+            历史月只读：手填列与两条结余都不能改。
+          </p>
           <div class="aManualRow">
             <label v-for="field in MANUAL_INPUTS" :key="field.key" class="aManualField">
               <span class="aManualLabel">{{ field.label }}</span>
@@ -855,6 +1003,7 @@ onMounted(() => {
                 :aria-label="`${person.name || ''} 的${field.label}`"
                 :value="manualValue(person, field)"
                 :title="field.key === 'borrowed_store' ? BORROWED_STORE_NOTE : undefined"
+                :disabled="readOnly"
               />
               <small class="aManualHint">{{ field.hint(person) }}</small>
             </label>
@@ -879,7 +1028,7 @@ onMounted(() => {
             <button
               class="btn btn-sm btn-primary aSave"
               type="button"
-              :disabled="savingManual === person.id"
+              :disabled="savingManual === person.id || readOnly"
               @click="saveManual(person, $event)"
             >
               存这三项
@@ -895,7 +1044,7 @@ onMounted(() => {
                 data-field="opening_balance"
                 :aria-label="`${person.name || ''} 的期初存假`"
                 :value="openingValue(person)"
-                :disabled="sealedNow"
+                :disabled="sealedNow || readOnly"
               />
               <small class="aOpeningHint">只在上线当月手工给一次；可为负、可带 .5</small>
             </label>
@@ -912,7 +1061,7 @@ onMounted(() => {
                 data-field="closing_balance_stored"
                 :aria-label="`${person.name || ''} 的期末存假`"
                 :value="closingValue(person)"
-                :disabled="sealedNow"
+                :disabled="sealedNow || readOnly"
               />
               <small class="aClosingHint">不填就用系统建议；可为负、可带 .5</small>
               <small v-if="closingNote(person)" class="aClosingNote">{{ closingNote(person) }}</small>
@@ -920,7 +1069,7 @@ onMounted(() => {
             <button
               class="btn btn-sm aOpeningSave"
               type="button"
-              :disabled="savingOpening === person.id || sealedNow"
+              :disabled="savingOpening === person.id || sealedNow || readOnly"
               @click="saveOpening(person, $event)"
             >
               存期初 / 期末
@@ -988,11 +1137,29 @@ onMounted(() => {
   font-weight: 600; letter-spacing: .26em; color: var(--ink-faint);
 }
 .aMetaRow { display: flex; align-items: center; gap: var(--sp-4); flex-wrap: wrap; }
-.aScope {
-  margin-left: auto; padding: 6px 10px; border: 1px solid var(--line-strong);
-  border-radius: var(--r-1); background: var(--surface-1); color: var(--ink-dim);
-  font-family: var(--font-mono); font-size: 10px; line-height: 1;
+/* 月份切换（R2）：‹ 上月 / 2026-10 月 / 下月 › + 「本月」回跳。
+   页头右侧那一行原来只摆一个只读的月份 scope，现在换成能翻的三颗按钮 —— 触控目标与
+   页面其它按钮同档（`--tap`=44px，390px 上也点得中）。 */
+.aMonthNav {
+  display: flex; align-items: center; gap: var(--sp-1);
+  margin-left: auto; flex-wrap: wrap;
 }
+.aMonthBtn {
+  min-width: var(--tap); min-height: var(--tap); padding: 0 var(--sp-2);
+  border: 1px solid var(--line-strong); border-radius: var(--r-1);
+  background: var(--surface-1); color: var(--ink-dim);
+  font: inherit; font-family: var(--font-mono); font-size: var(--fs-12);
+  line-height: 1; cursor: pointer;
+}
+.aMonthBtn:hover:not(:disabled) { border-color: var(--action); color: var(--ink); }
+.aMonthBtn:disabled { opacity: .5; cursor: default; }
+.aMonthBtn:focus-visible { outline: 1px solid var(--action); outline-offset: 1px; }
+.aMonthNow {
+  min-width: 86px; text-align: center;
+  font-family: var(--font-mono); font-size: var(--fs-12); line-height: 1;
+  color: var(--ink);
+}
+.aMonthBack { font-family: var(--font-sans); font-size: var(--fs-11); }
 .aSub { margin: 0; padding: 0 14px 12px; max-width: 760px; font-size: var(--fs-12); line-height: 1.7; color: var(--ink-dim); }
 .aHelp {
   border: 1px solid var(--line); border-radius: var(--r-1); background: var(--surface-1);
@@ -1068,6 +1235,13 @@ onMounted(() => {
   margin: 0; padding: 9px var(--sp-3); border-radius: var(--r-1);
   border: 1px solid var(--info); background: var(--info-soft);
   font-size: var(--fs-12); color: var(--ink);
+}
+/* 历史月（R2）：封账回执 / 「按现有数据重算」那一句。中性色 —— 它不是告警，
+   只是把这一页的口径说清楚（封账那一刻只有结余与时刻落进了台账）。 */
+.aHistoryNote {
+  margin: 0; padding: 9px var(--sp-3); border-radius: var(--r-1);
+  border: 1px solid var(--line-strong); background: var(--surface-2);
+  font-size: var(--fs-12); line-height: 1.6; color: var(--ink-dim);
 }
 .aErr {
   margin: 0; padding: 9px var(--sp-3); border-radius: var(--r-1);
@@ -1210,9 +1384,11 @@ onMounted(() => {
 .aEditToday { color: var(--accent); }
 .aEditChips { display: flex; flex-wrap: wrap; gap: var(--sp-1); }
 /* 每一颗 chip 都是**自己的按钮**（`type="button"`）：班次 / 休 / 休半天 各是一次写，
-   「取消」只是收起带子。当前生效的那一颗给 `is-on`（那天上哪个班、是不是休、是不是只上半天）。 */
+   「取消」只是收起带子。当前生效的那一颗给 `is-on`（那天上哪个班、是不是休、是不是只上半天）。
+   宽度也要够 `--tap`：只给高度的话，「休」这种单字 chip 实测只有 29px 宽（2026-11-09 B 组
+   390 实测），手机上点起来比旁边几颗难得多 —— 五颗 chip 一行仍放得下。 */
 .aChip {
-  min-height: var(--tap); padding: 2px var(--sp-2);
+  min-width: var(--tap); min-height: var(--tap); padding: 2px var(--sp-2);
   border: 1px solid var(--line-strong); border-radius: var(--r-full);
   background: transparent; color: var(--ink-dim);
   font: inherit; font-size: var(--fs-11); line-height: 1.6; cursor: pointer;
@@ -1374,6 +1550,8 @@ onMounted(() => {
 }
 @media (max-width: 720px) {
   .aTop h1 { font-size: 22px; }
+  .aMonthNav { width: 100%; margin-left: 0; }
+  .aMonthNow { flex: 1 1 auto; text-align: left; }
   .aTitleRow { flex-wrap: wrap; }
   .aActions { width: 100%; justify-content: flex-start; }
   .aKpis { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }

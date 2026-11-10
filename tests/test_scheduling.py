@@ -3310,7 +3310,7 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(SchedulingError) as queued:
             await self.store.submit_swap(third["id"], first["id"], "2026-09-25")
         self.assertEqual(queued.exception.code, "peer_in_swap")
-        self.assertIn("还在等店长批", queued.exception.args[0])
+        self.assertIn("还在等管理员批", queued.exception.args[0])
 
         # 换一天不受影响：挡的是「那天这个人」，不是「这个人」。
         self.assertEqual(

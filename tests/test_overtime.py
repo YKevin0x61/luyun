@@ -939,7 +939,7 @@ def test_rejections_are_chinese_400(overtime_http):
 
     too_early = submit(entry_date="2026-09-22")
     assert too_early.status_code == 400
-    assert too_early.json()["detail"] == "只能登记今天和昨天的加班：更早的请找店长补录"
+    assert too_early.json()["detail"] == "只能登记今天和昨天的加班：更早的请找管理员补录"
 
     zero = submit(half_hours=0)
     assert zero.status_code == 400
@@ -1481,7 +1481,7 @@ def test_supervisor_backfills_any_past_date_while_staff_cannot(overtime_http):
         json={"entry_date": "2026-08-01", "half_hours": 6, "reason": "补登"},
     )
     assert refused.status_code == 400
-    assert "店长" in refused.json()["detail"]
+    assert "管理员" in refused.json()["detail"]
 
     # 但店长**给自己**登也放开了窗口（能力跟人走，不跟「替谁登」走）。
     _staff_cookie(client, accounts, phone=SUPERVISOR_PHONE)

@@ -2306,7 +2306,7 @@ def test_swap_errors_are_readable_400s(scheduling_http, monkeypatch):
         base, json={"peer_employee_id": peer, "business_date": "2026-09-25"}
     )
     assert empty.status_code == 400
-    assert empty.json()["detail"] == "那天你手上没有班可换：先让店长给你配上轮转规则"
+    assert empty.json()["detail"] == "那天你手上没有班可换：先让管理员给你配上轮转规则"
     assert ruleless != peer
 
     # 同一天同一个人只挂一条：对方手机上不该出现两条一样的请求。

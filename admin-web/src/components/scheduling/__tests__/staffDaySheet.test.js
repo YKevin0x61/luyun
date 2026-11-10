@@ -169,7 +169,7 @@ describe('某一天的操作单：点开一天就能把那天的事办掉（票 
     const posted = calls.find((c) => c.path === '/api/scheduling/me/requests' && c.method === 'POST')
     expect(posted.body).toEqual({ start_date: '2026-10-08', end_date: null, note: null })
     // 办完回到那一天那一屏，并给一句回执。
-    expect(wrapper.text()).toContain('请假提上去了，等店长批')
+    expect(wrapper.text()).toContain('请假提上去了，等管理员批')
     expect(wrapper.find('#day-leave-start').exists()).toBe(false)
   })
 
@@ -225,7 +225,7 @@ describe('某一天的操作单：点开一天就能把那天的事办掉（票 
       ],
     })
     expect(buttonByText(pending.wrapper, '请这天的假').attributes('disabled')).toBeDefined()
-    expect(pending.wrapper.text()).toContain('这天已经有一条请假在等店长批：不用重复提')
+    expect(pending.wrapper.text()).toContain('这天已经有一条请假在等管理员批：不用重复提')
 
     // 批下来的换一种说法；换班按钮不受影响（那是另一件事）。
     const approved = await mountSheet({
@@ -391,13 +391,13 @@ describe('别人找我换这天的班：在这一屏就能回话（票 09 的验
   it('那天有人问我：先说清谁的哪天，同意就发 accept', async () => {
     const { wrapper, calls } = await mountSheet({ incoming: INCOMING })
     expect(wrapper.get('.ds-ask').text()).toContain('王五 想跟你换 10/8 周四')
-    await buttonByText(wrapper, '同意并转店长').trigger('click')
+    await buttonByText(wrapper, '同意并转管理员').trigger('click')
     await flushPromises()
     const posted = calls.find((c) => c.path.endsWith('/accept'))
     expect(posted.method).toBe('POST')
     expect(posted.path).toBe('/api/scheduling/me/swaps/31/accept')
     // 同意不弹确认框（后面还有店长那道闸），但要说清接下来等谁。
-    expect(wrapper.text()).toContain('你同意了，接下来等店长批')
+    expect(wrapper.text()).toContain('你同意了，接下来等管理员批')
   })
 
   it('拒绝先过确认框（服务端只往前走，手机上一误触没有回头路）', async () => {
@@ -431,7 +431,7 @@ describe('我在这天的申请：看得见、撤得回', () => {
 
   it('那天有一条还在等店长批：状态写出来，撤回要过确认框', async () => {
     const { wrapper, calls } = await mountSheet({ requests: MINE })
-    expect(wrapper.get('.ds-mine').text()).toContain('请假 · 10/8 周四 · 等店长批')
+    expect(wrapper.get('.ds-mine').text()).toContain('请假 · 10/8 周四 · 等管理员批')
     await wrapper.get('.ds-mine .ds-mini').trigger('click')
     await flushPromises()
     expect(calls.some((c) => c.method === 'DELETE')).toBe(false)

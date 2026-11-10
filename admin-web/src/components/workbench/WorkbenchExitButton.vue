@@ -54,4 +54,10 @@ const { ask, exit, confirmOpen, queuedCount, cancel, loggingOut } = useWorkbench
 @media (max-width: 720px) {
   .wb-exit { min-height: 44px; min-width: 44px; padding: 4px 12px; }
 }
+
+/* 平板 / 小笔电（721–1024）：顶栏还在，但这一档同样是触屏，退出也抬到 44px。
+   单独一段而不并进上面：`shellMobileChrome` 只看 720 段里的那条护栏。 */
+@media (max-width: 1024px) {
+  .wb-exit { min-height: 44px; min-width: 44px; padding: 4px 12px; }
+}
 </style>

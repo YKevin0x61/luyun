@@ -223,7 +223,7 @@ function onDocumentPointerDown(evt) {
           <div class="station-head-copy">
             <p class="station-kicker">配方 · 岗位</p>
             <h1 class="page-title">选择岗位</h1>
-            <p class="page-lead">查看该岗位配方，也可打印或张贴二维码。</p>
+            <p class="page-lead">点一张岗位卡，查看这个岗位的配方。</p>
             <div class="station-search" ref="searchRoot">
               <input
                 id="station-global-search"
@@ -325,9 +325,13 @@ function onDocumentPointerDown(evt) {
                     </span>
                   </span>
                 </router-link>
-                <div class="station-card-actions">
+                <!-- 印码入口按身份出现（与顶部那颗同一判据）：员工是扫码的一方，
+                     点「二维码」会落到管理员专属的印码页，只吃一张「无权访问」。
+                     批量打印是 `both` 页面的既定入口，员工也留着；没有入口时整行不占位。 -->
+                <div v-if="isAdmin || batchMode" class="station-card-actions">
                   <span class="station-check" aria-hidden="true"></span>
                   <router-link
+                    v-if="isAdmin"
                     class="station-qr-link"
                     :to="RECIPE_QR_PATH"
                     :aria-label="`${s.title} 岗位二维码`"

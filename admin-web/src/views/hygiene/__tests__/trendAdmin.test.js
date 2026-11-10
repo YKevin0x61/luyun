@@ -128,8 +128,10 @@ describe('卫生趋势 · 顶部汇总', () => {
     expect(text).not.toContain('73.3%')
     expect(text).toContain('44')
     expect(text).toContain('16')
-    // 逾期是另一条轴：单独一格，且明说了不参与通过率。
-    expect(text).toContain('逾期（次）· 另一条轴')
+    // 逾期单独一格，并且明说了不参与通过率（旧文案「另一条轴」只在源码注释里讲得清，
+    // 超级管理员那一格看到的字要自己说人话）。
+    expect(text).toContain('逾期（次）')
+    expect(text).toContain('不计入通过率')
     // 窗口首尾与天数都来自服务端（营业日在服务端切，前端不自己算「今天」）。
     expect(text).toContain('2026-09-06 ~ 2026-10-05')
     expect(text).toContain('30 天')

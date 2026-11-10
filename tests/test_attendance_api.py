@@ -219,9 +219,11 @@ def test_the_sheet_is_the_current_month_behind_the_hr_cap_door(attendance_http):
     assert resp.status_code == 200, resp.text
     body = resp.json()
 
-    # 打开就是当月（验收 2）：没有月份参数，给了也不认 —— 选不到历史月份。
+    # 打开就是当月（验收 2）：省略 month 就是本月。
     assert (body["month"], body["today"]) == (MONTH, TODAY)
-    assert client.get("/api/attendance/sheet", params={"month": "2026-08"}).json()["month"] == MONTH
+    # 当月永远不封账（ADR 0113）：`provisional` 恒 True、没有封账时刻。
+    assert body["provisional"] is True
+    assert body["sealed_at"] is None
 
     assert [(day["day"], day["business_date"]) for day in body["days"]][:2] == [
         (1, "2026-09-01"),
@@ -233,6 +235,95 @@ def test_the_sheet_is_the_current_month_behind_the_hr_cap_door(attendance_http):
     assert [day["business_date"] for day in body["days"] if day["is_future"]] == [
         f"2026-09-{day:02d}" for day in range(25, 31)
     ]
+
+
+# ── R2-A（2026-11-10）：月份选择器 —— 回看历史月、拒绝未来月与坏格式 ──────────
+
+
+def test_the_sheet_can_look_back_at_a_finished_month(attendance_http):
+    """`?month=2026-08` 返回 8 月那张表；`is_today` / `is_future` 仍按真实今天（9/24）。"""
+    client, db, accounts = attendance_http
+    admin = _admin_cookie(client)
+    shifts = _shift_ids(db)
+    employee_id = _employee_id(accounts)
+    # 8 月补一天班（在可补记窗口里：今天是 9/24，窗口回看到 8/25）：
+    # 证明历史月读的是**那个月**的排班，不是 9 月的。
+    _run(_scheduler(db).set_override(employee_id, "2026-08-26", shift_id=shifts["白班"]))
+
+    sheet = _sheet(client, admin, {"month": "2026-08"})
+
+    # 月框是 8 月；`today` 仍是真实今天 —— 两个是不同的东西，别混。
+    assert (sheet["month"], sheet["today"]) == ("2026-08", TODAY)
+    assert len(sheet["days"]) == 31
+    assert not any(day["is_today"] or day["is_future"] for day in sheet["days"])
+    cells = _cells(sheet, employee_id)
+    assert cells["2026-08-26"] == "work"
+    assert cells["2026-08-27"] == "todo"  # 8 月没有排班行
+    assert "2026-09-01" not in cells  # 月框就是 8 月，不混进当月
+    # 未封账的历史月照旧是「暂算值」：历史排班/加班改了，这个数会跟着变。
+    assert sheet["provisional"] is True
+    assert sheet["sealed_at"] is None
+    assert sheet["previous_month"]["month"] == "2026-07"
+
+
+def test_a_sealed_history_month_is_read_only_and_reports_when_it_was_sealed(attendance_http):
+    """封 2026-08 的账之后按 month 读：provisional False + sealed_at 就是台账那一位。"""
+    client, db, accounts = attendance_http
+    admin = _admin_cookie(client)
+    employee_id = _employee_id(accounts)
+    # 封账只给「那个月有排班/加班记录」的人写行；先给这人补一天 8 月的班。
+    _run(
+        _scheduler(db).set_override(
+            employee_id, "2026-08-26", shift_id=_shift_ids(db)["白班"]
+        )
+    )
+
+    sealed = _seal(client, admin, {"month": "2026-08"})
+    assert sealed.status_code == 200, sealed.text
+    assert sealed.json()["month"] == "2026-08"
+
+    sheet = _sheet(client, admin, {"month": "2026-08"})
+    assert sheet["provisional"] is False
+    assert sheet["sealed_at"] == sealed.json()["sealed_at"]
+    # 封账状态只读台账；表格内容仍是重算值 —— 这里只钉「封过账的月读得到」。
+    assert _sheet(client, admin, {"month": "2026-08"})["month"] == "2026-08"
+
+
+def test_the_sheet_refuses_a_future_month_with_400(attendance_http):
+    """未来月不预读：夹具的今天是 2026-09-24，10 月与明年都是 400。"""
+    client, _db, accounts = attendance_http
+    admin = _admin_cookie(client)
+    _employee_id(accounts)
+    _as_admin(client, admin)
+
+    resp = client.get("/api/attendance/sheet", params={"month": "2026-10"})
+    assert resp.status_code == 400, resp.text
+    assert "还没到" in resp.json()["detail"]
+    assert client.get("/api/attendance/sheet", params={"month": "2027-01"}).status_code == 400
+
+
+def test_the_sheet_rejects_a_malformed_month_with_400(attendance_http):
+    client, _db, accounts = attendance_http
+    admin = _admin_cookie(client)
+    _employee_id(accounts)
+    _as_admin(client, admin)
+    for bad in ("2026-13", "2026-1", "abc", "2026-09-01"):
+        resp = client.get("/api/attendance/sheet", params={"month": bad})
+        assert resp.status_code == 400, (bad, resp.text)
+        assert "YYYY-MM" in resp.json()["detail"]
+
+
+def test_the_month_selector_still_needs_the_hr_cap(attendance_http):
+    """月份参数不改变那道门：员工会话没勾「人事管理」时，历史月也读不到。"""
+    client, _db, accounts = attendance_http
+    _employee_id(accounts)
+    staff_session = _run(accounts.login(PHONE, PASSWORD))["session_id"]
+
+    client.cookies.clear()
+    client.cookies.set(settings.STAFF_SESSION_COOKIE_NAME, staff_session)
+    denied = client.get("/api/attendance/sheet", params={"month": "2026-08"})
+    assert denied.status_code == 403
+    assert "人事管理" in denied.json()["detail"]
 
 
 # ── 票 01 验收 3/4：逐日三态，今天之后留空 ──────────────────────────────────
@@ -2416,6 +2507,24 @@ def test_the_download_is_named_after_the_month_the_response_reports(attendance_h
     assert resp.headers["content-type"].startswith(
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
+
+
+def test_the_export_can_export_a_history_month(attendance_http):
+    """R2-A：导出跟着月份选择器走 —— `?month=2026-08` 导出的就是 8 月那张表。"""
+    client, db, accounts = attendance_http
+    admin = _admin_cookie(client)
+    _export_employees(accounts, db)
+
+    _as_admin(client, admin)
+    resp = client.get(EXPORT_URL, params={"month": "2026-08"})
+    assert resp.status_code == 200, resp.text
+    assert _disposition_filename(resp) == "考勤表-2026-08.xlsx"
+    assert _only_sheet(_workbook(resp))["A2"].value == "月份 ：8月份"
+
+    # 未来月与页面的月份选择器同一条闸。
+    future = client.get(EXPORT_URL, params={"month": "2026-10"})
+    assert future.status_code == 400
+    assert "还没到" in future.json()["detail"]
 
 
 def test_the_export_door_is_the_same_hr_cap_door_as_the_page(attendance_http):

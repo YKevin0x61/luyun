@@ -141,7 +141,7 @@ const whyNote = computed(() => (
   leaveTaken.value
     ? (leaveTaken.value.status === 'approved'
       ? '这天已经有批准的假：不用再提'
-      : '这天已经有一条请假在等店长批：不用重复提')
+      : '这天已经有一条请假在等管理员批：不用重复提')
     : actionsNote(acts.value)
 ))
 const mineText = computed(() => myDayText(props.day))
@@ -209,7 +209,7 @@ async function submitLeave() {
         note: leaveNote.value || null,
       },
     })
-    note.value = '请假提上去了，等店长批'
+    note.value = '请假提上去了，等管理员批'
     view.value = DAY_VIEW.day
     await loadRequests()
     emit('changed')
@@ -382,7 +382,7 @@ async function answerSwap(card, agree) {
     await staffRequest(`/api/scheduling/me/swaps/${card.id}/${agree ? 'accept' : 'reject'}`, {
       method: 'POST',
     })
-    note.value = agree ? '你同意了，接下来等店长批' : '你拒绝了，这件事到此为止'
+    note.value = agree ? '你同意了，接下来等管理员批' : '你拒绝了，这件事到此为止'
   } catch (err) {
     if (err.status === 401) {
       toLogin()
@@ -483,7 +483,7 @@ useNudgePull({
               type="button"
               :disabled="swapBusy"
               @click="answerSwap(card, true)"
-            >同意并转店长</button>
+            >同意并转管理员</button>
             <button
               class="btn"
               type="button"
@@ -662,7 +662,7 @@ useNudgePull({
         </div>
         <p class="ds-sub">
           {{ dayLabel(day.business_date) }} · 你那天{{ myShiftName ? ` ${myShiftName}` : '休' }}。
-          对方在手机上点同意，店长才看得到这条；两边都点头之后才轮到店长批。
+          对方在手机上点同意，管理员才看得到这条；两边都点头之后才轮到管理员批。
         </p>
 
         <p class="ds-h">点一个人换</p>
@@ -737,7 +737,7 @@ useNudgePull({
     <ConfirmDialog
       v-if="cancelTarget"
       title="撤回这条申请"
-      message="撤回之后要重新提一次；店长那边这条就消失了。"
+      message="撤回之后要重新提一次；管理员那边这条就消失了。"
       confirm-label="撤回"
       danger
       @confirm="confirmCancel"

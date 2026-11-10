@@ -314,9 +314,9 @@ describe('移动端：320px 起 5 项导航全可见 + 触控尺寸下限', () =
 
   it('主题里给三类通用控件压了触控下限，且只在 ≤430px 生效', () => {
     const { src } = mobileBlock(themeCss)
-    // 主按钮 40px、次级小按钮 36px（!important 是有意的：要压过组件里为桌面密度写的
+    // 主按钮 44px（2026-11-09 从 40 抬到 44 对齐 --tap）、次级小按钮 36px（!important 是有意的：要压过组件里为桌面密度写的
     // `.panel-header__actions :deep(.btn) { min-height: 36px }` 那类同名覆盖）。
-    expect(src).toContain('.btn{min-height:40px!important;}')
+    expect(src).toContain('.btn{min-height:44px!important;}')
     expect(src).toContain('.btn-sm{min-height:36px!important;}')
     // 勾选行靠 min-height + 上下 padding 撑热区。
     expect(src).toContain('.luyun-check-row,.luyun-radio-row{min-height:44px;padding:11px0;}')

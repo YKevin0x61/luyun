@@ -476,6 +476,12 @@ table.data-table td.actions { display: flex; gap: 6px; }
   box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.2);
 }
 
+/* 触控下限（2026-11-09 工作台走查）：vue-datepicker 的输入框在手机上只有 34–38px，
+   低于 44。窄屏统一抬到 44；卫生员工页自带 48px 的档位特异性更高，不受影响。 */
+@media (max-width: 720px) {
+  .luyun-date-picker .dp--input { min-height: 44px; }
+}
+
 .luyun-time-picker {
   /* 3 行滚轮：行高与可见行数决定滚轮高度，列内边距负责把首尾项也顶到中间。
      改这里时同步 LuyunTimePicker.vue 里的 ITEM_HEIGHT。 */
@@ -647,7 +653,9 @@ table.data-table td.actions { display: flex; gap: 6px; }
  * 手机上一个热区只有 18–36px 时点不中：2026-10-08 的移动端实测里，配置页的勾选行只有
  * 18px、`.btn-sm` 24px、主按钮 31–36px（`.scratch/settings-mobile-audit/report.md`）。
  * 这里在 ≤430px 给三个通用控件压一个下限，**只动尺寸与间距，不动颜色、字号与布局**：
- *   .btn 40px（主 / 次 / 危险三态同吃这一条）、.btn-sm 36px、勾选行 44px。
+ *   .btn 44px（主 / 次 / 危险三态同吃这一条；2026-11-09 工作台走查从 40 抬到 44，
+ *   与 --tap 触控下限一致——人事提醒「去花名册」、节假日年切换这些窄屏按钮曾差 4px）、
+ *   .btn-sm 36px、勾选行 44px。
  * 桌面不放开：鼠标下的紧凑密度是列表操作列有意为之（`.btn-sm` 24px），撑到 36px 会把
  * 表格行整体撑高。勾选行靠 `min-height` + 上下 padding 撑热区，16×16 的方块
  * （`.luyun-checkbox`）本身不变 —— 放大方块会让它在同一行里压到文字。
@@ -658,7 +666,7 @@ table.data-table td.actions { display: flex; gap: 6px; }
      与备份点列表头部的按钮都是 (0,3,0) 的具体度，主题里不加重要级就赢不了（实测「验证登录」
      「刷新连接信息」「退出登录」「刷新列表」都停在 36px）。它只作用于 min-height 一个属性、
      只在 ≤430px，且两条规则靠先后顺序分档：`.btn` 40px、`.btn-sm` 36px。 */
-  .btn { min-height: 40px !important; }
+  .btn { min-height: 44px !important; }
   .btn-sm { min-height: 36px !important; }
   .luyun-check-row,
   .luyun-radio-row { min-height: 44px; padding: 11px 0; }

@@ -12,6 +12,7 @@
  * `/api/semi-rules/{id}` 与 `/api/semi-rules/`。
  */
 import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { api } from '../../api/client'
 import { useStationsStore } from '../../stores/stations'
 import { useNudgePull } from '../../composables/useNudgePull'
@@ -34,7 +35,11 @@ const newItem = reactive({ open: false, name: '', unit: '', position: '', kind: 
 const comboOpen = ref(false)
 
 const tab = ref('covered') // covered | pending
-const search = ref('')
+// `?q=` 深链：备货计划里点「改配方系数」要直接落到这个备货品相关的规则上。
+// 备货品的名字本身不是菜名，但 visibleGroups 的匹配串里带 `prep_item_name`，
+// 所以这里用备货品名搜索正好能列出「用到它」的那些菜。
+const route = useRoute()
+const search = ref(String(route.query.q || ''))
 const positionFilter = ref('')
 const stationFilter = ref('')
 
@@ -332,10 +337,15 @@ async function load() {
       groups.value = data.groups || []
       coverage.value = data.coverage || null
       // 选中的组可能因为保存后从「待配」挪到「已配」而换了 tab，保持选中
-      if (!selectedKey.value && groups.value.length) {
-        pick(groups.value[0])
-        // 手机上详情是盖在列表上的一层：首屏先给列表，点了才进详情
-        mobileDetail.value = false
+      if (!selectedKey.value) {
+        // 从「备货计划 → 改配方系数」带 ?q= 进来时，第一条不一定在筛选结果里：
+        // 选第一条「当前列表里看得到的」，右边的编辑区才不会空着。
+        const first = visibleGroups.value[0]
+        if (first) {
+          pick(first)
+          // 手机上详情是盖在列表上的一层：首屏先给列表，点了才进详情
+          mobileDetail.value = false
+        }
       }
     }
   } catch (e) {

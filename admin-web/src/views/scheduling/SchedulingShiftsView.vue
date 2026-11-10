@@ -621,6 +621,10 @@ onMounted(() => {
   }
   /* 全局在 ≤430px 把 `.btn` 钉成 40px（theme.css 的 !important），这里要的是 44。 */
   .sMini { padding: 0; font-size: 12.5px; min-height: 44px !important; }
+  /* 班次色：9 档（8 色 + 中性）并排，一行放不下 9 个 44px。32px 是这条限制下最大的
+     可点面积，比原来的 18px 好按，也不会被挤成两行。 */
+  .sSw { gap: 3px; }
+  .sSw-dot { width: 32px; height: 32px; border-radius: 7px; }
   .sAdd .btn { min-height: 44px !important; }
   .sNotes { padding: 8px 12px 10px; }
   .sWhy { font-size: 10px; line-height: 1.6; }

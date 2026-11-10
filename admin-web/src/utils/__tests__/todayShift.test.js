@@ -78,7 +78,7 @@ describe('「休」和「还没排」是两件事（验收 3）', () => {
     expect(shiftText(NOT_ROSTERED)).toBe('还没排')
     expect(todayHeadline(NOT_ROSTERED)).toBe('今天没有你的班')
     expect(todayTone(NOT_ROSTERED)).toBe('none')
-    expect(todaySubline(NOT_ROSTERED)).toBe('店长还没排到你')
+    expect(todaySubline(NOT_ROSTERED)).toBe('管理员还没排到你')
   })
 
   it('行上写着休的那天说休', () => {
@@ -121,7 +121,7 @@ describe('「休」和「还没排」是两件事（验收 3）', () => {
   it('一天都没有（接口给了空数组）也不炸', () => {
     expect(shiftText(null)).toBe('还没排')
     expect(todayHeadline(undefined)).toBe('今天没有你的班')
-    expect(todaySubline(null)).toBe('店长还没排到你')
+    expect(todaySubline(null)).toBe('管理员还没排到你')
     expect(todayTone(null)).toBe('none')
   })
 })

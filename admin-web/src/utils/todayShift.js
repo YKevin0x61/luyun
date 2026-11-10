@@ -80,10 +80,10 @@ export function todayTone(day) {
 
 /** 大字下面那行小字。 */
 export function todaySubline(day) {
-  if (!day) return '店长还没排到你'
+  if (!day) return '管理员还没排到你'
   // 票 08：批过的请假与被排了一天休是两件事，这儿得说出来。
   if (day.leave) return '今天请假'
-  if (!day.scheduled) return '店长还没排到你'
+  if (!day.scheduled) return '管理员还没排到你'
   if (day.shift_id == null) return '今天休息'
   // 票 07：上半天班也是上班 —— 工作区照挂（那半天他在那个区）。
   if (day.half_rest) {

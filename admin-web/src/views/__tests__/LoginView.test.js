@@ -233,26 +233,23 @@ describe('/login 面板：两个 Tab 与默认栏', () => {
     expect(activeTab(wrapper)).toBe('超级管理员')
   })
 
-  // 票 04：印码页是**店长的活**（生成岗位码、印出来贴到岗位上），从阅读面白名单里摘出去
-  // 之后它就走「管理端专属页」这一档 —— 未登录访问它默认开超级管理员栏，不必先切一次身份。
-  // 扫码那条链路不受影响：`?next=` 是 detail 页时照旧开员工栏（下一条 describe 压着）。
-  it('票 04：?next 是印码页时开超级管理员栏（没记住偏好也一样）', async () => {
-    fetchMock.mockResolvedValueOnce(ADMIN_LOGGED_OUT())
+  // 2026-11-10：印码页带 `staffCap: recipe_qr` 之后，它跟排班页一样是「两种身份都可能开」
+  // 的页 —— 不再强制管理栏，按记住值走；没记住过时落员工栏（管理员可在员工会话里只读打印）。
+  it('?next 是印码页时不再强制管理栏：没记住偏好就开员工栏', async () => {
+    fetchMock.mockResolvedValueOnce(STAFF_LOGGED_OUT())
 
     const { wrapper } = await mountLogin('/login?next=%2Fworkbench%2Fkitchen%2Frecipe%2Fqr')
 
-    expect(activeTab(wrapper)).toBe('超级管理员')
-    expect(findCall(fetchMock, '/api/auth/status')).toBeTruthy()
-    expect(findCall(fetchMock, '/api/hygiene/staff/session')).toBeFalsy()
+    expect(activeTab(wrapper)).toBe('员工')
   })
 
-  it('票 04：印码页优先于「记住的是员工栏」', async () => {
+  it('?next 是印码页时跟记住值走（记住员工栏就开员工栏）', async () => {
     rememberTab('staff')
-    fetchMock.mockResolvedValueOnce(ADMIN_LOGGED_OUT())
+    fetchMock.mockResolvedValueOnce(STAFF_LOGGED_OUT())
 
     const { wrapper } = await mountLogin('/login?next=%2Fworkbench%2Fkitchen%2Frecipe%2Fqr')
 
-    expect(activeTab(wrapper)).toBe('超级管理员')
+    expect(activeTab(wrapper)).toBe('员工')
   })
 })
 

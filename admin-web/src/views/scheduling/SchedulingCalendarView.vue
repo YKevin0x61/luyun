@@ -8,7 +8,7 @@
 // 票 02 做「配固定班次」、票 03 加工作区、票 04 加轮转周期编辑、票 07 加单日覆盖
 // （点当天卡里的一个人就地改那一天）、票 08 加底下那根「请假待办」的条
 // （批假在 `/workbench/hr/inbox` 那一页：这一页只管排班怎么铺）；班次表的增删改在票 11。
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import ConfirmDialog from '../../components/admin/ConfirmDialog.vue'
 import LuyunDatePicker from '../../components/ui/LuyunDatePicker.vue'
@@ -1854,6 +1854,20 @@ async function openDayEdit(person, shiftId) {
   // 按名字反查会指到别人身上。休的人没有区，`zone_id` 是 null → 停在「跟固定区」。
   editZone.value = person.zone_id === null || person.zone_id === undefined ? '' : String(person.zone_id)
   editError.value = ''
+  revealDayEditor()
+}
+
+/** 点人之后那张「单日编辑卡」挂在右栏名单下面：宽屏点名单击后卡子会落在首屏之外
+ *  （2026-11-09 B 组实测：卡片 top=768、高 233，900 高的视口只看得见上半截，保存按钮
+ *  在折线以下），看着像「点了没反应」。`block:'nearest'` 只在卡子没完整可见时才滚；
+ *  手机端它长在底部抽屉里，滚动的是抽屉自己的滚动区，页面不动。 */
+function revealDayEditor() {
+  nextTick(() => {
+    const card = document.querySelector('.gD')
+    if (card && typeof card.scrollIntoView === 'function') {
+      card.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+    }
+  })
 }
 
 function closeDayEdit() {
@@ -2956,6 +2970,12 @@ useNudgePull({
 /* ── 月历：主面板 + 右侧当天名单 ──────────────────────────────────────── */
 .gDash { display: grid; grid-template-columns: 1.6fr 1fr; gap: 14px; align-items: start; }
 .gSide { display: flex; flex-direction: column; gap: 10px; }
+/* 当天名单的遮罩只在手机档是「盖住页面的遮罩」，所以 base 要把它彻底移出布局：宽屏
+   点某一天时 `.gDash--drawer` 不换版式（右栏继续原地更新），这个 `v-if="mobileDayOpen"`
+   的 div 若按静态元素占位，就会先占掉 `.gDash` 第二格、把 `.gSide` 挤到月历下面去
+   （2026-11-09 B 组实测：右栏从 x958,y201 掉到 x345,y1010，桌面看起来名单「消失」）。
+   手机档在下面 @media 里再把它设成 fixed 遮罩 —— display 也要在那里显式补回来。 */
+.gDrawerScrim { display: none; }
 /* 右栏顶/底两条：与面板同宽、单行 44px。 */
 .gSide > .gPend {
   margin: 0; min-height: 44px; padding: 7px 12px;
@@ -3679,7 +3699,7 @@ useNudgePull({
   .gDash--drawer .gSide > .gPend { display: none; }
   .gDash--drawer .gSide > .gB-card { border-radius: var(--r-2) var(--r-2) 0 0; border-left: 0; border-right: 0; }
   .gDrawerScrim {
-    position: fixed; inset: 0; z-index: var(--z-scrim);
+    display: block; position: fixed; inset: 0; z-index: var(--z-scrim);
     background: var(--wb-scrim);
   }
   .gDrawerClose { display: inline-flex; }

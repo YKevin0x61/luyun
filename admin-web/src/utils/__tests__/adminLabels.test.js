@@ -79,7 +79,7 @@ describe('getCellLabel', () => {
   })
 
   it('把排班 / 加班 / 出站 / 损耗的状态码翻成中文', () => {
-    expect(getCellLabel('scheduling_requests', 'status', 'pending_manager')).toBe('待店长审批')
+    expect(getCellLabel('scheduling_requests', 'status', 'pending_manager')).toBe('待管理员审批')
     expect(getCellLabel('scheduling_requests', 'status', 'pending_peer')).toBe('待对方确认')
     expect(getCellLabel('scheduling_requests', 'kind', 'swap')).toBe('换班')
     expect(getCellLabel('staff_shifts', 'duty_slot', 'night')).toBe('夜班')

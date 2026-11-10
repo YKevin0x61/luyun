@@ -21,7 +21,7 @@ export const REQUEST_STATUS = {
 
 const STATUS_TEXT = {
   pending_peer: '等对方同意',
-  pending_manager: '等店长批',
+  pending_manager: '等管理员批',
   approved: '批了',
   rejected: '驳回了',
   cancelled: '已撤回',
@@ -124,7 +124,7 @@ export function swapStatusText(request) {
     case REQUEST_STATUS.pendingPeer:
       return `等 ${who} 同意`
     case REQUEST_STATUS.pendingManager:
-      return `${who} 同意了 · 等店长批`
+      return `${who} 同意了 · 等管理员批`
     case REQUEST_STATUS.approved:
       return '换成了'
     case REQUEST_STATUS.rejected:

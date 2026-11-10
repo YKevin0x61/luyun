@@ -37,3 +37,20 @@ describe('加班费账单（票 03）', () => {
     expect(view).toMatch(/stats\.total\.unpriced/)
   })
 })
+
+// B 组（2026-11-09）：批准是落账动作，原来点一下直接 POST（店长侧又看不到台账、没有
+// 作废可回退）；±半小时步进在 390 上只有 32px。两条都按源码钉住。
+describe('批准二次确认与手机步进（B 组 2026-11-09）', () => {
+  it('批准先弹确认框，确认后才发请求（加班与存假抵扣两条队列）', () => {
+    expect(view).toMatch(/@click="startApprove\('entry', entry\)"/)
+    expect(view).toMatch(/@click="startApprove\('deduction', item\)"/)
+    expect(view).toMatch(/function startApprove\(kind, item\)/)
+    expect(view).toMatch(/function confirmApprove\(\)/)
+    expect(view).toMatch(/<ConfirmDialog\s+v-if="approveTarget"/)
+    expect(view).toMatch(/@confirm="confirmApprove"/)
+  })
+
+  it('手机档 ± 半小时按钮 44×44（桌面仍紧凑 32）', () => {
+    expect(view).toMatch(/@media \(max-width: 720px\) \{\s*\.oStep \{ width: var\(--tap\); height: var\(--tap\); font-size: 19px; \}/)
+  })
+})

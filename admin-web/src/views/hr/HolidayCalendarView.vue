@@ -20,6 +20,7 @@
 // 同一天（用户）：编辑带挂在**日历下面**（网格之后、同一张面板里），不再压在上面占位；
 // 手机上点第三行往下时带子可能落在视口外，打开后把它滚进来。
 import { computed, nextTick, onMounted, ref } from 'vue'
+import ConfirmDialog from '../../components/admin/ConfirmDialog.vue'
 import { api } from '../../api/client'
 import { workbenchDocumentTitle } from '../../utils/workbenchCopy'
 import {
@@ -44,10 +45,18 @@ const marked = ref({}) // 'YYYY-MM-DD' → 名称
 const selected = ref('') // 正在编辑的那一天（'' = 没选）
 const draft = ref('')
 const busy = ref(false)
+// 「取消标记」的确认框：取消一天会改变那一天（以及整月）的补休口径，标回来虽然容易，
+// 但「点一下就没」和「点一下再确认」是两种感觉 —— 后者才配得上这个影响面。
+const removeOpen = ref(false)
 const editorBar = ref(null) // 网格下面那条编辑带（滚动定位它）
 
 const grid = computed(() => monthGrid(year.value, month.value))
 const markedCount = computed(() => Object.keys(marked.value).length)
+// 当前这一月标了几天：整年有标、当月空白时，页面上什么提示都没有 —— 空月是最常见
+// 的落地状态，得有一句「点任意一天开始标」。
+const monthMarked = computed(() => (
+  grid.value.weeks.flat().filter((day) => day && marked.value[day]).length
+))
 const selectedName = computed(() => marked.value[selected.value] || '')
 // 正在输入的那个名称的问题（超长时当场就看得见）。空的只在点「标记」时拒 ——
 // 一开输入框就飘一条红字太吵。
@@ -167,6 +176,12 @@ async function remove() {
   }
 }
 
+/** 确认框的「取消标记」：先关框再发请求（请求失败时错误条会留在页面上）。 */
+function confirmRemove() {
+  removeOpen.value = false
+  void remove()
+}
+
 onMounted(() => {
   // 名字与 `pageRoutes.json` 里 `/workbench/hr/holidays` 那一行同步。
   document.title = workbenchDocumentTitle(TITLE)
@@ -212,8 +227,15 @@ onMounted(() => {
         </div>
         <span class="hPanel-hint">全年已标 {{ markedCount }} 天</span>
       </div>
+      <!-- 影响面常显：这张日历是「哪天算补休、加班」的唯一依据，不能只藏在「怎么用」里。 -->
+      <p v-if="state === 'ready'" class="hNotice">
+        只标法定节假日；补休、加班的口径只认这里标出来的日子。
+      </p>
       <p v-if="!markedCount && state === 'ready'" class="hEmptyLine">
         这一年还一天都没标：没有「法定节假日」的日子，补休一分都不给。点下面任意一天开始标。
+      </p>
+      <p v-if="state === 'ready' && markedCount > 0 && !monthMarked" class="hMonthHint">
+        这个月还没有标记。点下面任意一天开始标。
       </p>
       <div class="hGrid">
         <div class="hWeekdays">
@@ -251,13 +273,29 @@ onMounted(() => {
         <span class="hEditorHint">1~{{ MAX_HOLIDAY_NAME }} 个字；同名覆盖</span>
         <div class="hAct">
           <button class="btn btn-primary" type="button" :disabled="busy" @click="save">标记</button>
-          <button v-if="selectedName" class="btn" type="button" :disabled="busy" @click="remove">
+          <button
+            v-if="selectedName"
+            class="btn"
+            type="button"
+            :disabled="busy"
+            @click="removeOpen = true"
+          >
             取消标记
           </button>
           <button class="btn" type="button" @click="selected = ''">收起</button>
         </div>
       </section>
     </section>
+
+    <ConfirmDialog
+      v-if="removeOpen"
+      title="取消这一天的法定节假日"
+      :message="`${selected} 取消后不再按法定节假日算补休（可以再标回来）。`"
+      confirm-label="取消标记"
+      danger
+      @confirm="confirmRemove"
+      @cancel="removeOpen = false"
+    />
   </div>
 </template>
 
@@ -359,6 +397,12 @@ onMounted(() => {
   margin: 0; padding: 10px 14px; border-bottom: 1px solid var(--line);
   font-size: 11px; color: var(--ink-faint);
 }
+/* 影响面常显；当月空白时再补一句「点哪开始」。 */
+.hNotice {
+  margin: 0; padding: 9px 14px; border-bottom: 1px solid var(--line);
+  font-size: 10.5px; line-height: 1.5; color: var(--ink-dim);
+}
+.hMonthHint { margin: 0; padding: 10px 14px 0; text-align: center; font-size: 11px; color: var(--ink-dim); }
 /* 单月网格：7 列铺满 600（桌面居中、手机自然撑满），宽屏不再挤成一小块。 */
 .hGrid {
   width: 100%; max-width: 600px; margin: 0 auto;

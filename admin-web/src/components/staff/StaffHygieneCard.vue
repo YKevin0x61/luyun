@@ -128,10 +128,12 @@ const totalWork = computed(() => (
   + (deepProgress.value ? deepProgress.value.total : 0)
   + (fixProgress.value ? fixProgress.value.total : 0)
 ))
-/** 进度行末尾那句合计（面板头只报截止）：还差 N 项 / 已交齐。
- *  放在进度行里，是因为首页另有一格「我的待办 N」—— 同一件事在面板头再说一遍是重复。 */
+/** 进度行末尾那句合计（面板头只报截止）：合计还差 N 项 / 已交齐。
+ *  放在进度行里，是因为首页另有一格「我的待办 N」—— 同一件事在面板头再说一遍是重复。
+ *  **必须带「合计」二字**：这行开头是「日常 2/5」，只写「还差 3 项」会被读成日常还差 3
+ *  （2026-11-09 走查：日常 0/11 行尾写「还差 13 项」，13 其实是日常+专项+整改的和）。 */
 const remainingText = computed(() => (
-  remainingTotal.value ? `还差 ${remainingTotal.value} 项` : '已交齐'
+  remainingTotal.value ? `合计还差 ${remainingTotal.value} 项` : '已交齐'
 ))
 async function loadExtras() {
   const settle = (promise) => promise.then((data) => data.items || [], () => null)
@@ -155,8 +157,9 @@ const shcLed = computed(() => {
 })
 const attireLed = computed(() => {
   if (attire.value.status === 'rejected') return 'bad'
-  if (attire.value.status === 'pending' || !attire.value.hasStandard) return 'warn'
-  return 'ok'
+  if (attire.value.status === 'passed') return 'ok'
+  // 没拍 / 等验收 / 没标准图：都还要人动手或等，不是「已完成」的绿。
+  return 'warn'
 })
 
 /** 会话没了（换了手机、店里停了账号、cookie 过期）：回员工登录页，回来还是这一页。
@@ -337,14 +340,14 @@ useNudgePull({
               v-else-if="attire.status === 'passed'"
             >已通过</template><template
               v-else-if="attire.status === 'pending'"
-            >已交，等店长验收</template><template
+            >已交，等管理员验收</template><template
               v-else-if="attire.status === 'rejected'"
             >被驳回，要重拍</template><template
               v-else-if="!attire.hasStandard"
             >超级管理员还没传标准图</template><template v-else>今天还没拍</template>
           </p>
         </div>
-        <p v-if="attire.note" class="shc-err" role="status">店长说：{{ attire.note }}</p>
+        <p v-if="attire.note" class="shc-err" role="status">管理员说：{{ attire.note }}</p>
         <p v-if="attire.error" class="shc-err" role="status">{{ attire.error }}</p>
       </div>
 

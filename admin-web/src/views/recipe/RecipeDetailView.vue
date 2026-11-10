@@ -765,6 +765,33 @@ function onMoreQr() {
   openQr()
 }
 
+// 厨房现场看配方：手上有油/水，不碰屏幕时自动熄屏 = 得重新解锁再找回来。
+// 详情页在可见期间申请一次屏幕常亮（Screen Wake Lock API）：
+//   · 只在安全上下文 + 浏览器支持时申请（Chrome/Edge/Android；Safari 16.4 之前没有）；
+//   · 低电量模式、后台策略会 reject —— 静默降级，配方页不能因为常亮失败而报错；
+//   · 切到后台浏览器会自动释放，回到前台重新申请；离开页面必须显式 release。
+let wakeLock = null
+
+async function requestWakeLock() {
+  if (!('wakeLock' in navigator) || document.visibilityState !== 'visible') return
+  try {
+    wakeLock = await navigator.wakeLock.request('screen')
+  } catch (_) {
+    wakeLock = null
+  }
+}
+
+function releaseWakeLock() {
+  if (!wakeLock) return
+  wakeLock.release().catch(() => {})
+  wakeLock = null
+}
+
+function onVisibilityChange() {
+  if (document.visibilityState === 'visible') requestWakeLock()
+  else releaseWakeLock()
+}
+
 watch(slug, load)
 watch(targetServingsQty, () => applyAllCardScales())
 watch(drawerPanel, (open) => {
@@ -801,6 +828,8 @@ onMounted(() => {
   dragBlockMq = window.matchMedia(READER_DRAG_BLOCK_MQ)
   dragBlocked.value = dragBlockMq.matches
   dragBlockMq.addEventListener('change', onDragBlockMq)
+  document.addEventListener('visibilitychange', onVisibilityChange)
+  requestWakeLock()
   load()
 })
 onBeforeUnmount(() => {
@@ -809,6 +838,8 @@ onBeforeUnmount(() => {
   if (focusHighlightTimer != null) clearTimeout(focusHighlightTimer)
   unbindScaleDismiss()
   unbindReaderDrag()
+  document.removeEventListener('visibilitychange', onVisibilityChange)
+  releaseWakeLock()
   document.removeEventListener('keydown', onDrawerKeydown)
   desktopMq?.removeEventListener('change', onDesktopMq)
   dragBlockMq?.removeEventListener('change', onDragBlockMq)

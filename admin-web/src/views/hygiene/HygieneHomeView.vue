@@ -681,7 +681,17 @@ async function loadInbox() {
  *  （两处都按这一项判），没有这一项的人一次请求都不会发。 */
 async function loadPendingReviews() {
   const data = await staffRequest('/api/hygiene/staff/daily-work?review=1')
-  reviewInbox.value = data.items || []
+  // 2026-11-10：首页「待我复核」按 items + pending_past 计数（往期没验的旧账也算）。
+  // 这一档必须吃同一口径，否则首页说还有 1 项、点进来 0 项（group-d 走查发现）。
+  // pending_past 的字段名是 item_name，当前档是 name，这里归一成渲染用的 name。
+  reviewInbox.value = [
+    ...(data.items || []),
+    ...(data.pending_past || []).map((row) => ({
+      ...row,
+      name: row.name || row.item_name,
+      past: true,
+    })),
+  ]
 }
 
 async function loadDeepClean() {
@@ -1491,8 +1501,8 @@ async function decide(action, reason = '') {
              他干的是判别人活的活（真机走查 O-id：角色审查 F-01 记的就是"界面层看不见它"）。
              只在真有可用的那三项时出现，普通员工看不到这一颗。 -->
         </div>
-        <span v-if="employee && staffCapCount" class="hy-work-role role" :title="`可判 ${staffCapCount} 项：${ADMIN_CAP_STAFF_DEFS.filter((item) => HYGIENE_REVIEW_CAP_KEYS.includes(item.key) && hasCap(caps, item.key)).map((item) => item.label).join('、')}`">
-          现场复核 · {{ staffCapCount }} 项
+        <span v-if="employee && staffCapCount" class="hy-work-role role" :title="`可判 ${staffCapCount} 类：${ADMIN_CAP_STAFF_DEFS.filter((item) => HYGIENE_REVIEW_CAP_KEYS.includes(item.key) && hasCap(caps, item.key)).map((item) => item.label).join('、')}`">
+          现场复核 · {{ staffCapCount }} 类
         </span>
       </div>
     </header>
@@ -1546,7 +1556,7 @@ async function decide(action, reason = '') {
           <span class="hy-task-kind">{{ row.shift }}</span>
           <span class="hy-work-copy">
             <strong>{{ row.name }}</strong>
-            <span>{{ row.zone_name }} · 同事交的</span>
+            <span>{{ row.zone_name }} · {{ row.past ? `${row.business_date} 交的` : '同事交的' }}</span>
           </span>
           <span class="hy-work-due">待验收</span>
           <SvgIcon name="chevron-right" :size="18" />
@@ -1620,7 +1630,7 @@ async function decide(action, reason = '') {
                    管理者在别的区建好标准图后到这一屏核对，会以为图丢了。 -->
               <p>当前区域「{{ employee.zone_name || '未选区域' }}」没有带标准图的日常检查项。</p>
               <p class="hy-staff-lead">
-                日常检查项挂在工作区下，这一屏只列你选的这个区；管理端能看到全部区。
+                日常检查项挂在工作区下，这一屏只列你选的这个区；超级管理员的管理端能看到全部区，要改标准图找超级管理员。
               </p>
               <button type="button" class="btn" @click="openDutyNotice">看看今天怎么安排</button>
             </template>
@@ -1642,9 +1652,11 @@ async function decide(action, reason = '') {
                 <span class="hy-work-copy">
                   <strong>{{ task.title }}</strong>
                   <span>{{ task.context }}</span>
-                </span>
-                <span v-if="task.rejected" class="hy-work-reject">
-                  {{ task.rejectReason ? `已驳回：${task.rejectReason}` : '已驳回，请重拍' }}
+                  <!-- 驳回原因放在名字下面、跟副标题同一列：原来它是行里的第 5 个格子，
+                       行网格只有 4 列，于是长原因把标题挤成一字一行（真机 O-19 截图）。 -->
+                  <span v-if="task.rejected" class="hy-work-reject">
+                    {{ task.rejectReason ? `已驳回：${task.rejectReason}` : '已驳回，请重拍' }}
+                  </span>
                 </span>
                 <span class="hy-work-due">{{ task.dueText || task.status }}</span>
                 <SvgIcon name="chevron-right" :size="18" />
@@ -1836,7 +1848,7 @@ async function decide(action, reason = '') {
           <p class="hy-staff-lead">本周 {{ weekLabel(boards.week_start) }} 起。只记次数。</p>
           <section class="hy-section">
             <h2>人的红黑榜</h2>
-            <p v-if="!(boards.people || []).length" class="hy-staff-lead">这一周还没有人的次数。</p>
+            <p v-if="!(boards.people || []).length" class="hy-staff-lead">这一周还没有人的记录（实拍、驳回、一次通过、逾期都算）。榜空不是没加载，是这一周还没发生。</p>
             <article v-for="row in boards.people" :key="`person-${row.employee_id}`" class="hy-task">
               <div>
                 <strong>{{ personLabel(row) }}</strong>
@@ -1846,7 +1858,7 @@ async function decide(action, reason = '') {
           </section>
           <section class="hy-section">
             <h2>卫生工作区红黑榜</h2>
-            <p v-if="!(boards.zones || []).length" class="hy-staff-lead">这一周还没有卫生工作区的次数。</p>
+            <p v-if="!(boards.zones || []).length" class="hy-staff-lead">这一周所有工作区都没有逾期记录。</p>
             <article v-for="row in boards.zones" :key="`zone-${row.zone_id}`" class="hy-task">
               <div>
                 <strong>{{ row.zone_name }}</strong>

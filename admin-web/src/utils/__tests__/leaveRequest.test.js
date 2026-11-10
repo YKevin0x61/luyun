@@ -47,7 +47,7 @@ const SWAP = {
 describe('申请状态翻成人话（票 08、09）', () => {
   it('五个状态各说各的，谁也不跟谁混', () => {
     expect(statusText(REQUEST_STATUS.pendingPeer)).toBe('等对方同意')
-    expect(statusText(REQUEST_STATUS.pendingManager)).toBe('等店长批')
+    expect(statusText(REQUEST_STATUS.pendingManager)).toBe('等管理员批')
     expect(statusText(REQUEST_STATUS.approved)).toBe('批了')
     expect(statusText(REQUEST_STATUS.rejected)).toBe('驳回了')
     expect(statusText(REQUEST_STATUS.cancelled)).toBe('已撤回')
@@ -125,9 +125,9 @@ describe('申请区间写成「9/25」或「9/25 – 9/26」', () => {
 
 describe('自己那条申请的时间线（票 08 验收 4）', () => {
   it('一天与跨天两种写法，都带周几', () => {
-    expect(requestLine(PENDING)).toBe('请假 · 9/25 周五 起 9/26 周六 · 等店长批')
-    expect(requestLine({ ...PENDING, end_date: '2026-09-25' })).toBe('请假 · 9/25 周五 · 等店长批')
-    expect(requestLine({ ...PENDING, end_date: null })).toBe('请假 · 9/25 周五 · 等店长批')
+    expect(requestLine(PENDING)).toBe('请假 · 9/25 周五 起 9/26 周六 · 等管理员批')
+    expect(requestLine({ ...PENDING, end_date: '2026-09-25' })).toBe('请假 · 9/25 周五 · 等管理员批')
+    expect(requestLine({ ...PENDING, end_date: null })).toBe('请假 · 9/25 周五 · 等管理员批')
     expect(requestLine({ ...PENDING, status: 'approved' })).toBe(
       '请假 · 9/25 周五 起 9/26 周六 · 批了',
     )
@@ -149,14 +149,14 @@ describe('自己那条申请的时间线（票 08 验收 4）', () => {
     )
     // 还在等的申请没有结果，也就没有后缀。
     expect(requestLine({ ...PENDING, decided_by_name: '李四' })).toBe(
-      '请假 · 9/25 周五 起 9/26 周六 · 等店长批',
+      '请假 · 9/25 周五 起 9/26 周六 · 等管理员批',
     )
   })
 
   it('换班那条走自己的五个说法，且点名卡在谁那里（票 09 验收 7）', () => {
     expect(requestLine(SWAP)).toBe('换班 · 9/25 周五 · 等 李四 同意')
     expect(requestLine({ ...SWAP, status: 'pending_manager' })).toBe(
-      '换班 · 9/25 周五 · 李四 同意了 · 等店长批',
+      '换班 · 9/25 周五 · 李四 同意了 · 等管理员批',
     )
     expect(requestLine({ ...SWAP, status: 'approved' })).toBe('换班 · 9/25 周五 · 换成了')
     expect(requestLine({ ...SWAP, status: 'rejected' })).toBe('换班 · 9/25 周五 · 李四 没同意')

@@ -52,6 +52,12 @@ const incomplete = computed(() => data.value?.incomplete?.items || [])
 // 健康证到期（2026-10-08 从首页那一格并进来）：临期与已过期的人，判据在服务端。
 const certs = computed(() => data.value?.certs?.items || [])
 
+/** 行级跳转：带着姓名筛进花名册（花名册读 `?q=`，落页就只剩这个人）。
+ *  没有姓名时退到手机号 —— 搜索框两个都认。 */
+function rosterLink(person) {
+  return { path: ROSTER_PATH, query: { q: person?.name || person?.phone || '' } }
+}
+
 /** 到期还剩几天 / 过期几天。`days_left` 由服务端按同一套阈值算好，这里只翻文案。
  *
  *  未办理的人（`state: 'none'`）`days_left` 是 `null`，**必须先判它** ——
@@ -208,16 +214,19 @@ onMounted(() => {
           </p>
           <p v-if="!certs.length" class="hEmpty">在职的人健康证都齐、也都没到期。</p>
           <ul v-else class="hPeople hCerts">
-            <li v-for="person in certs" :key="person.id">
-              <b>{{ person.name || '（没有名字）' }}</b>
-              <span class="hState" :class="{ over: person.state !== 'ok' }">
-                {{ certStateText(person) }}
-              </span>
-              <span class="hMeta">
-                <span class="hPhone">{{ person.phone }}</span>
-                <span class="hWhen">{{ person.expires_on || '—' }}</span>
-                <span class="hNext">{{ certDaysText(person) }}</span>
-              </span>
+            <li v-for="person in certs" :key="person.id" class="has-link">
+              <router-link class="hPerson" :to="rosterLink(person)">
+                <b>{{ person.name || '（没有名字）' }}</b>
+                <span class="hState" :class="{ over: person.state !== 'ok' }">
+                  {{ certStateText(person) }}
+                </span>
+                <span class="hMeta">
+                  <span class="hPhone">{{ person.phone }}</span>
+                  <span class="hWhen">{{ person.expires_on || '—' }}</span>
+                  <span class="hNext">{{ certDaysText(person) }}</span>
+                  <span class="hGo">去花名册 ›</span>
+                </span>
+              </router-link>
             </li>
           </ul>
         </section>
@@ -233,10 +242,13 @@ onMounted(() => {
           </p>
           <p v-if="!incomplete.length" class="hEmpty">档案都齐。</p>
           <ul v-else class="hPeople">
-            <li v-for="person in incomplete" :key="person.id">
-              <b>{{ person.name || '（没有名字）' }}</b>
-              <span v-if="person.phone" class="hPhone">{{ person.phone }}</span>
-              <span class="hMissing">{{ missingText(person.missing) }}</span>
+            <li v-for="person in incomplete" :key="person.id" class="has-link">
+              <router-link class="hPerson" :to="rosterLink(person)">
+                <b>{{ person.name || '（没有名字）' }}</b>
+                <span v-if="person.phone" class="hPhone">{{ person.phone }}</span>
+                <span class="hMissing">{{ missingText(person.missing) }}</span>
+                <span class="hGo">去花名册 ›</span>
+              </router-link>
             </li>
           </ul>
           <div class="hFoot">
@@ -340,7 +352,8 @@ onMounted(() => {
 .hState.upcoming { color: var(--action); }
 .hState.today { color: var(--ok); font-weight: 600; }
 .hState.past { color: var(--ink-faint); }
-/* 侧栏名单：名字 / 状态 / 副行（日期、电话、说明）。 */
+/* 侧栏名单：名字 / 状态 / 副行（日期、电话、说明）。整行是链接：健康证与档案待补
+   都要去花名册改，让超管点名字就直接筛到那个人，不用再手打一遍搜索。 */
 .hPeople { list-style: none; margin: 0; padding: 0 14px; }
 .hPeople li {
   display: grid; grid-template-columns: minmax(0, 1fr) auto;
@@ -348,6 +361,16 @@ onMounted(() => {
   border-top: 1px solid var(--wb-ink-a08); font-size: 11px; color: var(--ink-dim);
 }
 .hPeople li:first-child { border-top: 0; }
+/* 带整行链接的那几行：li 交出行高与内边距，全给链接铺满（生日那种纯文本行不受影响）。 */
+.hPeople li.has-link { display: block; padding: 0; min-height: 0; }
+.hPerson {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center; gap: 2px 10px; min-height: 44px; padding: 8px 0;
+  text-decoration: none; color: inherit;
+}
+.hPerson:hover { background: var(--surface-2); }
+.hPerson:hover b { color: var(--action); }
+.hGo { margin-left: auto; font-size: 9.5px; color: var(--action); white-space: nowrap; }
 .hPeople b { min-width: 0; font-size: 12px; font-weight: 600; color: var(--ink); }
 .hPeople .hState { justify-self: end; }
 .hMeta {

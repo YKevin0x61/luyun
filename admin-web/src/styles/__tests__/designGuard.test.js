@@ -25,7 +25,10 @@ import { describe, expect, it } from 'vitest'
 const DEBT = JSON.parse(readFileSync('tokenDebt.json', 'utf8'))
 const THEME = readFileSync('src/styles/theme.workbench.css', 'utf8')
 const THEME_ADMIN = readFileSync('src/styles/theme.css', 'utf8')
-const BP_OK = new Set(['430', '560', '720', '900'])
+// 断点白名单。1024 是**平板横屏 / 小笔电**的边界（721–1024 用触屏、顶栏放不下九扇门，
+// 由工作台壳把「后勤」那格收成一扇组门，见 `WorkbenchNav.vue` 与 2026-11-09 走查探针
+// `.scratch/wb-review/shell_probe.py`）；新增它只让存量计数下降，不动快照。
+const BP_OK = new Set(['430', '560', '720', '900', '1024'])
 const SKIP = /(__tests__|node_modules|dist)/
 
 // ══════════════════════════════════════════════════════════════════════════════

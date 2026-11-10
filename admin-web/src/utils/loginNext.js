@@ -186,16 +186,18 @@ function migrateLegacyPath(next) {
  *  `?next=/workbench` 登录照样回得来 —— 这里认不出时 `resolveStaffNext` 落的就是那个
  *  默认值，两条路同一页。
  *
- *  配方**管理**页与**印码**页不在这两份里（两页都是管理端那一档），别顺手把整个
- *  `/workbench/kitchen/` 前缀放进来。印码页票 04 起从阅读面里摘出去了：印码是店长布置
- *  岗位码的动作，员工是扫码的那一方（扫到的是上面那条 detail）。
+ *  配方**管理**页不在这两份里（它仍是管理端专属那一档），别顺手把整个
+ *  `/workbench/kitchen/` 前缀放进来。**印码页**（`/workbench/kitchen/recipe/qr`）2026-11-10
+ *  起带 `staffCap: recipe_qr`（管理员在员工会话里只读打印）：它不是配方阅读面，但由下面的
+ *  `staffCap` 判据接住，因此也是合法员工落点；扫码那条链路的落点仍是上面那条 detail。
  */
 export function staffNextTarget(raw) {
   const next = sanitizeNext(raw)
   if (!next) return null
   const pathname = pathnameOf(next)
   if (isStaffLandingPath(pathname) || isRecipeReaderPath(pathname)) return next
-  // 带 `staffCap` 的店长页（排班三页、损耗分析，2026-10-14）：员工会话 + 那项能力也进得去，
+  // 带 `staffCap` 的店长页（排班三页、损耗分析 2026-10-14；备货复盘、岗位二维码 2026-11-10）：
+  // 员工会话 + 那项能力也进得去，
   // 所以它同样是合法的员工落点 —— 员工会话在那一页过期、重新登录之后要回到那一页。
   const row = pageRow(pathname)
   if (row && row.audience === 'admin' && row.staffCap) return next
@@ -245,7 +247,7 @@ export function resolveStaffNext(raw, fallback = STAFF_ENTRY_PATH) {
  *     专属页」强制管理员栏，员工打开登录页先看到的是用户名+密码表单。代价是管理端从
  *     首页被踢回来时要自己切一次栏 —— 用户明确选了这个方向。
  *  1. `?next=` 是**两种身份都能开的店长页**（`audience: admin` 且带 `staffCap`：排班三页、
- *     损耗分析，2026-10-14）→ **不强制**，按记住值走。这类页管理端与「勾了那项能力的员工」
+ *     损耗分析，2026-10-14；备货复盘、岗位二维码，2026-11-10）→ **不强制**，按记住值走。这类页管理端与「勾了那项能力的员工」
  *     都进得去，写死任何一侧都会让另一侧白填一次。
  *  2. `?next=` 是**管理端专属页**（页面清单里 `audience === 'admin'`）→ 强制管理员栏。
  *     这类目标只认管理端 cookie，开员工栏等于让人在手机号表单上白填一次（D13 实测：
@@ -269,7 +271,7 @@ export function resolveLoginTab(raw, remembered) {
     // 首页那个 `admin` 身份判定也就此绕开（这是唯一一处刻意不按页面清单判的地方，理由
     // 是「员工打开门店根地址」的入口体验，不是这一页的身份）。
     if (pathname === '/') return 'staff'
-    // 带 `staffCap` 的页（排班三页 / 损耗分析）**两种身份都可能开**：既不强制员工栏、
+    // 带 `staffCap` 的页（排班三页 / 损耗分析 / 备货复盘 / 岗位二维码）**两种身份都可能开**：既不强制员工栏、
     // 也不强制管理员栏，交回记住值（没记住过就落员工栏，手机为主）。写死任何一侧都会
     // 让另一侧在登录面板上白填一次 —— 员工不许看管理员栏，管理端也不该被塞进手机号表单。
     const row = pageRow(pathname)
@@ -285,7 +287,8 @@ export function resolveLoginTab(raw, remembered) {
 /** 这条 `?next=` 指向的是不是管理端专属页（`audience === 'admin'`）。
  *
  *  判据取自页面清单：`/workbench/hr/roster`、`/sales-report` 这类页只认管理端 cookie。
- *  `both` 与 `staff` 都不是（配方阅读面对两种身份都开，员工栏就是它的默认栏）。 */
+ *  `both` 与 `staff` 都不是（配方阅读面对两种身份都开，员工栏就是它的默认栏）。
+ *  带 `staffCap` 的管理端页在 `resolveLoginTab` 里更早一步交回记住值，不会走到这里。 */
 function adminTarget(raw) {
   const next = sanitizeNext(raw)
   if (!next) return false
