@@ -45,7 +45,7 @@ async function renderCodes() {
 onMounted(async () => {
   document.title = recipeDocumentTitle('岗位二维码')
   try {
-    const data = await api.get('/api/recipes/stations')
+    const data = await api.get('/api/recipes/qr-stations')
     stations.value = data.stations || []
   } catch (e) {
     errorMsg.value = '无法加载岗位列表，请稍后重试'

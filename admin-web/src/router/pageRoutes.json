@@ -273,6 +273,7 @@
       "title": "岗位二维码",
       "group": "kitchen",
       "audience": "admin",
+      "staffCap": "recipe_qr",
       "standalone": true,
       "public": false
     },
@@ -297,6 +298,7 @@
       "title": "备货复盘",
       "group": "kitchen",
       "audience": "admin",
+      "staffCap": "prep_review",
       "standalone": true,
       "public": false
     },

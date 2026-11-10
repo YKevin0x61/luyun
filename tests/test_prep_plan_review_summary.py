@@ -23,8 +23,8 @@ import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
-from api.prep_plan import router
-from api.security import verify_admin_token
+from api.prep_plan import manager_router, router
+from api.security import require_any_identity_session, verify_admin_token
 from database import CHINA_TZ, DatabaseManager, get_db
 from services.prep_review.summary import review_summary
 from services.prep_plan_service import PrepPlanService
@@ -452,11 +452,20 @@ class SnapshotDayTests(ReviewFixture):
 # --------------------------------------------------------------------- 接口
 
 
-def _build_app(db, *, admin=True):
+def _build_app(db, *, admin=True, session_identity=None):
     app = FastAPI()
+    app.include_router(manager_router)
     app.include_router(router)
     app.dependency_overrides[get_db] = lambda: db
     app.dependency_overrides[verify_admin_token] = (lambda: True) if admin else _deny_admin
+    # 2026-11-10：两个只读端点从「管理端专属 router」挪到 manager_router（员工会话 + 能力
+    # 可读），所以夹具要把「任一身份」会话也注进来；admin=True 时给管理端投影。
+    if session_identity is not None:
+        app.dependency_overrides[require_any_identity_session] = lambda: session_identity
+    else:
+        app.dependency_overrides[require_any_identity_session] = (
+            (lambda: {"kind": "admin"}) if admin else _deny_admin
+        )
     return app
 
 
@@ -564,3 +573,52 @@ def test_review_summary_is_admin_only(denied_client):
     client, _db = denied_client
     resp = client.get("/api/prep-plan/review/summary")
     assert resp.status_code == 401
+
+_STAFF_WITH_CAP = {"kind": "staff", "employee": {"id": 2, "name": "彭灼洪", "admin_caps": ["prep_review"]}}
+_STAFF_PLAIN = {"kind": "staff", "employee": {"id": 3, "name": "张织纷", "admin_caps": []}}
+
+
+def _staff_app(db, identity):
+    app = FastAPI()
+    app.include_router(manager_router)
+    app.include_router(router)
+    app.dependency_overrides[get_db] = lambda: db
+    app.dependency_overrides[verify_admin_token] = _deny_admin
+    app.dependency_overrides[require_any_identity_session] = lambda: identity
+    return app
+
+
+@pytest.fixture
+def staff_cap_client():
+    db = DatabaseManager()
+    _run(db.connect())
+    with TestClient(_staff_app(db, _STAFF_WITH_CAP)) as client:
+        yield client, db
+    _run(db.close())
+
+
+@pytest.fixture
+def staff_plain_client():
+    db = DatabaseManager()
+    _run(db.connect())
+    with TestClient(_staff_app(db, _STAFF_PLAIN)) as client:
+        yield client, db
+    _run(db.close())
+
+
+def test_staff_session_with_prep_review_cap_can_read_both_pages(staff_cap_client):
+    client, _db = staff_cap_client
+    resp = client.get("/api/prep-plan/review/summary", params={"end": "2026-10-19", "days": 7})
+    assert resp.status_code == 200, resp.text
+    resp = client.get("/api/prep-plan/snapshots", params={"day": "2026-10-19"})
+    assert resp.status_code == 200, resp.text
+
+
+def test_staff_session_without_cap_is_403(staff_plain_client):
+    client, _db = staff_plain_client
+    resp = client.get("/api/prep-plan/review/summary")
+    assert resp.status_code == 403
+    assert "备货复盘" in resp.json()["detail"]
+    resp = client.get("/api/prep-plan/snapshots", params={"day": "2026-10-19"})
+    assert resp.status_code == 403
+    assert "备货复盘" in resp.json()["detail"]

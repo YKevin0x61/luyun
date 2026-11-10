@@ -32,6 +32,7 @@ from services.recipes.sections import RecipeSectionError, require_recipe_section
 from services.recipes.rendering import render_station_to_docx
 from services.recipes.structured_render import render_structured_recipe_body
 from api.security import require_any_identity_session, verify_admin_token
+from services.identity.capabilities import CAP_RECIPE_QR, has_cap
 
 router = APIRouter(prefix="/api/recipes", tags=["recipes"])
 
@@ -257,6 +258,21 @@ async def search_recipes(q: str = "", include_inactive: bool = False,
 @reader_router.get("/stations")
 async def list_stations(identity: dict = Depends(require_any_identity_session),
                         store: RecipeStore = Depends(_get_recipe_store)):
+    return {"stations": await store.list_stations()}
+
+
+@reader_router.get("/qr-stations")
+async def list_qr_stations(identity: dict = Depends(require_any_identity_session),
+                           store: RecipeStore = Depends(_get_recipe_store)):
+    """岗位二维码页的只读清单：管理端直接放行，员工会话要「岗位二维码」这一项。
+
+    2026-11-10 用户裁定：二维码页开只读给勾了该项能力的管理员；普通员工 403。
+    页面只拿岗位标题与 slug 画码，不读配方正文，所以单独一条最小读面。
+    """
+    if identity.get("kind") == "staff":
+        employee = identity.get("employee") or {}
+        if not has_cap(employee.get("admin_caps"), CAP_RECIPE_QR):
+            raise HTTPException(status_code=403, detail="没有「岗位二维码」权限")
     return {"stations": await store.list_stations()}
 
 

@@ -11,7 +11,7 @@
 
 ## 契约
 
-**能力键名是前后端契约**：这里十二项，前端 `admin-web/src/utils/adminCaps.js` 一份，
+**能力键名是前后端契约**：这里十四项，前端 `admin-web/src/utils/adminCaps.js` 一份，
 两边键名与顺序必须逐字相同；`tests/test_hygiene_admin_caps.py` 会读前端那份文件比对。
 **线上只走键名**（英文下划线风格），中文标签只用于界面显示。
 
@@ -32,7 +32,7 @@ from __future__ import annotations
 import json
 from typing import Iterable, Optional
 
-# ── 十二项能力（键名 = 契约，顺序 = 花名册里的显示顺序）──────────────────────────
+# ── 十四项能力（键名 = 契约，顺序 = 花名册里的显示顺序）──────────────────────────
 # 2026-10-07 曾加过第 11 项 `overtime`（加班与补钟审批），但它与「人事管理」是同一批
 # 店长在员工端做的同一类事，两项并排只会让人勾错一项（用户 2026-11-03 裁定：并入
 # `schedule`）。**键删除、判据改看 `schedule`、迁移 `0045` 把库里的 `overtime` 换成
@@ -50,6 +50,8 @@ CAP_DEEP_REVIEW = "deep_review"  # 专项验收：判专项卫生的前后对照
 CAP_FIX = "fix"  # 整改单：开单 + 验收 + 驳回
 CAP_SCHEDULE = "schedule"  # 人事管理：排班 / 班次表 / 考勤表，外加加班与补钟审批
 CAP_WASTAGE = "wastage"  # 损耗分析：看全店损耗统计与明细（含谁记的）
+CAP_PREP_REVIEW = "prep_review"  # 备货复盘：只读看偏差、分组对比与多备代价
+CAP_RECIPE_QR = "recipe_qr"  # 岗位二维码：只读查看 / 打印岗位码
 CAP_ATTIRE = "attire"  # 仪容仪表：看/判仪容打卡、换标准
 CAP_STANDARD = "standard"  # 标准图管理：换标准图、改标注、导出
 CAP_ZONE = "zone"  # 工作区与检查项：加/改/删工作区与检查项
@@ -64,6 +66,8 @@ CAPABILITIES: tuple[str, ...] = (
     CAP_FIX,
     CAP_SCHEDULE,
     CAP_WASTAGE,
+    CAP_PREP_REVIEW,
+    CAP_RECIPE_QR,
     CAP_ATTIRE,
     CAP_STANDARD,
     CAP_ZONE,
@@ -79,6 +83,8 @@ CAPABILITY_LABELS: dict[str, str] = {
     CAP_FIX: "整改单",
     CAP_SCHEDULE: "人事管理",
     CAP_WASTAGE: "损耗分析",
+    CAP_PREP_REVIEW: "备货复盘",
+    CAP_RECIPE_QR: "岗位二维码",
     CAP_ATTIRE: "仪容仪表",
     CAP_STANDARD: "标准图管理",
     CAP_ZONE: "工作区与检查项",
@@ -94,6 +100,8 @@ CAPABILITY_NOTES: dict[str, str] = {
     CAP_FIX: "开整改单、验收或驳回整改单",
     CAP_SCHEDULE: "改全店排班、批请假与换班、管班次表，看与改考勤表；批 / 驳加班与补钟登记",
     CAP_WASTAGE: "看全店损耗统计与明细，含「谁记的」",
+    CAP_PREP_REVIEW: "只读看备货复盘：偏差口径、分组对比与多备代价",
+    CAP_RECIPE_QR: "只读查看并打印各岗位二维码",
     CAP_ATTIRE: "看与判仪容打卡，维护仪容标准",
     CAP_STANDARD: "换标准图、改标注、导出整套标准",
     CAP_ZONE: "加/改/删工作区与检查项",
@@ -106,13 +114,15 @@ CAPABILITY_NOTES: dict[str, str] = {
 #: 升级前那个「管理员」档位等于这三项 —— 迁移 `0015` 的回填值就是它，改这里要同步改迁移。
 LEGACY_ADMIN_CAPABILITIES: tuple[str, ...] = (CAP_DAILY_REVIEW, CAP_DEEP_REVIEW, CAP_FIX)
 
-#: **员工端有执行点的**能力：这五项在员工手机端真正生效 —— 日常验收 / 专项验收 /
+#: **员工端有执行点的**能力：这七项在员工端（手机或电脑上的员工会话）真正生效 —— 日常验收 / 专项验收 /
 #: 整改单在「卫生」页（判据见 `services/hygiene/work.py` 的 `_require_reviewer` /
 #: `_require_fix_*`），**人事管理**在人事组四页与「加班与补钟」页（判据见
 #: `api/scheduling.py` / `api/attendance.py` 的 `_require_scheduler`，以及
 #: `api/overtime.py` 的 `_require_reviewer` —— 加班审批 2026-11-03 并进了这一项），
 #: 损耗分析在后勤组那一页（判据见 `api/wastage.py` 的 `_require_wastage_reader` 与
-#: `WastageActor.sees_all`）。
+#: `WastageActor.sees_all`）；**备货复盘**与**岗位二维码** 2026-11-10 用户裁定放开给
+#: 勾了对应能力的管理员只读使用（判据见 `api/prep_plan.py` 的 `_require_review_reader`
+#: 与 `api/recipes.py` 的 `list_qr_stations`）。
 #: 花名册里**可勾**的就是这一组 —— 勾了就能用，不存在"勾了不生效"。
 STAFF_SIDE_CAPABILITIES: tuple[str, ...] = (
     CAP_DAILY_REVIEW,
@@ -120,6 +130,8 @@ STAFF_SIDE_CAPABILITIES: tuple[str, ...] = (
     CAP_FIX,
     CAP_SCHEDULE,
     CAP_WASTAGE,
+    CAP_PREP_REVIEW,
+    CAP_RECIPE_QR,
 )
 
 #: 其余七项：**键保留、判据暂时没有**。
@@ -150,7 +162,7 @@ SUPERVISOR_ONLY_CAPABILITIES: tuple[str, ...] = (
     CAP_DATA,
 )
 
-#: 两组必须刚好把十二项分完，且顺序与 `CAPABILITIES` 一致 —— 由 `tests/test_hygiene_admin_caps.py` 钉住。
+#: 两组必须刚好把十四项分完，且顺序与 `CAPABILITIES` 一致 —— 由 `tests/test_hygiene_admin_caps.py` 钉住。
 assert set(STAFF_SIDE_CAPABILITIES) | set(SUPERVISOR_ONLY_CAPABILITIES) == set(CAPABILITIES)
 assert tuple(k for k in CAPABILITIES if k in set(STAFF_SIDE_CAPABILITIES)) == STAFF_SIDE_CAPABILITIES
 

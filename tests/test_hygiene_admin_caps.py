@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""管理权限开关的契约：前后端十二项键名逐字一致，解析 fail-closed。
+"""管理权限开关的契约：前后端十四项键名逐字一致，解析 fail-closed。
 
 `services/identity/capabilities.py`（后端）与 `admin-web/src/utils/adminCaps.js`（前端）是
 **同一份契约的两半**：线上只走键名。键名一旦对不上，症状都是**静默**的 —— 花名册里勾了、
@@ -130,7 +130,7 @@ def test_every_wired_capability_is_referenced_by_a_judgment():
     )
     wired = tuple(key for key in CAPABILITIES if key not in UNWIRED_CAPABILITIES)
     assert wired == STAFF_SIDE_CAPABILITIES, (
-        f"要判据的应当是员工端有执行点的那五项，实际 {wired} vs {STAFF_SIDE_CAPABILITIES}"
+        f"要判据的应当是员工端有执行点的那七项，实际 {wired} vs {STAFF_SIDE_CAPABILITIES}"
     )
     sites = _capability_reference_sites()
     missing = [key for key in wired if not sites[key]]
@@ -143,7 +143,7 @@ def test_every_wired_capability_is_referenced_by_a_judgment():
 
 
 def test_frontend_keys_match_backend_exactly():
-    """十二项键名与顺序逐字相同 —— 这是前后端唯一共享的东西。"""
+    """十四项键名与顺序逐字相同 —— 这是前后端唯一共享的东西。"""
     src = FRONTEND.read_text(encoding="utf-8")
     keys = re.findall(r"key:\s*'([a-z_]+)'", src)
     assert tuple(keys) == CAPABILITIES, (
@@ -279,11 +279,11 @@ def test_frontend_checkbox_group_is_exactly_the_staff_side_caps():
     staff_side = tuple(re.findall(r"key:\s*'([a-z_]+)'[^}]*staffSide:\s*true", src))
     supervisor_only = tuple(re.findall(r"key:\s*'([a-z_]+)'[^}]*staffSide:\s*false", src))
     assert staff_side == STAFF_SIDE_CAPABILITIES, (
-        f"前端可勾的五项 {staff_side} 与后端 {STAFF_SIDE_CAPABILITIES} 不一致"
+        f"前端可勾的七项 {staff_side} 与后端 {STAFF_SIDE_CAPABILITIES} 不一致"
     )
     assert supervisor_only == SUPERVISOR_ONLY_CAPABILITIES, (
         f"前端只读的七项 {supervisor_only} 与后端 {SUPERVISOR_ONLY_CAPABILITIES} 不一致"
     )
-    # 两组刚好把十二项分完，不重不漏。
+    # 两组刚好把十四项分完，不重不漏。
     assert set(staff_side) | set(supervisor_only) == set(CAPABILITIES)
     assert not set(staff_side) & set(supervisor_only)

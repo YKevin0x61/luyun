@@ -52,6 +52,18 @@ function adminOnlyFetch() {
   })
 }
 
+/** 手机上的管理员：只有员工会话，且勾了某项管理能力（`staff-admin` 档）。 */
+function staffAdminFetch(caps = ['fix']) {
+  return vi.fn(async (url) => {
+    const path = String(url)
+    if (path.includes('/api/hygiene/staff/session')) {
+      return jsonResponse({ authenticated: true, employee: { name: '彭灼洪', admin_caps: caps } })
+    }
+    if (path.includes('/api/auth/status')) return jsonResponse({ logged_in: false, initialized: true })
+    return jsonResponse({}, 404)
+  })
+}
+
 /** 两套都没有（会话就在这一页上过期了）。 */
 function noSessionFetch() {
   return vi.fn(async (url) => {
@@ -94,7 +106,7 @@ describe('「无权访问」页：说清这页是谁的，给一颗回自己首�
     const { wrapper, router } = await mountForbidden('/workbench/floor/daily')
 
     expect(wrapper.text()).toContain('无权访问')
-    expect(wrapper.text()).toContain('店长')
+    expect(wrapper.text()).toContain('超级管理员')
     // 目标页的名字取自页面清单，不是我在这儿再写一份路径→名字的表。
     expect(wrapper.text()).toContain('日常验收')
     expect(wrapper.text()).toContain('员工')
@@ -118,7 +130,7 @@ describe('「无权访问」页：说清这页是谁的，给一颗回自己首�
     expect(wrapper.text()).toContain('请找超级管理员在花名册里勾上')
     expect(wrapper.text()).toContain('还没开「人事管理」')
     // 旧的「这是店长（超级管理员）用的页面」不再出现：按那句员工会去申请升成店长。
-    expect(wrapper.text()).not.toContain('是店长（超级管理员）用的页面')
+    expect(wrapper.text()).not.toContain('是超级管理员在电脑端用的页面')
   })
 
   it('票 04：员工进印码页同理 —— 说清那是店长的页，仍留一条回自己首页的路', async () => {
@@ -127,7 +139,7 @@ describe('「无权访问」页：说清这页是谁的，给一颗回自己首�
     const { wrapper, router } = await mountForbidden('/workbench/kitchen/recipe/qr')
 
     expect(wrapper.text()).toContain('无权访问')
-    expect(wrapper.text()).toContain('店长')
+    expect(wrapper.text()).toContain('超级管理员')
     expect(wrapper.text()).toContain('岗位二维码')
 
     const button = wrapper.get('button')
@@ -136,6 +148,25 @@ describe('「无权访问」页：说清这页是谁的，给一颗回自己首�
     await flushPromises()
 
     expect(router.currentRoute.value.path).toBe('/workbench')
+  })
+
+  it('管理员进没有手机入口的管理页：只说「超级管理员在电脑端用的页面」，不指去卫生页', async () => {
+    // 2026-11-10 走查：配方管理页对管理员也写「你的复核工作在手机端『卫生』页里做」，
+    // 但那一页跟卫生复核无关，这句会把人指去无关页面。现场组（floor/*）才保留这句。
+    vi.stubGlobal('fetch', staffAdminFetch())
+    const { wrapper } = await mountForbidden('/workbench/kitchen/recipe/manage')
+
+    expect(wrapper.text()).toContain('超级管理员在电脑端用的页面')
+    expect(wrapper.text()).not.toContain('复核工作')
+    expect(wrapper.text()).toContain('管理员（员工账号 · 现场复核）')
+  })
+
+  it('管理员进现场页：仍保留「复核工作在手机端卫生页」这句', async () => {
+    vi.stubGlobal('fetch', staffAdminFetch())
+    const { wrapper } = await mountForbidden('/workbench/floor/daily')
+
+    expect(wrapper.text()).toContain('超级管理员在电脑端用的页面')
+    expect(wrapper.text()).toContain('你的复核工作在手机端「卫生」页里做')
   })
 
   it('超级管理员进员工页：说明这是员工手机端的页，按钮回工作台首页', async () => {

@@ -6,6 +6,18 @@ import PrepReviewView from '../PrepReviewView.vue'
 import { buildReviewCsv, reviewCsvFilename } from '../../utils/prepReviewCsv.js'
 import { clearAuthStatusCache } from '../../utils/authStatus.js'
 
+// 2026-11-10：这一页按工作台身份分写面（备注 / 天气设置只给管理端会话）。
+// 测试默认固定「管理端」；员工会话那条只读契约在本文件末尾单独切 state 验证。
+const identityState = vi.hoisted(() => ({ identity: 'super', refresh: () => Promise.resolve() }))
+vi.mock('../../stores/workbenchIdentity', () => ({
+  useWorkbenchIdentityStore: () => ({
+    get identity() {
+      return identityState.identity
+    },
+    refresh: identityState.refresh,
+  }),
+}))
+
 /**
  * 备货复盘页（ADR 0129 / 票 06 前端）。
  *
@@ -486,5 +498,28 @@ describe('数据质量提示（票 09）', () => {
     const banner = wrapper.get('.pr-quality').text()
     expect(banner).toContain('快照只覆盖 1 个钟点')
     expect(banner).toContain('当日订单只有 5 条')
+  })
+})
+
+describe('员工会话只读（2026-11-10 用户裁定）', () => {
+  it('有「备货复盘」权限的员工能看全部只读内容，但备注 / 天气设置这类写面不渲染', async () => {
+    identityState.identity = 'staff'
+    try {
+      const fetchMock = probeFetch()
+      vi.stubGlobal('fetch', fetchMock)
+      const wrapper = await mountView()
+
+      // 只读内容照常
+      expect(wrapper.text()).toContain('备货复盘')
+      expect(wrapper.findAll('.pr-metric-review')).toHaveLength(3)
+      // 档口名来自管理端门的 `/api/stations`（员工会话 401）：员工档不拉它，别挂 401。
+      expect(callsTo(fetchMock, '/api/stations')).toHaveLength(0)
+
+      // 写面两个入口都不在：备注按钮（文案「备注」/ aria）与天气设置按钮
+      expect(wrapper.find('.pr-note-btn').exists()).toBe(false)
+      expect(wrapper.find('button[aria-label="天气设置"]').exists()).toBe(false)
+    } finally {
+      identityState.identity = 'super'
+    }
   })
 })

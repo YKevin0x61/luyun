@@ -6,6 +6,18 @@ import { nextTick } from 'vue'
 import PrepReviewView from '../PrepReviewView.vue'
 import { clearAuthStatusCache } from '../../utils/authStatus.js'
 
+// 2026-11-10：这一页按工作台身份分写面（备注 / 天气设置只给管理端会话）。
+// 测试默认固定「管理端」；员工会话那条只读契约在本文件末尾单独切 state 验证。
+const identityState = vi.hoisted(() => ({ identity: 'super', refresh: () => Promise.resolve() }))
+vi.mock('../../stores/workbenchIdentity', () => ({
+  useWorkbenchIdentityStore: () => ({
+    get identity() {
+      return identityState.identity
+    },
+    refresh: identityState.refresh,
+  }),
+}))
+
 /**
  * 备货复盘 · 天气设置（票 11）。
  *

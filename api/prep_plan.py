@@ -23,6 +23,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from api.security import require_any_identity_session, verify_admin_token
+from services.identity.capabilities import CAP_PREP_REVIEW, has_cap
 from database import CHINA_TZ, get_db
 from services.prep_plan_context import prep_plan_context
 from services.prep_plan_service import prep_plan_service
@@ -99,9 +100,17 @@ async def get_summary(db=Depends(get_db)):
         raise _wrap(exc, "读取备货汇总")
 
 
-@router.get("/snapshots", dependencies=_ADMIN_WRITE)
-async def get_snapshots(day: str = Query(..., description="YYYY-MM-DD"), db=Depends(get_db)):
-    """某一天的参考值快照 + 实际销量（ADR 0123）+ 当天环境信号，只读，管理端。"""
+@manager_router.get("/snapshots")
+async def get_snapshots(
+    day: str = Query(..., description="YYYY-MM-DD"),
+    identity: dict = Depends(require_any_identity_session),
+    db=Depends(get_db),
+):
+    """某一天的参考值快照 + 实际销量（ADR 0123）+ 当天环境信号，只读。
+
+    管理端直接可读；员工会话要「备货复盘」这一项（只读，2026-11-10 用户裁定）。
+    """
+    _require_review_reader(identity)
     try:
         result = await prep_plan_service.get_snapshot_day(db, day)
     except Exception as exc:
@@ -115,17 +124,21 @@ async def get_snapshots(day: str = Query(..., description="YYYY-MM-DD"), db=Depe
     return result
 
 
-@router.get("/review/summary", dependencies=_ADMIN_WRITE)
+@manager_router.get("/review/summary")
 async def get_review_summary(
     end: Optional[str] = Query(None, description="YYYY-MM-DD，缺省今天"),
     days: int = Query(90, ge=1, le=90, description="回看天数 1..90"),
+    identity: dict = Depends(require_any_identity_session),
     db=Depends(get_db),
 ):
-    """复盘聚合：偏差口径 / 分组对比 / 多备代价，只读，管理端。
+    """复盘聚合：偏差口径 / 分组对比 / 多备代价，只读。
+
+    管理端直接可读；员工会话要「备货复盘」这一项（只读，2026-11-10 用户裁定）。
 
     口径（07:00 主口径、final_qty 优先、无实际的日子不算）见
     `services/prep_review/summary.py` 的模块 docstring；这里只做参数与错误映射。
     """
+    _require_review_reader(identity)
     try:
         return await review_summary(db, end=end, days=days)
     except Exception as exc:
@@ -174,6 +187,19 @@ class WeatherSettingsRequest(BaseModel):
 def _reject_staff(identity: dict, action: str) -> None:
     if identity.get("kind") == "staff":
         raise HTTPException(status_code=403, detail=f"员工不能{action}")
+
+
+def _require_review_reader(identity: dict) -> None:
+    """备货复盘的只读面：管理端直接放行；员工会话要「备货复盘」这一项（只读）。
+
+    2026-11-10 用户裁定：管理端专属页开只读给勾了该项能力的员工会话；
+    普通员工仍 403（与写面 `_reject_staff` 同一档拒绝口径）。
+    """
+    if identity.get("kind") != "staff":
+        return
+    employee = identity.get("employee") or {}
+    if not has_cap(employee.get("admin_caps"), CAP_PREP_REVIEW):
+        raise HTTPException(status_code=403, detail="没有「备货复盘」权限")
 
 
 @manager_router.get("/context/weather")

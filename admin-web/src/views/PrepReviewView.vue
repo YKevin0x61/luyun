@@ -3,6 +3,8 @@ import { computed, onMounted, ref } from 'vue'
 import LuyunDatePicker from '../components/ui/LuyunDatePicker.vue'
 import { api } from '../api/client'
 import { useStationsStore } from '../stores/stations'
+import { useWorkbenchIdentityStore } from '../stores/workbenchIdentity'
+import { IDENTITY_ADMIN } from '../utils/workbenchIdentity'
 import { workbenchDocumentTitle } from '../utils/workbenchCopy'
 import {
   PREP_REVIEW_CONTEXT_HOLIDAY,
@@ -104,6 +106,12 @@ const REVIEW_DAYS = 90
 const REVIEW_CLOCK_FALLBACK = '07:00'
 
 const stations = useStationsStore()
+// 2026-11-10 用户裁定：这一页开只读给勾了「备货复盘」的管理员（员工会话）。
+// 备注 / 天气设置是写面，只给管理端会话；员工会话能看全部只读内容（后端也按这条判）。
+const identityStore = useWorkbenchIdentityStore()
+const canWrite = computed(() => identityStore.identity === IDENTITY_ADMIN)
+void identityStore.refresh()
+
 const day = ref(new Date().toLocaleDateString('sv-SE'))
 const state = ref('idle')
 const errorText = ref('')
@@ -448,7 +456,10 @@ function exportCsv() {
 }
 
 onMounted(() => {
-  stations.load().catch(() => {})
+  // 档口名只是分组卡上的标签。`/api/stations` 是管理端门（员工会话 401），
+  // 员工会话不拉它、退回显示 id（就是档口中文名），别让刚开放给管理员的只读页
+  // 一进来就挂一条 401（2026-11-10 走查）。
+  if (canWrite.value) stations.load().catch(() => {})
   reload()
 })
 </script>
@@ -465,7 +476,7 @@ onMounted(() => {
           <span>日期</span>
           <LuyunDatePicker v-model="day" placeholder="选择日期" aria-label="复盘日期" @update:model-value="reload" />
         </label>
-        <button type="button" class="pr-note-btn" :aria-expanded="noteEditing" @click="startNoteEdit">
+        <button v-if="canWrite" type="button" class="pr-note-btn" :aria-expanded="noteEditing" @click="startNoteEdit">
           {{ note ? PREP_REVIEW_NOTE_EDIT : PREP_REVIEW_NOTE_LABEL }}
         </button>
         <button
@@ -482,13 +493,13 @@ onMounted(() => {
 
     <div class="pr-context-row">
       <p v-if="contextLine" class="pr-context">{{ contextLine }}</p>
-      <button type="button" class="pr-weather-btn" aria-label="天气设置" @click="openWeatherSettings">
+      <button v-if="canWrite" type="button" class="pr-weather-btn" aria-label="天气设置" @click="openWeatherSettings">
         {{ WEATHER_SETTINGS_OPEN }}
       </button>
     </div>
     <p v-if="qualityLine" class="pr-quality" role="status">{{ qualityLine }}</p>
 
-    <div v-if="noteEditing" class="pr-note-edit">
+    <div v-if="canWrite && noteEditing" class="pr-note-edit">
       <input
         v-model="noteDraft"
         class="pr-note-input"
@@ -537,7 +548,9 @@ onMounted(() => {
         </span>
       </p>
 
-      <div class="pr-metrics">
+      <!-- 这个钟点的窗口还没结束（measured = 0）时，三张卡全是「— / 0.0」，白占一屏；
+           收成一行提示，把下面的近 90 天结论（方向偏差＝备多了/备少了）提到首屏。 -->
+      <div v-if="current.summary.measured > 0" class="pr-metrics">
         <div class="pr-metric">
           <p class="pr-metric-k">够卖</p>
           <p class="pr-metric-v" :class="current.summary.covered >= 0.7 ? 'is-ok' : 'is-warn'">
@@ -556,6 +569,9 @@ onMounted(() => {
           <p class="pr-metric-h">多做/买了 {{ num(current.summary.overfill) }}，占实际销量</p>
         </div>
       </div>
+      <p v-else class="pr-line pr-dim">
+        这个钟点还没有可判定的品 —— 先看下面的近 90 天偏差。
+      </p>
     </template>
 
     <p v-if="summaryError" class="pr-error" role="status">{{ summaryError }}</p>
