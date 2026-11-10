@@ -80,6 +80,8 @@ const STATS = {
 
 const RECORDS = {
   total: 2,
+  // 顶部状态（A2）用服务端 counts：今天 1 笔、昨天 1 笔。
+  counts: { today: 1, yesterday: 1 },
   records: [
     {
       id: 2,
@@ -94,6 +96,7 @@ const RECORDS = {
       images: [{ capture_id: 'img-2', url: '/api/wastage/images/img-2' }],
       can_amend: true,
       amend_deadline_at: '2026-10-18T09:00:00+08:00',
+      edit_count: 0,
     },
     {
       id: 1,
@@ -108,6 +111,7 @@ const RECORDS = {
       images: [],
       can_amend: false,
       amend_deadline_at: null,
+      edit_count: 0,
     },
   ],
 }
@@ -267,9 +271,94 @@ describe('损耗登记页（员工端）', () => {
     expect(wrapper.findAll('.loss-item')).toHaveLength(2)
     // 六个原因与单位都来自服务端的清单，不是页面里写死的。
     expect(wrapper.findAll('.loss-reason')).toHaveLength(6)
-    // 顶部一句「今天已记 N 笔」：从已加载的记录算，不额外请求（spec 4.1.1）。
-    expect(wrapper.get('.loss-status').text()).toContain('今天已记 1 笔')
+    // 顶部状态（A2）：今天/昨天各几笔由服务端 counts 给，不额外请求。
+    expect(wrapper.get('.loss-status').text()).toContain('今天 1 笔 · 昨天 1 笔')
     expect(get.mock.calls.map(([url]) => url)).not.toContain('/api/wastage/today-count')
+  })
+
+  it('顶部状态用服务端 counts（A2）：只补记了昨天时，不会出现「今天 0 笔」与满屏昨天记录打架', async () => {
+    const history = Array.from({ length: 8 }, (_, index) => ({
+      id: 200 + index,
+      item_name: '生菜',
+      quantity: 1,
+      unit: '份',
+      reason: 'expired',
+      reason_text: '过期丢弃',
+      remark: '',
+      wastage_date: '2026-10-16',
+      operator_name: '张伟',
+      images: [],
+      can_amend: true,
+      amend_deadline_at: '2026-10-18T09:00:00+08:00',
+      edit_count: 0,
+    }))
+    get.mockImplementation((url) => {
+      if (url === '/api/wastage/meta') return Promise.resolve(META)
+      if (url === '/api/wastage/templates') return Promise.resolve({ templates: [] })
+      if (url === '/api/wastage/suggestions') return Promise.resolve({ suggestions: [] })
+      if (url === '/api/wastage/records') {
+        return Promise.resolve({ total: 8, counts: { today: 0, yesterday: 8 }, records: history })
+      }
+      if (url === '/api/prep-plan/items') return Promise.resolve({ items: [] })
+      return Promise.resolve({})
+    })
+
+    const wrapper = await mountView(WastageRegisterView, '/workbench/staff/loss')
+    await flushPromises()
+
+    // 8 条记录全是昨天的，顶上一句是「今天 0 笔 · 昨天 8 笔」：两件事对得上。
+    expect(wrapper.get('.loss-status').text()).toContain('今天 0 笔 · 昨天 8 笔')
+    expect(wrapper.findAll('.loss-item')).toHaveLength(8)
+  })
+
+  it('记录区「查看全部」（A1）：默认 8 条，展开拿到全部，再点收起', async () => {
+    const many = Array.from({ length: 30 }, (_, index) => ({
+      id: 300 + index,
+      item_name: '五花肉',
+      quantity: 1,
+      unit: 'kg',
+      reason: 'spoiled',
+      reason_text: '变质腐败',
+      remark: '',
+      wastage_date: '2026-10-17',
+      operator_name: '张伟',
+      images: [],
+      can_amend: true,
+      amend_deadline_at: '2026-10-18T09:00:00+08:00',
+      edit_count: 0,
+    }))
+    get.mockImplementation((url, params) => {
+      if (url === '/api/wastage/meta') return Promise.resolve(META)
+      if (url === '/api/wastage/templates') return Promise.resolve({ templates: [] })
+      if (url === '/api/wastage/suggestions') return Promise.resolve({ suggestions: [] })
+      if (url === '/api/wastage/records') {
+        const offset = Number(params && params.offset) || 0
+        const limit = Number(params && params.limit) || 20
+        return Promise.resolve({
+          total: 30,
+          counts: { today: 30, yesterday: 0 },
+          records: many.slice(offset, offset + limit),
+        })
+      }
+      if (url === '/api/prep-plan/items') return Promise.resolve({ items: [] })
+      return Promise.resolve({})
+    })
+
+    const wrapper = await mountView(WastageRegisterView, '/workbench/staff/loss')
+    await flushPromises()
+
+    // 默认只摆 8 条，右上一个「查看全部 ›」——第 9 条以前的记录也能看到、也才改得到。
+    expect(wrapper.findAll('.loss-item')).toHaveLength(8)
+    expect(wrapper.get('.loss-more-link').text()).toContain('查看全部')
+
+    await wrapper.get('.loss-more-link').trigger('click')
+    await flushPromises()
+    expect(wrapper.findAll('.loss-item')).toHaveLength(30)
+    expect(wrapper.get('.loss-more-link').text()).toBe('收起')
+
+    await wrapper.get('.loss-more-link').trigger('click')
+    await flushPromises()
+    expect(wrapper.findAll('.loss-item')).toHaveLength(8)
   })
 
   it('表单重排：必填三项在前，照片/备注/日期收成一行小按钮、点开才展开（4.1.1~4.1.5）', async () => {
@@ -287,11 +376,13 @@ describe('损耗登记页（员工端）', () => {
     // 四颗：照片 / 备注 / 日期 / 对应备货品。「对应备货品」原本插在必填三项中间，
     // 70px 会把「原因」挤出首屏 —— 2026-11-07 挪进这一行，一行横滑不换行。
     expect(moreButtons).toHaveLength(4)
+    // F 组（2026-11-09）：390 宽这一行只有 332px，四颗按钮原来 381px、第 4 颗被右缘切掉
+    // 一截。日期 chip 不再带「· 今天」动态文案（补记确认挪到吸底条），第 4 颗缩成「＋备货品」。
     expect(moreButtons.map((node) => node.text())).toEqual([
       '＋现场照片',
       '＋备注',
-      '改日期 · 今天',
-      '＋对应备货品',
+      '改日期',
+      '＋备货品',
     ])
     // 默认全收着：照片区、备注框、日期快捷都不在 DOM 里（首屏一屏看完）。
     expect(wrapper.find('.loss-photo').exists()).toBe(false)
@@ -357,13 +448,32 @@ describe('损耗登记页（员工端）', () => {
     expect(body.wastage_date).toBe('2026-10-17')
   })
 
+  it('F1 补记（改日期）时吸底条在提交按钮旁确认「这一笔记在哪天」', async () => {
+    const wrapper = await mountView(WastageRegisterView, '/workbench/staff/loss')
+    await flushPromises()
+
+    // 默认今天：吸底条不重复说日期，chip 也不带动态文案（390 宽横滑会切掉它）。
+    expect(wrapper.get('.loss-actions').text()).not.toContain('补记')
+    await moreButton(wrapper, '改日期').trigger('click')
+    const days = wrapper.findAll('.loss-day')
+    expect(days.map((node) => node.text())).toEqual(['今天', '昨天'])
+    // 点「昨天」= 凌晨补记前一晚：提交按钮上方立刻出现日期确认。
+    await days[1].trigger('click')
+    expect(wrapper.get('.loss-actions').text()).toContain('这一笔记在昨天（补记）')
+    // 日期 chip 有标记，收起面板后仍知道日期被改过。
+    expect(moreButton(wrapper, '改日期').classes()).toContain('on')
+    // 改回今天 → 确认消失。
+    await wrapper.findAll('.loss-day')[0].trigger('click')
+    expect(wrapper.get('.loss-actions').text()).not.toContain('补记')
+  })
+
   it('可选「对应备货品」：选了下拉就把 prep_item_id 一起提交', async () => {
     const wrapper = await mountView(WastageRegisterView, '/workbench/staff/loss')
     await flushPromises()
 
     // 原生 select 只剩这一个，且收在选填行里：点开才有（首屏不占位）。
     expect(wrapper.find('select').exists()).toBe(false)
-    await moreButton(wrapper, '对应备货品').trigger('click')
+    await moreButton(wrapper, '备货品').trigger('click')
     const select = wrapper.get('form select')
     expect(wrapper.text()).toContain('对应备货品')
     expect(select.element.value).toBe('')

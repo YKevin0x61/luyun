@@ -331,7 +331,11 @@ async def list_records(
     identity: dict = Depends(require_any_identity_session),
 ) -> dict:
     """明细，新的在前。员工拿得到自己那几笔；开了「损耗分析」能力的员工与店长一样看全店
-    （归属过滤在服务层的 `_scope_clause` 一处判）。"""
+    （归属过滤在服务层的 `_scope_clause` 一处判）。
+
+    响应另带 `counts`（归属口径的今天 / 昨天笔数，与筛选无关）与每条的 `edit_count`
+    （改过几次）—— 登记页那行状态与明细上的「改」角标直接读，不在前端另算。
+    """
     store = _store(db)
     try:
         data = await store.list_records(
@@ -356,7 +360,8 @@ async def read_statistics(
     db=Depends(get_db),
     identity: dict = Depends(require_any_identity_session),
 ) -> dict:
-    """按月（或一段日期）的汇总：总笔数、物料种类、原因分布、物料排行、逐日趋势。
+    """按月（或一段日期）的汇总：总笔数、物料种类、原因分布、物料排行、逐日趋势，
+    外加 `revoked_count` / `edited_count`（范围内撤回过、改过的笔数，空范围是 0 不是 None）。
 
     门是「管理端或开了『损耗分析』能力的员工」（`_require_wastage_reader`）。
     """

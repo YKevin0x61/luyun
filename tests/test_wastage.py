@@ -713,6 +713,124 @@ class WastageStoreTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(revoked["revoked_by_employee_id"])
         self.assertEqual(len(await self._revisions(admin_record["id"])), 2)
 
+    # ── A 批：今天/昨天笔数、改过几次、关键词三处 ────────────────────────────
+
+    async def test_counts_are_scoped_and_ignore_the_filters(self):
+        """counts 是归属口径的今天/昨天笔数：员工只看自己、管理端看全店；换筛子不变。"""
+        owner = await self._employee()
+        other = await self._employee(PHONE2, NAME2)
+        actor, other_actor = _staff(owner["id"]), _staff(other["id"])
+
+        for item in ("青菜", "豆芽"):
+            await self.store.add_record(
+                actor, item_name=item, quantity=1, unit="kg", reason="expired",
+                wastage_date=TODAY,
+            )
+        await self.store.add_record(
+            actor, item_name="五花肉", quantity=1, unit="kg", reason="spoiled",
+            wastage_date=YESTERDAY,
+        )
+        # 撤回的那一笔不算「今天记了几笔」（软删不参与读路径，counts 也一样）。
+        revoked = await self.store.add_record(
+            actor, item_name="豆腐", quantity=1, unit="盒", reason="expired",
+            wastage_date=TODAY,
+        )
+        await self.store.revoke_record(actor, revoked["id"])
+        # 别人今天记的：员工那档看不到，管理端那档要算进去。
+        await self.store.add_record(
+            other_actor, item_name="鸡蛋", quantity=1, unit="斤", reason="damaged",
+            wastage_date=TODAY,
+        )
+
+        mine = await self.store.list_records(actor)
+        self.assertEqual(mine["counts"], {"today": 2, "yesterday": 1})
+
+        # 与筛选/分页无关：搜一个不存在的词，明细空了，counts 还是同一份。
+        filtered = await self.store.list_records(actor, keyword="不存在的物料")
+        self.assertEqual(filtered["total"], 0)
+        self.assertEqual(filtered["counts"], {"today": 2, "yesterday": 1})
+
+        shop = await self.store.list_records(ADMIN_ACTOR)
+        self.assertEqual(shop["counts"], {"today": 3, "yesterday": 1})
+
+    async def test_edit_count_counts_only_edit_revisions(self):
+        """明细每条的 edit_count：改过一次是 1，没改的是 0；撤回的那条不在明细里。"""
+        employee = await self._employee()
+        actor = _staff(employee["id"])
+        changed = await self.store.add_record(
+            actor, item_name="五花肉", quantity=1, unit="kg", reason="spoiled",
+            wastage_date=TODAY,
+        )
+        untouched = await self.store.add_record(
+            actor, item_name="青菜", quantity=2, unit="斤", reason="excess",
+            wastage_date=YESTERDAY,
+        )
+        await self.store.amend_record(actor, changed["id"], quantity=1.5)
+        revoked = await self.store.add_record(
+            actor, item_name="豆腐", quantity=1, unit="盒", reason="expired",
+            wastage_date=TODAY,
+        )
+        await self.store.revoke_record(actor, revoked["id"])
+
+        listed = await self.store.list_records(actor)
+        by_id = {row["id"]: row for row in listed["records"]}
+        self.assertEqual(by_id[changed["id"]]["edit_count"], 1)
+        self.assertEqual(by_id[untouched["id"]]["edit_count"], 0)
+        self.assertNotIn(revoked["id"], by_id)
+
+    async def test_statistics_counts_revoked_and_edited(self):
+        """统计里的「撤回 Y 笔 / 改过 X 笔」：空范围给 0，不是 None。"""
+        employee = await self._employee()
+        actor = _staff(employee["id"])
+        changed = await self.store.add_record(
+            actor, item_name="五花肉", quantity=1, unit="kg", reason="spoiled",
+            wastage_date="2026-09-10",
+        )
+        await self.store.amend_record(actor, changed["id"], quantity=2)
+        revoked = await self.store.add_record(
+            actor, item_name="豆腐", quantity=1, unit="盒", reason="expired",
+            wastage_date="2026-09-12",
+        )
+        await self.store.revoke_record(actor, revoked["id"])
+
+        stats = await self.store.statistics(month="2026-09")
+        self.assertEqual(
+            (stats["total_count"], stats["revoked_count"], stats["edited_count"]),
+            (1, 1, 1),
+        )
+
+        empty = await self.store.statistics(month="2026-07")
+        self.assertEqual(
+            (empty["total_count"], empty["revoked_count"], empty["edited_count"]),
+            (0, 0, 0),
+        )
+        self.assertIsNotNone(empty["revoked_count"])
+        self.assertIsNotNone(empty["edited_count"])
+
+    async def test_keyword_searches_item_remark_and_operator(self):
+        """关键词三处：物料名、备注、登记人；`%` 仍按字面量。"""
+        owner = await self._employee()
+        other = await self._employee(PHONE2, NAME2)
+        # 操作人名跟着 actor 走（不是花名册里查的），所以这里要把名字对上。
+        actor, other_actor = _staff(owner["id"]), _staff(other["id"], NAME2)
+        await self.store.add_record(
+            actor, item_name="五花肉", quantity=1, unit="kg", reason="other",
+            remark="客人退菜", wastage_date=TODAY,
+        )
+        await self.store.add_record(
+            other_actor, item_name="豆腐", quantity=1, unit="盒", reason="expired",
+            wastage_date=TODAY,
+        )
+
+        async def hit(keyword):
+            data = await self.store.list_records(ADMIN_ACTOR, keyword=keyword)
+            return [row["item_name"] for row in data["records"]]
+
+        self.assertEqual(await hit("五花"), ["五花肉"])   # 物料名
+        self.assertEqual(await hit("退菜"), ["五花肉"])   # 备注
+        self.assertEqual(await hit(NAME2), ["豆腐"])      # 操作人
+        self.assertEqual(await hit("%"), [])              # 通配符是字面量
+
 
 class WastageTableContractTest(unittest.TestCase):
     """新表进表名清单，Admin 的数据浏览器里只读（写入口在 HTTP 那一侧钉）。"""
@@ -1406,3 +1524,42 @@ def test_admin_amends_and_revokes_only_his_own_records(wastage_http):
     assert denied.status_code == 403, denied.text
     assert "只能改自己记的那几条" in denied.json()["detail"]
     assert client.delete(f"/api/wastage/records/{staff_id}").status_code == 403
+
+
+# ── A 批：明细的 counts / edit_count、统计的撤回与改过、关键词三处 ───────────
+
+
+def test_records_and_statistics_carry_the_a_batch_fields(wastage_http):
+    """接口形状：明细带 counts / edit_count，统计带 revoked_count / edited_count。"""
+    client, _db, accounts = wastage_http
+    _employee_id(accounts)
+    _staff_cookie(client, accounts)
+
+    created = client.post("/api/wastage/records", json=_record_body("五花肉", 1.5))
+    assert created.status_code == 200, created.text
+    record_id = created.json()["record"]["id"]
+
+    listed = client.get("/api/wastage/records").json()
+    assert listed["counts"] == {"today": 1, "yesterday": 0}
+    assert listed["records"][0]["edit_count"] == 0
+    assert listed["records"][0]["operator_name"] == NAME
+
+    amended = client.patch(f"/api/wastage/records/{record_id}", json={"quantity": 2})
+    assert amended.status_code == 200, amended.text
+    listed = client.get("/api/wastage/records").json()
+    assert listed["records"][0]["edit_count"] == 1
+
+    # 关键词也走备注/操作人（接口层只透传，这里确认参数接上了）。
+    assert client.get(
+        "/api/wastage/records", params={"keyword": NAME}
+    ).json()["total"] == 1
+    assert client.get(
+        "/api/wastage/records", params={"keyword": "没有这个人"}
+    ).json()["total"] == 0
+
+    _admin_cookie(client)
+    stats = client.get("/api/wastage/statistics", params={"month": "2026-09"}).json()
+    assert stats["edited_count"] == 1
+    assert stats["revoked_count"] == 0
+    empty = client.get("/api/wastage/statistics", params={"month": "2026-07"}).json()
+    assert (empty["revoked_count"], empty["edited_count"]) == (0, 0)

@@ -184,12 +184,13 @@ function shiftDate(iso, delta) {
 /** 昨天：跨零点以后补记前一晚的损耗时，点一下就对上（最晚仍是今天，服务端那道闸不动）。 */
 const yesterday = computed(() => (today.value ? shiftDate(today.value, -1) : ''))
 
-/** 「改日期」那颗小按钮的当前值：今天 / 昨天 / 具体日期。 */
-const dayLabel = computed(() => {
-  if (!day.value) return ''
-  if (day.value === today.value) return '今天'
-  if (day.value === yesterday.value) return '昨天'
-  return day.value
+/** 补记提示（F 组）：日期 chip 只写「改日期」，改没改由吸底条在提交按钮上方确认 ——
+ *  390 宽选填行放不下「改日期 · 昨天」这种动态文案，横滑会把日期本身切掉；而「记错日期」
+ *  恰恰是提交前最该看见的一件事，所以放到按钮旁边。 */
+const backdatedNote = computed(() => {
+  if (!day.value || !today.value || day.value === today.value) return ''
+  const label = day.value === yesterday.value ? '昨天' : ' ' + day.value
+  return '这一笔记在' + label + '（补记）'
 })
 
 /** 编辑态顶栏那一句「正在改 10-16 那一笔」。 */
@@ -200,12 +201,21 @@ const editingDateLabel = computed(() => {
   return editingDate.value
 })
 
-/** 顶部状态：今天已经记了几笔（从已加载的记录算，不额外请求 —— spec 4.1.1）。
- *  列表只拉 8 条：当 8 条全是今天的、而总数更多时显示「8+」，别把「更多」说成「刚好 8」。 */
-const todayCount = computed(() => records.value.filter((row) => row.wastage_date === today.value).length)
-const todayCountText = computed(() => {
-  const capped = records.value.length > 0 && total.value > records.value.length && todayCount.value >= records.value.length
-  return capped ? todayCount.value + '+' : String(todayCount.value)
+/** 顶部状态（A2）：今天 / 昨天各几笔，由服务端按归属直接给 counts。
+ *  别再从已加载的 8 条里数：凌晨补记前一晚时，页面上会变成「今天已记 0 笔」而下面
+ *  正躺着 8 条昨天的记录 —— 两句话互相打架，人会以为登记没生效。 */
+const dayCounts = ref({ today: null, yesterday: null })
+const statusText = computed(() => {
+  const todayTotal = dayCounts.value.today
+  const yesterdayTotal = dayCounts.value.yesterday
+  if (todayTotal === null || todayTotal === undefined) {
+    // 老响应没有 counts：退回从已加载的记录里数，别把页面弄崩。
+    const counted = records.value.filter((row) => row.wastage_date === today.value).length
+    const capped = records.value.length > 0 && total.value > records.value.length && counted >= records.value.length
+    return '今天已记 ' + (capped ? counted + '+' : String(counted)) + ' 笔'
+  }
+  if (!todayTotal && !yesterdayTotal) return '今天还没有记录'
+  return '今天 ' + todayTotal + ' 笔 · 昨天 ' + yesterdayTotal + ' 笔'
 })
 
 /** 物料名可以点「最近记过的」直接填：手打「五花肉」三个字比点一下慢得多，而手机上的
@@ -486,6 +496,7 @@ async function load(quiet = false) {
     prepItems.value = Array.isArray(items.items) ? items.items : []
     records.value = list.records || []
     total.value = list.total || 0
+    dayCounts.value = list.counts || { today: null, yesterday: null }
     if (!day.value) day.value = meta.today
     state.value = 'ready'
   } catch (err) {
@@ -503,9 +514,55 @@ async function loadRecords() {
     const list = await api.get('/api/wastage/records', { ...identityParams(), limit: 8 })
     records.value = list.records || []
     total.value = list.total || 0
+    dayCounts.value = list.counts || { today: null, yesterday: null }
   } catch (err) {
     if (err.status !== 401) listError.value = err.message || '读不到最近的记录'
   }
+}
+
+/** 「查看全部」展开态（A1）：默认 8 条是给「刚记完一眼看到」的；要核对第 9 笔以前的事，
+ *  得能翻到全部 —— 否则 24 小时更正入口对第 9 条以前的记录等于不存在。 */
+const allRecords = ref([])
+const showAll = ref(false)
+const loadingAll = ref(false)
+const visibleRecords = computed(() => (showAll.value ? allRecords.value : records.value))
+const hasMoreRecords = computed(() => total.value > records.value.length)
+
+/** 一次拉完：接口 limit 上限 100，按 offset 逐页拼；最多 10 页（1000 条）防手滑。 */
+async function loadAllRecords() {
+  loadingAll.value = true
+  try {
+    let rows = []
+    let totalCount = total.value
+    for (let page = 0; page < 10; page += 1) {
+      const res = await api.get('/api/wastage/records', { ...identityParams(), offset: rows.length, limit: 100 })
+      const batch = res.records || []
+      totalCount = Number(res.total) || totalCount
+      rows = rows.concat(batch)
+      if (!batch.length || rows.length >= totalCount) break
+    }
+    allRecords.value = rows
+    total.value = totalCount
+    showAll.value = true
+  } catch (err) {
+    if (err.status !== 401) listError.value = err.message || '读不到全部记录'
+  } finally {
+    loadingAll.value = false
+  }
+}
+
+async function toggleAllRecords() {
+  if (showAll.value) {
+    showAll.value = false
+    return
+  }
+  await loadAllRecords()
+}
+
+/** 提交/改/撤之后刷新记录区：展开态要连全部一起重拉，别让展开的列表停在旧数据上。 */
+async function refreshRecords() {
+  await loadRecords()
+  if (showAll.value) await loadAllRecords()
 }
 
 /** 模板单独抽出来：提交成功后要重拉一次，下一笔才点得到刚记过的组合。 */
@@ -648,12 +705,14 @@ function togglePrepSelect() {
   prepSelectOpen.value = !prepSelectOpen.value
 }
 
-/** 选填行那颗按钮的文案：没挂就是「＋对应备货品」，挂上了就报出是哪一个（否则员工看不出
- *  自己刚才那一下挂没挂上）。 */
+/** 选填行那颗按钮的文案：没挂就是「＋备货品」，挂上了就报出是哪一个（否则员工看不出
+ *  自己刚才那一下挂没挂上）。
+ *  390 宽这一行只有 332px：四颗按钮原来 381px，第 4 颗被右缘切掉一截。所以默认文案
+ *  从「＋对应备货品」缩成「＋备货品」——展开区里的字段名仍然是完整的「对应备货品」。 */
 const prepPickedLabel = computed(() => {
-  if (!prepItemId.value) return '＋对应备货品'
+  if (!prepItemId.value) return '＋备货品'
   const hit = prepItems.value.find((row) => String(row.id) === String(prepItemId.value))
-  return hit ? '备货品 · ' + [hit.item_name, hit.unit].filter(Boolean).join(' ') : '＋对应备货品'
+  return hit ? '备货品 · ' + [hit.item_name, hit.unit].filter(Boolean).join(' ') : '＋备货品'
 })
 
 /** 点「拍一张」：就地展开取景框（页内相机，不跳系统相机）。 */
@@ -812,6 +871,7 @@ async function revoke(row) {
   try {
     await api.delete('/api/wastage/records/' + row.id, identityParams())
     records.value = records.value.filter((item) => item.id !== row.id)
+    if (showAll.value) allRecords.value = allRecords.value.filter((item) => item.id !== row.id)
     total.value = Math.max(0, total.value - 1)
     if (lastSavedId.value === row.id) lastSavedId.value = null
     if (editingId.value === row.id) cancelEdit()
@@ -825,7 +885,7 @@ async function revoke(row) {
     listError.value = err.message || '撤回失败'
     cancelRevokeConfirm()
     // 403/404/409 都说明这一行的 can_amend 已经过时：重拉一次，别再让人点第二次白点。
-    await loadRecords()
+    await refreshRecords()
   } finally {
     revoking.value = false
   }
@@ -861,7 +921,7 @@ async function createRecord() {
   afterSaved()
   // 三样一起重拉：记录（下面那条要出现）、模板（刚记的高频组合下一笔就能点）、
   // 名字建议（这一笔的物料名下次该能点出来）。
-  await Promise.all([loadRecords(), loadTemplates(), loadSuggestions()])
+  await Promise.all([refreshRecords(), loadTemplates(), loadSuggestions()])
   await nextTick()
   // 提交成功后**页面不滚动**（spec 4.1.7）：只把焦点放回物料框，方便连着记下一笔。
   focusItem()
@@ -894,7 +954,7 @@ async function saveEdit() {
     record.reason_text
   lastSavedId.value = record.id ?? null
   afterSaved()
-  await Promise.all([loadRecords(), loadTemplates(), loadSuggestions()])
+  await Promise.all([refreshRecords(), loadTemplates(), loadSuggestions()])
   await nextTick()
   focusItem()
 }
@@ -923,7 +983,7 @@ async function submit() {
     formError.value = err.message || (editingId.value ? '保存失败' : '提交失败')
     formErrorRetry.value = true
     // 权限/窗口/记录都没了：这一行的 can_amend 已经过时，重拉列表让人看到真实状态。
-    if (editingId.value && [403, 404, 409].includes(err.status)) await loadRecords()
+    if (editingId.value && [403, 404, 409].includes(err.status)) await refreshRecords()
   } finally {
     busy.value = false
   }
@@ -979,7 +1039,7 @@ onUnmounted(() => {
     <template v-else>
       <!-- 顶部一句状态：今天记过没有、正在改哪一笔。 -->
       <p class="loss-status">
-        <span class="loss-status-today">今天已记 {{ todayCountText }} 笔</span>
+        <span class="loss-status-today">{{ statusText }}</span>
         <span v-if="editingId" class="loss-status-edit">正在改 {{ editingDateLabel }} 那一笔</span>
       </p>
       <!-- 从备货计划带过来（spec 4.5）：说清这物料/单位是哪来的，数量仍然要现场填。 -->
@@ -1152,10 +1212,10 @@ onUnmounted(() => {
           <button
             type="button"
             class="loss-more-btn"
-            :class="{ on: dateOpen }"
+            :class="{ on: dateOpen || !!backdatedNote }"
             :aria-expanded="dateOpen"
             @click="toggleDate"
-          >改日期 · {{ dayLabel }}</button>
+          >改日期</button>
           <button
             v-if="!editingId && prepItems.length"
             type="button"
@@ -1265,6 +1325,9 @@ onUnmounted(() => {
 
         <!-- 吸底条：提示在上、按钮在下。错误/成功都放这里 —— 提交那一刻它一定在视野里。 -->
         <div class="loss-actions">
+          <!-- 改过日期时把「记的是哪一天」放在提交按钮旁边：chip 只写「改日期」，
+               免得 390 宽横滑把日期本身切掉（F 组）。编辑态顶部已说明在改哪一笔，不重复。 -->
+          <p v-if="!editingId && backdatedNote" class="loss-note loss-feedback" role="status">{{ backdatedNote }}</p>
           <p v-if="formError" class="loss-error loss-feedback" role="alert">
             <span v-if="formErrorRetry" class="loss-error-retry">再点一次就是重试。</span>
             {{ formError }}
@@ -1287,14 +1350,23 @@ onUnmounted(() => {
       <section class="loss-block">
         <div class="loss-block-hd">
           <span>我最近的登记</span>
-          <span v-if="total" class="loss-hint">共 {{ total }} 笔</span>
+          <span class="loss-recent-hd">
+            <span v-if="total" class="loss-hint">共 {{ total }} 笔</span>
+            <button
+              v-if="hasMoreRecords || showAll"
+              type="button"
+              class="loss-more-link"
+              :disabled="loadingAll"
+              @click="toggleAllRecords"
+            >{{ showAll ? '收起' : (loadingAll ? '读取中…' : '查看全部 ›') }}</button>
+          </span>
         </div>
         <p v-if="listError" class="loss-error" role="alert">{{ listError }}</p>
         <p v-if="listNote" class="loss-note" role="status">{{ listNote }}</p>
-        <p v-if="!records.length" class="loss-muted">还没有登记过。上面这一笔记完就会出现在这里。</p>
+        <p v-if="!visibleRecords.length" class="loss-muted">还没有登记过。上面这一笔记完就会出现在这里。</p>
         <ul v-else class="loss-list">
           <li
-            v-for="row in records"
+            v-for="row in visibleRecords"
             :key="row.id"
             class="loss-item"
             :class="{ 'is-new': row.id === lastSavedId, 'is-editing': row.id === editingId }"
@@ -1404,6 +1476,15 @@ onUnmounted(() => {
 }
 .loss-status-today { font-size: 13px; color: var(--ink); font-weight: 600; }
 .loss-status-edit { font-size: 12px; color: var(--action); }
+/* 「我最近的登记」右半边：共 N 笔 + 查看全部（A1）。查看全部是轻量文字按钮 ——
+   44px 行高留给记录行里的「改/撤回」，这里只是把第 9 条以前的事翻出来的入口。 */
+.loss-recent-hd { display: flex; align-items: baseline; gap: 10px; letter-spacing: 0; }
+.loss-more-link {
+  padding: 2px 0; margin: 0;
+  font-size: 12px; font-family: inherit; font-weight: 600;
+  color: var(--action); background: transparent; border: 0; cursor: pointer;
+}
+.loss-more-link:disabled { opacity: .5; }
 /* 从备货计划带过来的那一句：说明物料/单位是别人带过来的，数量仍要现场填。 */
 .loss-source {
   margin: 0 0 10px; padding: 6px 10px;

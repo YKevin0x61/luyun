@@ -460,6 +460,23 @@ class WastageStore:
         )
         return int(rows[0]["total"]) if rows else 0
 
+    async def _edit_counts(self, record_ids: list[int]) -> dict[int, int]:
+        """一批记录各被改过几次：一条 IN (...) 分组查完，不给每条打一次库。
+
+        列表一页最多 100 条，逐条查就是 100 次往返；没有修订的记录不出现在结果里，
+        调用方按「查不到 = 0」处理。
+        """
+        if not record_ids:
+            return {}
+        placeholders = ", ".join("?" for _ in record_ids)
+        rows = await self._rows(
+            "SELECT record_id, COUNT(*) AS total FROM wastage_record_revisions"
+            f' WHERE record_id IN ({placeholders}) AND "action" = ?'
+            " GROUP BY record_id",
+            tuple(int(item) for item in record_ids) + ("edit",),
+        )
+        return {int(row["record_id"]): int(row["total"]) for row in rows}
+
     async def _prep_item_exists(self, item_id: int) -> bool:
         """这个备货品还在不在主数据里。只查主键，不替调用方判断 active。"""
         rows = await self._rows(
@@ -809,8 +826,12 @@ class WastageStore:
             escaped = (
                 text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
             )
-            where.append("item_name ILIKE ? ESCAPE '\\'")
-            params.append(f"%{escaped}%")
+            # 备注与操作人一起搜：店长按「退菜」「张三」找一笔时，不该先知道物料名。
+            where.append(
+                "(item_name ILIKE ? ESCAPE '\\' OR remark ILIKE ? ESCAPE '\\'"
+                " OR operator_name ILIKE ? ESCAPE '\\')"
+            )
+            params.extend([f"%{escaped}%"] * 3)
         clause = f" WHERE {' AND '.join(where)}" if where else ""
         return clause, params
 
@@ -830,6 +851,9 @@ class WastageStore:
 
         `total` 是**筛选后的总数**（不是这一页的条数）：页面靠它画「第几页 / 共几页」，
         员工端也靠它显示「这个范围内记了几笔」。
+
+        另给两样页面要的派生数据：`counts`（归属口径的今天 / 昨天笔数，与筛子无关）
+        与每条的 `edit_count`（改过几次）。
         """
         clause, params = self._scope_clause(
             actor,
@@ -848,13 +872,35 @@ class WastageStore:
         )
         records = [_record_row(row) for row in rows]
         images = await self._images_for([int(item["id"]) for item in records])
+        edit_counts = await self._edit_counts([int(item["id"]) for item in records])
         for record in records:
             record["images"] = images.get(int(record["id"]), [])
             record["can_amend"] = self._can_amend(record, actor)
+            record["edit_count"] = edit_counts.get(int(record["id"]), 0)
+        # 状态行说「今天记了 N 笔」：这是**归属口径**的笔数，换关键词 / 原因不该变，
+        # 所以不复用上面的筛选子句，只按归属 + 撤回 + 日期重算。今天取台账那一刻钟
+        # （self.today()），与登记页上的「今天」是同一个自然日。
+        today = self.today()
+        yesterday = (self._now_dt().date() - timedelta(days=1)).isoformat()
+        count_where = ["revoked_at IS NULL", "wastage_date IN (?, ?)"]
+        count_params: list[Any] = [today, yesterday]
+        if not actor.can_see_all:
+            count_where.insert(0, "employee_id = ?")
+            count_params.insert(0, int(actor.employee_id))
+        day_rows = await self._rows(
+            "SELECT wastage_date, COUNT(*) AS total FROM wastage_records"
+            f" WHERE {' AND '.join(count_where)} GROUP BY wastage_date",
+            tuple(count_params),
+        )
+        day_counts = {row["wastage_date"]: int(row["total"]) for row in day_rows}
         return {
             "total": total,
             "offset": start,
             "limit": size,
+            "counts": {
+                "today": day_counts.get(today, 0),
+                "yesterday": day_counts.get(yesterday, 0),
+            },
             "records": records,
         }
 
@@ -929,11 +975,30 @@ class WastageStore:
             )
         ]
 
+        # 页面抬头那行「改过 X 笔 · 撤回 Y 笔」读的就是这两个数：范围与上面同一段日期。
+        # 撤回按 wastage_date 落范围（它不在上面那个 WHERE 里，所以单独数）；
+        # 改过按记录日期 join 修订表去重 —— 一笔改三次也只算一笔。
+        revoked_rows = await self._rows(
+            "SELECT COUNT(*) AS total FROM wastage_records"
+            " WHERE revoked_at IS NOT NULL AND wastage_date >= ? AND wastage_date <= ?",
+            params,
+        )
+        edited_rows = await self._rows(
+            "SELECT COUNT(DISTINCT r.id) AS total FROM wastage_records r"
+            ' JOIN wastage_record_revisions v ON v.record_id = r.id AND v."action" = ?'
+            " WHERE r.wastage_date >= ? AND r.wastage_date <= ?",
+            ("edit", first, last),
+        )
+        revoked_count = int(revoked_rows[0]["total"]) if revoked_rows else 0
+        edited_count = int(edited_rows[0]["total"]) if edited_rows else 0
+
         return {
             "start_date": first,
             "end_date": last,
             "total_count": total_count,
             "item_type_count": item_type_count,
+            "revoked_count": revoked_count,
+            "edited_count": edited_count,
             "by_reason": by_reason,
             "top_items": top_items,
             "daily_stats": daily_stats,
