@@ -546,4 +546,10 @@ describe('安全区只在令牌层写一遍（票 07 / ADR 0106 决策 4）', ()
     // 防空转：这条今天真的在盯着存量；哪天清单收敛空了，这条与 LEGACY 一起删。
     expect(watched, '剥注释后真的还有存量直写在被这条盯着').toBeGreaterThan(0)
   })
+  it('配方页内重复的页内页签在壳里一律隐藏（2026-11-10 用户裁定）', () => {
+    // 壳顶栏 + 左 rail 已给出导航；页内 `.sop-site-header` 是第三份。
+    // 手机档原本就由 `public/recipe.css` 的 ≤720 段隐藏，所以这里直接一刀切。
+    expect(SHELL).toMatch(/\.wb-main\s+:deep\(\.sop-site-header\)\s*\{\s*display:\s*none/)
+  })
+
 })

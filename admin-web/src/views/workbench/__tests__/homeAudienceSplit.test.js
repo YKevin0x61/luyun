@@ -39,6 +39,11 @@ describe('首页按身份分两档（不是权限缺口）', () => {
   })
 })
 
+// 管理员专属「店里的事」条（2026-11-09 走查新增；2026-11-10 增加卫生复核那一行）：
+// 员工身份 + 能力档（schedule / 卫生复核任一项）才渲染，`teamSummary` 与 `hygieneSummary`
+// 在能力不足时都返回 null。普通员工的结构扫描要先把它剥掉。
+const MANAGER_TEAM = /<section v-if="teamSummary \|\| hygieneSummary" class="wbh-team"[\s\S]*?<\/section>/
+
 describe('员工档只渲染：我的班 + 待办 + 等我回应', () => {
   const staff = src.slice(STAFF_AT, STAFF_END)
 
@@ -48,9 +53,18 @@ describe('员工档只渲染：我的班 + 待办 + 等我回应', () => {
     expect(staff).toContain('等我回应')
   })
 
-  it('一个管理信息都不出现（权限面的判据）', () => {
+  it('管理员「店里的事」条有 schedule 能力闸门', () => {
+    expect(staff, '员工档缺少管理员条（有排班权限的管理员看不到待批/上班人数/备货）').toMatch(MANAGER_TEAM)
+    expect(src, '管理员条没有按 manage 能力闸门短路').toMatch(/if \(!manage\.value\) return null/)
+    expect(src, 'manage 没有绑定 schedule 能力').toMatch(/staffCaps\.includes\('schedule'\)/)
+  })
+
+  it('普通员工档一个管理信息都不出现（权限面的判据）', () => {
+    // 管理员条已由 teamSummary 的 !manage 短路保证不渲染；这里扫「去掉店长条之后」的员工档，
+    // 防止有人把管理 KPI 片段挪到普通员工也会渲染的位置。
+    const plainStaff = staff.replace(MANAGER_TEAM, '')
     for (const leaked of ['今天谁上班', '待批请假', '待验收', '逾期整改', '人事提醒']) {
-      expect(staff, `员工档里出现了管理信息「${leaked}」`).not.toContain(leaked)
+      expect(plainStaff, `员工档里出现了管理信息「${leaked}」`).not.toContain(leaked)
     }
   })
 
@@ -58,5 +72,40 @@ describe('员工档只渲染：我的班 + 待办 + 等我回应', () => {
     expect(staff.match(/<button/g) || []).toHaveLength(0)
     expect(staff.match(/@click/g) || []).toHaveLength(0)
     expect(staff).not.toMatch(/全选|批量|删除|停用|作废/)
+  })
+})
+
+// 卫生复核那一行（2026-11-10 用户裁定）：管理员（员工会话）读不到卫生 admin 那三块
+// （页面墙 401），于是用员工端已开放的只读接口补「待我复核 / 本周被驳回」。
+// 这一条把三件事钉住：只对卫生复核能力的人渲染、只走员工端只读接口、失败不挡首页。
+describe('管理员条里的卫生复核小条（2026-11-10 用户裁定）', () => {
+  it('卫生小条只对卫生复核能力的人渲染，并指向员工端卫生页', () => {
+    expect(src).toMatch(/const HYGIENE_REVIEW_CAPS = \['daily_review', 'deep_review', 'fix'\]/)
+    expect(src).toMatch(/const canHygieneReview = computed\(\(\) => HYGIENE_REVIEW_CAPS\.some/)
+    expect(src).toMatch(/<router-link\s+v-if="hygieneSummary"/)
+    expect(
+      src,
+      '卫生小条没有指向员工端卫生页',
+    ).toMatch(/v-if="hygieneSummary"[\s\S]{0,400}to="\/workbench\/staff\/clean"/)
+    // 0 值中性灯这条口径得和排班三格一样接在 toneOn 上。
+    expect(src).toMatch(/toneOn\(hygieneSummary\.review\)/)
+  })
+
+  it('只走员工端只读接口，且失败静默（不挡首页）', () => {
+    expect(src).toContain('/api/hygiene/staff/daily-work?review=1')
+    expect(src).toContain('/api/hygiene/staff/boards')
+    // 两条都包在 safe(...) 里：读不到只让那一行画「—」，不改整页结构。
+    expect(src).toMatch(/safe\(staffRequest\('\/api\/hygiene\/staff\/daily-work\?review=1'\)/)
+    expect(src).toMatch(/safe\(staffRequest\('\/api\/hygiene\/staff\/boards'\)/)
+    // 请求只在卫生能力闸门里发出去。
+    expect(src).toMatch(/const hygiene = canHygieneReview\.value\s*\?/)
+  })
+
+  it('普通员工档去掉管理员条之后，不出现卫生复核文案', () => {
+    const staff = src.slice(STAFF_AT, STAFF_END)
+    const plainStaff = staff.replace(MANAGER_TEAM, '')
+    for (const leaked of ['待我复核', '本周被驳回', '卫生复核']) {
+      expect(plainStaff, `员工档里出现了管理信息「${leaked}」`).not.toContain(leaked)
+    }
   })
 })

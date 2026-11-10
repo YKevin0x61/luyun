@@ -31,6 +31,8 @@ import {
 import { hygienePermissionLabel, rosterStatusLabel } from '../../utils/hygieneCopy'
 import { chinaTodayDate, formatHygieneStamp } from '../../utils/hygieneTime'
 import { STAFF_ENTRY_PATH } from '../../utils/staffPaths'
+import { pageTitle } from '../../router/pageRoutes.js'
+import { workbenchDocumentTitle } from '../../utils/workbenchCopy'
 
 const employees = ref([])
 const loading = ref(true)
@@ -41,7 +43,10 @@ const savedHint = ref('')
 let savedHintTimer = null
 
 // 工具栏两个筛选位：搜索是**本地**过滤（不请求），分段筛选是这一页唯一的一组开关。
-const keyword = ref('')
+// `?q=` 给其它页的行级跳转用（人事提醒：健康证 / 档案待补那一行点过来就筛到这个人）。
+// 读 `location` 而不是 `useRoute()`：这一页的既有测试没装 router，读数不该让页面挂掉。
+const initialQuery = new URLSearchParams(window.location.search).get('q') || ''
+const keyword = ref(initialQuery)
 const segment = ref('all')
 const SEGMENTS = [
   { id: 'all', label: '全部', title: '待批准和在职的人' },
@@ -217,6 +222,8 @@ function onKeydown(event) {
 }
 
 onMounted(() => {
+  // 本页原来没设过标题，浏览器 tab 一直停在「厨务管家 · 管理后台」（真机走查）。
+  document.title = workbenchDocumentTitle(pageTitle('/workbench/hr/roster'))
   loadRoster()
   document.addEventListener('keydown', onKeydown)
 })
@@ -1024,7 +1031,10 @@ async function copyInvite() {
         </p>
         <label class="roster-field">
           <span>离职日期</span>
-          <input v-model="resignDate" type="date" class="input" :disabled="busy">
+          <!-- 与抽屉里的健康证 / 入职日期同一个控件：原生的 date 输入显示格式由浏览器
+               语言决定（英文机上是 mm/dd/yyyy），跟全页的 yyyy-MM-dd 打架。这里不加
+               max —— 「干到月底」是允许的。 -->
+          <LuyunDatePicker v-model="resignDate" :disabled="busy" aria-label="离职日期" />
         </label>
         <p class="editor-note">
           离职日<strong>当天照常上班</strong>；之后的排班会被删掉，轮转规则一并停用。

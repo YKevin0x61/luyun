@@ -23,7 +23,7 @@ import { computed } from 'vue'
 import { useRoute } from 'vue-router'
 import { pageTitle } from '../../router/pageRoutes.js'
 import { useWorkbenchIdentityStore } from '../../stores/workbenchIdentity'
-import { workbenchGroupOf, workbenchNavFor } from '../../utils/workbenchNav'
+import { workbenchGroup, workbenchGroupOf, workbenchNavFor } from '../../utils/workbenchNav'
 
 const route = useRoute()
 const identityStore = useWorkbenchIdentityStore()
@@ -58,6 +58,9 @@ const navCells = computed(() => {
       ...item,
       label: titled ? pageTitle(item.to) : item.label,
     }))
+    // 平板/小笔电那一档（≤1024，见样式段）：一格多门收成**一扇组门**，所以先把组落点带在身上。
+    // 一格一门（今天 / 人事 / 现场 / 卫生 / 我的）用不到它，多算一次无副作用。
+    cell.group = workbenchGroup(cell.key, identity.value)
   }
   return cells
 })
@@ -81,6 +84,16 @@ function isCurrentLink(cell, item) {
       class="wb-nav-cell"
       :class="{ 'is-on': cell.key === currentGroup, 'is-multi': cell.links.length > 1 }"
     >
+      <!-- 一格多门（后勤）在平板档只露一条「后勤」：顶栏放不下六扇门，收成全组入口，
+           组内换页走组自己的页内导航（rail / 组页签）。它不带 `.wb-nav-item` 类 ——
+           那是给「一级门」的测试与语义留的，别混。 -->
+      <router-link
+        v-if="cell.links.length > 1 && cell.group"
+        class="wb-nav-group"
+        :class="{ 'is-current': cell.key === currentGroup }"
+        :aria-current="cell.key === currentGroup ? 'page' : undefined"
+        :to="cell.group.to"
+      >{{ cell.group.label }}</router-link>
       <router-link
         v-for="item in cell.links"
         :key="item.to"
@@ -105,26 +118,39 @@ function isCurrentLink(cell, item) {
   position: relative; display: inline-flex; align-items: stretch;
   /* 下划线挂在格上（不是链接上）：`.is-multi`（后勤多扇门）因此只有一条线。 */
 }
-.wb-nav-item {
-  display: inline-flex; align-items: center;
+.wb-nav-item, .wb-nav-group {
+  align-items: center;
   font-size: 13.5px; color: var(--hy-muted); text-decoration: none;
   padding: 0 13px; white-space: nowrap;
   border: 0; background: none;
   min-height: 38px;
 }
-.wb-nav-item:hover { color: var(--hy-ink); }
+.wb-nav-item { display: inline-flex; }
+/* 一格多门（后勤）的**组门**：只在平板档露脸（见下面的断点），桌面不进顶栏。 */
+.wb-nav-group { display: none; }
+.wb-nav-item:hover, .wb-nav-group:hover { color: var(--hy-ink); }
 /* 当前格：文字提亮 + 底部一条指示线（贴在这一条导航的下沿 —— 各壳把它放在顶栏里时，
    这条线就落在顶栏的分隔线上）。 */
 .wb-nav-cell.is-on::after {
   content: ""; position: absolute; left: 11px; right: 11px; bottom: 0;
   height: 2.5px; border-radius: 2.5px 2.5px 0 0; background: var(--hy-mint);
 }
-.wb-nav-cell.is-on .wb-nav-item { color: var(--hy-mint); font-weight: 700; }
+.wb-nav-cell.is-on .wb-nav-item, .wb-nav-cell.is-on .wb-nav-group { color: var(--hy-mint); font-weight: 700; }
 /* 一格里的第二条门（后勤：配方 + 备货计划）：用一条内阴影分隔，不再各画一颗胶囊。 */
 .wb-nav-cell.is-multi > .wb-nav-item + .wb-nav-item { box-shadow: inset 1px 0 0 var(--hy-line); }
 /* 「哪一半贴着当前」：整格已亮，这一半再加一档字重（站在备货计划上时，亮的仍只有它）。 */
 .wb-nav-item.is-current { color: var(--hy-ink); font-weight: 600; }
 .wb-nav-item.is-current.is-on { color: var(--hy-mint); }
+
+/* 平板 / 小笔电（721–1024）：顶栏放不下九扇门（实测 834 宽要 935px，见
+   `.scratch/wb-review/shell_probe.py`），把**一格多门**收成一扇组门，其余格不动；
+   这一档也是触屏，导航高度抬到 44px。一格一门（今天/人事/现场/我的）不收 ——
+   它们是最高频的跨组入口，收进下拉只会多一次点击。 */
+@media (max-width: 1024px) {
+  .wb-nav-item { min-height: 44px; padding: 0 12px; }
+  .wb-nav-cell.is-multi > .wb-nav-item { display: none; }
+  .wb-nav-cell.is-multi > .wb-nav-group { display: inline-flex; min-height: 44px; padding: 0 14px; }
+}
 
 /* 窄屏（B6）：手机上这一排是**点得最多**的东西，抬到 44px 的触控下限。
    高度由 `min-height` 给（不是定高），汉字换行时不会被裁。 */

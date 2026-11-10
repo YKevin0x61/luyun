@@ -187,6 +187,34 @@ export function countHrReminders(reminders) {
   return Number.isFinite(sum) ? sum : null
 }
 
+/** 卫生复核（2026-11-10，用户裁定）：管理员用**员工端只读接口**看「待我复核」。
+ *
+ *  为什么走员工端那条门：管理员的员工会话打卫生 admin 那三块是 401（页面墙按
+ *  `daily_review` / `deep_review` / `fix` 放行页面，但接口仍认管理端 cookie）。
+ *  `GET /api/hygiene/staff/daily-work?review=1` 是那页复核收件箱自己读的端点：
+ *  `items` 是今天待验收的，`pending_past` 是压在更早营业日、还挂着的 —— 两块都是
+ *  「待我复核」的账，只数 `items` 会把旧账漏掉（那正是店长要盯的）。
+ *
+ *  读不到给 `null`（页面画「—」），不把「没读到」说成 0。
+ */
+export function countHygieneReview(work) {
+  if (!work || (!Array.isArray(work.items) && !Array.isArray(work.pending_past))) return null
+  const items = Array.isArray(work.items) ? work.items.length : 0
+  const past = Array.isArray(work.pending_past) ? work.pending_past.length : 0
+  return items + past
+}
+
+/** 本周被驳回：`GET /api/hygiene/staff/boards` 的 `people[].驳回` 求和。
+ *
+ *  那张板是一人一行（店员维度），驳回次数就在行上；没有这一列的人按 0 算，
+ *  但不给整张板时给 `null` —— 跟上面同一条「读不到别装 0」。
+ */
+export function countHygieneRejected(boards) {
+  const people = boards && Array.isArray(boards.people) ? boards.people : null
+  if (!people) return null
+  return people.reduce((sum, person) => sum + (Number(person && person['驳回']) || 0), 0)
+}
+
 /** 今天谁上班：按班次分组，带人数与名字（休的人不在这份里 —— 服务端给了 `off_people`）。
  *
  *  `count` 数的是**有名字的人**：服务端的 `count` 与 `people` 是同一批人，名字为空的

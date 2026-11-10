@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import {
   HOME_LINKS,
+  countHygieneRejected,
+  countHygieneReview,
   countHrReminders,
   countOverdueFixes,
   countPendingItems,
@@ -370,5 +372,32 @@ describe('店长首页「等我处理」：四个读数的展开版（2026-10-18
     const many = { items: Array.from({ length: 20 }, (_, i) => ({ item_id: i, shift: '白班', status: '待验收' })) }
     expect(managerTodoRows({ queue: many }).length).toBe(20)
     expect(MANAGER_TODO_LIMIT).toBe(6)
+  })
+})
+
+describe('卫生复核 / 被驳回（2026-11-10 用户裁定，员工端只读接口）', () => {
+  it('待我复核 = items + pending_past：压在更早营业日的旧账也要算', () => {
+    expect(countHygieneReview({ items: [{}, {}], pending_past: [{}] })).toBe(3)
+    expect(countHygieneReview({ items: [], pending_past: [] })).toBe(0)
+    expect(countHygieneReview({ items: [{}] })).toBe(1)
+    expect(countHygieneReview({ pending_past: [{}, {}] })).toBe(2)
+  })
+
+  it('两块都没有时给 null（页面画「—」），不把没读到说成 0', () => {
+    expect(countHygieneReview(null)).toBeNull()
+    expect(countHygieneReview({})).toBeNull()
+    expect(countHygieneReview({ items: 'oops' })).toBeNull()
+  })
+
+  it('本周被驳回 = people[].驳回 求和；没这一列按 0 算', () => {
+    expect(countHygieneRejected({ people: [{ 驳回: 2 }, { 驳回: 1 }, {}] })).toBe(3)
+    expect(countHygieneRejected({ people: [] })).toBe(0)
+    expect(countHygieneRejected({ people: [{ 驳回: '2' }] })).toBe(2)
+  })
+
+  it('读不到时给 null', () => {
+    expect(countHygieneRejected(null)).toBeNull()
+    expect(countHygieneRejected({})).toBeNull()
+    expect(countHygieneRejected({ people: null })).toBeNull()
   })
 })

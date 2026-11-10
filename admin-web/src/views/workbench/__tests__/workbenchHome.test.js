@@ -125,7 +125,7 @@ function fetchStub(table) {
   })
 }
 
-async function mountHome({ identity = null, table = {}, path = '/workbench' } = {}) {
+async function mountHome({ identity = null, table = {}, path = '/workbench', staffCaps = [] } = {}) {
   vi.resetModules()
   const fetchMock = fetchStub(table)
   vi.stubGlobal('fetch', fetchMock)
@@ -142,6 +142,8 @@ async function mountHome({ identity = null, table = {}, path = '/workbench' } = 
   store.identity = identity
   store.sessions = { admin: identity === 'super', staff: identity === 'staff' }
   store.available = identity ? [identity] : []
+  // 店长走的是员工会话 + `schedule` 能力档：首页据此多渲染「店里的事」那一条。
+  store.staffCaps = staffCaps
 
   const router = createRouter({ history: createMemoryHistory(), routes: ROUTES })
   await router.push(path)
@@ -479,5 +481,196 @@ describe('工作台首页 · 员工视角', () => {
     expect(wrapper.text()).not.toContain('仪容仪表：')
     // 也不替员工打那三条：店长这一档连请求都不该发出去。
     expect(requestedPaths(fetchMock).filter((p) => p.startsWith('/api/hygiene/staff'))).toEqual([])
+  })
+})
+
+describe('工作台首页 · 灯的亮灭跟着数字走（2026-11-09 走查）', () => {
+  it('四个读数为 0 时全用中性灯：第一屏不该每天先报一次警', async () => {
+    const { wrapper } = await mountHome({ identity: 'super', table: managerData() })
+
+    for (const key of ['leaves', 'reviews', 'fixes']) {
+      expect(wrapper.get(`.wbh-cell.${key}`).classes()).not.toContain('is-warn')
+      expect(wrapper.get(`.wbh-cell.${key}`).classes()).not.toContain('is-bad')
+      expect(wrapper.get(`.wbh-cell.${key} .wbh-led`).classes()).toContain('off')
+    }
+    // 人事提醒 0 人也一样：中性灯，别用蓝点假装有动静。
+    expect(wrapper.get('.wbh-cell.reminders .wbh-led').classes()).toContain('off')
+  })
+
+  it('有数字时才亮：待批 1 件是黄灯，逾期整改 1 件是红灯', async () => {
+    const { wrapper } = await mountHome({
+      identity: 'super',
+      table: managerData({
+        '/api/scheduling/inbox': { today: '2026-10-05', requests: [{ id: 1, kind: 'leave' }] },
+        '/api/hygiene/admin/fix': {
+          items: [{ id: 2, status: '待回拍', deadline: '2026-10-01T00:00:00+08:00' }],
+        },
+      }),
+    })
+
+    expect(wrapper.get('.wbh-cell.leaves').classes()).toContain('is-warn')
+    expect(wrapper.get('.wbh-cell.leaves .wbh-led').classes()).toContain('warn')
+    expect(wrapper.get('.wbh-cell.fixes').classes()).toContain('is-bad')
+    expect(wrapper.get('.wbh-cell.fixes .wbh-led').classes()).toContain('bad')
+  })
+
+  it('员工两格：0 待办 / 0 回应不亮灯', async () => {
+    const { wrapper } = await mountHome({ identity: 'staff', table: staffData() })
+
+    expect(wrapper.get('.wbh-cell.myItems .wbh-led').classes()).toContain('off')
+    expect(wrapper.get('.wbh-cell.myRequests .wbh-led').classes()).toContain('off')
+  })
+})
+
+describe('工作台首页 · 店长（员工会话 + schedule）的「店里的事」', () => {
+  const teamTable = () =>
+    staffData({
+      '/api/scheduling/inbox': {
+        today: '2026-10-05',
+        requests: [
+          { id: 11, kind: 'leave', is_own: false },
+          { id: 12, kind: 'leave', is_own: true },
+        ],
+      },
+      '/api/scheduling/day': DAY,
+      '/api/prep-plan/summary': { remaining: 70, stations: [] },
+    })
+
+  it('渲染待批请假 / 今天上班 / 备货还差，各点进对应页', async () => {
+    const { wrapper } = await mountHome({
+      identity: 'staff',
+      staffCaps: ['schedule'],
+      table: teamTable(),
+    })
+
+    const team = wrapper.get('.wbh-team')
+    expect(team.text()).toContain('店里的事')
+    const cells = team.findAll('.wbh-team-cell')
+    expect(cells).toHaveLength(3)
+    expect(cells[0].get('.wbh-num').text()).toBe('1') // 自己提的那条不算待批
+    expect(cells[1].get('.wbh-num').text()).toBe('3')
+    expect(cells[2].get('.wbh-num').text()).toBe('70')
+    expect(cells[0].attributes('href')).toBe('/workbench/hr/inbox')
+    expect(cells[1].attributes('href')).toBe('/workbench/hr/calendar')
+    expect(cells[2].attributes('href')).toBe('/workbench/kitchen/prep-plan')
+    // 员工自己的那几块照旧还在。
+    expect(wrapper.text()).toContain('我的班')
+  })
+
+  it('普通店员不渲染、也不打那三个接口', async () => {
+    const { wrapper, fetchMock } = await mountHome({ identity: 'staff', table: staffData() })
+
+    expect(wrapper.find('.wbh-team').exists()).toBe(false)
+    const paths = requestedPaths(fetchMock)
+    expect(paths).not.toContain('/api/scheduling/inbox')
+    expect(paths).not.toContain('/api/scheduling/day')
+    expect(paths).not.toContain('/api/prep-plan/summary')
+  })
+})
+
+describe('工作台首页 · 管理员（员工会话 + 卫生复核能力）的卫生汇总（2026-11-10 用户裁定）', () => {
+  const hygieneTable = () => staffData({
+    // `review=1` 的响应：items 是今天待验收，pending_past 是更早营业日还挂着的旧账。
+    '/api/hygiene/staff/daily-work': {
+      items: [{ item_id: 1, status: '待验收' }],
+      pending_past: [{ item_id: 2, status: '待验收' }, { item_id: 3, status: '待验收' }],
+    },
+    '/api/hygiene/staff/boards': {
+      week_start: '2026-10-05T00:00:00+08:00',
+      week_end: '2026-10-12T00:00:00+08:00',
+      people: [{ employee_id: 9, name: '张织纷', 实拍: 4, 驳回: 2 }, { employee_id: 10, name: '李四', 驳回: 1 }],
+    },
+  })
+
+  const teamTable = () => ({
+    ...hygieneTable(),
+    '/api/scheduling/inbox': { today: '2026-10-05', requests: [{ id: 11, kind: 'leave', is_own: false }] },
+    '/api/scheduling/day': DAY,
+    '/api/prep-plan/summary': { remaining: 70, stations: [] },
+  })
+
+  it('排班 + 卫生都有：三格下面多一行小条，数字与去向都对', async () => {
+    const { wrapper, fetchMock } = await mountHome({
+      identity: 'staff',
+      staffCaps: ['schedule', 'daily_review'],
+      table: teamTable(),
+    })
+
+    const row = wrapper.get('.wbh-team-row')
+    expect(row.text()).toContain('待我复核 3 项')
+    expect(row.text()).toContain('本周被驳回 3 次')
+    expect(row.text()).toContain('卫生复核')
+    expect(row.attributes('href')).toBe('/workbench/staff/clean')
+    expect(row.get('.wbh-led').classes()).toContain('warn')
+    // 排班三格照旧。
+    expect(wrapper.findAll('.wbh-team-cell')).toHaveLength(3)
+    // 走的是员工端只读接口：管理端卫生那几条一条都不打。
+    const paths = requestedPaths(fetchMock)
+    const reviewCall = fetchMock.mock.calls.find(([url]) => String(url).includes('/api/hygiene/staff/daily-work?review=1'))
+    expect(reviewCall, '没有 review=1 的待复核请求').toBeTruthy()
+    expect(paths).toContain('/api/hygiene/staff/boards')
+    expect(paths.filter((p) => p.startsWith('/api/hygiene/admin'))).toEqual([])
+  })
+
+  it('只有卫生能力（没有 schedule）：不渲染排班三格，只渲染卫生小条', async () => {
+    const { wrapper, fetchMock } = await mountHome({
+      identity: 'staff',
+      staffCaps: ['fix'],
+      table: hygieneTable(),
+    })
+
+    expect(wrapper.findAll('.wbh-team-cell')).toHaveLength(0)
+    expect(wrapper.get('.wbh-team-row').text()).toContain('待我复核 3 项')
+    const paths = requestedPaths(fetchMock)
+    expect(paths).not.toContain('/api/scheduling/inbox')
+    expect(paths).not.toContain('/api/scheduling/day')
+    expect(paths).not.toContain('/api/prep-plan/summary')
+  })
+
+  it('普通员工（没有任何能力档）看不到、也不请求卫生汇总', async () => {
+    const { wrapper, fetchMock } = await mountHome({ identity: 'staff', table: staffData() })
+
+    expect(wrapper.find('.wbh-team').exists()).toBe(false)
+    expect(wrapper.find('.wbh-team-row').exists()).toBe(false)
+    const paths = requestedPaths(fetchMock)
+    expect(paths).not.toContain('/api/hygiene/staff/boards')
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('review=1'))).toBe(false)
+  })
+
+  it('卫生两块读不出来：小条给「—」，首页照常 ready、不阻塞', async () => {
+    const { wrapper } = await mountHome({
+      identity: 'staff',
+      staffCaps: ['daily_review'],
+      table: {
+        ...staffData(),
+        '/api/hygiene/staff/daily-work': 'fail',
+        '/api/hygiene/staff/boards': 'fail',
+      },
+    })
+
+    const row = wrapper.get('.wbh-team-row')
+    expect(row.text()).toContain('待我复核 — 项')
+    expect(row.text()).toContain('本周被驳回 — 次')
+    expect(row.classes()).not.toContain('is-warn')
+    expect(row.get('.wbh-led').classes()).toContain('off')
+    // 首页其他块照常（员工自己的班还在）。
+    expect(wrapper.text()).toContain('我的班')
+  })
+
+  it('0 值用中性灯：待复核与驳回都是 0 时不报警', async () => {
+    const { wrapper } = await mountHome({
+      identity: 'staff',
+      staffCaps: ['deep_review'],
+      table: staffData({
+        '/api/hygiene/staff/daily-work': { items: [], pending_past: [] },
+        '/api/hygiene/staff/boards': { week_start: '', week_end: '', people: [{ 驳回: 0 }] },
+      }),
+    })
+
+    const row = wrapper.get('.wbh-team-row')
+    expect(row.text()).toContain('待我复核 0 项')
+    expect(row.text()).toContain('本周被驳回 0 次')
+    expect(row.classes()).not.toContain('is-warn')
+    expect(row.get('.wbh-led').classes()).toContain('off')
   })
 })

@@ -16,6 +16,9 @@
  *
  * 员工那一档打五个（我的班 / 我的申请 / 日常 / 专项 / 整改）：班次与工作区复用「今天」页
  * 那套翻译（`utils/todayShift.js`），待办条数与「卫生待办」页的三个角标同一口径。
+ * 员工会话带能力档时再多打几块（2026-11-09 / 11-10 走查）：`schedule` 给「店里的事」
+ * 排班三格；`daily_review` / `deep_review` / `fix` 任一给卫生复核那一行 —— 走员工端
+ * 只读接口，卫生 admin 那侧对员工会话是 401。
  * 那一档里还有一块**今天的活**（`components/staff/StaffHygieneCard.vue`）：它自带三条请求
  * （`/staff/me`、`/staff/daily-work`、`/staff/attire`）与自己的实时订阅 —— 首页只摆它一行，
  * 不把它的口径并进这套摘要里（那一块有业务动作，摘要没有）。
@@ -32,12 +35,21 @@ import { IDENTITY_ADMIN } from '../../utils/workbenchIdentity'
 import { staffRequest } from '../../utils/hygieneStaff'
 import { dayLabel } from '../../utils/todayShift'
 import { WORKBENCH_TITLE, workbenchDocumentTitle } from '../../utils/workbenchCopy'
-import { HOME_LINKS, MANAGER_TODO_LIMIT, workbenchHomeSummary } from '../../utils/workbenchHome'
+import { HOME_LINKS, MANAGER_TODO_LIMIT, countHygieneRejected, countHygieneReview, workbenchHomeSummary } from '../../utils/workbenchHome'
 import { PREP_PLAN_PATH } from '../../utils/prepPlanPaths.js'
 import { useStationsStore } from '../../stores/stations'
 
 const identityStore = useWorkbenchIdentityStore()
 const identity = computed(() => identityStore.identity)
+// 店长用的是员工会话（`schedule` 能力档），进首页落到的是员工视角。他要的画面除了「我的班」
+// 还有店里的事：待批的申请、今天几个人上班、备货还差多少。能力档是只读的，这里只决定
+// 要不要多读那三块接口 —— 普通店员不读（卫生 admin 接口对他们本来就是 401）。
+const manage = computed(() => identityStore.staffCaps.includes('schedule'))
+// 卫生复核（2026-11-10，用户裁定）：管理员只要开了三项里任一，就能在员工端卫生页复核。
+// 这三条能力决定「店里的事」里要不要多摊一行卫生汇总（不是第四格）。数据走员工端
+// 只读接口（`daily-work?review=1` / `boards`），管理端 cookie 的接口对员工会话是 401。
+const HYGIENE_REVIEW_CAPS = ['daily_review', 'deep_review', 'fix']
+const canHygieneReview = computed(() => HYGIENE_REVIEW_CAPS.some((cap) => identityStore.staffCaps.includes(cap)))
 
 // 四块数据的原始响应（`null` = 还没回来 / 读失败）。页面只把它们交给
 // `workbenchHomeSummary`，自己不解释形状 —— 口径在 util 里，能拿真单测压。
@@ -53,6 +65,15 @@ const stationsStore = useStationsStore()
 const deep = ref(null)
 const daily = ref(null)
 const me = ref(null)
+// 店长那一档额外读的三块（排班待办 / 今天谁上班 / 备货）。员工会话能读这三个接口
+// （2026-11-09 实测：inbox、day、prep-plan 都是 200；卫生 admin 那三个是 401）。
+const teamInbox = ref(null)
+const teamDay = ref(null)
+const teamPrep = ref(null)
+// 卫生复核那一行的两块原始响应（同上：`null` = 没读到）。`daily-work?review=1` 是
+// 员工端复核收件箱，`boards` 是本周那张一人一行的板（驳回次数在行上）。
+const hygieneWork = ref(null)
+const hygieneBoards = ref(null)
 // 业务日（服务端那个 06:00 切日的今天）：月历、员工端、卫生三处读的是同一天，首页
 // 显示的日期也得是它 —— 手机上「今天」是几号不作数（票 05 已踩过一次时区）。
 const businessDate = ref('')
@@ -70,6 +91,47 @@ const summary = computed(() => workbenchHomeSummary({
   daily: daily.value,
   me: me.value,
 }))
+
+/** 店长首页「店里的事」那一条：读不到的那格给 `null`（显示 —），别把没读到说成 0。
+ *  待批只数请假、且**不含自己提的**：店长自己的假是超管批的，他点进去也批不了。 */
+const teamSummary = computed(() => {
+  if (!manage.value) return null
+  const rows = teamInbox.value && Array.isArray(teamInbox.value.requests)
+    ? teamInbox.value.requests
+    : null
+  return {
+    leaves: rows ? rows.filter((row) => row && row.kind === 'leave' && row.is_own !== true).length : null,
+    onDuty: teamDay.value ? (teamDay.value.total ?? null) : null,
+    remaining: teamPrep.value ? teamPrep.value.remaining : null,
+  }
+})
+
+/** 卫生复核那一行（2026-11-10 用户裁定）：待我复核条数 + 本周被驳回次数。
+ *  只对开了卫生复核能力的人算；读不到给 null，页面画「—」，失败静默不挡首页。 */
+const hygieneSummary = computed(() => {
+  if (!canHygieneReview.value) return null
+  return {
+    review: countHygieneReview(hygieneWork.value),
+    rejected: countHygieneRejected(hygieneBoards.value),
+  }
+})
+
+/** 「店里的事」的眉标：这条里现在放的是哪几种管理员权限（排班 / 卫生 / 两者都有）。 */
+const teamHint = computed(() => {
+  const parts = []
+  if (teamSummary.value) parts.push('排班')
+  if (hygieneSummary.value) parts.push('卫生')
+  return parts.length ? `管理员 · ${parts.join(' + ')}` : '管理员'
+})
+
+/** 「店里的事」那颗灯：条里任何一笔待办（排班 / 卫生复核 / 被驳回）有数字就黄，
+ *  全 0（或全读不到）就中性 —— 同 D 组 2026-11-09 定下的「0 值不报警」口径。 */
+const teamLed = computed(() => {
+  const values = []
+  if (teamSummary.value) values.push(teamSummary.value.leaves)
+  if (hygieneSummary.value) values.push(hygieneSummary.value.review, hygieneSummary.value.rejected)
+  return values.some(toneOn) ? 'warn' : 'off'
+})
 
 /** 员工首页「我的班」右上角那颗状态（`staffShiftCell().tone` 的六种取值）。 */
 const SHIFT_STATES = {
@@ -103,6 +165,12 @@ const dateText = computed(() => dayLabel(businessDate.value))
 function numberText(value) {
   if (value == null) return '—'
   return String(value)
+}
+
+/** 灯只在真有事时亮：`0`（真没有）与 `null`（没读到）都不该每天第一屏就报警 ——
+ *  四个读数全亮红黄的话，今天到底哪件事急就没人看得出来了。 */
+function toneOn(value) {
+  return typeof value === 'number' && value > 0
 }
 
 /** 几块并行、各拉各的：失败把那块留成 `null`，不抛出去影响别的块。 */
@@ -154,11 +222,29 @@ async function loadStaff() {
   // 先拿自己的班：营业日与「我的班次」都从它来，其余四块并行。
   await safe(staffRequest('/api/scheduling/me'), me)
   businessDate.value = (me.value && me.value.today) || ''
+  // 店长多读三块（见 `manage`）。日期用服务端营业日，跟「今天」页同一份口径。
+  const team = manage.value
+    ? [
+      safe(api.get('/api/scheduling/inbox'), teamInbox),
+      safe(api.get('/api/scheduling/day', businessDate.value ? { date: businessDate.value } : {}), teamDay),
+      safe(api.get('/api/prep-plan/summary'), teamPrep),
+    ]
+    : []
+  // 卫生复核那一行（见 `canHygieneReview`）：只走员工端只读接口，失败就画「—」，
+  // 不影响下面那几块，也不把整页打回错误态。
+  const hygiene = canHygieneReview.value
+    ? [
+      safe(staffRequest('/api/hygiene/staff/daily-work?review=1'), hygieneWork),
+      safe(staffRequest('/api/hygiene/staff/boards'), hygieneBoards),
+    ]
+    : []
   await Promise.all([
     safe(staffRequest('/api/scheduling/me/requests'), inbox),
     safe(staffRequest('/api/hygiene/staff/daily-work'), daily),
     safe(staffRequest('/api/hygiene/staff/deep-clean'), deep),
     safe(staffRequest('/api/hygiene/staff/fix'), fix),
+    ...team,
+    ...hygiene,
   ])
 }
 
@@ -209,23 +295,23 @@ useNudgePull({
     <!-- ── 店长：四个读数 + 今天的班 ─────────────────────────────────── -->
     <template v-else-if="summary.view === IDENTITY_ADMIN">
       <div class="wbh-kpis">
-        <router-link class="wbh-kpi wbh-cell leaves is-warn" :to="HOME_LINKS.leaves">
-          <div class="wbh-kh"><span>待批请假</span><i class="wbh-led warn"></i></div>
-          <b class="wbh-num is-warn">{{ numberText(summary.leaves) }}</b>
+        <router-link class="wbh-kpi wbh-cell leaves" :class="{ 'is-warn': toneOn(summary.leaves) }" :to="HOME_LINKS.leaves">
+          <div class="wbh-kh"><span>待批请假</span><i class="wbh-led" :class="toneOn(summary.leaves) ? 'warn' : 'off'"></i></div>
+          <b class="wbh-num" :class="{ 'is-warn': toneOn(summary.leaves) }">{{ numberText(summary.leaves) }}</b>
           <p class="wbh-kf">排班待办 · 员工已提</p>
         </router-link>
-        <router-link class="wbh-kpi wbh-cell reviews is-warn" :to="HOME_LINKS.reviews">
-          <div class="wbh-kh"><span>待验收</span><i class="wbh-led warn"></i></div>
-          <b class="wbh-num is-warn">{{ numberText(summary.reviews) }}</b>
+        <router-link class="wbh-kpi wbh-cell reviews" :class="{ 'is-warn': toneOn(summary.reviews) }" :to="HOME_LINKS.reviews">
+          <div class="wbh-kh"><span>待验收</span><i class="wbh-led" :class="toneOn(summary.reviews) ? 'warn' : 'off'"></i></div>
+          <b class="wbh-num" :class="{ 'is-warn': toneOn(summary.reviews) }">{{ numberText(summary.reviews) }}</b>
           <p class="wbh-kf">日常检查 · 现在能验收</p>
         </router-link>
-        <router-link class="wbh-kpi wbh-cell fixes is-bad" :to="HOME_LINKS.fixes">
-          <div class="wbh-kh"><span>逾期整改</span><i class="wbh-led bad"></i></div>
-          <b class="wbh-num is-bad">{{ numberText(summary.fixes) }}</b>
+        <router-link class="wbh-kpi wbh-cell fixes" :class="{ 'is-bad': toneOn(summary.fixes) }" :to="HOME_LINKS.fixes">
+          <div class="wbh-kh"><span>逾期整改</span><i class="wbh-led" :class="toneOn(summary.fixes) ? 'bad' : 'off'"></i></div>
+          <b class="wbh-num" :class="{ 'is-bad': toneOn(summary.fixes) }">{{ numberText(summary.fixes) }}</b>
           <p class="wbh-kf">超过期限 · 未回拍</p>
         </router-link>
         <router-link class="wbh-kpi wbh-cell reminders" :to="HOME_LINKS.reminders">
-          <div class="wbh-kh"><span>人事提醒</span><i class="wbh-led sig"></i></div>
+          <div class="wbh-kh"><span>人事提醒</span><i class="wbh-led" :class="toneOn(summary.reminders) ? 'sig' : 'off'"></i></div>
           <b class="wbh-num">{{ numberText(summary.reminders) }}</b>
           <p class="wbh-kf">工龄奖 · 生日 · 健康证</p>
         </router-link>
@@ -316,6 +402,49 @@ useNudgePull({
            操作单（发起只有那一处表单）；加班登记、损耗登记本来就在自己那一页
            （`/workbench/staff/overtime`、`/workbench/staff/loss`），直接过去，不在这儿再
            摆第二张表单。 -->
+      <!-- 管理员（员工会话 + 能力档）：除了「我的班」，店里那几件他今天要处理的事也该在
+           第一屏。排班三格走 schedule 能力（待批 / 上班人数 / 备货）；卫生两笔走
+           daily_review / deep_review / fix 任一，用员工端只读接口（卫生 admin 那侧对
+           员工会话是 401）。读不到就显示 —，不假装成 0；这一条里没有任何验收 / 批准
+           动作 —— 点进去，动作在专页里做。 -->
+      <section v-if="teamSummary || hygieneSummary" class="wbh-team">
+        <header class="wbh-ph">
+          <i class="wbh-led" :class="teamLed"></i>
+          <h2>店里的事</h2>
+          <span class="wbh-hint">{{ teamHint }}</span>
+        </header>
+        <div v-if="teamSummary" class="wbh-team-grid">
+          <router-link class="wbh-team-cell" :class="{ 'is-warn': toneOn(teamSummary.leaves) }" to="/workbench/hr/inbox">
+            <b class="wbh-num" :class="{ 'is-warn': toneOn(teamSummary.leaves) }">{{ numberText(teamSummary.leaves) }}</b>
+            <span class="wbh-team-lab">件待批请假 ›</span>
+          </router-link>
+          <router-link class="wbh-team-cell" to="/workbench/hr/calendar">
+            <b class="wbh-num">{{ numberText(teamSummary.onDuty) }}</b>
+            <span class="wbh-team-lab">人今天上班 ›</span>
+          </router-link>
+          <router-link class="wbh-team-cell" :class="{ 'is-warn': toneOn(teamSummary.remaining) }" to="/workbench/kitchen/prep-plan">
+            <b class="wbh-num" :class="{ 'is-warn': toneOn(teamSummary.remaining) }">{{ numberText(teamSummary.remaining) }}</b>
+            <span class="wbh-team-lab">项备货还差 ›</span>
+          </router-link>
+        </div>
+        <!-- 卫生复核（2026-11-10 用户裁定）：一行小条而不是第四格 —— 排班三格是同一件事，
+             卫生是另一件；390 下四格数字会挤成一团。点进员工端卫生页，复核动作在那边做。 -->
+        <router-link
+          v-if="hygieneSummary"
+          class="wbh-team-row"
+          :class="{ 'is-warn': toneOn(hygieneSummary.review) || toneOn(hygieneSummary.rejected) }"
+          to="/workbench/staff/clean"
+        >
+          <i class="wbh-led" :class="toneOn(hygieneSummary.review) || toneOn(hygieneSummary.rejected) ? 'warn' : 'off'"></i>
+          <!-- 数据标注（控件文本），文案预算按 `.wbh-team-lab` / `.wbh-go` 排除，与上面三格同口径。 -->
+          <span class="wbh-team-row-lab">卫生复核</span>
+          <b class="wbh-team-lab">待我复核 {{ numberText(hygieneSummary.review) }} 项</b>
+          <span class="wbh-team-row-sep">·</span>
+          <b class="wbh-team-lab" :class="{ 'is-warn': toneOn(hygieneSummary.rejected) }">本周被驳回 {{ numberText(hygieneSummary.rejected) }} 次</b>
+          <span class="wbh-team-go wbh-go">去卫生页 ›</span>
+        </router-link>
+      </section>
+
       <section class="wbh-me-card">
         <router-link class="wbh-me" :to="HOME_LINKS.myMonth">
           <div class="wbh-kh">
@@ -340,13 +469,13 @@ useNudgePull({
       <StaffHygieneCard />
 
       <div class="wbh-cells">
-        <router-link class="wbh-cell myItems" :to="HOME_LINKS.myItems">
-          <div class="wbh-kh"><span>我的待办</span><i class="wbh-led warn"></i></div>
-          <b class="wbh-num is-warn">{{ numberText(summary.work.pending) }}</b>
+        <router-link class="wbh-cell myItems" :class="{ 'is-warn': toneOn(summary.work.pending) }" :to="HOME_LINKS.myItems">
+          <div class="wbh-kh"><span>我的待办</span><i class="wbh-led" :class="toneOn(summary.work.pending) ? 'warn' : 'off'"></i></div>
+          <b class="wbh-num" :class="{ 'is-warn': toneOn(summary.work.pending) }">{{ numberText(summary.work.pending) }}</b>
           <p class="wbh-kf">卫生待办 ›</p>
         </router-link>
         <router-link class="wbh-cell myRequests" :to="HOME_LINKS.myRequests">
-          <div class="wbh-kh"><span>等我回应</span><i class="wbh-led sig"></i></div>
+          <div class="wbh-kh"><span>等我回应</span><i class="wbh-led" :class="toneOn(summary.incoming) ? 'sig' : 'off'"></i></div>
           <b class="wbh-num">{{ numberText(summary.incoming) }}</b>
           <p class="wbh-kf">我的申请 ›</p>
         </router-link>
@@ -569,6 +698,44 @@ useNudgePull({
   text-decoration: none;
 }
 
+/* 管理员（员工会话 + schedule 权限）的「店里的事」：一条三格（待批请假 / 今天上班 / 备货）。
+   三格等宽、手机上也是一行 —— 它是管理摘要，不该比下面的「我的班」更占地方。 */
+.wbh-team {
+  background: var(--surface-1);
+  border: 1px solid var(--line);
+  border-radius: var(--r-2);
+  overflow: hidden;
+}
+.wbh-team-grid { display: grid; grid-template-columns: repeat(3, 1fr); }
+.wbh-team-cell {
+  display: flex; flex-direction: column; gap: 6px;
+  min-height: 64px; padding: 12px 14px;
+  border-left: 1px solid var(--wb-ink-a08);
+  text-decoration: none;
+}
+.wbh-team-cell:first-child { border-left: 0; }
+.wbh-team-cell .wbh-num { font-size: 24px; }
+.wbh-team-cell span { font-size: 10px; line-height: 1.4; color: var(--ink-dim); }
+.wbh-team-cell:hover { background: var(--surface-2); }
+
+/* 卫生复核那一行（2026-11-10 用户裁定）：管理员（员工会话 + 卫生复核能力）的
+   「待我复核 / 本周被驳回」，点进员工端卫生页。做成一行小条而不是第四格 —— 排班
+   三格是同一件事，卫生是另一件；390 下四格数字会挤成一团。 */
+.wbh-team-row {
+  display: flex; align-items: center; gap: 7px;
+  min-height: 44px; padding: 10px 14px;
+  border-top: 1px solid var(--wb-ink-a08);
+  font-size: 11px; color: var(--ink-dim);
+  text-decoration: none;
+}
+.wbh-team-row b { font-size: 12px; font-weight: 600; color: var(--ink); white-space: nowrap; }
+.wbh-team-row b.is-warn { color: var(--warn); }
+.wbh-team-row:hover { background: var(--surface-2); }
+.wbh-team-row-lab { white-space: nowrap; }
+.wbh-team-row.is-warn .wbh-team-row-lab { color: var(--warn); }
+.wbh-team-row-sep { color: var(--ink-faint); }
+.wbh-team-go { margin-left: auto; font-size: 10px; color: var(--action); white-space: nowrap; }
+
 @media (max-width: 900px) {
   .wbh-kpis { grid-template-columns: repeat(2, 1fr); }
   .wbh-cols { grid-template-columns: 1fr; }
@@ -579,5 +746,6 @@ useNudgePull({
   .wbh-title { font-size: 22px; }
   .wbh-kpi { padding: 11px 13px 10px; }
   .wbh-num { font-size: 26px; }
+  .wbh-team-row { gap: 5px; padding: 10px 12px; }
 }
 </style>
