@@ -97,11 +97,16 @@ describe('员工端 · 健康证提示', () => {
     })
 
     const alert = wrapper.get('.health-cert-alert')
-    expect(alert.text()).toBe('健康证快到期，请尽快办理')
-    expect(alert.attributes('role')).toBe('status')
+    // 文案只认那一行字：2026-11 起横条右手多了一颗「更新健康证」入口，
+    // 别再对整个横条断言 text()。
+    const text = alert.get('.health-cert-alert-text')
+    expect(text.text()).toBe('健康证快到期，请尽快办理')
+    expect(text.attributes('role')).toBe('status')
     expect(alert.classes()).toContain('is-soon')
     // 日期不在这句里（在「我的」那两行里）。
-    expect(alert.text()).not.toContain('2026-10-25')
+    expect(text.text()).not.toContain('2026-10-25')
+    // 自助入口在横条右手，且只在横条出现时出现。
+    expect(alert.get('.health-cert-action').text()).toBe('更新健康证')
     // 只有一处：不重复出现第二遍。
     expect(wrapper.findAll('.health-cert-alert')).toHaveLength(1)
   })
@@ -113,7 +118,8 @@ describe('员工端 · 健康证提示', () => {
     })
 
     const alert = wrapper.get('.health-cert-alert')
-    expect(alert.text()).toBe('健康证已过期，请尽快办理')
+    expect(alert.get('.health-cert-alert-text').text()).toBe('健康证已过期，请尽快办理')
+    expect(alert.get('.health-cert-action').text()).toBe('更新健康证')
     expect(alert.classes()).not.toContain('is-soon')
   })
 

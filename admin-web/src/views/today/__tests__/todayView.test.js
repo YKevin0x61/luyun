@@ -163,6 +163,23 @@ describe('「我的成绩」卡（2026-10-05 用户裁定）', () => {
     expect(view).not.toMatch(/scorePercent/)
   })
 
+  it('空态给出下一步：去卫生交一项（只是链接，不新增卫生数据请求）', () => {
+    // 2026-11-09 走查：空态说「交一项就有记录」，但没有下一步 —— 员工不知道去哪儿交。
+    // 卫生页（员工档）当天有 13 项待交，所以这个链接是真落点，不是装饰。
+    expect(view).toMatch(/class="acts"[\s\S]{0,160}?to="\/workbench\/staff\/clean"/)
+    expect(view).toContain('去卫生交一项 ›')
+    // 只是把人送过去：这一页仍然不拉卫生待办 / 仪容仪表那两条接口。
+    expect(view).not.toMatch(/staffRequest\('\/api\/hygiene\/staff\/daily-work'\)/)
+    expect(view).not.toMatch(/staffRequest\('\/api\/hygiene\/staff\/attire'\)/)
+  })
+
+  it('我的资料：展开后右上角改口「收起 ›」（details 的开合状态与文案一致）', () => {
+    // 2026-11-09 走查：展开后仍写「展开 ›」，像没展开、也不知道能收。
+    expect(view).toMatch(/<details class="tA-card me" @toggle="meOpen = \$event\.target\.open">/)
+    expect(view).toMatch(/\{\{ meOpen \? '收起 ›' : '展开 ›' \}\}/)
+    expect(view).toMatch(/const meOpen = ref\(false\)/)
+  })
+
   it('只报三条次数（一次通过 / 被驳回 / 实拍），且没有百分率；驳回原因一行一条带次数', () => {
     // t59 按原型 05 收敛：主数字（百分率）已删，判据改成「三条计数在、百分号不在」。
     expect(view).not.toMatch(/class="score-rate"/)
@@ -203,8 +220,8 @@ describe('两个弹层的点击账约束（DO:250-251 / DO:909-914 / DO:860-869 
   })
 
   it('换班：同意按钮写「同意并转店长」（DO:925）', () => {
-    expect(view).toContain('>同意并转店长</button>')
-    expect(view).toContain('点「同意并转店长」才会轮到店长批')
+    expect(view).toContain('>同意并转管理员</button>')
+    expect(view).toContain('点「同意并转管理员」才会轮到管理员批')
     expect(view).not.toContain('>同意</button>')
   })
 
@@ -316,7 +333,7 @@ describe('员工端请假（票 08）', () => {
     // 按钮先开确认框（`cancelTarget`），真发那条 DELETE 在 `confirmCancel` 里。
     expect(view).toMatch(/@click="cancelTarget = request"/)
     expect(view).toContain('请假批了那天写')
-    expect(view).toContain('换班要对方先同意、店长再批')
+    expect(view).toContain('换班要对方先同意、管理员再批')
     // 出错了要说出来（不吞）：这一页现在只有 `requestsError` 一处（表单那两处
     // `leaveError` / `swapError` 跟着表单搬去了 StaffDaySheet）。
     expect(view).toMatch(/v-if="requestsError"/)
@@ -353,9 +370,9 @@ describe('员工端换班（票 09）', () => {
     expect(view).toMatch(/@click="answerSwap\(card, true\)"/)
     // 拒绝先开确认框（同意不弹，见确认框那条用例）。
     expect(view).toMatch(/@click="answerTarget = \{ card, agree: false \}"/)
-    expect(view).toContain('点「同意并转店长」才会轮到店长批')
+    expect(view).toContain('点「同意并转管理员」才会轮到管理员批')
     // 同意/拒绝之后两边都要重读（对方可能自己撤了），也各有一句回执。
-    expect(view).toMatch(/note\.value = agree \? '你同意了，接下来等店长批' : '你拒绝了，这件事到此为止'/)
+    expect(view).toMatch(/note\.value = agree \? '你同意了，接下来等管理员批' : '你拒绝了，这件事到此为止'/)
     // 那次重读要钉在 `answerSwap` 里：`cancelLeave` 里也有一句 `await loadRequests(true)`，
     // 全文匹配会被它顶替（删掉这里的重读，断言照样绿）。
     const answer = view.slice(view.indexOf('async function answerSwap'), view.indexOf('onMounted('))

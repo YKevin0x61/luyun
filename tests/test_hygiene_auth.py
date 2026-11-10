@@ -416,19 +416,19 @@ def test_staff_cannot_self_pick_shift_or_zone_any_more(hygiene_http):
         (
             "/api/hygiene/staff/assignment",
             {"shift": "白班", "zone_id": 1},
-            "今天上哪个班、在哪个区由排班决定：去「今天」页看你的班，要改请找店长",
+            "今天上哪个班、在哪个区由排班决定：去「今天」页看你的班，要改请找管理员",
         ),
         (
             "/api/hygiene/staff/assignment",
             {"shift": "夜班", "zone_id": 2},
-            "今天上哪个班、在哪个区由排班决定：去「今天」页看你的班，要改请找店长",
+            "今天上哪个班、在哪个区由排班决定：去「今天」页看你的班，要改请找管理员",
         ),
         # 只改班次那条路答的是自己那句话（各自的服务层入口，各自的说法）——
         # 两条路都撤了，但说的是各自那件事，不是一句笼统的「都改不了」。
         (
             "/api/hygiene/staff/shift",
             {"shift": "夜班", "zone_id": 2},
-            "今天的班次由排班决定：去「今天」页看你的班，要改请找店长",
+            "今天的班次由排班决定：去「今天」页看你的班，要改请找管理员",
         ),
     ):
         refused = client.post(path, json=payload)
@@ -488,7 +488,7 @@ def test_nobody_changes_a_shift_from_the_hygiene_side(hygiene_http):
         )
         assert refused.status_code == 403, (entry, refused.text)
         assert refused.json()["detail"] == (
-            "今天上哪个班、在哪个区由排班决定：去「今天」页看你的班，要改请找店长"
+            "今天上哪个班、在哪个区由排班决定：去「今天」页看你的班，要改请找管理员"
         )
     assert _run(accounts.current_shift(staff["id"])) == "白班"
     roster = client.get("/api/hygiene/admin/roster")
@@ -606,7 +606,7 @@ def test_staff_can_get_catalog_and_current_standard_after_login(hygiene_http):
     # 卫生工作区"把他指去一个不存在的操作，现在是"找店长在排班页配一个"。
     no_duty = client.get(f"/api/hygiene/staff/items/{item['id']}/standard")
     assert no_duty.status_code == 400
-    assert no_duty.json()["detail"] == "今天排班没给你排到工作区：找店长在排班页配一个"
+    assert no_duty.json()["detail"] == "今天排班没给你排到工作区：找管理员在排班页配一个"
 
     # 排班说「白班 · 案板」之后，同一张标准图才拿得到（票 10：分工读排班，不自选）。
     _assign_duty(_db, employee["id"], "白班", zone_id=anban["id"])
@@ -1213,7 +1213,7 @@ def test_admin_sets_zone_shifts_staff_cannot_self_pick_any_zone(hygiene_http):
         )
         assert refused.status_code == 403, (shift, refused.text)
         assert refused.json()["detail"] == (
-            "今天上哪个班、在哪个区由排班决定：去「今天」页看你的班，要改请找店长"
+            "今天上哪个班、在哪个区由排班决定：去「今天」页看你的班，要改请找管理员"
         )
 
     # 被拒之后当天分工还是排班给的那一份：白班 · 案板（不是他刚想选的那个区）。

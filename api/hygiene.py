@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 from collections import defaultdict
 from pathlib import Path
@@ -34,7 +34,13 @@ from services.hygiene.accounts import (
     normalize_phone,
 )
 from services.identity.capabilities import CAPABILITY_LABELS, STAFF_SIDE_CAPABILITIES
-from services.identity.profile import ProfileError, approve_gate, normalize_date
+from services.identity.profile import (
+    HEALTH_CERT_VALID_MONTHS,
+    ProfileError,
+    add_months,
+    approve_gate,
+    normalize_date,
+)
 from services.hygiene.archive import (
     KIND_DAILY,
     KIND_DEEP,
@@ -130,6 +136,12 @@ _ERROR_DETAILS = {
     "duplicate_id_card": "该身份证号已建档",
     "health_cert_required": "请选择健康证办理日期",
     "health_cert_future": "健康证办理日期不能是将来",
+    # 员工自己更新健康证（2026-11 工作台未落地项）：员工看到的是证上的**到期日**，
+    # 库里只存办理日期，所以这三句说的是「选哪一天」而不是「办证日期填错了」。
+    "health_cert_expiry_required": "请选择新的健康证到期日",
+    "health_cert_expiry_past": "新的健康证到期日不能早于今天",
+    "health_cert_expiry_too_far": "新的健康证到期日最晚是今天往后 12 个月",
+    "health_cert_expiry_unmapped": "这个到期日没有对应的办理日期，请改选一天",
     # 入职日期（2026-10-13）：只有"必填"这一句 —— 它**允许将来**（提前建档），所以没有
     # 健康证那种 `*_future` 对照文案；形状不对走 profile.py 共用的 `bad_date`。
     "hire_date_required": "请选择入职日期",
@@ -152,14 +164,14 @@ _ERROR_DETAILS = {
     "shift_already_picked": "当天班次已选定，不能自己改",
     # 票 10：员工不再自己选班次和工作区（管理员改派也从卫生这一侧撤了，落到排班的
     # 单日覆盖上）。这两句说的是「该去哪儿做」，不是「你填错了」。
-    "assignment_from_schedule": "今天上哪个班、在哪个区由排班决定：去「今天」页看你的班，要改请找店长",
+    "assignment_from_schedule": "今天上哪个班、在哪个区由排班决定：去「今天」页看你的班，要改请找管理员",
     # 仪容仪表（按人，排到班次才要拍）：每一句都说清下一步该做什么。
     "attire_not_required": "今天没排到你的班次，这一项不用拍",
     "attire_standard_required": "管理员还没传标准图：等传了再拍，或者找他问一下",
     "attire_note_required": "请写明哪里不合格：员工要照着这句重拍",
     "attire_not_found": "这一张不存在：可能还没交，刷新看看",
     "attire_not_pending": "这一张不在等你验收：可能刚被处理过，刷新看看",
-    "shift_from_schedule": "今天的班次由排班决定：去「今天」页看你的班，要改请找店长",
+    "shift_from_schedule": "今天的班次由排班决定：去「今天」页看你的班，要改请找管理员",
     "forbidden": "没有权限做这一步",
     "standard_required": "没有标准图不能上架日常检查项",
     "standard_not_found": "标准图版本不存在",
@@ -178,7 +190,7 @@ _ERROR_DETAILS = {
     # 票 10 起员工**不能自选**工作区（区域与班次由店长在排班页配），所以这两句不能再
     # 说"请先选择 / 所选"——那是旧口径，会把人指去一个已经不存在的操作。现在的真话是：
     # 他没被排到区，得找店长配。前端的门槛已经先拦一道，这里是绕过前端直接打接口时的那句。
-    "zone_required": "今天排班没给你排到工作区：找店长在排班页配一个",
+    "zone_required": "今天排班没给你排到工作区：找管理员在排班页配一个",
     "zone_mismatch": "只能在自己今天那个区里操作",
     "live_required": "必须现场拍摄，不能从相册选图",
     "capture_required": "请拍摄日常检查照片",
@@ -402,6 +414,20 @@ class StaffLoginIn(BaseModel):
 class StaffProfileIn(BaseModel):
     name: Optional[str] = None
     phone: Optional[str] = None
+
+
+class StaffHealthCertIn(BaseModel):
+    """员工自己更新健康证（2026-11，工作台未落地项）。
+
+    `expires_on` 是**证上的到期日**。库里只有 `health_cert_date`（办理日期，ADR 0098：
+    到期日不落库、只由 `services/identity/profile.py` 派生），接口层负责反推。
+    两个字段都声明成可选、必填在 handler 里判：缺字段时 pydantic 回的是 422 英文结构，
+    而这里要的是 400 + 中文原话（与注册、PATCH /staff/me 同一个口径）。
+    """
+
+    expires_on: Optional[str] = None
+    # 选填说明：眼下没有核验流、也没有审计表，它只随一条 INFO 日志留痕（报告里写明边界）。
+    note: Optional[str] = None
 
 
 class StaffPasswordIn(BaseModel):
@@ -978,6 +1004,91 @@ async def staff_update_me(
             detail=_error_detail(str(exc)),
         ) from exc
     await _hygiene_nudge("roster", "profile_updated")
+    return {"employee": employee}
+
+
+@router.patch("/staff/me/health-cert")
+async def staff_update_health_cert(
+    body: StaffHealthCertIn,
+    staff=Depends(require_staff_session),
+    accounts: EmployeeAccounts = Depends(_get_accounts),
+) -> Dict[str, Any]:
+    """员工更新**自己的**健康证（2026-11 工作台未落地项）。
+
+    契约：body 收 `expires_on`（新证上的到期日，YYYY-MM-DD，不得早于北京时今天）+
+    可选 `note`（说明，≤200 字）。响应与 `/staff/me` 同形：`{"employee": 投影}`，
+    其中的 `health_cert_expires_on` / `health_cert_state` 已经是新值。
+
+    只改 `staff["employee"]["id"]` 这一行 —— 员工会话里没有可填的 employee_id，
+    这里也没有第二个人可指，越权没有入口。管理员花名册读的是同一列
+    （`hygiene_employees.health_cert_date`），所以改完那一行自然显示新日期。
+
+    为什么把到期日反推成办理日期：ADR 0098 / `profile.py` 的口径是**到期日不落库**，
+    有效期永远 = 办理日期 + 12 个月，只有 `profile.py` 一处算。员工手里那张证印的是
+    到期日，所以弹层让他选到期日，这里反推 12 个月落库，再用派生函数回环校验一次
+    —— 2 月 29 日这种「反推出来那一天再加 12 个月对不回去」的到期日直接拒掉，
+    不悄悄存一个差一天的日期（报告里记了这个边界）。
+
+    没有核验流：谁都能替自己报一个新日期，管理员只能事后在花名册里看见。`note`
+    也只随一条 INFO 日志留痕（`logs` 表由日志管线落库），不新建审计表。
+    """
+    raw = (body.expires_on or "").strip()
+    if not raw:
+        raise HTTPException(
+            status_code=400,
+            detail=_ERROR_DETAILS["health_cert_expiry_required"],
+        )
+    try:
+        expires_on = normalize_date(raw)
+    except ProfileError as exc:
+        raise HTTPException(status_code=400, detail=_error_detail(exc.code)) from exc
+    # normalize_date 只在空串时回 None（上面已挡）；显式兜底而不是 assert —— 生产
+    # 解释器带 -O 时 assert 会被去掉，这里不能靠它挡。
+    if expires_on is None:
+        raise HTTPException(
+            status_code=400,
+            detail=_ERROR_DETAILS["health_cert_expiry_required"],
+        )
+    if date.fromisoformat(expires_on) < date.fromisoformat(accounts.today()):
+        raise HTTPException(
+            status_code=400,
+            detail=_ERROR_DETAILS["health_cert_expiry_past"],
+        )
+    # 有效期固定 12 个月 → 到期日最多 = 今天 + 12 个月（再往后反推出的办理日期
+    # 就是将来了，`update_fields` 会拒，但那时给员工的会是「办理日期不能是将来」，
+    # 对着「到期日」这个输入说不通；先在这里用一句话说清楚）。
+    if expires_on > add_months(accounts.today(), HEALTH_CERT_VALID_MONTHS):
+        raise HTTPException(
+            status_code=400,
+            detail=_ERROR_DETAILS["health_cert_expiry_too_far"],
+        )
+    try:
+        health_cert_date = add_months(expires_on, -HEALTH_CERT_VALID_MONTHS)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=_error_detail("bad_date")) from exc
+    if add_months(health_cert_date, HEALTH_CERT_VALID_MONTHS) != expires_on:
+        raise HTTPException(
+            status_code=400,
+            detail=_ERROR_DETAILS["health_cert_expiry_unmapped"],
+        )
+    try:
+        employee = await accounts.update_fields(
+            staff["employee"]["id"],
+            health_cert_date=health_cert_date,
+        )
+    except EmployeeAccountsError as exc:
+        raise _http_error(exc) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=_error_detail(str(exc))) from exc
+    note = (body.note or "").strip()[:200].replace("\r", " ").replace("\n", " ")
+    logger.info(
+        "staff health cert updated id=%s expires_on=%s old=%s note=%s",
+        staff["employee"]["id"],
+        expires_on,
+        staff["employee"].get("health_cert_expires_on"),
+        note,
+    )
+    await _hygiene_nudge("roster", "health_cert_updated")
     return {"employee": employee}
 
 

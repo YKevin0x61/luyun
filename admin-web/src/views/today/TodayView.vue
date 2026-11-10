@@ -20,6 +20,7 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import ConfirmDialog from '../../components/admin/ConfirmDialog.vue'
+import LuyunDatePicker from '../../components/ui/LuyunDatePicker.vue'
 import { workbenchDocumentTitle } from '../../utils/workbenchCopy'
 import { useNudgePull } from '../../composables/useNudgePull'
 import { ADMIN_CAP_STAFF_DEFS, hasCap } from '../../utils/adminCaps'
@@ -64,11 +65,11 @@ const staffMe = ref(null)
 const deepClock = ref(null)
 const dailyClocks = ref(null)
 
-// 「你能做的事」能力卡（票 01 / ADR 0093）的数据：十二项开关里**员工端真有执行点**的那五项
+// 「你能做的事」能力卡（票 01 / ADR 0093）的数据：十四项开关里**员工端真有执行点**的那七项
 // （`ADMIN_CAP_STAFF_DEFS` 与后端 `STAFF_SIDE_CAPABILITIES` 同义），逐项标出开了没有。
 // 判据一律看 `admin_caps` —— `permission` 只是显示用的标签（真机走查 S10：标签写着
 // 「管理员」而一项开关都没给是合法状态），拿标签判会放行没给的那件事。
-// 未接线的七项**不进这张卡**：它们对应的是超级管理员在电脑端的活，员工端没有入口，
+// 只读的七项**不进这张卡**：它们对应的是超级管理员在电脑端的活，员工端仍无入口，
 // 画出来就是"勾了不生效"那类缺陷的另一面。
 const staffCaps = computed(() => ADMIN_CAP_STAFF_DEFS.map((item) => ({
   ...item,
@@ -76,13 +77,14 @@ const staffCaps = computed(() => ADMIN_CAP_STAFF_DEFS.map((item) => ({
 })))
 const staffCapCount = computed(() => staffCaps.value.filter((item) => item.granted).length)
 
-// 能力 → 落点（§12 第 1 条裁定：能力卡计 **5 项**，三项在「卫生」页、`schedule` 在人事组，`wastage` 在后勤组）。
+// 能力 → 落点（§12 第 1 条裁定：能力卡计 **7 项**，三项在「卫生」页、`schedule` 在人事组，`wastage` 在后勤组；
+// 2026-11-10 新增的 `prep_review` / `recipe_qr` 落到后勤组两个只读页）。
 // 加班与补钟审批 2026-11-03 并进了 `schedule`，「加班与补钟」页仍在 `/workbench/staff/overtime`，
 // 但能力卡上不再单独占一项 —— 它的落点跟着人事管理走。
 // 落点写在数据旁边，而不是页尾一句概括句 —— 那种句子在一项能力多出来之后就会变成假话。
 // 2026-10-14 加的两项：`schedule` 落到人事组的月历（管理端那一面，员工会话 + 能力即可进），
 // `wastage` 落到后勤组的损耗分析（同上）。两页都是 `audience: admin` + `staffCap`。
-// 「今天会用到」这五项里，现场三项（日常验收 / 专项验收 / 整改单）今天就会真用上；
+// 「今天会用到」这几项里，现场三项（日常验收 / 专项验收 / 整改单）今天就会真用上；
 // 其余（排班 / 考勤、损耗）是隔天的事。分组只影响默认折叠哪几行，不改开关判据。
 const CAP_TODAY_KEYS = ['daily_review', 'deep_review', 'fix']
 const capsExpanded = ref(false)
@@ -95,6 +97,8 @@ const CAP_ROUTES = {
   fix: '/workbench/staff/clean',
   schedule: '/workbench/hr/calendar',
   wastage: '/workbench/kitchen/loss',
+  prep_review: '/workbench/kitchen/prep-review',
+  recipe_qr: '/workbench/kitchen/recipe/qr',
 }
 
 // 健康证到期（一行提示，只在临期 / 过期时渲染）：文案里**不带日期** —— 日期在下面
@@ -109,6 +113,68 @@ const healthCertAlert = computed(() => {
 const healthCertTone = computed(() => (
   (staffMe.value && staffMe.value.health_cert_state) === 'soon' ? 'is-soon' : ''
 ))
+
+// 更新健康证（2026-11，工作台未落地项）：横条上的「更新健康证」开这个页内弹层。
+// 员工只能改**新证到期日**，办理日期由服务端反推落库（花名册读的仍是那一列）；
+// 没有核验流 —— 保存后管理员能看到新日期，但没人核对实体证（报告里写明这个边界）。
+const healthCertOpen = ref(false)
+const healthCertExpires = ref('')
+const healthCertNote = ref('')
+const healthCertSaving = ref(false)
+const healthCertError = ref('')
+
+// 北京时自然日（YYYY-MM-DD）：日期选择器的下限 + 提交前的一次本地说法。
+// 真正的校验在服务端（`accounts.today()`，同一时区）；这里只用 Intl，不做日期算术。
+function todayInChina() {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai' }).format(new Date())
+}
+
+function openHealthCert() {
+  healthCertExpires.value = ''
+  healthCertNote.value = ''
+  healthCertError.value = ''
+  healthCertOpen.value = true
+}
+
+function closeHealthCert() {
+  if (healthCertSaving.value) return
+  healthCertOpen.value = false
+}
+
+async function saveHealthCert() {
+  if (healthCertSaving.value) return
+  const expiresOn = healthCertExpires.value
+  if (!expiresOn) {
+    healthCertError.value = '请选择新的健康证到期日'
+    return
+  }
+  if (expiresOn < todayInChina()) {
+    healthCertError.value = '新的健康证到期日不能早于今天'
+    return
+  }
+  healthCertSaving.value = true
+  healthCertError.value = ''
+  try {
+    const data = await staffRequest('/api/hygiene/staff/me/health-cert', {
+      method: 'PATCH',
+      body: {
+        expires_on: expiresOn,
+        note: healthCertNote.value.trim() || undefined,
+      },
+    })
+    staffMe.value = { ...staffMe.value, ...(data.employee || {}) }
+    healthCertOpen.value = false
+    profileFlash.value = `健康证已更新，有效期至 ${(data.employee || {}).health_cert_expires_on || expiresOn}`
+  } catch (err) {
+    if (err.status === 401) {
+      leaveForStaffLogin()
+      return
+    }
+    healthCertError.value = err.message || '保存健康证失败'
+  } finally {
+    healthCertSaving.value = false
+  }
+}
 
 // 工龄奖（票 05，`docs/adr/0101`）：档位是档案里落库的那一栏（超管在花名册 / 人事提醒里
 // 维护），下次调整月是服务端按入职日期派生的 —— 前端不做日期算术，月份只做「2027-09 →
@@ -263,7 +329,7 @@ async function answerSwap(card, agree) {
     await staffRequest(`/api/scheduling/me/swaps/${card.id}/${agree ? 'accept' : 'reject'}`, {
       method: 'POST',
     })
-    note.value = agree ? '你同意了，接下来等店长批' : '你拒绝了，这件事到此为止'
+    note.value = agree ? '你同意了，接下来等管理员批' : '你拒绝了，这件事到此为止'
   } catch (err) {
     if (err.status === 401) {
       leaveForStaffLogin()
@@ -365,6 +431,8 @@ const profilePhoneConfirmOpen = ref(false)
 const passwordOpen = ref(false)
 // t71：资料表折叠后的二级视图（页内弹层，不开新路由）
 const moreOpen = ref(false)
+// 资料卡折叠状态：`<details>` 自己管开合，这里只跟着换右上角「展开 / 收起」。
+const meOpen = ref(false)
 const currentPassword = ref('')
 const newPassword = ref('')
 const confirmPassword = ref('')
@@ -508,7 +576,7 @@ function openShiftNotice() {
  *  - 关掉 → 焦点回到打开它的那颗按钮（否则焦点掉到 body，键盘用户直接迷路）。
  * 写法照 `views/hygiene/HygieneHomeView.vue` 里那套（全仓此前唯一在用 `inert` 的地方）。
  */
-const anyModalOpen = computed(() => [profileOpen, passwordOpen, moreOpen].some((r) => Boolean(r.value)))
+const anyModalOpen = computed(() => [profileOpen, passwordOpen, moreOpen, healthCertOpen].some((r) => Boolean(r.value)))
 const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
 let lastFocusedElement = null
 
@@ -566,14 +634,14 @@ onMounted(() => {
 onUnmounted(() => document.removeEventListener('keydown', onModalKeydown))
 
 /**
- * **测试专用暴露面（t72）**：`openModal('more' | 'profile' | 'password')`。
- * 为什么要开这个口子：弹层的入口按钮依赖数据（无班次 / 资料没读到时按钮不可点），
- * 而焦点陷阱与背景隔离的判据必须在**弹层开着**的前提下实测 —— 见
- * `__tests__/todayModalFocus.test.js`。生产代码不会调用它。
+ * **测试专用暴露面（t72）**：`openModal('more' | 'profile' | 'password' | 'healthcert')`。
+ * 为什么要开这个口子：弹层的入口按钮依赖数据（无班次 / 资料没读到时按钮不可点，
+ * 健康证横条本身也是条件渲染的），而焦点陷阱与背景隔离的判据必须在**弹层开着**的
+ * 前提下实测 —— 见 `__tests__/todayModalFocus.test.js`。生产代码不会调用它。
  */
 function openModal(key) {
   const map = {
-    more: moreOpen, profile: profileOpen, password: passwordOpen,
+    more: moreOpen, profile: profileOpen, password: passwordOpen, healthcert: healthCertOpen,
   }
   const target = map[key]
   if (!target) throw new Error('unknown modal: ' + key)
@@ -601,7 +669,8 @@ useNudgePull({
 <template>
   <div class="today-page hygiene-staff">
     <!-- 页头（B 案 v3 · IA 第二层）：这一页是「我的」，不再承担「今天」。
-         右手只留一个入口：「整月 ›」（班/区与那一天的操作单都在那儿）。 -->
+         右手两个入口：整月（班/区与那一天的操作单）、加班与补钟（员工自己的加班台账，
+         手机端 1 击可达；这一页只有 staff 会话能进，所以不用再判身份）。 -->
     <header class="tTop" :inert="anyModalOpen || null">
       <div class="tTop-main">
         <p class="kicker">我的</p>
@@ -609,19 +678,23 @@ useNudgePull({
       </div>
       <div class="tTop-side">
         <router-link class="tTop-link" to="/workbench/staff/month">整月 ›</router-link>
+        <router-link class="tTop-link" to="/workbench/staff/overtime">加班与补钟 ›</router-link>
       </div>
       <!-- 退出**不在这里**（D5）：工作台外壳顶栏已经有一颗（`WorkbenchLayout` 的
            `WorkbenchExitButton`，员工那一档走同一条 `useStaffLogout`）。 -->
     </header>
 
     <div class="tA-body" :inert="anyModalOpen || null">
-      <!-- 健康证提示（横条）：它说的是「我的档案得去办」，跟着「我的」走。 -->
-      <p
+      <!-- 健康证提示（横条）：它说的是「我的档案得去办」，跟着「我的」走。
+           横条右手是员工自助入口（2026-11）：只能更新到期日，新证核验仍归管理员。 -->
+      <div
         v-if="healthCertAlert"
         class="hy-staff-alert health-cert-alert"
         :class="healthCertTone"
-        role="status"
-      >{{ healthCertAlert }}</p>
+      >
+        <span class="health-cert-alert-text" role="status">{{ healthCertAlert }}</span>
+        <button type="button" class="health-cert-action" @click="openHealthCert">更新健康证</button>
+      </div>
 
       <!-- ① 待你回应：别人找我换班（要点头 / 拒绝）与我自己提的申请（看状态 / 撤回）。
            两块保留原样，统一归到这个小节下。 -->
@@ -647,7 +720,7 @@ useNudgePull({
                   type="button"
                   :disabled="swapBusy"
                   @click="answerSwap(card, true)"
-                >同意并转店长</button>
+                >同意并转管理员</button>
                 <button
                   class="btn tL-cancel"
                   type="button"
@@ -680,7 +753,7 @@ useNudgePull({
             </li>
           </ul>
           <p class="tA-sub">
-            请假批了那天写「请假」；换班要对方先同意、店长再批，批完两个人才对调。
+            请假批了那天写「请假」；换班要对方先同意、管理员再批，批完两个人才对调。
           </p>
         </section>
 
@@ -726,6 +799,11 @@ useNudgePull({
              已经被扣了一分，而这张卡存在的理由正好相反：让他愿意交第一项。 -->
         <template v-else-if="score.passRate === null">
           <p class="score-empty">近 {{ score.days }} 天还没交过活，交一项就有记录 —— 现在不算你落后。</p>
+          <!-- 空态不能只说「交一项」却不给入口：员工看完这句就得自己找卫生页。
+               目标页是员工自己的卫生任务（那里有今天要交的项），不是管理端。 -->
+          <div class="acts">
+            <router-link class="btn" to="/workbench/staff/clean">去卫生交一项 ›</router-link>
+          </div>
         </template>
 
         <template v-else>
@@ -766,12 +844,12 @@ useNudgePull({
 
       <!-- ③ 我的资料（账号设置）：收起成一行入口，点开才是资料与三行设置。
            收起的 details 里那几颗按钮仍是真按钮（测试与键盘都照常可达）。 -->
-      <details class="tA-card me">
+      <details class="tA-card me" @toggle="meOpen = $event.target.open">
         <summary class="me-sum">
           <i class="led sig" aria-hidden="true"></i>
           <span class="me-sum-title">我的资料</span>
           <span v-if="staffMe" class="me-sum-name">{{ staffMe.name || staffMe.phone }}</span>
-          <span class="me-sum-more">展开 ›</span>
+          <span class="me-sum-more">{{ meOpen ? '收起 ›' : '展开 ›' }}</span>
         </summary>
         <div class="me-body">
           <p v-if="profileFlash" class="me-flash" role="status">{{ profileFlash }}</p>
@@ -840,8 +918,8 @@ useNudgePull({
       <!-- 规则说明（常驻说明收进折叠入口，一屏不被长句占满）。 -->
       <details class="tA-foot rules">
         <summary>规则说明 ›</summary>
-        <p class="tA-sub sched-note">今天上哪个班、在哪个区由排班决定；本月的班看「整月」。请假、换班在月历上点那一天办（排班页由店长管理）。</p>
-        <p class="tA-sub">点「同意并转店长」才会轮到店长批；不点，这件事就停在你这里。</p>
+        <p class="tA-sub sched-note">今天上哪个班、在哪个区由排班决定；本月的班看「整月」。请假、换班在月历上点那一天办（排班页由管理员管理）。</p>
+        <p class="tA-sub">点「同意并转管理员」才会轮到管理员批；不点，这件事就停在你这里。</p>
         <p class="tA-sub">排班只说班次，不说几点上班 —— 钟点只有卫生那边才有（逾期点）。</p>
       </details>
 
@@ -853,7 +931,7 @@ useNudgePull({
           <h2>你能做的事</h2>
           <!-- 档位那颗胶囊：原来在账号信息里的「卫生权限」那一行，票 01 起搬到这里 ——
                同一件事只说一遍。措辞 2026-10-14 从「现场复核」改成「管理权限」：花名册上
-               可勾的现在有五项，其中人事管理与损耗分析不是「复核」，写着那个词就成假话。 -->
+               可勾的现在有七项，其中人事管理 / 损耗分析 / 备货复盘 / 岗位二维码不是「复核」，写着那个词就成假话。 -->
           <span class="hint">管理权限 · {{ staffCapCount }} 项</span>
         </div>
 
@@ -1072,6 +1150,60 @@ useNudgePull({
       </div>
     </div>
 
+    <!-- 更新健康证（2026-11，工作台未落地项）：横条上的入口落到这里。
+         员工只填**新证到期日**，办理日期由服务端反推落库（花名册读的就是那一列）；
+         没有核验流 —— 保存后管理员在花名册看到新日期，但没人核对实体证。 -->
+    <div
+      v-if="healthCertOpen"
+      class="modal-overlay"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="health-cert-title"
+      @click.self="closeHealthCert"
+    >
+      <div class="modal-box">
+        <div class="modal-header">
+          <h3 id="health-cert-title">更新健康证</h3>
+          <button class="btn" type="button" @click="closeHealthCert">关闭</button>
+        </div>
+        <div class="form-row">
+          <label for="health-cert-expires">新的到期日</label>
+          <LuyunDatePicker
+            v-model="healthCertExpires"
+            input-id="health-cert-expires"
+            :min-date="todayInChina()"
+            placeholder="选择到期日"
+            aria-label="新的健康证到期日"
+          />
+        </div>
+        <div class="form-row">
+          <label for="health-cert-note">说明（选填）</label>
+          <input
+            id="health-cert-note"
+            v-model="healthCertNote"
+            class="input"
+            type="text"
+            maxlength="100"
+            placeholder="例如：新证已办，原件在店里"
+          >
+        </div>
+        <p class="tA-sub">
+          当前有效期至 {{ (staffMe && staffMe.health_cert_expires_on) || '未办理' }}。
+          保存后管理员在花名册能看到新日期；到期日当天仍有效，次日起算过期。
+        </p>
+        <p v-if="healthCertError" class="tL-err" role="alert">{{ healthCertError }}</p>
+        <div class="modal-footer">
+          <button class="btn" type="button" :disabled="healthCertSaving" @click="closeHealthCert">取消</button>
+          <button
+            class="btn btn-primary"
+            type="button"
+            :disabled="healthCertSaving"
+            @click="saveHealthCert"
+          >{{ healthCertSaving ? '正在保存…' : '保存' }}</button>
+        </div>
+      </div>
+    </div>
+
     <!-- 撤回 / 拒绝先过确认框（不可逆，手机上一误触没有回头路）。同意不弹：
          后面还有店长那道闸，跟店长端「批准不弹、驳回弹」同一个口径。 -->
     <ConfirmDialog
@@ -1152,7 +1284,8 @@ useNudgePull({
   flex: none;
 }
 
-/* 页头右手唯一的入口：整月。≥48px 方角、描边式（与页内次按钮同一套）。 */
+/* 页头右手的两个入口：整月、加班与补钟。≥48px 方角、描边式（与页内次按钮同一套）。
+   nowrap：320 宽的机器上两串中文要是折行，页头会被顶高。 */
 .tTop-link {
   display: inline-flex;
   align-items: center;
@@ -1161,6 +1294,7 @@ useNudgePull({
   font-size: 11.5px;
   color: var(--ink);
   text-decoration: none;
+  white-space: nowrap;
   border: 1px solid var(--line-strong);
   border-radius: var(--r-1);
 }
@@ -1285,7 +1419,12 @@ useNudgePull({
   gap: 8px;
   margin: 10px 14px 0;
 }
-.acts .btn { flex: 1; }
+.acts .btn {
+  flex: 1;
+  /* 这一格既可能是 `<button>`（重试）也可能是 `<router-link>`（去卫生交一项），
+     link 默认带下划线，混在按钮里会像一行文字链，统一按按钮的视觉处理。 */
+  text-decoration: none;
+}
 
 .tA-note {
   margin: 10px 14px 0;
@@ -1688,6 +1827,28 @@ details.tA-foot {
   flex: none;
   border-radius: 50%;
   background: currentColor;
+}
+/* 横条右手的自助入口（2026-11）：44px 触控、描边跟着横条当前色走。
+   文字用 flex:1 吃掉剩余宽度，按钮才不会被长句挤到换行。 */
+.today-page .hy-staff-alert.health-cert-alert .health-cert-alert-text {
+  flex: 1;
+  min-width: 0;
+}
+.today-page .hy-staff-alert.health-cert-alert .health-cert-action {
+  flex: none;
+  margin-left: auto;
+  min-height: 44px;
+  padding: 0 12px;
+  border: 1px solid currentColor;
+  border-radius: var(--r-1);
+  background: transparent;
+  color: inherit;
+  font: 600 11.5px/1 var(--font-sans);
+  cursor: pointer;
+}
+.today-page .hy-staff-alert.health-cert-alert .health-cert-action:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 2px;
 }
 .today-page .hy-staff-alert.health-cert-alert.is-soon {
   background: var(--warn-soft);
