@@ -111,6 +111,7 @@ GUARD_CALLABLES = {
     "verify_admin_token",
     "require_session",
     "require_staff_session",
+    "require_staff_identity",
     "require_standard_cache_session",
     "require_any_identity_session",
 }

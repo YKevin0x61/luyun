@@ -241,19 +241,29 @@ def _staff_accounts():
     return employee_accounts
 
 
+async def require_staff_identity(request: Request) -> dict:
+    """员工会话的完整身份：`{"kind": "staff", "employee": ..., "session_id": ...}`。
+
+    边界层（`api/workbench_boundary.py`）的 `WorkbenchActor` 要记「这套 cookie 的
+    会话 id」，所以在这里把员工会话 id 一并交出来；`require_staff_session` 仍是它
+    的 employee 那一半，既有调用方一个字都不用改。拒绝语义也保持不变：服务未装配
+    先 503，cookie 无效 401「需要员工登录」。
+    """
+    accounts = _staff_accounts()
+    staff_session = request.cookies.get(settings.STAFF_SESSION_COOKIE_NAME)
+    employee = await accounts.get_staff_session(staff_session)
+    if employee is None:
+        raise HTTPException(status_code=401, detail="需要员工登录")
+    return {"kind": "staff", "employee": employee, "session_id": staff_session}
+
+
 async def require_staff_session(request: Request) -> dict:
     """员工会话（手机端那个 cookie），卫生与排班两个 HTTP 面共用。
 
     身份本身在公共层（`services.identity.accounts`）：排班不该 import 卫生的路由模块
     去蹭它那个同名依赖 —— `tests/test_scheduling.py` 的分层测试盯的就是这条边界。
     """
-    accounts = _staff_accounts()
-    employee = await accounts.get_staff_session(
-        request.cookies.get(settings.STAFF_SESSION_COOKIE_NAME)
-    )
-    if employee is None:
-        raise HTTPException(status_code=401, detail="需要员工登录")
-    return employee
+    return (await require_staff_identity(request))["employee"]
 
 
 async def _admin_session_identity(request: Request) -> Optional[dict]:
@@ -277,7 +287,7 @@ async def _staff_session_identity(request: Request) -> Optional[dict]:
     employee = await accounts.get_staff_session(staff_session)
     if employee is None:
         return None
-    return {"kind": "staff", "employee": employee}
+    return {"kind": "staff", "employee": employee, "session_id": staff_session}
 
 
 async def require_any_identity_session(request: Request) -> dict:

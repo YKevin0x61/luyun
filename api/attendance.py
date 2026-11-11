@@ -5,7 +5,7 @@
 票 01 原本只有**一扇门**：管理端会话（`require_session`）—— 考勤表是店长的表，
 里面有全店人的底薪与假期。**2026-10-31 用户裁定把它并入人事那一项能力**（`schedule`，
 显示名「人事管理」）：管理端会话照旧直接放行，员工会话则要花名册上勾了「人事管理」
-（`_require_scheduler`，与排班三页同一个依赖）。页面清单一侧同步成 `staffCap: schedule`，
+（票 02 起走边界层的 `schedule_edit`，与排班三页同一个动作）。页面清单一侧同步成 `staffCap: schedule`，
 所以「页面能打开」与「接口能读」仍是两处都判。
 
 票 06 给这扇门加了**第一个写动作**：逐日改格（把某天改成休、或换成另一个启用中的
@@ -40,15 +40,19 @@ from urllib.parse import quote
 from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel
 
-from api.scheduling import _bad_request as _scheduling_bad_request
-from api.scheduling import _require_scheduler
-from api.security import require_staff_session
+from api.workbench_boundary import (
+    WorkbenchActor,
+    WorkbenchErrors,
+    require_action,
+    staff_actor,
+)
 from database import get_db
 from services.realtime.workbench import nudge_scheduling as _scheduling_nudge
 from services.attendance import (
     LEDGER_WRITE_FIELDS,
     AttendanceError,
     AttendanceStore,
+    from_actor,
 )
 from services.attendance.export import (
     EXPORT_CONTENT_TYPE,
@@ -85,7 +89,7 @@ _ERROR_DETAILS = {
     "invalid_closing_balance": (
         "期末存假要写一个数字（可以是负的、也可以带 .5）；要清空就把那一格留空"
     ),
-    # 逐日写口（票 07 的「休半天」）那三句。带 `{}` 的那几句由 `_bad_request` 填细节。
+    # 逐日写口（票 07 的「休半天」）那三句。带 `{}` 的那几句由 `_ATTENDANCE_ERRORS` 填细节。
     "invalid_business_date": "日期格式应该是 YYYY-MM-DD",
     "out_of_month": "考勤表只算当月：只能改 {} 所在那个月的格子",
     # 逐日写口的另外两道闸（收尾修复 ③）：故事 45 与故事 33 各一句。
@@ -115,7 +119,7 @@ _ERROR_STATUS = {
 
 # 逐日改格（票 06）的拒绝理由：单日覆盖那几条 + 这一页多出来的那一条。文案跟排班
 # 月历**刻意不一样**：那边是「在月历上刷格子」，这边是「在考勤表卡片上点某一天」，
-# 说「月历」会让店长去找一个他不在的页面。带 `{}` 的那几条由 `_write_error` 填细节。
+# 说「月历」会让店长去找一个他不在的页面。带 `{}` 的那几条由 `_WRITE_ERRORS` 填细节。
 _WRITE_DETAILS = {
     "invalid_business_date": "日期格式应该是 YYYY-MM-DD",
     "unknown_employee": "找不到这位员工：刷新页面重新选一次",
@@ -125,7 +129,7 @@ _WRITE_DETAILS = {
     "beyond_window": "这天还没排到：排班只铺到 {}，等它进窗口再改",
     "rest_with_details": "「改成休」的那天不能再带班次或工作区：请把这两项留空",
     # 这一页多出来的那条闸（票 06 验收 3）：口头说清楚「谁在等、等什么」，
-    # 让店长知道该先去待办里把那条申请处理掉。`{}` 由 `_write_error` 填。
+    # 让店长知道该先去待办里把那条申请处理掉。`{}` 由 `_WRITE_ERRORS` 填。
     "pending_request": "{}在等管理员批：先把它批掉或驳回，再改这一天",
     # **复用同一个 code 的两句**：那两条是 `set_day_override` 自己抛的
     # `SchedulingError`，但这句话是给在考勤表页点格子的店长听的，不是给月历上的。
@@ -142,7 +146,7 @@ _WRITE_DETAILS = {
 # 申请那两种说法（`pending_request` 的 `{}` 就是它）。
 _PENDING_WORDS = {"leave": "请假", "swap": "换班"}
 
-# 封账（票 04）的拒绝理由。带 `{}` 的那两条由 `_seal_error` 填**月份**：店长要知道
+# 封账（票 04）的拒绝理由。带 `{}` 的那两条由 `_SEAL_ERRORS` 填**月份**：店长要知道
 # 自己点的到底是哪一个月，以及它为什么封不了。`not_migrated` 复用上面那一份文案
 # （缺的还是同一个 0027），所以这里只写封账自己的三条。
 _SEAL_DETAILS = {
@@ -160,60 +164,49 @@ _SEAL_STATUS = {
 }
 
 
-def _seal_error(exc: AttendanceError) -> HTTPException:
-    """把封账的拒绝翻成一句能看懂的中文（票 04 验收 2/3）。
+# 三个 HTTP 出口的域对象（票 02）：文案表与状态覆盖仍是原来那三份数据，边界只多
+# 了一件事 —— 每个由这里翻出来的拒绝都带 `X-Error-Code: <code>`。三条出口的缺省句、
+# `{}` 的填法、`_PENDING_WORDS` 的说法都保持原样（ADR-0134）。
+_ATTENDANCE_ERRORS = WorkbenchErrors(
+    domain="考勤请求",
+    texts=_ERROR_DETAILS,
+    status_overrides=_ERROR_STATUS,
+    default_text="考勤参数不合法",
+)
 
-    `{}` 由服务层放在 `args[0]` 的月份填，用 `replace` 而不是 `format`（同
-    `api/scheduling.py` 的 `_bad_request`）。没写文案的 code（`not_migrated`）退回
-    考勤那一层的通用出口 —— 缺表要说的是「去应用哪个迁移」，那句话只有一份。
-    """
-    raw = exc.args[0] if exc.args else ""
-    detail = _SEAL_DETAILS.get(exc.code) or _ERROR_DETAILS.get(exc.code, "这次封账没成")
-    if "{}" in detail:
-        detail = detail.replace("{}", str(raw) if raw and raw != exc.code else "这个月")
-    logger.info("封账被拒: code=%s", exc.code)
-    status = _SEAL_STATUS.get(exc.code) or _ERROR_STATUS.get(exc.code, 400)
-    return HTTPException(status_code=status, detail=detail)
+_WRITE_ERRORS = WorkbenchErrors(
+    domain="逐日改格",
+    texts={
+        **_WRITE_DETAILS,
+        # 旧 `_write_error` 对未登记的 code 回退排班 `_bad_request`。逐日可达的 code
+        # 里只有 `resigned_employee` 不在本表（离职日之后补一天），把它收进来之后
+        # 那条回退不再可达；文案与 400 与排班那一层逐字一致。
+        "resigned_employee": "这个人已经离职：离职日之后不再排班（当天仍是他最后一天）",
+    },
+    status_overrides={
+        **_ERROR_STATUS,
+        # 未决申请 = 与另一条请求冲突：409 比 400 诚实（`spec.md` Testing Decisions）。
+        "pending_request": 409,
+        # 共享表把 `unknown_*` 通配成 404；逐日写口上这两个一直是 **400** ——
+        # 那里错的是「选错了班次 / 工作区」，不是「资源不存在」。
+        "unknown_shift": 400,
+        "unknown_zone": 400,
+    },
+    # 旧映射器对未登记的 code 还会回退排班那句「排班参数不合法」；补上
+    # `resigned_employee` 之后没有可达的未登记 code，这条防御路径只剩共享缺省句。
+    pending_words=_PENDING_WORDS,
+)
 
+_SEAL_ERRORS = WorkbenchErrors(
+    domain="封账",
+    texts={**_ERROR_DETAILS, **_SEAL_DETAILS},
+    status_overrides={**_ERROR_STATUS, **_SEAL_STATUS},
+    default_text="这次封账没成",
+    missing_word="这个月",
+)
 
-def _bad_request(exc: AttendanceError) -> HTTPException:
-    detail = _ERROR_DETAILS.get(exc.code, "考勤参数不合法")
-    # 带 `{}` 的模板由服务层放在 `args[0]` 的细节填（同 `_write_error`：用 `replace`
-    # 而不是 `format`，模板里出现一个字面花括号也不会变成 500）。
-    if "{}" in detail:
-        raw = exc.args[0] if exc.args else ""
-        detail = detail.replace("{}", str(raw) if raw else "？")
-    logger.info("考勤请求被拒: code=%s", exc.code)
-    return HTTPException(status_code=_ERROR_STATUS.get(exc.code, 400), detail=detail)
-
-
-def _write_error(exc: SchedulingError) -> HTTPException:
-    """把排班那层的错误翻成考勤表页上的一句话。
-
-    带 `{}` 的模板由服务层放在 `args[0]` 的细节填（同 `api/scheduling.py` 的
-    `_bad_request`：用 `replace` 而不是 `format`，模板里出现一个字面花括号也不会变成
-    500）。没写文案的 code 不硬翻成「参数不合法」—— 那句对店长毫无用处，所以退回
-    排班那一层的通用出口，至少口径与月历一致。
-    """
-    if exc.code not in _WRITE_DETAILS:
-        return _scheduling_bad_request(exc)
-    raw = exc.args[0] if exc.args else ""
-    if raw == "pending_request":  # pragma: no cover - 服务层不该这么传
-        raw = ""
-    detail = _WRITE_DETAILS[exc.code]
-    if "{}" in detail:
-        if exc.code == "pending_request":
-            filled = _PENDING_WORDS.get(str(raw), "申请")
-        else:
-            filled = str(raw) if raw and raw != exc.code else "？"
-        detail = detail.replace("{}", filled)
-    logger.info("逐日改格被拒: code=%s", exc.code)
-    # 状态码优先查**与月级写口共用**的那张表（`unknown_employee` = 404、`not_migrated` = 503）——
-    # 同一个 code 在同一个模块里只该有一种状态码；表里没有的才落回「参数不合法 = 400」。
-    # 那天还有未决申请 = 这次的写入与另一条请求**冲突**：409 比 400 诚实
-    # （`spec.md` 的 Testing Decisions 也点的是 409）。
-    status = _ERROR_STATUS.get(exc.code) or (409 if exc.code == "pending_request" else 400)
-    return HTTPException(status_code=status, detail=detail)
+# 管理端那一侧的五条路由共用这一个依赖（管理端放行；员工要「人事管理」）。
+_schedule_edit = require_action("schedule_edit")
 
 
 class DayEditRequest(BaseModel):
@@ -267,27 +260,27 @@ class ManualColumnsRequest(BaseModel):
 async def attendance_sheet(
     month: Optional[str] = None,
     db=Depends(get_db),
-    _: dict = Depends(_require_scheduler),
+    _actor: WorkbenchActor = Depends(_schedule_edit),
 ) -> dict:
     """某一个月那一张考勤表（一人一张卡）。
 
     `month=YYYY-MM` 可选：省略就是**本月**（与 2026-11-10 之前的行为一致）；给了
     就是那一个月 —— 历史月只读回看，数字仍按现有排班/加班/台账**重算**，不是封账
     快照（封账状态/时间只从台账的 `sealed_at` 读）。未来月拒绝（400 `future_month`），
-    格式不对 400 `invalid_month`。权限与这一页其它门口径相同（`_require_scheduler`）。
+    格式不对 400 `invalid_month`。权限与这一页其它门口径相同（`schedule_edit`）。
     """
     store = AttendanceStore(db)
     try:
         return await store.sheet(month)
     except AttendanceError as exc:
-        raise _bad_request(exc) from exc
+        raise _ATTENDANCE_ERRORS.http(exc) from exc
 
 
 @router.get("/me")
 async def my_leave(
     month: Optional[str] = None,
     db=Depends(get_db),
-    employee: dict = Depends(require_staff_session),
+    actor: WorkbenchActor = Depends(staff_actor),
 ) -> dict:
     """员工看**自己**某个月的存假（整月页那张卡，ADR 0124）。
 
@@ -298,16 +291,16 @@ async def my_leave(
     """
     store = AttendanceStore(db)
     try:
-        return await store.leave_summary(employee["id"], month)
+        return await store.leave_summary(from_actor(actor), month)
     except AttendanceError as exc:
-        raise _bad_request(exc) from exc
+        raise _ATTENDANCE_ERRORS.http(exc) from exc
 
 
 @router.get("/sheet.xlsx")
 async def export_attendance_sheet(
     month: Optional[str] = None,
     db=Depends(get_db),
-    _: dict = Depends(_require_scheduler),
+    _actor: WorkbenchActor = Depends(_schedule_edit),
 ) -> Response:
     """一键导出某个月的考勤表（票 08）：一份 `.xlsx` 直接下发，**不落服务器、不推送**。
 
@@ -319,14 +312,14 @@ async def export_attendance_sheet(
     同源。文件名按 RFC 5987 的 `filename*=UTF-8''…` 给（中文名不靠 ASCII 兜底），前端
     `api.download` 优先读它。
 
-    鉴权与这一页的其它门一样是 `_require_scheduler`：管理端会话直接放行，员工会话要在
+    鉴权与这一页的其它门一样是 `schedule_edit`：管理端会话直接放行，员工会话要在
     花名册上勾了「人事管理」—— 这一份表里有全店人的底薪与假期，所以它与页面同一道闸。
     """
     store = AttendanceStore(db)
     try:
         sheet = await store.sheet(month)
     except AttendanceError as exc:
-        raise _bad_request(exc) from exc
+        raise _ATTENDANCE_ERRORS.http(exc) from exc
 
     filename = attendance_export_filename(str(sheet["month"]))
     logger.info("导出考勤表: month=%s rows=%s", sheet["month"], len(sheet.get("employees") or []))
@@ -348,7 +341,7 @@ async def set_attendance_manual_columns(
     employee_id: int,
     payload: ManualColumnsRequest,
     db=Depends(get_db),
-    _: dict = Depends(_require_scheduler),
+    _actor: WorkbenchActor = Depends(_schedule_edit),
 ) -> dict:
     """把某人**本月的四个手填列**（外加期初 / 期末存假）存进月度考勤台账（票 05 + 35 + 09）。
 
@@ -381,7 +374,7 @@ async def set_attendance_manual_columns(
     try:
         return await store.set_manual_columns(employee_id, values)
     except AttendanceError as exc:
-        raise _bad_request(exc) from exc
+        raise _ATTENDANCE_ERRORS.http(exc) from exc
 
 
 class SealRequest(BaseModel):
@@ -398,7 +391,7 @@ class SealRequest(BaseModel):
 async def seal_month(
     payload: Optional[SealRequest] = None,
     db=Depends(get_db),
-    _: dict = Depends(_require_scheduler),
+    _actor: WorkbenchActor = Depends(_schedule_edit),
 ) -> dict:
     """把**已经过完的**某个自然月的存假结余写进月度考勤台账并定稿（票 04 / ADR 0113）。
 
@@ -407,7 +400,7 @@ async def seal_month(
     来源：之后再改上月的排班，封下的结余不跟着漂。
 
     只封已经过完的月份（当月与未来 400）、封过的月不再封（409），那些理由都翻成中文
-    由 `_seal_error` 给。缺表（0027 没应用）照旧是一个点名脚本的 503。
+    由 `_SEAL_ERRORS` 给。缺表（0027 没应用）照旧是一个点名脚本的 503。
 
     **不广播 nudge**：封的是管理端这张表自己的账，员工手机上的班与假一个字都没变。
     """
@@ -415,7 +408,7 @@ async def seal_month(
     try:
         return await store.seal(payload.month if payload else None)
     except AttendanceError as exc:
-        raise _seal_error(exc) from exc
+        raise _SEAL_ERRORS.http(exc) from exc
 
 
 @router.put("/sheet/{employee_id}/{business_date}")
@@ -424,7 +417,7 @@ async def set_attendance_day(
     business_date: str,
     payload: DayEditRequest,
     db=Depends(get_db),
-    _: dict = Depends(_require_scheduler),
+    _actor: WorkbenchActor = Depends(_schedule_edit),
 ) -> dict:
     """把某人某一天改成休、换成另一个启用中的班次（票 06），或标「休半天」（票 07）。
 
@@ -451,7 +444,7 @@ async def set_attendance_day(
     try:
         await AttendanceStore(db).ensure_day_editable(business_date)
     except AttendanceError as exc:
-        raise _bad_request(exc) from exc
+        raise _ATTENDANCE_ERRORS.http(exc) from exc
     if payload.half_rest is not None:
         return await _set_half_rest(
             db, employee_id, business_date, bool(payload.half_rest), payload
@@ -465,7 +458,7 @@ async def set_attendance_day(
             shift_id=payload.shift_id,
         )
     except SchedulingError as exc:
-        raise _write_error(exc) from exc
+        raise _WRITE_ERRORS.http(exc) from exc
     # 被临时调走（或被改成休）的人手机上的「今天」页要跟着变 —— 跟月历那条 PUT 一样。
     await _scheduling_nudge("override_set", employee_id)
     return result
@@ -489,7 +482,7 @@ async def _set_half_rest(
     try:
         result = await store.set_half_rest(employee_id, business_date, half_rest)
     except AttendanceError as exc:
-        raise _bad_request(exc) from exc
+        raise _ATTENDANCE_ERRORS.http(exc) from exc
     # 员工手机上那一屏要跟着变（班次没变，但那天从「上班」变成了「上半天」）。
     await _scheduling_nudge("half_rest_set", employee_id)
     return result

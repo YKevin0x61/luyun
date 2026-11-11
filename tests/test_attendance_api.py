@@ -24,13 +24,14 @@ from datetime import date, datetime
 from urllib.parse import unquote
 
 import pytest
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
 from openpyxl.utils import get_column_letter
 
 import api.attendance as attendance_module
 import api.auth as auth_module
 import api.scheduling as scheduling_module
+from api.workbench_boundary import require_action
 import services.realtime.workbench as workbench_module
 import main
 from config import settings
@@ -3366,3 +3367,350 @@ def test_staff_with_the_hr_cap_can_read_and_edit_the_sheet(attendance_http):
     ).status_code == 403
 
     _as_admin(client, admin)
+
+
+# ══ 票 02：工作台 HTTP 边界（动作门 + 错误域 + X-Error-Code） ═══════════════
+#
+# 边界本身没有第二个缝：动作门从 HTTP 进、错误翻译从 HTTP 看。动作矩阵挂在一份
+# **只存在于测试里的探针 app** 上 —— 六条路由用的就是考勤路由将要用的那六个
+# `Depends(require_action(...))` 对象，所以验的是真正的门，不是把判据抄一遍。
+
+
+_ACTION_NAMES = (
+    "schedule_edit",
+    "overtime_review",
+    "wastage_view_all",
+    "prep_review",
+    "admin_only",
+    "staff_identity",
+)
+
+
+def _action_probe_app():
+    app = FastAPI()
+
+    for action in _ACTION_NAMES:
+
+        async def probe(actor=Depends(require_action(action))):
+            return {
+                "kind": actor.kind,
+                "employee_id": actor.employee_id,
+                "name": actor.name,
+                "caps": sorted(actor.caps),
+                "session_id": actor.session_id,
+            }
+
+        app.get(f"/{action}")(probe)
+
+    return app
+
+
+def test_the_six_action_gates_are_one_matrix_over_four_identities(attendance_http):
+    """六个动作 × 管理员 / 有能员工 / 无能员工 / 无会话。
+
+    `admin_only` 的默认形态是加班 `/admin` 那一侧（401 变体）：管理员放行，员工与
+    匿名都拿 401「需要登录」；`staff_identity` 是员工端 `/me` 那一侧。
+    """
+    client, _db, accounts = attendance_http
+    admin_session = _admin_cookie(client)
+    employee_id = _employee_id(accounts)
+    staff_session = _run(accounts.login(PHONE, PASSWORD))["session_id"]
+    probe = TestClient(_action_probe_app())
+
+    def _as_admin():
+        probe.cookies.clear()
+        probe.cookies.set(settings.SESSION_COOKIE_NAME, admin_session)
+
+    def _as_staff():
+        probe.cookies.clear()
+        probe.cookies.set(settings.STAFF_SESSION_COOKIE_NAME, staff_session)
+
+    def _as_anonymous():
+        probe.cookies.clear()
+
+    capability_gates = (
+        (
+            "schedule_edit",
+            "schedule",
+            "只有开了「人事管理」权限的人能改排班与考勤：请找超级管理员在花名册里开通",
+        ),
+        (
+            "overtime_review",
+            "schedule",
+            "只有开了「人事管理」的人能审批加班登记：请找超级管理员在花名册里开通",
+        ),
+        (
+            "wastage_view_all",
+            "wastage",
+            "只有开了「损耗分析」权限的人能看全店损耗统计：请找超级管理员在花名册里开通",
+        ),
+        ("prep_review", "prep_review", "没有「备货复盘」权限"),
+    )
+
+    for action, cap, denial in capability_gates:
+        _as_admin()
+        allowed = probe.get(f"/{action}")
+        assert allowed.status_code == 200, (action, allowed.text)
+        assert allowed.json() == {
+            "kind": "admin",
+            "employee_id": None,
+            "name": "管理端",
+            "caps": [],
+            "session_id": admin_session,
+        }
+
+        _run(accounts.set_admin_caps(employee_id, [cap]))
+        _as_staff()
+        allowed = probe.get(f"/{action}")
+        assert allowed.status_code == 200, (action, allowed.text)
+        assert allowed.json() == {
+            "kind": "staff",
+            "employee_id": employee_id,
+            "name": NAME,
+            "caps": [cap],
+            "session_id": staff_session,
+        }
+
+        _run(accounts.set_admin_caps(employee_id, []))
+        _as_staff()
+        refused = probe.get(f"/{action}")
+        assert refused.status_code == 403, (action, refused.text)
+        assert refused.json()["detail"] == denial
+        assert refused.headers["X-Error-Code"] == "capability_required"
+
+        _as_anonymous()
+        anonymous = probe.get(f"/{action}")
+        assert anonymous.status_code == 401, (action, anonymous.text)
+        assert anonymous.json()["detail"] == "未授权"
+        assert "x-error-code" not in anonymous.headers
+
+    # admin_only 的默认形态：加班 /admin 那一侧。员工拿的是 401 而不是 403 ——
+    # 那里从来没有「员工被拒」这句话，只认管理端会话。
+    _as_admin()
+    allowed = probe.get("/admin_only")
+    assert allowed.status_code == 200, allowed.text
+    assert allowed.json()["kind"] == "admin"
+
+    _as_staff()
+    refused = probe.get("/admin_only")
+    assert refused.status_code == 401
+    assert refused.json()["detail"] == "需要登录"
+    assert "x-error-code" not in refused.headers
+
+    _as_anonymous()
+    refused = probe.get("/admin_only")
+    assert refused.status_code == 401
+    assert refused.json()["detail"] == "需要登录"
+
+    # staff_identity：员工端那一侧只认员工会话；管理端 cookie 在这里不算数。
+    _as_admin()
+    refused = probe.get("/staff_identity")
+    assert refused.status_code == 401
+    assert refused.json()["detail"] == "需要员工登录"
+    assert "x-error-code" not in refused.headers
+
+    _as_staff()
+    allowed = probe.get("/staff_identity")
+    assert allowed.status_code == 200, allowed.text
+    assert allowed.json() == {
+        "kind": "staff",
+        "employee_id": employee_id,
+        "name": NAME,
+        "caps": [],
+        "session_id": staff_session,
+    }
+
+    _as_anonymous()
+    refused = probe.get("/staff_identity")
+    assert refused.status_code == 401
+    assert refused.json()["detail"] == "需要员工登录"
+
+
+def test_admin_only_can_say_the_route_sentence_to_staff(attendance_http):
+    """prep_plan manager 那一侧：员工被拒时读到的是这条路由自己的那句话。"""
+    client, _db, accounts = attendance_http
+    admin_session = _admin_cookie(client)
+    _employee_id(accounts)
+    staff_session = _run(accounts.login(PHONE, PASSWORD))["session_id"]
+
+    app = FastAPI()
+
+    @app.get("/weather")
+    async def weather(actor=Depends(require_action("admin_only", label="查看天气配置"))):
+        return {"kind": actor.kind}
+
+    probe = TestClient(app)
+    probe.cookies.set(settings.SESSION_COOKIE_NAME, admin_session)
+    assert probe.get("/weather").status_code == 200
+
+    probe.cookies.clear()
+    probe.cookies.set(settings.STAFF_SESSION_COOKIE_NAME, staff_session)
+    refused = probe.get("/weather")
+    assert refused.status_code == 403
+    assert refused.json()["detail"] == "员工不能查看天气配置"
+    assert refused.headers["X-Error-Code"] == "admin_only"
+
+    probe.cookies.clear()
+    anonymous = probe.get("/weather")
+    assert anonymous.status_code == 401
+    assert anonymous.json()["detail"] == "未授权"
+    assert "x-error-code" not in anonymous.headers
+
+
+def test_the_employee_attendance_view_stays_employee_only(attendance_http):
+    """/api/attendance/me 切到 staff_identity 后语义不变：管理端 cookie 也进不来。"""
+    client, _db, accounts = attendance_http
+    admin = _admin_cookie(client)
+    employee_id = _employee_id(accounts)
+    staff_session = _run(accounts.login(PHONE, PASSWORD))["session_id"]
+
+    _as_admin(client, admin)
+    refused = client.get("/api/attendance/me")
+    assert refused.status_code == 401
+    assert refused.json()["detail"] == "需要员工登录"
+
+    client.cookies.clear()
+    refused = client.get("/api/attendance/me")
+    assert refused.status_code == 401
+    assert refused.json()["detail"] == "需要员工登录"
+
+    client.cookies.set(settings.STAFF_SESSION_COOKIE_NAME, staff_session)
+    allowed = client.get("/api/attendance/me")
+    assert allowed.status_code == 200, allowed.text
+    assert allowed.json()["employee"]["id"] == employee_id
+
+
+def test_a_future_day_is_still_400_and_says_which_day_with_its_code(attendance_http):
+    client, _db, accounts = attendance_http
+    admin = _admin_cookie(client)
+    employee_id = _employee_id(accounts)
+
+    refused = _edit(client, admin, employee_id, "2026-09-30", {"is_rest": True})
+    assert refused.status_code == 400, refused.text
+    assert refused.json()["detail"] == (
+        "今天之后的日子不能改：2026-09-30 还没到，考勤表只记已经发生的班"
+    )
+    assert refused.headers["X-Error-Code"] == "future_day"
+
+
+def test_month_sealed_is_409_with_the_month_filled_in_and_its_code(attendance_http):
+    client, db, accounts = attendance_http
+    admin = _admin_cookie(client)
+    employee_id = _employee_id(accounts)
+    # 封账落行的是「那个月真有一条排班」的员工；先铺一天，封出来的月才锁得住。
+    shifts = _shift_ids(db)
+    _run(_scheduler(db).set_override(employee_id, "2026-08-25", shift_id=shifts["白班"]))
+    assert _seal(client, admin, {"month": "2026-08"}).status_code == 200
+
+    refused = _edit(client, admin, employee_id, "2026-08-31", {"is_rest": True})
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["detail"] == (
+        "2026-08 已经封账了：封过的月只读，它里面的格子与存假都不再改"
+    )
+    assert refused.headers["X-Error-Code"] == "month_sealed"
+
+
+def test_an_unknown_employee_on_the_manual_write_is_404_with_its_code(attendance_http):
+    client, _db, _accounts = attendance_http
+    admin = _admin_cookie(client)
+    _as_admin(client, admin)
+
+    refused = client.put(
+        "/api/attendance/sheet/999999/manual", json={"lodging": "是"}
+    )
+    assert refused.status_code == 404, refused.text
+    assert refused.json()["detail"] == "找不到这位员工：刷新页面重新选一次"
+    assert refused.headers["X-Error-Code"] == "unknown_employee"
+
+
+def test_a_missing_ledger_table_is_a_503_with_its_code_and_the_same_sentence(
+    attendance_http,
+):
+    client, db, _accounts = attendance_http
+    admin = _admin_cookie(client)
+    _as_admin(client, admin)
+
+    async def _rename(source, target):
+        await db._conn.execute(f"ALTER TABLE {source} RENAME TO {target}")
+        await db._conn.commit()
+
+    _run(_rename("attendance_ledger", "attendance_ledger_tmp"))
+    try:
+        refused = client.get("/api/attendance/sheet")
+        assert refused.status_code == 503, refused.text
+        assert refused.json()["detail"] == (
+            "考勤表要读的表还没建好：请在 Admin「系统更新 → 数据库迁移」应用 "
+            "migrations/pg/0005_scheduling.sql、migrations/pg/0021_overtime_entries.sql、"
+            "migrations/pg/0026_statutory_holidays.sql、"
+            "migrations/pg/0027_attendance_ledger.sql 与 "
+            "migrations/pg/0028_staff_assignments_half_rest.sql，然后刷新本页"
+        )
+        assert refused.headers["X-Error-Code"] == "not_migrated"
+    finally:
+        _run(_rename("attendance_ledger_tmp", "attendance_ledger"))
+
+
+def test_a_pending_request_keeps_its_409_and_now_carries_its_code(attendance_http):
+    client, db, accounts = attendance_http
+    admin = _admin_cookie(client)
+    employee_id = _employee_id(accounts)
+    _run(_scheduler(db).submit_leave(employee_id, TODAY))
+
+    refused = _edit(client, admin, employee_id, TODAY, {"is_rest": True})
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["detail"] == (
+        "请假在等管理员批：先把它批掉或驳回，再改这一天"
+    )
+    assert refused.headers["X-Error-Code"] == "pending_request"
+
+
+def test_an_unknown_shift_is_still_400_and_not_swallowed_by_the_unknown_404(
+    attendance_http,
+):
+    """共享表里的 unknown_* 是 404；逐日写口的这两个 code 必须盖回 400。"""
+    client, _db, accounts = attendance_http
+    admin = _admin_cookie(client)
+    employee_id = _employee_id(accounts)
+
+    refused = _edit(client, admin, employee_id, TODAY, {"shift_id": 999999})
+    assert refused.status_code == 400, refused.text
+    assert refused.json()["detail"] == "班次不存在或已停用：请重新选一个班次"
+    assert refused.headers["X-Error-Code"] == "unknown_shift"
+
+
+def test_a_resigned_employee_keeps_the_scheduling_sentence_and_its_code(attendance_http):
+    """旧 `_write_error` 对未登记的 `resigned_employee` 回退排班映射；现在逐日域自己收。"""
+    client, _db, accounts = attendance_http
+    admin = _admin_cookie(client)
+    employee_id = _employee_id(accounts)
+    _run(accounts.resign(employee_id, "2026-09-01"))
+
+    refused = _edit(client, admin, employee_id, TODAY, {"is_rest": True})
+    assert refused.status_code == 400, refused.text
+    assert refused.json()["detail"] == (
+        "这个人已经离职：离职日之后不再排班（当天仍是他最后一天）"
+    )
+    assert refused.headers["X-Error-Code"] == "resigned_employee"
+
+
+def test_the_attendance_capability_door_carries_its_code_on_the_real_route(
+    attendance_http,
+):
+    client, _db, accounts = attendance_http
+    _employee_id(accounts)
+    staff_session = _run(accounts.login(PHONE, PASSWORD))["session_id"]
+
+    client.cookies.clear()
+    client.cookies.set(settings.STAFF_SESSION_COOKIE_NAME, staff_session)
+    refused = client.get("/api/attendance/sheet")
+    assert refused.status_code == 403
+    assert refused.json()["detail"] == (
+        "只有开了「人事管理」权限的人能改排班与考勤：请找超级管理员在花名册里开通"
+    )
+    assert refused.headers["X-Error-Code"] == "capability_required"
+
+    client.cookies.clear()
+    anonymous = client.get("/api/attendance/sheet")
+    assert anonymous.status_code == 401
+    assert anonymous.json()["detail"] == "未授权"
+    assert "x-error-code" not in anonymous.headers
