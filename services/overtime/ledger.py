@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import functools
 import logging
-import math
 import re
 from calendar import monthrange
 from dataclasses import dataclass
@@ -31,6 +30,17 @@ import asyncpg
 from db_core.utils import CHINA_TZ
 from services.identity import EmployeeAccounts, serialized_write
 from services.identity.capabilities import CAP_SCHEDULE
+from services.leave_ledger import LeaveLedger
+from services.overtime_contract import (
+    HALF_HOURS_PER_LEAVE_DAY,
+    HOURS_PER_DAY,
+    MAX_DEDUCTION_DAYS,
+    STATUS_APPROVED,
+    STATUS_CANCELLED,
+    STATUS_PENDING,
+    STATUS_REJECTED,
+    STATUS_VOIDED,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -54,13 +64,9 @@ __all__ = [
     "STATUS_VOIDED",
 ]
 
-# 状态机（`docs/adr/0100`）：本票只用得到 `pending` 与 `cancelled`，另外三个一次到位 ——
-# 状态取值是数据面契约，票 02 的审批不该再改一次列的定义。
-STATUS_PENDING = "pending"
-STATUS_APPROVED = "approved"
-STATUS_REJECTED = "rejected"
-STATUS_CANCELLED = "cancelled"
-STATUS_VOIDED = "voided"
+# 状态机（`docs/adr/0100`）、一个工作日的半小时数与「一次最多抵几天」都搬到了
+# `services/overtime_contract.py`（零 import 的叶子，ADR 0139）：考勤那边只需要念
+# 两个状态字符串，不该为此 import 整个加班域。名字仍从本模块导出（`__all__` 不变）。
 
 # 读的时候按符号派生：正数是加班、负数是补钟。它不是库里的一列。
 KIND_OVERTIME = "overtime"
@@ -68,13 +74,6 @@ KIND_MAKEUP = "makeup"
 # 补钟用存假抵扣（ADR 0124）：它不是加班登记的一种，是那张 `overtime_leave_deductions`
 # 表上的一行 —— 但列表接口把两种记录并排下发时，前端要靠这个字段分渲染。
 KIND_LEAVE_DEDUCTION = "leave_deduction"
-
-# 一个工作日的半小时数（8.5 小时 = 17 个半小时）：抵扣只能整天，`days × 17` 就是
-# 它从补钟账上注销的半小时数。与 `HOURS_PER_DAY` 同源，改一个必须改另一个。
-# （定义在 `HOURS_PER_DAY` 之后 —— 这里读的是它的值。）
-
-# 一次最多抵几天：一个月最多 31 天，再大就是手滑（防的不是业务，是「抵 100 天」）。
-MAX_DEDUCTION_DAYS = 31
 
 # 界面上的步长是 0.5 小时，库里存它的整数倍（`half_hours`）。单条上限 ±12 小时 ——
 # 防的是手滑打成 120，不是替业务定政策。
@@ -87,14 +86,6 @@ MAX_REASON = 50
 # 驳回理由限长。它比事由宽一倍：事由是「这笔是干什么的」，驳回理由是「为什么不算」
 # ——后者常常要说清依据（哪天的排班、哪条规矩），一句话往往不够。
 MAX_REJECT_REASON = 100
-
-# 加班费的分母：一个工作日按 8.5 小时算（用户给的口径，见 `docs/adr/0100` 与票 03）。
-# 它与 `half_hours` 的单位无关 —— 金额那一步才把「半小时数」折成小时。
-HOURS_PER_DAY = 8.5
-
-# 一个工作日的半小时数（8.5 小时 = 17 个半小时）：抵扣只能整天，`days × 17` 就是它
-# 从补钟账上注销的半小时数。与 `HOURS_PER_DAY` 同源，改一个必须改另一个。
-HALF_HOURS_PER_LEAVE_DAY = int(HOURS_PER_DAY * 2)
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _MONTH_RE = re.compile(r"^\d{4}-\d{2}$")
@@ -752,37 +743,25 @@ class OvertimeLedger:
         row = await cur.fetchone()
         return int(dict(row)["half_hours"] or 0) if row is not None else 0
 
-    async def _month_sealed(self, employee_id: int, month: str) -> bool:
-        """那个月这个人的考勤台账**封过账没有** —— 封过就锁死，不能再抵。
+    async def _month_sealed(self, month: str) -> bool:
+        """那个月**整月**封过账没有 —— 封过就锁死，不能再抵、也不能再撤销。
 
-        `attendance_ledger` 是考勤面的表（0027），这里只读那一行的 `sealed_at`：
-        封账 = 定稿，再用存假抵它等于让封下的结余与现状各说各话（ADR 0113 / 0124）。
+        封账是整月操作：`AttendanceStore.seal()` 一次写全在册员工的行，
+        `ensure_day_editable()` 也按整月挡。这里跟同一口径，避免「甲封了、乙还能撤」
+        （AD-0139 决定 3）。
         缺表时回 `False`（老库先跑着，真正写时会由那张表自己的缺表错误兜住）。
         """
         try:
             cur = await self._conn.execute(
-                """SELECT sealed_at FROM attendance_ledger
-                   WHERE employee_id = ? AND "month" = ?""",
-                (int(employee_id), month),
+                """SELECT 1 FROM attendance_ledger
+                   WHERE "month" = ? AND sealed_at IS NOT NULL LIMIT 1""",
+                (month,),
             )
             row = await cur.fetchone()
         except (asyncpg.UndefinedTableError, asyncpg.UndefinedColumnError):
             await self._rollback_quietly()
             return False
-        return bool(row is not None and dict(row).get("sealed_at"))
-
-    async def _leave_balance(self, employee_id: int, month: str) -> float:
-        """存假有效天数（扣过已批抵扣、含人工定稿）—— 借考勤那一层的算式。
-
-        **函数内 import**：`services/attendance/store.py` 在模块级 import 本模块的
-        `STATUS_APPROVED`，这里若也模块级 import 回去就是循环。函数内 import 只在第一次
-        调用时解析，那时两个模块都已加载完 —— 而且这条路径不会在模块导入期跑。
-        """
-        from services.attendance.store import AttendanceStore
-
-        return await AttendanceStore(
-            self._write_lock_owner, now=self._now
-        ).leave_balance_days(int(employee_id), month)
+        return row is not None
 
     async def deduction_capacity(self, employee_id: int, month: str) -> dict:
         """那个人那个月**还能抵几天**：补钟与存假两头都封顶（用户裁定）。
@@ -795,34 +774,19 @@ class OvertimeLedger:
         这个数同时是员工端「申请抵扣」弹窗的上限与店长审批时的那道闸 —— 只有一份实现，
         两边不会对不上（弹出「可抵 2 天」、点下去却被拒是最糟的一种）。
         """
+        # 月格式仍在这里拦：这条是 HTTP 读口，非法月份以前报 `invalid_month`（400），
+        # 不能因为换了实现就变成 500（ADR 0139 的兼容底线）。
         target = _require_month(month)
-        employee_id = int(employee_id)
-        makeup_half = await self._approved_makeup_half_hours(employee_id, target)
-        deducted_half = (
-            await self._deduction_days(employee_id, target)
-        ) * HALF_HOURS_PER_LEAVE_DAY
-        available_half = max(0, makeup_half - deducted_half)
-        sealed = await self._month_sealed(employee_id, target)
-        balance = await self._leave_balance(employee_id, target)
-        by_makeup = available_half // HALF_HOURS_PER_LEAVE_DAY
-        by_leave = math.floor(balance) if balance > 0 else 0
-        return {
-            "month": target,
-            "makeup_half_hours": makeup_half,
-            "makeup_hours": makeup_half / 2,
-            "deducted_days": int(deducted_half // HALF_HOURS_PER_LEAVE_DAY),
-            "deducted_half_hours": deducted_half,
-            "deducted_hours": deducted_half / 2,
-            "available_half_hours": available_half,
-            "available_hours": available_half / 2,
-            "leave_balance": balance,
-            "max_days_by_makeup": int(by_makeup),
-            "max_days_by_leave": int(by_leave),
-            "max_days": 0 if sealed else int(min(by_makeup, by_leave)),
-            "sealed": bool(sealed),
-            "half_hours_per_day": HALF_HOURS_PER_LEAVE_DAY,
-            "hours_per_day": HOURS_PER_DAY,
-        }
+        capacity = await LeaveLedger(self._write_lock_owner, now=self._now).capacity(
+            int(employee_id), target
+        )
+        if capacity is None:
+            # 旧路径经 `AttendanceStore.leave_balance_days()` 抛考勤那一层的
+            # `unknown_employee`；原样复现（函数内 import：只在这一条错误支路用到）。
+            from services.attendance.store import AttendanceError
+
+            raise AttendanceError("unknown_employee", "unknown_employee")
+        return capacity
 
     async def _require_deduction_table(self) -> None:
         """写路径的那道闸：缺 0042 时给一句能照做的 503，而不是一句业务错误。"""
@@ -1064,7 +1028,7 @@ class OvertimeLedger:
             raise OvertimeError("unknown_deduction", "unknown_deduction")
         if row["status"] != STATUS_APPROVED:
             raise OvertimeError("deduction_not_approved", "deduction_not_approved")
-        if await self._month_sealed(int(row["employee_id"]), str(row["month"])):
+        if await self._month_sealed(str(row["month"])):
             raise OvertimeError("month_sealed", str(row["month"]))
         return await self._decide_deduction_locked(
             int(deduction_id),

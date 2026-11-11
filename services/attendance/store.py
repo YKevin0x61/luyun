@@ -77,14 +77,20 @@ import asyncpg
 
 from db_core.utils import CHINA_TZ
 from services.business_day import current_workbench_date, shift_business_date
-from services.holiday_calendar import HolidayCalendar, HolidayError
+from services.holiday_calendar import HolidayError
 from services.identity import EmployeeAccounts, EmployeeAccountsError, serialized_write
-from services.identity.profile import (
-    birthday_in_year,
-    seniority_due_month,
-    seniority_should_be,
+from services.leave_ledger import (
+    ANNUAL_LEAVE_MANAGEMENT,
+    ANNUAL_LEAVE_STAFF,
+    MONTHLY_REST_MAX,
+    MONTHLY_REST_STEP,
+    LeaveLedger,
 )
-from services.overtime import STATUS_APPROVED, STATUS_PENDING
+from services.overtime_contract import (
+    HALF_HOURS_PER_LEAVE_DAY,
+    STATUS_APPROVED,
+    STATUS_PENDING,
+)
 from services.scheduling.day_grid import DayGrid
 
 logger = logging.getLogger(__name__)
@@ -106,13 +112,9 @@ STATE_WORK = "work"  # 那天排了班
 STATE_REST = "rest"  # 那天有排班行、班次为空（休）
 STATE_TODO = "todo"  # 那天压根没有排班行（轮转规则没铺到，「待补」）
 
-# 假期台账那几个数（票 03）。每一条都在 `GLOSSARY.md` 的「考勤与假期」里定死：
-# 月例休每出勤 6 天折 1 天、上限 4 天；年假只在工龄奖调整那个月给，管理层 5 天、
-# 其他员工 3 天（判据是**管理能力开关非空**，与职位名无关）。
-MONTHLY_REST_STEP = 6
-MONTHLY_REST_MAX = 4
-ANNUAL_LEAVE_MANAGEMENT = 5
-ANNUAL_LEAVE_STAFF = 3
+# 假期台账那几个数（月例休每出勤 6 天折 1 天、上限 4 天；年假管理层 5 天 / 其他 3 天）
+# 已经搬进 `services/leave_ledger.py`（ADR 0139），这里只 import 再导出 —— `__all__`
+# 里的名字与取值都不变，`services.attendance` 的既有导入方不用改。
 
 
 def _needs_migration(method):
@@ -323,39 +325,19 @@ class AttendanceStore:
             bucket["count"] += 1
         return pending
 
-    async def _leave_deductions(self, month: str) -> dict[int, int]:
-        """那个月**已经批下来**的补钟抵扣天数：``{员工号: 天数}``（ADR 0124）。
+    async def _leave_rows(
+        self, month: str, employee_ids: list[int]
+    ) -> dict[int, dict]:
+        """那个月这些人的存假行（ADR 0139 的只读 module）。
 
-        只数 `approved` —— 待批 / 驳回 / 撤回 / 作废都不减少存假（与净时长那条口径一致：
-        「有单子等着批」是审批队列里的事，不是已经用掉的假）。多次抵扣在同一张表里是
-        多行，`SUM(days)` 合起来才是这个人当月用掉的天数。
-
-        缺 0042 那张表时**回空字典**而不是 `not_migrated`：抵扣是新功能，老库先跑着，
-        考勤表与封账不能因为这张表还没建就整页 503。表一旦建好，下一次读就自动生效。
+        节假日日历缺表（0026 没应用）时与旧实现一样报 `not_migrated` —— 这一页要读的
+        每一张表都点得到名，店长才知道去 Admin 应用哪几个脚本。台账（0027）与抵扣
+        （0042）两张附表缺表由 module 自己按「没有」处理：未封账、期初 0、抵扣 0 天。
         """
         try:
-            cur = await self._conn.execute(
-                """SELECT employee_id, SUM(days) AS days FROM overtime_leave_deductions
-                   WHERE "month" = ? AND status = ? GROUP BY employee_id""",
-                (month, "approved"),
-            )
-            rows = await cur.fetchall()
-        except (asyncpg.UndefinedTableError, asyncpg.UndefinedColumnError):
-            await self._rollback_quietly()
-            return {}
-        return {
-            int(dict(row)["employee_id"]): int(dict(row)["days"] or 0) for row in rows
-        }
-
-    async def _statutory_holidays(self, month: str) -> list[str]:
-        """当月法定节假日（升序的日期串）。**日历是唯一依据**，代码里没有年度表。
-
-        日历缺表（0026 没应用）时与缺排班 / 加班表一样报 `not_migrated` —— 这一页要
-        读的每一张表都点得到名，店长才知道去 Admin 应用哪几个脚本。
-        """
-        calendar = HolidayCalendar(self._write_lock_owner, now=self._now)
-        try:
-            return await calendar.days_in_month(month)
+            return await LeaveLedger(
+                self._write_lock_owner, now=self._now
+            ).ledger_rows(month, employee_ids)
         except HolidayError as exc:
             if exc.code == "not_migrated":
                 await self._rollback_quietly()
@@ -559,20 +541,13 @@ class AttendanceStore:
         next_month = _next_month(start)
         # 区间右开：`[本月一号, 下月一号)` —— 不自己数月份长度（2 月与 31 天的月各一次坑）。
         first, until = start.isoformat(), next_month.isoformat()
-        # 计算历史月的时点：过去月顶到月末（与封账同口径），当月就是今天。
-        month_end = (next_month - timedelta(days=1)).isoformat()
-        as_of = min(today, month_end)
 
         rows, half_rests = await self._assignment_rows(first, until)
         totals, recorded = await self._month_entries(first, until)
         # 还没批的加班 / 补钟：只标色，不进净时长、也不进存假（故事 14）。
         pending = await self._pending_entries(first, until)
-        # 本月已经批下来的**补钟用存假抵扣**天数（ADR 0124）：`{员工号: 天数}`。
-        # 缺 0042 那张表时回空字典 —— 抵扣是新功能，不该让考勤表整体 503。
-        deductions = await self._leave_deductions(month)
-        # 当月的法定节假日（补休要用）。日历缺表时与缺排班表一样报 `not_migrated`。
-        holidays = await self._statutory_holidays(month)
-        # 本月与上一月的台账行：算「上月存假」（已封账的结余 / 人工期初）。
+        # 本月与上一月的台账行：只取人工列（期初 / 期末 / sealed_at）；存假余额由只读
+        # module 一次算好，这里不再自己拼算式（ADR 0139）。
         previous_month = (start - timedelta(days=1)).isoformat()[:7]
         ledger = await self._ledger_rows((previous_month, month))
         shifts = await self._shifts()
@@ -584,6 +559,16 @@ class AttendanceStore:
         # 员工是谁只从公共层取（同排班的路子）：职位 / 底薪 / 工龄奖 / 入职日期都在
         # 那一份投影里。时钟跟着本服务的钟走，派生字段才与「今天」同一个。
         roster = await EmployeeAccounts(self._write_lock_owner, now=self._now).list_roster()
+        # 这一页要出现的人：在职的 + 那个月有记录的（离职的人靠后者进表）。
+        # 存假行**一次批量**取回来（ADR 0139），不逐人重算一份余额。
+        on_sheet = [
+            employee
+            for employee in roster
+            if _is_on_the_sheet(employee, int(employee["id"]) in on_record)
+        ]
+        leave_rows = await self._leave_rows(
+            month, [int(employee["id"]) for employee in on_sheet]
+        )
 
         # 月框：当月每一天一条（`day` 是日期号，前端拿它当表头）。`is_future` 是
         # 「还没到」的判据 —— 今天之后留空，不是「待补」（票 01 验收 4）。
@@ -601,10 +586,8 @@ class AttendanceStore:
             )
 
         employees = []
-        for employee in roster:
+        for employee in on_sheet:
             employee_id = int(employee["id"])
-            if not _is_on_the_sheet(employee, employee_id in on_record):
-                continue
             theirs = rows.get(employee_id, {})
             # 这个人当月标了「休半天」的那几天（票 07）：格子上写出来、例休折算按 0.5 天。
             their_half_rests = half_rests.get(employee_id, set())
@@ -631,9 +614,11 @@ class AttendanceStore:
                     "resigned_at": employee.get("resigned_at"),
                     # 净时长（ADR 0124）：已批的补钟抵扣加回来 —— 被抵掉的那部分时间按
                     # 休假算、不再欠班，与加班账单（`monthly_stats`）同一条口径。
+                    # 抵扣天数直接读 module 那一行（ADR 0139），这一页不再自己查一遍。
                     "net_hours": (
                         totals.get(employee_id, 0)
-                        + deductions.get(employee_id, 0) * 17
+                        + leave_rows[employee_id]["leave"]["deducted_days"]
+                        * HALF_HOURS_PER_LEAVE_DAY
                     )
                     / 2,
                     # 这一页的逐日改格（票 06）能挑的班次：**启用中的**那一份。
@@ -647,30 +632,9 @@ class AttendanceStore:
                     # 票 09 在算式外面盖了一层**人工定稿**：台账本月那一行填过
                     # `closing_balance` 就以它为准，`balance` 因此是**有效值**
                     # （手填 ?? 公式），公式值另给 `balance_computed`。
-                    "leave": _with_manual_balance(
-                        _leave_terms(
-                            # 历史月按月末算（与封账同口径），当月就是今天 —— 出生日期
-                            # 与年资都是按目标月判的，不能拿「今天所在月」去套历史月。
-                            today=as_of,
-                            theirs=theirs,
-                            half_rest_days=their_half_rests,
-                            holidays=holidays,
-                            employee=employee,
-                            month=month,
-                            # **本月在岗天数**（2026-10-29）：入职当月从他入职那天算起，
-                            # 不是整月自然天数 —— 见 `_on_duty_days`。
-                            month_days=_on_duty_days(
-                                start, len(days), hire_date, employee.get("resigned_at")
-                            ),
-                            previous_balance=_previous_balance(
-                                ledger.get((employee_id, previous_month)),
-                                ledger.get((employee_id, month)),
-                            ),
-                            # 本月经补钟抵扣（ADR 0124）：从余额里减，池不动。
-                            deducted_days=deductions.get(employee_id, 0),
-                        ),
-                        closing_balance=stored_closing_balance,
-                    ),
+                    # 存假那一块由只读 module 一次算好（ADR 0139）：与 `leave_summary()`、
+                    # 封账、抵扣上限念的是同一份算式。
+                    "leave": leave_rows[employee_id]["leave"],
                     "days": [
                         {
                             "business_date": day["business_date"],
@@ -757,7 +721,7 @@ class AttendanceStore:
         读口 —— 整月页能翻月（`stepMonth` 只挡未来），所以月份是参数，但**接口上没有
         `employee_id`**：员工会话读得到的只有自己，口径同 `/api/scheduling/me/month`。
 
-        与卡片同一条算式（`_leave_terms` + `_with_manual_balance`）：
+        与卡片同一条算式（`services/leave_ledger.py`，ADR 0139）：
 
         * 有效值 = 超管手填的 `closing_balance`（那个月封过账 / 当月填过期末）优先，
           否则公式值 —— 员工与店长看到的是同一个数，不另起一套「员工版口径」；
@@ -768,16 +732,8 @@ class AttendanceStore:
         生日假与年假按 `month` 判，不拿今天的年月去给历史月算假。
         """
         target = _validated_month(month or self.today()[:7])
-        start = date.fromisoformat(f"{target}-01")
-        days_in_month = monthrange(start.year, start.month)[1]
-        first, until = start.isoformat(), _next_month(start).isoformat()
-        month_end = (start + timedelta(days=days_in_month - 1)).isoformat()
-        # 未来月按今天算（排班还没铺，数只是暂算）；过去月按月末算（与封账同口径）。
-        today = self.today()
-        as_of = min(today, month_end)
-        before = _previous_month(target)
-
         employee_id = int(employee_id)
+        # 员工是谁只从公共层取：这个 id 认不出来就照旧 404（module 那一层只回 `None`）。
         roster = await EmployeeAccounts(
             self._write_lock_owner, now=self._now
         ).list_roster()
@@ -787,48 +743,25 @@ class AttendanceStore:
         if employee is None:
             raise AttendanceError("unknown_employee", "unknown_employee")
 
-        rows, half_rests = await self._assignment_rows(first, until)
-        holidays = await self._statutory_holidays(target)
-        ledger = await self._ledger_rows((before, target))
-        deductions = await self._leave_deductions(target)
-        hire_date = employee.get("hire_date") or None
-        stored = ledger.get((employee_id, target))
-        leave = _with_manual_balance(
-            _leave_terms(
-                today=as_of,
-                theirs=rows.get(employee_id, {}),
-                half_rest_days=half_rests.get(employee_id, set()),
-                holidays=holidays,
-                employee=employee,
-                month_days=_on_duty_days(
-                    start, days_in_month, hire_date, employee.get("resigned_at")
-                ),
-                previous_balance=_previous_balance(
-                    ledger.get((employee_id, before)),
-                    stored,
-                ),
-                month=target,
-                deducted_days=deductions.get(employee_id, 0),
-            ),
-            closing_balance=_ledger_number(stored, "closing_balance"),
-        )
-        sealed_at = stored.get("sealed_at") if stored is not None else None
+        # 存假那一块整个交给只读 module（ADR 0139）：与卡片 / 封账 / 抵扣上限同一份算式。
+        # 走 `_leave_rows` 而不是直接调 module，是为了把缺 0026 翻成同一条 `not_migrated`。
+        row = (await self._leave_rows(target, [employee_id])).get(employee_id)
+        if row is None:
+            raise AttendanceError("unknown_employee", "unknown_employee")
         return {
             "employee": {"id": employee_id, "name": employee.get("name") or ""},
-            "month": target,
-            "today": today,
-            "as_of": as_of,
-            "days_in_month": days_in_month,
+            "month": row["month"],
+            "today": row["today"],
+            "as_of": row["as_of"],
+            "days_in_month": row["days_in_month"],
             # 还没封账 = 这个月的数还会随着排班与抵扣变（当月恒为 True）。
-            "provisional": not sealed_at,
-            "sealed_at": sealed_at,
-            "previous_month": {
-                "month": before,
-                "sealed_at": _sealed_at(ledger, before),
-            },
-            "leave": leave,
+            "provisional": row["provisional"],
+            "sealed_at": row["sealed_at"],
+            "previous_month": row["previous_month"],
+            "leave": row["leave"],
         }
 
+    @_needs_migration
     async def leave_balance_days(self, employee_id: int, month: Optional[str] = None) -> float:
         """某个人某个月的**有效存假天数**（扣过已批抵扣、含人工定稿）。
 
@@ -836,8 +769,12 @@ class AttendanceStore:
         它是同一条算式的一个薄封装，不另写一份余额 —— 两个数一旦分家，员工看到的余额
         与能抵的上限就会对不上。
         """
-        data = await self.leave_summary(employee_id, month)
-        return float(data["leave"]["balance"])
+        target = _validated_month(month or self.today()[:7])
+        employee_id = int(employee_id)
+        row = (await self._leave_rows(target, [employee_id])).get(employee_id)
+        if row is None:
+            raise AttendanceError("unknown_employee", "unknown_employee")
+        return float(row["leave"]["balance"])
 
     @_needs_migration
     async def ensure_day_editable(self, business_date: Any) -> str:
@@ -952,26 +889,28 @@ class AttendanceStore:
             raise AttendanceError("month_not_finished", target)
 
         start = date.fromisoformat(f"{target}-01")
-        month_days = monthrange(start.year, start.month)[1]
         first, until = start.isoformat(), _next_month(start).isoformat()
-        # 这个月最后一天：整月都过完了，算「已过」的天数时它就是那个月的「今天」。
-        as_of = (start + timedelta(days=month_days - 1)).isoformat()
 
         if await self._sealed_rows(target):
             raise AttendanceError("already_sealed", target)
 
-        # 两份索引：三态（`rows`）与「哪天标了休半天」（`half_rests`）—— 后者进例休折算。
-        rows, half_rests = await self._assignment_rows(first, until)
+        # 名单只认**那个月有记录的人**（`on_record` = 排过班或登过加班）：日格与加班
+        # 登记各读一次，与 `sheet()` 同一份来源。
+        rows, _ = await self._assignment_rows(first, until)
         _, recorded = await self._month_entries(first, until)
-        holidays = await self._statutory_holidays(target)
-        before = _previous_month(target)
-        ledger = await self._ledger_rows((before, target))
         roster = await EmployeeAccounts(self._write_lock_owner, now=self._now).list_roster()
         on_record = set(rows) | recorded
         sealed_at = self._now_dt().isoformat()
-        # 封的那个月已经批下来的补钟抵扣（ADR 0124）：封账写下的余额必须已经减过它，
-        # 否则封完账抵扣就凭空消失（下月起「上月存假」按封下的数走，没人再算得回来）。
-        deductions = await self._leave_deductions(target)
+        # 那个月的存假余额由只读 module 一次算好（ADR 0139）：已批抵扣与人工定稿都在
+        # 里面减过 / 盖过，写下去的仍是那个月卡片上的那个数。
+        leave_rows = await self._leave_rows(
+            target,
+            [
+                int(employee["id"])
+                for employee in roster
+                if int(employee["id"]) in on_record
+            ],
+        )
 
         sealed = 0
         for employee in roster:
@@ -981,37 +920,7 @@ class AttendanceStore:
             # 「现在在职」的人那个月可能一条记录都没有，给他封一笔负数就是永久冻结的假账。
             if employee_id not in on_record:
                 continue
-            leave = _with_manual_balance(
-                _leave_terms(
-                    today=as_of,
-                    theirs=rows.get(employee_id, {}),
-                    # 封账与当月卡片同一套算式：标了「休半天」的那天算 0.5 天出勤（票 07）。
-                    # 少了这一句，封下来的存假会比卡片上多算半天。
-                    half_rest_days=half_rests.get(employee_id, set()),
-                    holidays=holidays,
-                    employee=employee,
-                    # 与 `sheet()` 同一条（2026-10-29）：入职当月按在岗天数算，不是整月 ——
-                    # 两边差一个分母，封下来的数就会和那个月卡片上的对不上。
-                    month_days=_on_duty_days(
-                        start,
-                        month_days,
-                        employee.get("hire_date"),
-                        employee.get("resigned_at"),
-                    ),
-                    previous_balance=_previous_balance(
-                        ledger.get((employee_id, before)),
-                        ledger.get((employee_id, target)),
-                    ),
-                    month=target,
-                    deducted_days=deductions.get(employee_id, 0),
-                ),
-                # 票 09：那个月那一行上**手填过**期末存假就以它为准（先填 10 → 封账 → 10），
-                # 没填过就是 `None`，照旧写公式值（04 的既有行为不破）。封的是**已经过完的**
-                # 月，所以那一行还没封过（`already_sealed` 上面挡着）—— 手填值在这里就是定稿值。
-                closing_balance=_ledger_number(
-                    ledger.get((employee_id, target)), "closing_balance"
-                ),
-            )
+            leave = leave_rows[employee_id]["leave"]
             outcome = await self._conn.execute(
                 """INSERT INTO attendance_ledger
                    (tenant_id, employee_id, "month", closing_balance, sealed_at,
@@ -1215,184 +1124,6 @@ def _day_state(
     return STATE_REST if theirs[business_date] is None else STATE_WORK
 
 
-def _on_duty_days(
-    month_start: date, month_days: int, hire_date: Any, resigned_at: Any = None
-) -> int:
-    """这个人**本月应在岗**的自然天数（2026-10-29 用户裁定：入职当月从中入职那天算起）。
-
-    假期算式里的「本月自然天数」原来一律是整月天数。可入职当月的人前半段还没来，
-    减去整月就等于把他根本不用上的那些天当成了欠班 —— 14 号入职、还没排班的人
-    存假凭空是 `−31 天`。所以：
-
-    * 入职日期为空 / 早于月初（老员工）：整月天数，口径一个字不变；
-    * 入职日期落在本月：入职日到月底的天数（14 号入职 = 当月剩余天数）；
-    * 入职日期在月末之后（还没到）：0 —— 那时不该有欠班；
-    * **离职日期落在本月**（2026-10-29 一并）：截到离职日那天为止 —— 当月来又走的人，
-      分母是「入职日到离职日」，不是整月。
-
-    解析不了的坏值按「老员工」处理（不剪）：剪错了等于替他认账。
-    """
-    month_end = month_start + timedelta(days=month_days - 1)
-    first_day = month_start
-    last_day = month_end
-    if hire_date:
-        try:
-            hired = datetime.strptime(str(hire_date)[:10], "%Y-%m-%d").date()
-        except (TypeError, ValueError):
-            hired = None
-        if hired is not None and hired > first_day:
-            first_day = hired
-    # 离职（2026-10-29）：截到离职日为止 —— 离职日**当天仍算在岗**（那天他还上班），
-    # 与 `_day_state` 的「离职日之后留空」是同一条线。空串（日期待补）不剪：不知道哪天走。
-    if resigned_at:
-        left_text = str(resigned_at)[:10]
-        if left_text:
-            try:
-                left = datetime.strptime(left_text, "%Y-%m-%d").date()
-            except (TypeError, ValueError):
-                left = None
-            if left is not None and left < last_day:
-                last_day = left
-    if last_day < first_day:
-        return 0
-    return (last_day - first_day).days + 1
-
-
-def _leave_terms(
-    *,
-    today: str,
-    theirs: dict[str, Any],
-    holidays: list[str],
-    employee: dict,
-    month_days: int,
-    previous_balance: float,
-    half_rest_days: Optional[set[str]] = None,
-    month: Optional[str] = None,
-    deducted_days: float = 0.0,
-) -> dict[str, Any]:
-    """卡片上那一块假期算式（票 03，ADR 0113 的口径）。**全是派生值，不落库。**
-
-    ``theirs`` 是这个人当月的排班行（``{营业日: 班次 id 或 None}``）；``half_rest_days``
-    是其中**标了「休半天」**的那几天（票 07，只含班次非空的日子）；``holidays`` 是
-    当月法定节假日（`HolidayCalendar.days_in_month`，日历是唯一依据）；``employee`` 是
-    花名册那一行（生日从身份证号派生、工龄奖与入职日期都在里面）。``month_days`` 是
-    **本月在岗天数**（见 `_on_duty_days`：老员工 = 整月，入职当月 = 入职日起算）。
-
-    * **出勤天数**按**排班**数（2026-10-29 用户裁定「按排班预结算」）：已过的日子 + 今天
-      之后**已经排了班**的日子都算 —— 店长在周表给 30/31 排了早班，考勤表当月的出勤
-      天数与存假就该跟着变，不用等到 30 号。**没排班的未来日子不算**（没有排班行）。
-      封账算的是整月都过完的月份，两种口径同值。**标了「休半天」的那天算 0.5 天**
-      （`GLOSSARY.md` 的月例休：「出勤半天算 0.5 天参与折算」）：月例休与存假都跟着
-      这半个天走。未到日子的半天休也按 0.5 算（它是计划的一部分）。
-    * **法定节假日补休**按**当月每个**法定节假日算：那天排了班（有排班行、班次非空）
-      就 +1，休的不给，没标日历的没有。这条不跟「已过」：日历与轮转都已经知道那天他
-      上班，池子又是整月的量（票 03 验收 3）。**半天休照给整天**：那天他确实上了班
-      （补休的判据是「那天排了班」，不是「上了几个半天」）。
-    * **生日假**：身份证号派生的生日落在当月 +1。生日那一栏是**派生值**（`MM-DD`，
-      没填身份证号 / 号码读不出日期就是 `None`）—— 算不出来的人没有这一项，不是 0 天。
-      平年 2 月 29 日折到 28 日由 `birthday_in_year` 负责（与人事提醒同一处口径）。
-    * **年假**只在**工龄奖调整发生的那一个月**计入：`seniority_due_month`（应为值是
-      哪一次调整带来的）就在当月，而且「当前」与「应为」确实已经对上（还没落账的、
-      调过头的都不算）—— GLOSSARY 的原话是「由应为值与当前值什么时候对上说了算」。
-      管理层 5 天、其他员工 3 天，**管理层按管理能力开关非空判，与职位名无关**。
-    * **可用天数池** = 上面五项 + 上月存假；**本月出勤天数** = `min(池, 本月在岗天数)`；
-      **存假** = `池 − 本月在岗天数`（可为负 = 欠班、可带 .5）。
-
-      「本月在岗天数」是 `month_days` 这一位（2026-10-29 用户裁定）：老员工就是整月
-      自然天数，**入职当月从他入职那天算起**（14 号入职 = 当月剩余的天数）—— 否则
-      新入职的人的存假会把他没入职的前半段当成欠班（`_on_duty_days`）。
-
-    **加班与补钟不参与这一套**（`GLOSSARY.md` 的存假：净时长单独结算）—— 唯一的例外是
-    2026-10-31 用户裁定的**补钟用存假抵扣**（ADR 0124）：``deducted_days`` 是那个人那个月
-    已经批下来的抵扣天数，它从**余额**里减（`balance = pool − month_days − deducted_days`），
-    池本身不动 —— 抵扣用的是他攒下的假，不是让这个月的出勤多铺出一天。天数由
-    `OvertimeLedger` 那张 `overtime_leave_deductions` 表给，这一层只减、不判该不该抵。
-
-    `month` 是「算的是哪个月」—— `sheet()` 不给，就取 `today` 那个月（当月的卡片）；
-    封账（票 04）算的是**上一个自然月**，于是它明说哪个月，并把 `today` 顶到那个月的
-    最后一天（整月都过完了，那个月的每一天都算「已过」）。生日假与年假按 `month` 判，
-    不跟 `today` 的月份 —— 否则封 8 月的账会拿 9 月的生日去给假。
-    """
-    month = month or today[:7]
-    half_rest_days = half_rest_days or set()
-    actual_days = 0.0
-    for business_date, shift_id in theirs.items():
-        # 预结算（2026-10-29 用户裁定）：**未来已排的班也算**，不按「已过」截止 ——
-        # 店长按排班看数；封账时整月都过完了，两种口径同值。未来没排班的天不会进
-        # `theirs`（没有排班行），所以不用再判一次日期。
-        if shift_id is not None:
-            actual_days += 0.5 if business_date in half_rest_days else 1.0
-    holiday_makeup = sum(1 for day in holidays if theirs.get(day) is not None)
-    birthday_leave = 0
-    birthday = employee.get("birthday")
-    if birthday:
-        landed = birthday_in_year(birthday, int(month[:4]))
-        if landed and landed[:2] == month[5:7]:
-            birthday_leave = 1
-    annual_leave = 0
-    hire_date = employee.get("hire_date") or None
-    should_be = seniority_should_be(hire_date, today)
-    settled = employee.get("seniority_bonus")
-    if (
-        should_be > 0
-        and settled is not None
-        and int(settled) == should_be
-        and seniority_due_month(hire_date, today) == month
-    ):
-        annual_leave = (
-            ANNUAL_LEAVE_MANAGEMENT if employee.get("admin_caps") else ANNUAL_LEAVE_STAFF
-        )
-    monthly_rest = min(MONTHLY_REST_MAX, math.floor(actual_days / MONTHLY_REST_STEP))
-    pool = (
-        actual_days
-        + monthly_rest
-        + holiday_makeup
-        + birthday_leave
-        + annual_leave
-        + previous_balance
-    )
-    return {
-        "actual_days": actual_days,
-        "monthly_rest": monthly_rest,
-        "holiday_makeup": holiday_makeup,
-        "birthday_leave": birthday_leave,
-        "annual_leave": annual_leave,
-        "previous_balance": previous_balance,
-        "pool": pool,
-        "month_days": month_days,
-        # 本月经补钟抵扣的天数（ADR 0124）：只从余额里减，池与明细保持原样 ——
-        # 卡片上那九项说的是「这个月攒了多少」，抵扣是「用掉多少」。
-        "deducted_days": float(deducted_days),
-        # 池比自然天数还小的时候按池填（这个月剩下的假不够铺满），所以这里不能 clamp 到 0。
-        "month_attendance_days": min(pool, float(month_days)),
-        "balance": pool - month_days - float(deducted_days),
-    }
-
-
-def _with_manual_balance(
-    terms: dict[str, Any], closing_balance: Optional[float]
-) -> dict[str, Any]:
-    """给算式的结果盖上**人工定稿**那一层（票 09）。``terms`` 就是 `_leave_terms` 的返回值。
-
-    `_leave_terms` 只算**公式值**（池 − 本月自然天数）；人工那一位是本票加在它**外面**的
-    一层覆盖：台账那一行填过 `closing_balance` 就以它为准，没填过就照公式值。覆盖刻意
-    留在算式之外 —— 07 的半天休折算与 03 的口径用例因此仍然读得出「公式说的是什么」。
-
-    返回的 dict 在原有键之外多两位（`balance` 的含义因此从「公式值」变成「**有效值**」，
-    导出件的「存休天数」读的就是它，所以导出件自动跟着走）：
-
-    * ``balance_computed`` —— 公式值（页面上的「系统建议」）；
-    * ``balance_is_manual`` —— 这一次用的是不是手填值。
-
-    ``closing_balance`` 是台账上的**原始**值（`None` = 没填过 / 清空 = 退回公式值）。
-    """
-    computed = terms["balance"]
-    terms["balance_computed"] = computed
-    terms["balance_is_manual"] = closing_balance is not None
-    if closing_balance is not None:
-        terms["balance"] = closing_balance
-    return terms
-
 
 def _sealed_at(ledger: dict[tuple[int, str], dict], month: str) -> Optional[str]:
     """这个月**已经封账**的时刻（一行都没有 / 都没封账时是 `None`）。
@@ -1406,18 +1137,3 @@ def _sealed_at(ledger: dict[tuple[int, str], dict], month: str) -> Optional[str]
         if row_month == month and row.get("sealed_at")
     ]
     return max(str(stamp) for stamp in stamps) if stamps else None
-
-
-def _previous_balance(previous_row: Optional[dict], current_row: Optional[dict]) -> float:
-    """上月存假（票 03 验收 7）。
-
-    正源是**上一月已封账那一行的结余** —— 封账是定稿，过去的月份不随后来的排班改动漂
-    （ADR 0113）。上一月还没有已封账的行时（上线当月 2026-10 就是这一种，之前根本没有
-    台账数据）退回读**本月这一行的期初余额** —— 那是人工录入一次的「上月末余额」。
-    两个都没有就是 0（新员工从零开始）。
-    """
-    if previous_row is not None and previous_row.get("sealed_at"):
-        return float(previous_row.get("closing_balance") or 0.0)
-    if current_row is not None and current_row.get("opening_balance") is not None:
-        return float(current_row["opening_balance"])
-    return 0.0
