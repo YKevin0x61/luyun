@@ -76,7 +76,7 @@ from typing import Any, Callable, Optional
 import asyncpg
 
 from db_core.utils import CHINA_TZ
-from services.business_day import current_workbench_date
+from services.business_day import current_workbench_date, shift_business_date
 from services.holiday_calendar import HolidayCalendar, HolidayError
 from services.identity import EmployeeAccounts, EmployeeAccountsError, serialized_write
 from services.identity.profile import (
@@ -85,6 +85,7 @@ from services.identity.profile import (
     seniority_should_be,
 )
 from services.overtime import STATUS_APPROVED, STATUS_PENDING
+from services.scheduling.day_grid import DayGrid
 
 logger = logging.getLogger(__name__)
 
@@ -144,15 +145,6 @@ class AttendanceError(ValueError):
 def _next_month(start: date) -> date:
     """下月一号 —— 区间一律**右开**（`>= 本月一号 AND < 下月一号`），不自己数月份长度。"""
     return (start.replace(day=28) + timedelta(days=4)).replace(day=1)
-
-
-def _is_half_rest(value: Any) -> bool:
-    """`half_rest` 是 BIGINT 0/1（仓库口径的布尔，同 `staff_shifts.is_active`）。
-
-    读出来是 `int`，写进去是 `1` / `0` —— 这一对转换只在这里与 `set_half_rest` 两处，
-    别让调用方各自 `bool()` 一遍（`"0"` 这种字符串在别处会变成 `True`）。
-    """
-    return bool(int(value)) if value is not None else False
 
 
 def _require_business_date(value: Any) -> str:
@@ -250,28 +242,24 @@ class AttendanceStore:
         * ``{员工号: {营业日: 班次 id 或 None}}`` —— 三态（上班 / 休 / 待补）与班次号；
         * ``{员工号: {标了「休半天」的营业日}}`` —— 只装**那天真有班次**的那些（票 07）。
 
-        **有行**就说明那天被铺过（`None` = 休）；没有这一格就是「待补」，所以这里不
-        过滤班次为空的行 —— 过滤掉的话「休」会与「没铺到」塌成同一件事。
+        `next_month` 是**右开**的（下月一号，同 `sheet()` / `seal()` 的入参口径），
+        日格两端都含，所以这里先退一天拿月末。
 
-        「休半天」在 `shift_id IS NULL`（那天休）的行上没有意义：`休 + 休半天` 是自相
-        矛盾的，写路径（排班 `set_override` 的「改成休」）也会把那种行上的标志清成 0。
-        这里再挡一次，是为了不让手工 SQL / 历史数据里那种行在页面上变成「休半天」。
+        读的是排班的日格（`DayGrid.cells`，ADR 0138）：**有行**就说明那天被铺过
+        （`None` = 休）；没有这一格就是「待补」，所以这里不过滤班次为空的行 ——
+        过滤掉的话「休」会与「没铺到」塌成同一件事。「休半天」的归一（shift 空恒
+        False）也在日格里做完了，这里直接用 `cell.half_rest` 建索引，不再判一次班次。
         """
-        cur = await self._conn.execute(
-            """SELECT employee_id, business_date, shift_id, half_rest FROM staff_assignments
-               WHERE business_date >= ? AND business_date < ?""",
-            (first, next_month),
+        last = shift_business_date(next_month, -1)
+        cells = await DayGrid(self._write_lock_owner, now=self._now).cells(
+            first, last, roster_only=False
         )
         rows: dict[int, dict[str, Any]] = {}
         half_rests: dict[int, set[str]] = {}
-        for row in await cur.fetchall():
-            mapping = dict(row)
-            employee_id = int(mapping["employee_id"])
-            rows.setdefault(employee_id, {})[mapping["business_date"]] = (
-                None if mapping["shift_id"] is None else int(mapping["shift_id"])
-            )
-            if mapping["shift_id"] is not None and _is_half_rest(mapping["half_rest"]):
-                half_rests.setdefault(employee_id, set()).add(mapping["business_date"])
+        for cell in cells:
+            rows.setdefault(cell.employee_id, {})[cell.business_date] = cell.shift_id
+            if cell.half_rest:
+                half_rests.setdefault(cell.employee_id, set()).add(cell.business_date)
         return rows, half_rests
 
     async def _assignment_row(self, employee_id: int, day: str) -> Optional[dict]:
