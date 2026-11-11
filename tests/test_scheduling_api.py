@@ -138,7 +138,7 @@ def test_scheduling_routes_need_a_session_or_the_schedule_cap(scheduling_http, m
     2026-10-14 用户裁定：排班那一面不再只认管理端会话 —— 花名册上勾了「人事管理」
     （`schedule`）的员工用**员工会话**也能改全店排班；2026-10-31 起考勤表并进同一项，
     显示名随之从「排班管理」改成「人事管理」。判定见 `api/scheduling.py` 的
-    `_require_scheduler`：管理端会话直接放行，员工会话要那一项能力，被拒是 403
+    `_schedule_edit`：管理端会话直接放行，员工会话要那一项能力，被拒是 403
     （「你没这个权限」）而不是 401（「你没登录」）—— 后者会把「权限不够」说成「会话没了」。
     """
     client, db, accounts = scheduling_http
@@ -328,28 +328,36 @@ def test_bad_input_is_a_400_and_unknown_employee_is_a_404(scheduling_http):
     month = client.get("/api/scheduling/calendar", params={"month": "2026-9"})
     assert month.status_code == 400
     assert month.json()["detail"] == "月份格式应该是 YYYY-MM"
+    assert month.headers["x-error-code"] == "invalid_month"
     day = client.get("/api/scheduling/day", params={"date": "24/09/2026"})
     assert day.status_code == 400
     assert day.json()["detail"] == "日期格式应该是 YYYY-MM-DD"
+    assert day.headers["x-error-code"] == "invalid_business_date"
     # 空周期在请求形状这一层就被挡下（pydantic），所以是 422 而不是 400。
     assert client.put(f"/api/scheduling/rules/{employee_id}", json={"cycle": []}).status_code == 422
     shift = client.put(f"/api/scheduling/rules/{employee_id}", json={"cycle": [999]})
     assert shift.status_code == 400
     # 票 04 起这句话带格号：规则编辑页要能指出错在哪一天。
     assert shift.json()["detail"] == "轮转周期第 1 格引用的班次不存在或已停用：请重新选那一天的班次"
+    assert shift.headers["x-error-code"] == "unknown_shift_in_cycle"
     missing = client.put("/api/scheduling/rules/9999", json={"cycle": [1]})
     assert missing.status_code == 404
     assert missing.json()["detail"] == "员工不存在"
+    assert missing.headers["x-error-code"] == "unknown_employee"
 
 
 def test_missing_table_is_a_503_with_instructions():
     """0005 还没应用时，页面拿到的是「去数据库迁移面板」，不是一个 500。"""
-    from api.scheduling import _bad_request
+    from api.scheduling import _SCHEDULING_ERRORS
     from services.scheduling import SchedulingError
 
-    exc = _bad_request(SchedulingError("not_migrated", "UndefinedTableError: staff_shifts"))
+    exc = _SCHEDULING_ERRORS.http(
+        SchedulingError("not_migrated", "UndefinedTableError: staff_shifts")
+    )
     assert exc.status_code == 503
     assert "0005_scheduling.sql" in exc.detail
+    # 错误码仍随响应头出去（前端靠它换呈现，不靠文案匹配）。
+    assert exc.headers["X-Error-Code"] == "not_migrated"
 
 
 def test_dirty_rule_data_skips_that_person_instead_of_a_400(scheduling_http):
@@ -389,13 +397,15 @@ def test_dirty_rule_data_skips_that_person_instead_of_a_400(scheduling_http):
 
 def test_error_details_never_leak_the_placeholder():
     """`{}` 是给「说清哪里错」用的：缺细节时不能把字面 `{}` 端给店长看。"""
-    from api.scheduling import _ERROR_DETAILS, _bad_request
+    from api.scheduling import _ERROR_DETAILS, _SCHEDULING_ERRORS
     from services.scheduling import SchedulingError
 
     for code in _ERROR_DETAILS:
-        detail = _bad_request(SchedulingError(code)).detail
-        assert "{}" not in detail, code
-    formatted = _bad_request(SchedulingError("unknown_shift_in_cycle", "3")).detail
+        exc = _SCHEDULING_ERRORS.http(SchedulingError(code))
+        assert "{}" not in exc.detail, code
+        # 每条拒绝都带稳定错误码，文案怎么改都不影响前端认这一条。
+        assert exc.headers["X-Error-Code"] == code, code
+    formatted = _SCHEDULING_ERRORS.http(SchedulingError("unknown_shift_in_cycle", "3")).detail
     assert "第 3 格" in formatted
 
 
@@ -778,7 +788,7 @@ def test_a_bad_month_is_a_400_not_a_500(scheduling_http, monkeypatch):
 def test_staff_day_lists_the_whole_store_to_a_staff_cookie(scheduling_http, monkeypatch):
     """验收 2/3：员工点开某天 —— 上班的是谁、在哪个区，以及谁休 / 谁请假。
 
-    门仍然是员工那扇（`require_staff_session`），路径上没有任何 `employee_id`：全店名单
+    门仍然是员工那扇（`staff_actor`），路径上没有任何 `employee_id`：全店名单
     是贴在墙上那张排班表上的东西，不是「谁都能查谁」的口子。
     """
     client, db, accounts = scheduling_http
@@ -2945,7 +2955,7 @@ def test_staff_with_schedule_cap_can_manage_the_whole_shop(scheduling_http, monk
 def test_schedule_cap_does_not_leak_colleagues_phone_numbers(scheduling_http, monkeypatch):
     """「人事管理」能力拿到的是排班需要的名单，**不是全店同事的手机号**。
 
-    `GET /api/scheduling/roster` 挂在 `_require_scheduler` 后面，而 2026-10-14 起
+    `GET /api/scheduling/roster` 挂在 `schedule_edit` 后面，而 2026-10-14 起
     「员工会话 + `schedule`」也进得来 —— 手机号是同事的私人联系方式、排班用不到，
     与 `GET /api/scheduling/me/colleagues`「不给手机号」同一口径（`docs/adr/0098`）。
     管理端花名册页读的是 `/api/hygiene/admin/roster`（那份照旧带手机号），所以投影在
@@ -3262,3 +3272,241 @@ def test_approving_a_swap_does_not_speak_as_a_leave(scheduling_http, monkeypatch
     assert approved.status_code == 200, approved.text
     assert approved.json()["kind"] == "swap"
     assert calls == []
+
+
+# ── 票 06：29 条路由接到工作台边界的动作门 ────────────────────────────────
+#
+# 这一组只问两件事：**哪一扇门**（401 / 403 的文案与头）与**进去之后还是不是原来
+# 那条业务路径**（状态码与既有错误码不变）。管理面 19 条逐条过四个身份（管理员 /
+# 有「人事管理」的员工 / 无该能力的员工 / 匿名）；`/me` 那 10 条没有能力这一维，
+# 过员工 / 管理端 / 匿名三个身份。
+
+SCHEDULE_EDIT_DENIED = (
+    "只有开了「人事管理」权限的人能改排班与考勤：请找超级管理员在花名册里开通"
+)
+
+
+def _management_calls(client, employee_id, counter):
+    """19 条管理面各一条「同一身份连跑两遍也不撞」的请求。
+
+    路径与身体都是**发出去之前才现取**（lazy）：加 / 删班次那两条要独一无二的
+    名字，删掉的那条得是刚建出来的 —— 管理员与有能力的员工各跑一遍时，第二遍
+    不会撞名字、也不会删到还在用的班次。
+    """
+
+    def shift_id():
+        return client.get("/api/scheduling/shifts").json()["shifts"][0]["id"]
+
+    def fresh_name():
+        counter[0] += 1
+        return f"矩阵班次{counter[0]}"
+
+    def disposable_shift():
+        created = client.post("/api/scheduling/shifts", json={"name": fresh_name()})
+        assert created.status_code == 200, created.text
+        return created.json()["shift"]["id"]
+
+    def all_ids():
+        body = client.get("/api/scheduling/shifts/manage").json()
+        return [shift["id"] for shift in body["shifts"]]
+
+    return [
+        ("GET", lambda: "/api/scheduling/shifts", None, 200),
+        ("GET", lambda: "/api/scheduling/shifts/manage", None, 200),
+        ("POST", lambda: "/api/scheduling/shifts", lambda: {"name": fresh_name()}, 200),
+        ("PUT", lambda: "/api/scheduling/shifts/order", lambda: {"ids": all_ids()}, 200),
+        (
+            "PUT",
+            lambda: f"/api/scheduling/shifts/{shift_id()}",
+            lambda: {"is_active": True},
+            200,
+        ),
+        ("DELETE", lambda: f"/api/scheduling/shifts/{disposable_shift()}", None, 200),
+        ("GET", lambda: "/api/scheduling/calendar?month=2026-09", None, 200),
+        ("GET", lambda: "/api/scheduling/day?date=2026-09-24", None, 200),
+        ("GET", lambda: "/api/scheduling/week", None, 200),
+        ("GET", lambda: "/api/scheduling/roster", None, 200),
+        (
+            "PUT",
+            lambda: f"/api/scheduling/zone-defaults/{employee_id}",
+            lambda: {"shift_id": shift_id(), "zone_id": None},
+            200,
+        ),
+        (
+            "PUT",
+            lambda: f"/api/scheduling/rules/{employee_id}",
+            lambda: {"cycle": [shift_id()]},
+            200,
+        ),
+        ("DELETE", lambda: f"/api/scheduling/rules/{employee_id}", None, 200),
+        (
+            "POST",
+            lambda: "/api/scheduling/overrides/batch",
+            lambda: {"action": "rest", "items": []},
+            200,
+        ),
+        (
+            "PUT",
+            lambda: f"/api/scheduling/overrides/{employee_id}/2026-09-26",
+            lambda: {"is_rest": True},
+            200,
+        ),
+        (
+            "DELETE",
+            lambda: f"/api/scheduling/overrides/{employee_id}/2026-09-26",
+            None,
+            200,
+        ),
+        ("GET", lambda: "/api/scheduling/inbox", None, 200),
+        ("POST", lambda: "/api/scheduling/inbox/999999/approve", None, 404),
+        ("POST", lambda: "/api/scheduling/inbox/999999/reject", None, 404),
+    ]
+
+
+def _refused_management_calls():
+    """同一批 19 条的静态形状：被门拒的时候 handler 一步都不跑，身体是什么不重要。"""
+    return [
+        ("GET", "/api/scheduling/shifts", None),
+        ("GET", "/api/scheduling/shifts/manage", None),
+        ("POST", "/api/scheduling/shifts", {"name": "矩阵班次"}),
+        ("PUT", "/api/scheduling/shifts/order", {"ids": []}),
+        ("PUT", "/api/scheduling/shifts/1", {"is_active": True}),
+        ("DELETE", "/api/scheduling/shifts/1", None),
+        ("GET", "/api/scheduling/calendar?month=2026-09", None),
+        ("GET", "/api/scheduling/day?date=2026-09-24", None),
+        ("GET", "/api/scheduling/week", None),
+        ("GET", "/api/scheduling/roster", None),
+        ("PUT", "/api/scheduling/zone-defaults/1", {"shift_id": 1, "zone_id": None}),
+        ("PUT", "/api/scheduling/rules/1", {"cycle": [1]}),
+        ("DELETE", "/api/scheduling/rules/1", None),
+        ("POST", "/api/scheduling/overrides/batch", {"action": "rest", "items": []}),
+        ("PUT", "/api/scheduling/overrides/1/2026-09-26", {"is_rest": True}),
+        ("DELETE", "/api/scheduling/overrides/1/2026-09-26", None),
+        ("GET", "/api/scheduling/inbox", None),
+        ("POST", "/api/scheduling/inbox/1/approve", None),
+        ("POST", "/api/scheduling/inbox/1/reject", None),
+    ]
+
+
+def test_every_management_route_is_behind_the_schedule_edit_action(
+    scheduling_http, monkeypatch
+):
+    """管理面 19 条 = 一个动作门：admin 放行、员工看「人事管理」能力，匿名 401。
+
+    放行的两个身份还要照旧拿到业务响应（200 / `unknown_request` 404）—— 门换了，
+    门后面那条路没换。被拒的 403 带 `capability_required`、401 是裸的，文案逐字。
+    """
+    client, _db, accounts = scheduling_http
+    employee_id = _employee_id(accounts)
+    _wire_staff_accounts(monkeypatch, accounts)
+    admin = _admin_cookie(client)
+    counter = [0]
+
+    allowed = _management_calls(client, employee_id, counter)
+    assert len(allowed) == 19
+    for method, path, body, expected in allowed:
+        response = client.request(method, path(), json=body() if body else None)
+        assert response.status_code == expected, (method, path(), response.text)
+        if expected == 404:
+            assert response.json()["detail"] == "这条申请不存在：可能已经被撤回，刷新看看"
+            assert response.headers["x-error-code"] == "unknown_request"
+
+    # 员工会话 + 「人事管理」：同一批请求照旧跑通（不是只放行读）。
+    _run(accounts.set_admin_caps(employee_id, ["schedule"]))
+    _staff_cookie(client, accounts)
+    for method, path, body, expected in allowed:
+        response = client.request(method, path(), json=body() if body else None)
+        assert response.status_code == expected, (method, path(), response.text)
+
+    refused = _refused_management_calls()
+    assert len(refused) == 19
+
+    # 员工会话在、能力不在：每一条都 403，文案逐字，头是能力门那一枚。
+    _run(accounts.set_admin_caps(employee_id, []))
+    _staff_cookie(client, accounts)
+    for method, path, body in refused:
+        response = client.request(method, path, json=body)
+        assert response.status_code == 403, (method, path, response.text)
+        assert response.json()["detail"] == SCHEDULE_EDIT_DENIED
+        assert response.headers["x-error-code"] == "capability_required"
+
+    # 匿名：401「未授权」，带的是 401 的 body，不是一个能力错误码。
+    _as_manager(client, admin)
+    client.cookies.clear()
+    for method, path, body in refused:
+        response = client.request(method, path, json=body)
+        assert response.status_code == 401, (method, path, response.text)
+        assert response.json()["detail"] == "未授权"
+        assert "x-error-code" not in response.headers
+
+
+def _refused_staff_calls():
+    """`/me` 10 条的静态形状（被拒时 handler 不跑，路径里的 id 用占位）。"""
+    return [
+        ("GET", "/api/scheduling/me", None),
+        ("GET", "/api/scheduling/me/month", None),
+        ("GET", "/api/scheduling/me/day?date=2026-09-24", None),
+        ("GET", "/api/scheduling/me/requests", None),
+        ("GET", "/api/scheduling/me/colleagues", None),
+        ("POST", "/api/scheduling/me/requests", {"start_date": "2026-09-28"}),
+        ("DELETE", "/api/scheduling/me/requests/1", None),
+        (
+            "POST",
+            "/api/scheduling/me/swaps",
+            {"peer_employee_id": 1, "business_date": "2026-09-26"},
+        ),
+        ("POST", "/api/scheduling/me/swaps/1/accept", None),
+        ("POST", "/api/scheduling/me/swaps/1/reject", None),
+    ]
+
+
+def test_every_staff_route_is_behind_the_staff_door(scheduling_http, monkeypatch):
+    """`/me` 10 条只认员工 cookie：管理端会话与匿名都是 401「需要员工登录」。"""
+    client, db, accounts = scheduling_http
+    me = _employee_id(accounts)
+    peer = _employee_id(accounts, phone="13800138001", name="李四")
+    _wire_staff_accounts(monkeypatch, accounts)
+    admin = _admin_cookie(client)
+
+    store = SchedulingStore(db)
+    ids = _shift_ids(client)
+    _run(store.set_rule(me, [ids["白班"]]))
+    _run(store.set_rule(peer, [ids["白班"]]))
+    accept_id = _run(store.submit_swap(peer, me, TODAY))["id"]
+    reject_id = _run(store.submit_swap(peer, me, "2026-09-25"))["id"]
+
+    refused = _refused_staff_calls()
+    assert len(refused) == 10
+    for method, path, body in refused:
+        _as_manager(client, admin)
+        response = client.request(method, path, json=body)
+        assert response.status_code == 401, (method, path, response.text)
+        assert response.json()["detail"] == "需要员工登录"
+        assert "x-error-code" not in response.headers
+
+        client.cookies.clear()
+        response = client.request(method, path, json=body)
+        assert response.status_code == 401, (method, path, response.text)
+        assert response.json()["detail"] == "需要员工登录"
+        assert "x-error-code" not in response.headers
+
+    # 员工自己：10 条照旧走通（提交请假 / 提交换班 / 回应换班都要真的写进去）。
+    _staff_cookie(client, accounts)
+    assert client.get("/api/scheduling/me").json()["employee"]["id"] == me
+    assert client.get("/api/scheduling/me/month").status_code == 200
+    assert client.get("/api/scheduling/me/day", params={"date": TODAY}).status_code == 200
+    assert client.get("/api/scheduling/me/requests").status_code == 200
+    assert client.get("/api/scheduling/me/colleagues").status_code == 200
+
+    leave = client.post("/api/scheduling/me/requests", json={"start_date": "2026-09-28"})
+    assert leave.status_code == 200, leave.text
+    request_id = leave.json()["request"]["id"]
+    assert client.delete(f"/api/scheduling/me/requests/{request_id}").status_code == 200
+
+    swap = client.post(
+        "/api/scheduling/me/swaps",
+        json={"peer_employee_id": peer, "business_date": "2026-09-26"},
+    )
+    assert swap.status_code == 200, swap.text
+    assert client.post(f"/api/scheduling/me/swaps/{accept_id}/accept").status_code == 200
+    assert client.post(f"/api/scheduling/me/swaps/{reject_id}/reject").status_code == 200

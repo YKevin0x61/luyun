@@ -10,9 +10,13 @@ from typing import Any, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from api.security import require_any_identity_session, require_staff_session
+from api.workbench_boundary import (
+    WorkbenchActor,
+    WorkbenchErrors,
+    require_action,
+    staff_actor,
+)
 from database import get_db
-from services.identity.capabilities import CAP_SCHEDULE, has_cap
 from services.realtime.workbench import nudge_scheduling as _scheduling_nudge
 from services.scheduling import MAX_CYCLE_DAYS, MAX_REQUEST_NOTE, MAX_SHIFT_NAME
 from services.scheduling.store import KIND_LEAVE, SchedulingError, SchedulingStore
@@ -33,7 +37,7 @@ _ERROR_DETAILS = {
     "unknown_shift": "班次不存在或已停用",
     # 带一个 `{}`：服务层会把出错的那一格序号放在 `SchedulingError.args[0]`（票 04 要求
     # 「说清哪里错」——「排班参数不合法」说不出是第 3 格写错了）。同一个事实只在下面
-    # `_bad_request` 里解释一次。
+    # `_SCHEDULING_ERRORS` 那里解释一次（填充规则是公共层的）。
     "unknown_shift_in_cycle": "轮转周期第 {} 格引用的班次不存在或已停用：请重新选那一天的班次",
     "unknown_employee": "员工不存在",
     # 离职（2026-10-29 取代「停用」）：离职日之后的日子不能再排班，也不再配轮转规则。
@@ -177,6 +181,26 @@ _ERROR_STATUS = {
     "not_migrated": 503,
 }
 
+# 共享的状态表把 `unknown_*` 通配成 404。排班里有四个老 code 描述的不是「那一行
+# 不存在」，而是「请求里引用的东西选错了」—— 规则周期里的某一格、换班对象、工作区；
+# 它们从 2026-09 上线起一直是 **400**，状态码是前端契约，这次只接线不改判。
+_UNKNOWN_BUT_BAD_REQUEST = {
+    "unknown_shift": 400,
+    "unknown_shift_in_cycle": 400,
+    "unknown_zone": 400,
+    "unknown_peer": 400,
+}
+
+# 错误翻译域（ADR-0134）：两张数据表原样留在这里，翻译、状态码与
+# `X-Error-Code` 头由公共层统一做。表里的 code 是服务层的稳定标识、也是前端认的码，
+# 一条都不能少（59 条）；文案里的 `{}` 由 `SchedulingError.args[0]` 填。
+_SCHEDULING_ERRORS = WorkbenchErrors(
+    domain="排班请求",
+    texts=_ERROR_DETAILS,
+    status_overrides={**_ERROR_STATUS, **_UNKNOWN_BUT_BAD_REQUEST},
+    default_text="排班参数不合法",
+)
+
 
 class RejectRequest(BaseModel):
     """驳一条申请时带的那句原因（0044 的 `decision_note`，选填）。
@@ -316,91 +340,45 @@ class SwapRequest(BaseModel):
     note: Optional[str] = None
 
 
-def _bad_request(exc: SchedulingError) -> HTTPException:
-    detail = _ERROR_DETAILS.get(exc.code, "排班参数不合法")
-    if "{}" in detail:
-        # `SchedulingError(code, message)` 的 message 放在 args[0]（默认等于 code），
-        # 服务层用它带「哪里错」的细节，例如周期里出错的那一格序号。
-        # 用 `str.replace` 而不是 `str.format`：模板里多一个花括号、或哪天文案里出现
-        # 字面 `{...}`，`format` 会抛 KeyError/IndexError/ValueError 变成 500 —— `replace`
-        # 没有这些语义。服务层没给细节时填「？」，绝不把字面的 `{}` 端给店长看。
-        raw = exc.args[0] if exc.args else ""
-        if not raw or raw == exc.code:
-            logger.warning("排班错误缺细节，用「？」占位: code=%s", exc.code)
-        detail = detail.replace("{}", raw if raw and raw != exc.code else "？")
-    logger.info("排班请求被拒: code=%s", exc.code)
-    # 稳定的错误码跟着响应头一起出去（文案会改字，码不会）：少数几句在页面上要换一种
-    # 呈现（换班撞车要弹一句说清是谁跟谁），靠文案匹配会随改字漂。`detail` 一个字段没动。
-    return HTTPException(
-        status_code=_ERROR_STATUS.get(exc.code, 400),
-        detail=detail,
-        headers={"X-Error-Code": exc.code},
-    )
+# 管理面（19 条）共用的一道门：管理端会话，**或**员工会话加「人事管理」（`schedule`）
+# 能力。2026-10-14 用户裁定：排班不再只给超级管理员 —— 花名册上勾了这项能力的店长用
+# 员工会话也能改全店排班；2026-10-31 考勤表并入同一项（显示名从「排班管理」改成
+# 「人事管理」，键名仍是 `schedule`）。判据、403 的文案与 `capability_required` 头都在
+# `api/workbench_boundary.py` 的 `schedule_edit` 里，这里只接线。
+#
+# 必须在模块级定义一次并复用：`require_action("schedule_edit")` 每次都返回一个新的
+# 闭包，逐条路由各调一次就会变成 19 个互不相识的门（测试也按这个对象认门）。
+_schedule_edit = require_action("schedule_edit")
 
 
-async def _require_scheduler(identity: dict = Depends(require_any_identity_session)) -> dict:
-    """人事那几页的门：管理端会话，**或**员工会话加「人事管理」（`schedule`）能力。
-
-    2026-10-14 用户裁定：排班不再只给超级管理员 —— 花名册上勾了这项能力的店长用
-    **员工会话**也能改全店排班（月历 / 待办 / 班次表三页）。他本来就有员工账号，不该为了
-    改一个班次专门去电脑上登录管理端。判据与加班审批那扇门（`api/overtime.py` 的
-    `_require_reviewer`）同一形状：员工会话 + 一项能力，每次请求现读 `admin_caps`。
-
-    2026-10-31 用户裁定：考勤表页并入同一项能力（显示名随之从「排班管理」改成
-    「人事管理」，**键名仍是 `schedule`**）。`api/attendance.py` 的六个端点直接复用这道
-    门，不再自己写一份 —— 两处各判一次迟早会漂成两种口径。
-
-    **花名册不在这扇门后面**：`roster`（审批入职、停用、改权限）是另一个键，仍只给
-    超级管理员 —— 身份证明细按 `docs/adr/0098` 不下发员工端，所以「能做人事」不能连带
-    拿到花名册页。底薪这一项例外：考勤表页本身就带底薪，2026-10-31 的裁定是把它和
-    排班放进同一档（用户已知这一代价后选的）。
-
-    被拒是 **403**（「你没这个权限」），不是 404：后者会把「权限不够」说成「这一笔不
-    存在」。收回能力后下一次请求就 403 —— 权限不在登录时快照。
-    """
-    if identity.get("kind") == "admin":
-        return identity
-    employee = identity.get("employee") or {}
-    if not has_cap(employee.get("admin_caps"), CAP_SCHEDULE):
-        raise HTTPException(
-            status_code=403,
-            detail="只有开了「人事管理」权限的人能改排班与考勤：请找超级管理员在花名册里开通",
-        )
-    return identity
-
-
-def _decider_id(identity: dict) -> Optional[int]:
+def _decider_id(actor: WorkbenchActor) -> Optional[int]:
     """当前审批人的员工 id；**管理后台那条路是 None**（它没有员工身份）。
 
     `None` 在服务层是两个意思，别混：批准 / 驳回时它是「管理后台批的」（不受自批那道闸
     约束，也记不成某个员工）；撤回时它是「没记」。见 `store._claim_request` 的 docstring。
     """
-    if identity.get("kind") == "admin":
-        return None
-    employee = identity.get("employee") or {}
-    raw = employee.get("id")
-    return None if raw is None else int(raw)
+    return actor.employee_id if actor.kind == "staff" else None
 
 
 @router.get("/me")
 async def my_days(
     db=Depends(get_db),
-    employee: dict = Depends(require_staff_session),
+    actor: WorkbenchActor = Depends(staff_actor),
 ) -> dict:
     """员工自己这几天的班（「今天」页读的就是这一条）。
 
-    跟店长那扇门不是一回事：那边是 `_require_scheduler`（管理端会话，或带「人事管理」
+    跟店长那扇门不是一回事：那边是 `schedule_edit`（管理端会话，或带「人事管理」
     能力的员工会话 —— 2026-10-14 起），这边要员工自己的手机端 cookie
-    （`require_staff_session`），读的永远是自己。**接口上故意没有 `employee_id` 参数** ——
+    （`staff_actor`），读的永远是自己。**接口上故意没有 `employee_id` 参数** ——
     员工会话能读到的只有自己，想读别人的班也没地方填。
     """
     store = SchedulingStore(db)
     try:
-        data = await store.my_days(employee["id"])
+        data = await store.my_days(actor.employee_id)
     except SchedulingError as exc:
-        raise _bad_request(exc) from exc
+        raise _SCHEDULING_ERRORS.http(exc) from exc
     return {
-        "employee": {"id": employee["id"], "name": employee["name"]},
+        "employee": {"id": actor.employee_id, "name": actor.name},
         "today": data["today"],
         "days": data["days"],
     }
@@ -410,7 +388,7 @@ async def my_days(
 async def my_month(
     month: Optional[str] = Query(None, description="YYYY-MM；不填就是本营业月"),
     db=Depends(get_db),
-    employee: dict = Depends(require_staff_session),
+    actor: WorkbenchActor = Depends(staff_actor),
 ) -> dict:
     """员工自己那一个月的班（「今天」页点「整月」进来）。
 
@@ -423,11 +401,11 @@ async def my_month(
     """
     store = SchedulingStore(db)
     try:
-        data = await store.my_month(employee["id"], month)
+        data = await store.my_month(actor.employee_id, month)
     except SchedulingError as exc:
-        raise _bad_request(exc) from exc
+        raise _SCHEDULING_ERRORS.http(exc) from exc
     return {
-        "employee": {"id": employee["id"], "name": employee["name"]},
+        "employee": {"id": actor.employee_id, "name": actor.name},
         "month": data["month"],
         "first_date": data["first_date"],
         "today": data["today"],
@@ -445,7 +423,7 @@ async def my_month(
 async def my_day(
     date: str = Query(..., alias="date", description="YYYY-MM-DD"),
     db=Depends(get_db),
-    employee: dict = Depends(require_staff_session),
+    actor: WorkbenchActor = Depends(staff_actor),
 ) -> dict:
     """员工点开某一天看到的**全店**名单（票 13）：各班是谁、在哪个区，以及谁不上班。
 
@@ -465,14 +443,14 @@ async def my_day(
         await store.expand()
         data = await store.my_day(date)
     except SchedulingError as exc:
-        raise _bad_request(exc) from exc
-    return {"employee": {"id": employee["id"], "name": employee["name"]}, **data}
+        raise _SCHEDULING_ERRORS.http(exc) from exc
+    return {"employee": {"id": actor.employee_id, "name": actor.name}, **data}
 
 
 @router.get("/me/requests")
 async def my_requests(
     db=Depends(get_db),
-    employee: dict = Depends(require_staff_session),
+    actor: WorkbenchActor = Depends(staff_actor),
 ) -> dict:
     """我的申请，新的在前（「今天」页的「我的申请」看的就是这条）。
 
@@ -485,11 +463,11 @@ async def my_requests(
     """
     store = SchedulingStore(db)
     try:
-        data = await store.my_requests(employee["id"])
+        data = await store.my_requests(actor.employee_id)
     except SchedulingError as exc:
-        raise _bad_request(exc) from exc
+        raise _SCHEDULING_ERRORS.http(exc) from exc
     return {
-        "employee": {"id": employee["id"], "name": employee["name"]},
+        "employee": {"id": actor.employee_id, "name": actor.name},
         "today": data["today"],
         "requests": data["requests"],
         "incoming": data["incoming"],
@@ -503,7 +481,7 @@ async def my_requests(
 async def submit_leave(
     payload: LeaveRequest,
     db=Depends(get_db),
-    employee: dict = Depends(require_staff_session),
+    actor: WorkbenchActor = Depends(staff_actor),
 ) -> dict:
     """提一条请假：一天，或一段日期（两端都算）。
 
@@ -513,17 +491,17 @@ async def submit_leave(
     store = SchedulingStore(db)
     try:
         request = await store.submit_leave(
-            employee["id"], payload.start_date, payload.end_date, payload.note
+            actor.employee_id, payload.start_date, payload.end_date, payload.note
         )
     except SchedulingError as exc:
-        raise _bad_request(exc) from exc
+        raise _SCHEDULING_ERRORS.http(exc) from exc
     # 店长那边等着批：叫他自己来拉一次（nudge 不带数据，只说「有你的事」）。
-    await _scheduling_nudge("leave_submitted", employee["id"])
+    await _scheduling_nudge("leave_submitted", actor.employee_id)
     # 群里也知会一声（只有订阅了「请假申请」的群会发；文案里的审批链接见 ADMIN_BASE_URL）。
     # 放在 nudge 之后：推送是附带的一步，它失败不该让员工看到「提交失败」。
-    await notify_leave_request(db, request, employee_name=employee.get("name") or "")
+    await notify_leave_request(db, request, employee_name=actor.name)
     return {
-        "employee": {"id": employee["id"], "name": employee["name"]},
+        "employee": {"id": actor.employee_id, "name": actor.name},
         "request": request,
     }
 
@@ -532,7 +510,7 @@ async def submit_leave(
 async def cancel_request(
     request_id: int,
     db=Depends(get_db),
-    employee: dict = Depends(require_staff_session),
+    actor: WorkbenchActor = Depends(staff_actor),
 ) -> dict:
     """撤回自己**还没被批**的申请。排班一个字不改。
 
@@ -540,18 +518,18 @@ async def cancel_request(
     """
     store = SchedulingStore(db)
     try:
-        result = await store.cancel_request(employee["id"], request_id)
+        result = await store.cancel_request(actor.employee_id, request_id)
     except SchedulingError as exc:
-        raise _bad_request(exc) from exc
+        raise _SCHEDULING_ERRORS.http(exc) from exc
     # 撤回也要说一声：店长待办里那条该消失（他可能正开着那一页）。
-    await _scheduling_nudge("request_cancelled", employee["id"])
+    await _scheduling_nudge("request_cancelled", actor.employee_id)
     return result
 
 
 @router.get("/me/colleagues")
 async def my_colleagues(
     db=Depends(get_db),
-    employee: dict = Depends(require_staff_session),
+    actor: WorkbenchActor = Depends(staff_actor),
 ) -> dict:
     """换班能找谁（票 09）：名单里在上班的其他人，只给 id / 姓名 / 职位。
 
@@ -559,17 +537,17 @@ async def my_colleagues(
     """
     store = SchedulingStore(db)
     try:
-        people = await store.colleagues(employee["id"])
+        people = await store.colleagues(actor.employee_id)
     except SchedulingError as exc:
-        raise _bad_request(exc) from exc
-    return {"employee": {"id": employee["id"], "name": employee["name"]}, "colleagues": people}
+        raise _SCHEDULING_ERRORS.http(exc) from exc
+    return {"employee": {"id": actor.employee_id, "name": actor.name}, "colleagues": people}
 
 
 @router.post("/me/swaps")
 async def submit_swap(
     payload: SwapRequest,
     db=Depends(get_db),
-    employee: dict = Depends(require_staff_session),
+    actor: WorkbenchActor = Depends(staff_actor),
 ) -> dict:
     """提一条换班：跟哪位同事、换哪一天（票 09 的第一步）。
 
@@ -579,15 +557,15 @@ async def submit_swap(
     store = SchedulingStore(db)
     try:
         request = await store.submit_swap(
-            employee["id"], payload.peer_employee_id, payload.business_date, payload.note
+            actor.employee_id, payload.peer_employee_id, payload.business_date, payload.note
         )
     except SchedulingError as exc:
-        raise _bad_request(exc) from exc
+        raise _SCHEDULING_ERRORS.http(exc) from exc
     # **对方**要马上知道有人找他换班 —— 这条最需要实时：他不开页面就永远不知道，
     # 申请人也就一直等（票 09 的整条链路卡在这儿）。一人一条，各收各的。
-    await _scheduling_nudge("swap_submitted", employee["id"], payload.peer_employee_id)
+    await _scheduling_nudge("swap_submitted", actor.employee_id, payload.peer_employee_id)
     return {
-        "employee": {"id": employee["id"], "name": employee["name"]},
+        "employee": {"id": actor.employee_id, "name": actor.name},
         "request": request,
     }
 
@@ -596,7 +574,7 @@ async def submit_swap(
 async def accept_swap(
     request_id: int,
     db=Depends(get_db),
-    employee: dict = Depends(require_staff_session),
+    actor: WorkbenchActor = Depends(staff_actor),
 ) -> dict:
     """同意跟我换班：这条申请这才进店长待办（票 09 的验收项）。
 
@@ -605,11 +583,11 @@ async def accept_swap(
     """
     store = SchedulingStore(db)
     try:
-        result = await store.answer_swap(employee["id"], request_id, True)
+        result = await store.answer_swap(actor.employee_id, request_id, True)
     except SchedulingError as exc:
-        raise _bad_request(exc) from exc
+        raise _SCHEDULING_ERRORS.http(exc) from exc
     # 申请人要知道对方回话了（他那边没有别的途径看到）；同意之后这条接着进店长待办。
-    await _scheduling_nudge("swap_answered", result.get("employee_id"), employee["id"])
+    await _scheduling_nudge("swap_answered", result.get("employee_id"), actor.employee_id)
     return result
 
 
@@ -617,31 +595,35 @@ async def accept_swap(
 async def reject_swap(
     request_id: int,
     db=Depends(get_db),
-    employee: dict = Depends(require_staff_session),
+    actor: WorkbenchActor = Depends(staff_actor),
 ) -> dict:
     """拒绝跟我换班：这件事到此为止 —— 店长那边从头到尾看不到它，排班一个字不改。"""
     store = SchedulingStore(db)
     try:
-        result = await store.answer_swap(employee["id"], request_id, False)
+        result = await store.answer_swap(actor.employee_id, request_id, False)
     except SchedulingError as exc:
-        raise _bad_request(exc) from exc
+        raise _SCHEDULING_ERRORS.http(exc) from exc
     # 同上：拒绝了也要让申请人知道（这件事到此为止，别让他一直等）。
-    await _scheduling_nudge("swap_answered", result.get("employee_id"), employee["id"])
+    await _scheduling_nudge("swap_answered", result.get("employee_id"), actor.employee_id)
     return result
 
 
 @router.get("/shifts")
-async def list_shifts(db=Depends(get_db), _: dict = Depends(_require_scheduler)) -> dict:
+async def list_shifts(
+    db=Depends(get_db), _actor: WorkbenchActor = Depends(_schedule_edit)
+) -> dict:
     """班次表（白班、夜班……）。UI 按 N 个班次渲染，不写死两个。"""
     store = SchedulingStore(db)
     try:
         return {"shifts": await store.list_shifts()}
     except SchedulingError as exc:
-        raise _bad_request(exc) from exc
+        raise _SCHEDULING_ERRORS.http(exc) from exc
 
 
 @router.get("/shifts/manage")
-async def manage_shifts(db=Depends(get_db), _: dict = Depends(_require_scheduler)) -> dict:
+async def manage_shifts(
+    db=Depends(get_db), _actor: WorkbenchActor = Depends(_schedule_edit)
+) -> dict:
     """班次表**连停用的一起**，每条带上「有多少人在用」：票 11 的编辑页读这一条。
 
     编辑页要看到停用的那几条（给它们改名、重新启用、看还有没有历史行），所以不能
@@ -659,7 +641,7 @@ async def manage_shifts(db=Depends(get_db), _: dict = Depends(_require_scheduler
             for shift in await store.list_shifts(include_inactive=True)
         ]
     except SchedulingError as exc:
-        raise _bad_request(exc) from exc
+        raise _SCHEDULING_ERRORS.http(exc) from exc
     return {
         "shifts": shifts,
         "max_name": MAX_SHIFT_NAME,
@@ -671,7 +653,7 @@ async def manage_shifts(db=Depends(get_db), _: dict = Depends(_require_scheduler
 async def create_shift(
     payload: CreateShiftRequest,
     db=Depends(get_db),
-    _: dict = Depends(_require_scheduler),
+    _actor: WorkbenchActor = Depends(_schedule_edit),
 ) -> dict:
     """加一个班次（票 11）。加完就是一条普通的班次：月历图例、配规则的下拉、员工端
     的卡片都按 N 个班次渲染，不需要改代码（验收项）。"""
@@ -683,7 +665,7 @@ async def create_shift(
             )
         }
     except SchedulingError as exc:
-        raise _bad_request(exc) from exc
+        raise _SCHEDULING_ERRORS.http(exc) from exc
 
 
 # 声明在 `/shifts/{shift_id}` **之前**：两条都是 PUT，先声明的先匹配，否则
@@ -692,14 +674,14 @@ async def create_shift(
 async def reorder_shifts(
     payload: ShiftOrderRequest,
     db=Depends(get_db),
-    _: dict = Depends(_require_scheduler),
+    _actor: WorkbenchActor = Depends(_schedule_edit),
 ) -> dict:
     """按给定的顺序重铺显示顺序（票 11 的「上移 / 下移」）。要**给全**所有班次 id。"""
     store = SchedulingStore(db)
     try:
         return {"shifts": await store.reorder_shifts(payload.ids)}
     except SchedulingError as exc:
-        raise _bad_request(exc) from exc
+        raise _SCHEDULING_ERRORS.http(exc) from exc
 
 
 @router.put("/shifts/{shift_id}")
@@ -707,7 +689,7 @@ async def update_shift(
     shift_id: int,
     payload: UpdateShiftRequest,
     db=Depends(get_db),
-    _: dict = Depends(_require_scheduler),
+    _actor: WorkbenchActor = Depends(_schedule_edit),
 ) -> dict:
     """改名 / 调顺序 / 启用停用（票 11）。停用还有人在上的班次会被拦下来说清人数。"""
     store = SchedulingStore(db)
@@ -723,28 +705,28 @@ async def update_shift(
             )
         }
     except SchedulingError as exc:
-        raise _bad_request(exc) from exc
+        raise _SCHEDULING_ERRORS.http(exc) from exc
 
 
 @router.delete("/shifts/{shift_id}")
 async def delete_shift(
     shift_id: int,
     db=Depends(get_db),
-    _: dict = Depends(_require_scheduler),
+    _actor: WorkbenchActor = Depends(_schedule_edit),
 ) -> dict:
     """删掉刚建错、还没人用过的班次（票 11）。排过班的删不掉，那句话里说清为什么。"""
     store = SchedulingStore(db)
     try:
         return {"shift": await store.delete_shift(shift_id)}
     except SchedulingError as exc:
-        raise _bad_request(exc) from exc
+        raise _SCHEDULING_ERRORS.http(exc) from exc
 
 
 @router.get("/calendar")
 async def month_calendar(
     month: str = Query(..., description="YYYY-MM"),
     db=Depends(get_db),
-    _: dict = Depends(_require_scheduler),
+    _actor: WorkbenchActor = Depends(_schedule_edit),
 ) -> dict:
     """一个月的月历：每天各班几个人。打开就先补齐未来 90 天（幂等）。"""
     store = SchedulingStore(db)
@@ -752,14 +734,14 @@ async def month_calendar(
         await store.expand()
         return await store.month_calendar(month)
     except SchedulingError as exc:
-        raise _bad_request(exc) from exc
+        raise _SCHEDULING_ERRORS.http(exc) from exc
 
 
 @router.get("/day")
 async def day_detail(
     date: str = Query(..., alias="date", description="YYYY-MM-DD"),
     db=Depends(get_db),
-    _: dict = Depends(_require_scheduler),
+    _actor: WorkbenchActor = Depends(_schedule_edit),
 ) -> dict:
     """某一天各班是谁（月历点开那天看的就是这个）。"""
     store = SchedulingStore(db)
@@ -767,14 +749,14 @@ async def day_detail(
         await store.expand()
         return await store.day_detail(date)
     except SchedulingError as exc:
-        raise _bad_request(exc) from exc
+        raise _SCHEDULING_ERRORS.http(exc) from exc
 
 
 @router.get("/week")
 async def week(
     start: Optional[str] = Query(None, description="YYYY-MM-DD"),
     db=Depends(get_db),
-    _: dict = Depends(_require_scheduler),
+    _actor: WorkbenchActor = Depends(_schedule_edit),
 ) -> dict:
     """「员工 × 周」矩阵：这一周每人每天上什么班、在哪个区（票 A，只读）。
 
@@ -789,20 +771,20 @@ async def week(
         await store.expand()
         return await store.week_grid(start)
     except SchedulingError as exc:
-        raise _bad_request(exc) from exc
+        raise _SCHEDULING_ERRORS.http(exc) from exc
 
 
 @router.get("/roster")
 async def roster(
     db=Depends(get_db),
-    identity: dict = Depends(_require_scheduler),
+    actor: WorkbenchActor = Depends(_schedule_edit),
 ) -> dict:
     """全体花名册 + 每人当前那条规则 + 每人每班次的固定工作区（没配就是 `{}`）。
 
     名单面板会一起读固定工作区（票 03），所以缺 0006 时这里也要出 503 那句话 ——
     不然「已更新代码、还没应用迁移」这段窗口里，店长看到的是 500。
 
-    **手机号按调用方身份投影**：这条路由在 `_require_scheduler` 后面，员工会话 + `schedule`
+    **手机号按调用方身份投影**：这条路由在 `schedule_edit` 后面，员工会话 + `schedule`
     能力也进得来，而手机号是同事的私人联系方式、不是排班需要的字段 —— 只有管理端会话
     才拿到（员工端看自己的手机号走 `/me`，看同事的花名册走管理端 `/api/hygiene/admin/roster`，
     见 `docs/adr/0098`）。投影在服务层（`roster_with_rules(include_phone=…)`），
@@ -810,11 +792,9 @@ async def roster(
     """
     store = SchedulingStore(db)
     try:
-        data = await store.roster_with_rules(
-            include_phone=identity.get("kind") == "admin"
-        )
+        data = await store.roster_with_rules(include_phone=actor.kind == "admin")
     except SchedulingError as exc:
-        raise _bad_request(exc) from exc
+        raise _SCHEDULING_ERRORS.http(exc) from exc
     # 周期能写多少天由服务层的常量说了算：规则编辑页照这个数校验，别在前端再写死一份。
     data["max_cycle_days"] = MAX_CYCLE_DAYS
     return data
@@ -825,7 +805,7 @@ async def set_zone_default(
     employee_id: int,
     payload: SetZoneDefaultRequest,
     db=Depends(get_db),
-    _: dict = Depends(_require_scheduler),
+    _actor: WorkbenchActor = Depends(_schedule_edit),
 ) -> dict:
     """给「某人 × 某班次」定一个固定工作区；今天以后已经铺好的行一起改。
 
@@ -835,7 +815,7 @@ async def set_zone_default(
     try:
         return await store.set_zone_default(employee_id, payload.shift_id, payload.zone_id)
     except SchedulingError as exc:
-        raise _bad_request(exc) from exc
+        raise _SCHEDULING_ERRORS.http(exc) from exc
 
 
 @router.put("/rules/{employee_id}")
@@ -843,14 +823,14 @@ async def set_rule(
     employee_id: int,
     payload: SetRuleRequest,
     db=Depends(get_db),
-    _: dict = Depends(_require_scheduler),
+    _actor: WorkbenchActor = Depends(_schedule_edit),
 ) -> dict:
     """给一个人配轮转规则；今天以后的规则行立刻重铺，月历随即可见。"""
     store = SchedulingStore(db)
     try:
         result = await store.set_rule(employee_id, payload.cycle, payload.anchor_date)
     except SchedulingError as exc:
-        raise _bad_request(exc) from exc
+        raise _SCHEDULING_ERRORS.http(exc) from exc
     # 店长改了排班：当事人手机上的「今天」页该跟着变 —— 票 10 验收 4 在人机两侧都成立。
     await _scheduling_nudge("rule_changed", employee_id)
     return result
@@ -860,14 +840,14 @@ async def set_rule(
 async def clear_rule(
     employee_id: int,
     db=Depends(get_db),
-    _: dict = Depends(_require_scheduler),
+    _actor: WorkbenchActor = Depends(_schedule_edit),
 ) -> dict:
     """拿掉一个人的规则（连今天以后的规则行）。过去写过的不动。"""
     store = SchedulingStore(db)
     try:
         await store.clear_rule(employee_id)
     except SchedulingError as exc:  # pragma: no cover - 现在不会抛，留个一致的出口
-        raise _bad_request(exc) from exc
+        raise _SCHEDULING_ERRORS.http(exc) from exc
     await _scheduling_nudge("rule_cleared", employee_id)
     return {"employee_id": employee_id, "rule": None}
 
@@ -876,7 +856,7 @@ async def clear_rule(
 async def batch_overrides(
     payload: BatchOverrideRequest,
     db=Depends(get_db),
-    _: dict = Depends(_require_scheduler),
+    _actor: WorkbenchActor = Depends(_schedule_edit),
 ) -> dict:
     """先选一片、再一次刷完（票 14；ADR 0107 决策 5/6）。
 
@@ -908,7 +888,7 @@ async def batch_overrides(
             payload.half_rest,
         )
     except SchedulingError as exc:
-        raise _bad_request(exc) from exc
+        raise _SCHEDULING_ERRORS.http(exc) from exc
     # 真写下去的那些人一人一条（`_scheduling_nudge` 自己去重）：nudge 不带数据，员工
     # 自己重拉那几天。`employee_ids` 只给这一行用，响应里不带出去 —— 契约就三个键。
     await _scheduling_nudge("overrides_batched", *result.pop("employee_ids", ()))
@@ -921,7 +901,7 @@ async def set_override(
     business_date: str,
     payload: SetOverrideRequest,
     db=Depends(get_db),
-    _: dict = Depends(_require_scheduler),
+    _actor: WorkbenchActor = Depends(_schedule_edit),
 ) -> dict:
     """改某人某一天：换班次、改成休、或只换工作区 —— **只动这一天**（票 07）。
 
@@ -940,7 +920,7 @@ async def set_override(
             zone_id=payload.zone_id,
         )
     except SchedulingError as exc:
-        raise _bad_request(exc) from exc
+        raise _SCHEDULING_ERRORS.http(exc) from exc
     # 被临时调走（或被改成休）的人手机上的「今天」页要跟着变 —— 票 10 验收 6 的同一件事。
     await _scheduling_nudge("override_set", employee_id)
     return result
@@ -951,7 +931,7 @@ async def clear_override(
     employee_id: int,
     business_date: str,
     db=Depends(get_db),
-    _: dict = Depends(_require_scheduler),
+    _actor: WorkbenchActor = Depends(_schedule_edit),
 ) -> dict:
     """撤掉某人某天的覆盖，那天回到规则铺出来的样子（票 07）。
 
@@ -964,12 +944,12 @@ async def clear_override(
         result = await store.clear_override(employee_id, business_date)
     except SchedulingError as exc:
         # 日期格式不对、管理员没应用 0007 都会走到这里 —— 跟 PUT 那条一样的出口。
-        raise _bad_request(exc) from exc
+        raise _SCHEDULING_ERRORS.http(exc) from exc
     await _scheduling_nudge("override_cleared", employee_id)
     return result
 
 
-async def _inbox_payload(db, identity: dict) -> dict:
+async def _inbox_payload(db, actor: WorkbenchActor) -> dict:
     """待办 + 「这条是不是我自己的申请」标记（2026-11-02 审查的发现 1）。
 
     服务层不认人（它只知道申请是谁提的），「我」是会话的事，所以这一笔在这里标：
@@ -980,8 +960,8 @@ async def _inbox_payload(db, identity: dict) -> dict:
     try:
         data = await store.inbox()
     except SchedulingError as exc:
-        raise _bad_request(exc) from exc
-    decider = _decider_id(identity)
+        raise _SCHEDULING_ERRORS.http(exc) from exc
+    decider = _decider_id(actor)
     if decider is not None:
         for row in data.get("requests") or []:
             row["is_own"] = int(row.get("employee_id") or 0) == decider
@@ -990,7 +970,7 @@ async def _inbox_payload(db, identity: dict) -> dict:
 
 @router.get("/inbox")
 async def inbox(
-    db=Depends(get_db), identity: dict = Depends(_require_scheduler)
+    db=Depends(get_db), actor: WorkbenchActor = Depends(_schedule_edit)
 ) -> dict:
     """店长待办：等他批的申请 + 还没配规则的人（票 08 的待办页，票 09 起也收换班）。
 
@@ -1000,7 +980,7 @@ async def inbox(
     换班那张卡摊开两个人那天的班（`peer_*`），批了就是对调 —— 对调走两个人、来两个人，
     哪个班次的人数都不变，所以没有「剩几个人」这一项。**对方还没点头的换班不在这里**。
     """
-    data = await _inbox_payload(db, identity)
+    data = await _inbox_payload(db, actor)
     return data
 
 
@@ -1008,7 +988,7 @@ async def inbox(
 async def approve_request(
     request_id: int,
     db=Depends(get_db),
-    identity: dict = Depends(_require_scheduler),
+    actor: WorkbenchActor = Depends(_schedule_edit),
 ) -> dict:
     """批一条申请：请假那几天变成请假，换班两个人那天对调。
 
@@ -1019,9 +999,9 @@ async def approve_request(
     """
     store = SchedulingStore(db)
     try:
-        result = await store.approve_request(request_id, decided_by=_decider_id(identity))
+        result = await store.approve_request(request_id, decided_by=_decider_id(actor))
     except SchedulingError as exc:
-        raise _bad_request(exc) from exc
+        raise _SCHEDULING_ERRORS.http(exc) from exc
     # 批完两个人都要知道：申请人（他那几天变了）、换班的对方（两个人的班对调了）。
     await _scheduling_nudge(
         "request_approved", result.get("employee_id"), result.get("peer_employee_id")
@@ -1038,7 +1018,7 @@ async def reject_request(
     request_id: int,
     payload: Optional[RejectRequest] = None,
     db=Depends(get_db),
-    identity: dict = Depends(_require_scheduler),
+    actor: WorkbenchActor = Depends(_schedule_edit),
 ) -> dict:
     """驳回一条申请：排班一个字不改，只把申请记为驳回（票 08 的验收项；换班同理）。
 
@@ -1056,10 +1036,10 @@ async def reject_request(
     store = SchedulingStore(db)
     try:
         result = await store.reject_request(
-            request_id, decided_by=_decider_id(identity), reason=reason
+            request_id, decided_by=_decider_id(actor), reason=reason
         )
     except SchedulingError as exc:
-        raise _bad_request(exc) from exc
+        raise _SCHEDULING_ERRORS.http(exc) from exc
     # 驳回也要让申请人知道（他提的那条有结果了）。
     await _scheduling_nudge("request_rejected", result.get("employee_id"))
     # 群里也说一声，把店长写的那句原因带上 —— 员工看到「没批」却不知道为什么，

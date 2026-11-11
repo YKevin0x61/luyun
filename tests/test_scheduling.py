@@ -3943,18 +3943,21 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
         """错误码翻成中文：那句话要说全不能用的字符，并点名这次撞上的那个。
 
         这条特意穿到 HTTP 适配层 —— 错误码是服务层的，店长读到的那句话是接口层的，
-        两边都对才算数（`_bad_request` 就是所有排班路由共用的那个出口）。
+        两边都对才算数（`_SCHEDULING_ERRORS` 就是所有排班路由共用的那个出口）。
         """
-        from api.scheduling import _bad_request
+        from api.scheduling import _SCHEDULING_ERRORS
 
-        exc = _bad_request(SchedulingError("shift_name_charset", "/"))
+        exc = _SCHEDULING_ERRORS.http(SchedulingError("shift_name_charset", "/"))
         self.assertEqual(exc.status_code, 400)
         self.assertIn("空格", exc.detail)
         for char in (",", "，", "、", "·", "/"):
             self.assertIn(char, exc.detail)
         # 点名撞上的那个字符；空白那一种不给店长看一个看不见的东西。
         self.assertIn("「/」", exc.detail)
-        self.assertIn("「空格」", _bad_request(SchedulingError("shift_name_charset", "空格")).detail)
+        self.assertIn(
+            "「空格」",
+            _SCHEDULING_ERRORS.http(SchedulingError("shift_name_charset", "空格")).detail,
+        )
         self.assertNotIn("{}", exc.detail)
 
     async def test_usage_counts_people_in_the_rotation_and_days_written(self):
@@ -4134,9 +4137,9 @@ class SchedulingLayeringTest(unittest.TestCase):
         员工那扇门仍然全挂在 `/me` 底下。
 
         断言路由表本身，不是源码文本 —— 文本比对会被注释或文档字符串误伤
-        （写一句「这里不用 require_staff_session」就红了）。
+        （写一句「这里不用 staff_actor」就红了）。
         """
-        from api.scheduling import router
+        from api.scheduling import _schedule_edit, router, staff_actor
 
         staff_paths = {
             "/api/scheduling/me",
@@ -4180,25 +4183,27 @@ class SchedulingLayeringTest(unittest.TestCase):
             {route.path for route in router.routes}, staff_paths | manager_paths
         )
 
-        def dependency_names(dependant) -> set[str]:
-            names = set()
+        def dependency_calls(dependant) -> list:
+            calls = []
             for sub in dependant.dependencies:
-                names.add(getattr(sub.call, "__name__", ""))
-                names |= dependency_names(sub)
-            return names
+                calls.append(sub.call)
+                calls.extend(dependency_calls(sub))
+            return calls
 
         for route in router.routes:
-            names = dependency_names(route.dependant)
+            calls = dependency_calls(route.dependant)
+            names = {getattr(call, "__name__", "") for call in calls}
             if route.path in staff_paths:
-                self.assertIn("require_staff_session", names, route.path)
+                # 员工那扇门是边界预设 `staff_actor`（`require_action("staff_identity")`）：
+                # 解析员工 cookie，读的永远是自己；不能误挂到店长那扇门上。
+                self.assertIn(staff_actor, calls, route.path)
+                self.assertNotIn(_schedule_edit, calls, route.path)
                 self.assertNotIn("require_session", names, route.path)
             else:
-                # 2026-10-14 用户裁定：店长那一面（`_require_scheduler`）不再只认管理端会话
+                # 2026-10-14 用户裁定：店长那一面（`schedule_edit`）不再只认管理端会话
                 # —— 花名册上勾了「人事管理」（`schedule`）的员工用**员工会话**也进得来。
-                # 所以那一侧的断言点从 `require_session` 换成这一层门，它内部自带
-                # `require_any_identity_session`（先管理端、再员工）。
-                self.assertIn("_require_scheduler", names, route.path)
-                self.assertNotIn("require_staff_session", names, route.path)
+                self.assertIn(_schedule_edit, calls, route.path)
+                self.assertNotIn(staff_actor, calls, route.path)
 
         # 员工那扇门全挂在 `/me` 底下：读谁、动谁的申请都由会话决定，路径里不许出现
         # 员工号（票 08 的撤回带的是申请号 —— 申请号不是身份，拿别人的号也改不动）。
