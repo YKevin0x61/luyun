@@ -102,12 +102,8 @@ _ERROR_STATUS = {
     "unknown_entry": 404,
     "unknown_employee": 404,
     "unknown_deduction": 404,
-    # 「你没这个权限」不是「参数写错了」：403 与卫生的 `cannot_self_accept` 同一个口径。
-    "cannot_self_accept": 403,
-    # 那个月的账封了 = 状态冲突，不是参数错：409 让前端能单独特判（封账提示）。
-    "month_sealed": 409,
-    # `not_migrated` 不是「参数写错了」，是这台机器还没升级完 —— 503 比 400 诚实。
-    "not_migrated": 503,
+    # `cannot_self_accept`（403）、`month_sealed`（409）与 `not_migrated`（503）由
+    # 共享例外表提供，本域不再复写。
 }
 
 # 24 个 `raise` 出口共用这一份翻译：状态码查 `_ERROR_STATUS`，未登记的 code 默认 400，

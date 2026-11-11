@@ -177,8 +177,7 @@ _ERROR_STATUS = {
     "unknown_request": 404,
     "unknown_shift_id": 404,
     # 其余一律 400（`request_not_pending` 就是这一类：那一行在，只是不再是「等你批」）；
-    # `not_migrated` 不是「参数写错了」，是这台机器还没升级完 —— 503 比 400 诚实。
-    "not_migrated": 503,
+    # `not_migrated`（503）由共享例外表提供，本域不再复写。
 }
 
 # 共享的状态表把 `unknown_*` 通配成 404。排班里有四个老 code 描述的不是「那一行
@@ -349,15 +348,6 @@ class SwapRequest(BaseModel):
 # 必须在模块级定义一次并复用：`require_action("schedule_edit")` 每次都返回一个新的
 # 闭包，逐条路由各调一次就会变成 19 个互不相识的门（测试也按这个对象认门）。
 _schedule_edit = require_action("schedule_edit")
-
-
-def _decider_id(actor: WorkbenchActor) -> Optional[int]:
-    """当前审批人的员工 id；**管理后台那条路是 None**（它没有员工身份）。
-
-    `None` 在服务层是两个意思，别混：批准 / 驳回时它是「管理后台批的」（不受自批那道闸
-    约束，也记不成某个员工）；撤回时它是「没记」。见 `store._claim_request` 的 docstring。
-    """
-    return actor.employee_id if actor.kind == "staff" else None
 
 
 @router.get("/me")
@@ -961,7 +951,8 @@ async def _inbox_payload(db, actor: WorkbenchActor) -> dict:
         data = await store.inbox()
     except SchedulingError as exc:
         raise _SCHEDULING_ERRORS.http(exc) from exc
-    decider = _decider_id(actor)
+    # 管理后台不是某个员工：它的待办里没有「自己的申请」（`None` 不会命中任何一行）。
+    decider = None if actor.kind == "admin" else actor.employee_id
     if decider is not None:
         for row in data.get("requests") or []:
             row["is_own"] = int(row.get("employee_id") or 0) == decider
@@ -999,7 +990,10 @@ async def approve_request(
     """
     store = SchedulingStore(db)
     try:
-        result = await store.approve_request(request_id, decided_by=_decider_id(actor))
+        result = await store.approve_request(
+            request_id,
+            decided_by=None if actor.kind == "admin" else actor.employee_id,
+        )
     except SchedulingError as exc:
         raise _SCHEDULING_ERRORS.http(exc) from exc
     # 批完两个人都要知道：申请人（他那几天变了）、换班的对方（两个人的班对调了）。
@@ -1036,7 +1030,9 @@ async def reject_request(
     store = SchedulingStore(db)
     try:
         result = await store.reject_request(
-            request_id, decided_by=_decider_id(actor), reason=reason
+            request_id,
+            decided_by=None if actor.kind == "admin" else actor.employee_id,
+            reason=reason,
         )
     except SchedulingError as exc:
         raise _SCHEDULING_ERRORS.http(exc) from exc

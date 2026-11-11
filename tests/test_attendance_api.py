@@ -31,7 +31,7 @@ from openpyxl.utils import get_column_letter
 import api.attendance as attendance_module
 import api.auth as auth_module
 import api.scheduling as scheduling_module
-from api.workbench_boundary import require_action
+from api.workbench_boundary import ACTION_IDENTITIES, ACTION_NAMES, require_action
 import services.realtime.workbench as workbench_module
 import main
 from config import settings
@@ -3376,20 +3376,10 @@ def test_staff_with_the_hr_cap_can_read_and_edit_the_sheet(attendance_http):
 # `Depends(require_action(...))` 对象，所以验的是真正的门，不是把判据抄一遍。
 
 
-_ACTION_NAMES = (
-    "schedule_edit",
-    "overtime_review",
-    "wastage_view_all",
-    "prep_review",
-    "admin_only",
-    "staff_identity",
-)
-
-
 def _action_probe_app():
     app = FastAPI()
 
-    for action in _ACTION_NAMES:
+    for action in sorted(ACTION_NAMES):
 
         async def probe(actor=Depends(require_action(action))):
             return {
@@ -3403,6 +3393,28 @@ def _action_probe_app():
         app.get(f"/{action}")(probe)
 
     return app
+
+
+def test_the_six_action_table_is_complete_and_its_identity_tiers_are_legal():
+    """动作表是公开常量：六个动作都在，identity 只落在 any / staff / admin 三档。
+
+    `admin_only` 必须是独立的 `admin` 档 —— 早先它靠 `require_action` 的 if 分支实现；
+    若只是把 `identity="admin"` 填进表里而不实现这一档，它会落进 any 门，有能力的员工
+    就被放过去了。
+    """
+    assert ACTION_NAMES == frozenset(
+        {
+            "schedule_edit",
+            "overtime_review",
+            "wastage_view_all",
+            "prep_review",
+            "admin_only",
+            "staff_identity",
+        }
+    )
+    assert set(ACTION_IDENTITIES) == ACTION_NAMES
+    assert set(ACTION_IDENTITIES.values()) <= {"any", "staff", "admin"}
+    assert ACTION_IDENTITIES["admin_only"] == "admin"
 
 
 def test_the_six_action_gates_are_one_matrix_over_four_identities(attendance_http):
@@ -3582,6 +3594,36 @@ def test_admin_only_can_say_the_route_sentence_to_staff(attendance_http):
     assert anonymous.status_code == 401
     assert anonymous.json()["detail"] == "未授权"
     assert "x-error-code" not in anonymous.headers
+
+
+def test_admin_only_denies_staff_even_with_a_capability(attendance_http):
+    """admin 档不是「能力强就给过」：员工带满能力键也读 403（管理端专属动作）。
+
+    这条盯的是 `_ActionRule.identity` 的实现：若 `admin_only` 落进 any 能力门并带上
+    某个能力键，员工只要开了那项能力就会被放过去 —— 管理端专属动作的提权。
+    """
+    client, _db, accounts = attendance_http
+    admin_session = _admin_cookie(client)
+    employee_id = _employee_id(accounts)
+    staff_session = _run(accounts.login(PHONE, PASSWORD))["session_id"]
+    _run(accounts.set_admin_caps(employee_id, ["schedule", "wastage", "prep_review"]))
+
+    app = FastAPI()
+
+    @app.get("/weather")
+    async def weather(actor=Depends(require_action("admin_only", label="查看天气配置"))):
+        return {"kind": actor.kind}
+
+    probe = TestClient(app)
+    probe.cookies.set(settings.SESSION_COOKIE_NAME, admin_session)
+    assert probe.get("/weather").status_code == 200
+
+    probe.cookies.clear()
+    probe.cookies.set(settings.STAFF_SESSION_COOKIE_NAME, staff_session)
+    refused = probe.get("/weather")
+    assert refused.status_code == 403
+    assert refused.json()["detail"] == "员工不能查看天气配置"
+    assert refused.headers["X-Error-Code"] == "admin_only"
 
 
 def test_the_employee_attendance_view_stays_employee_only(attendance_http):

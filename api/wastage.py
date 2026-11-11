@@ -122,13 +122,8 @@ _ERROR_STATUS = {
     # 共享例外表把 `unknown_*` 通配成 404；这个 code 在损耗这边一直是 **400** —— 错的
     # 是「选了一个不存在的备货品」，不是「要改的那条记录没了」。
     "unknown_prep_item": 400,
-    # 看得到不等于改得了：不是本人记的，403 比 404 诚实（这条不是没了，是不归你）。
-    "not_owner": 403,
-    # 窗口过了不是请求写错，是此刻不允许 —— 409 让前端能和 400 的「参数错」分开提示。
-    "amend_window_closed": 409,
-    # `not_migrated` 不是「参数写错了」，是这台机器还没升级完 —— 503 比 400 诚实。
-    "not_migrated": 503,
-    "images_unavailable": 503,
+    # `not_owner`（403）、`amend_window_closed`（409）、`not_migrated` 与
+    # `images_unavailable`（503）由共享例外表提供，本域不再复写。
 }
 
 # 本域唯一的业务错误出口（票 04）：文案表与状态覆盖仍是原来那两份数据，边界只多做

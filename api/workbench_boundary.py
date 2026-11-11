@@ -104,15 +104,17 @@ def _actor(identity: dict) -> WorkbenchActor:
 
 @dataclass(frozen=True)
 class _ActionRule:
-    """动作表的一行：身份形态 + 员工侧需要的能力 + 缺能力时那句话。"""
+    """动作表的一行：身份档 + 员工侧需要的能力 + 403 的文案与 code。"""
 
-    identity: str  # "any" | "admin" | "staff"
+    identity: str  # "any" | "staff" | "admin"
     capability: Optional[str] = None
     denial: str = ""
+    code: str = "capability_required"
 
 
-# 六动作表。`admin_only` 与 `staff_identity` 的拒绝不是「缺能力」，是「身份不对」，
-# 单独走下面两个依赖；`admin_only` 的 403 变体还要按路由换文案（`label`）。
+# 六动作表（spec 硬要求）：身份、能力、403 文案与 `X-Error-Code` 都只在这里声明，
+# `require_action` 只查表，不再按动作名分支。`admin_only` 的 403 文案随路由走
+# （`label`），其余动作的 `denial` 是唯一来源。
 _ACTION_RULES = {
     "schedule_edit": _ActionRule(
         "any",
@@ -132,9 +134,28 @@ _ACTION_RULES = {
         "只有开了「损耗分析」权限的人能看全店损耗统计：请找超级管理员在花名册里开通",
     ),
     "prep_review": _ActionRule("any", CAP_PREP_REVIEW, "没有「备货复盘」权限"),
+    # 只认管理端会话。无 `label` 时是加班 `/admin` 的 401 形态（员工与匿名都只说
+    # 「需要登录」）；带 `label` 时是备货 manager 的 403 形态（员工读到路由那句话）。
+    # 两档都不看能力键：员工即使有 cap 也不能过。
+    "admin_only": _ActionRule("admin", None, "", "admin_only"),
+    # 只认员工会话，`/me` 路由自己取 `employee_id`；没有能力判据，也不会 403。
+    "staff_identity": _ActionRule("staff"),
 }
 
-_ACTION_NAMES = frozenset(_ACTION_RULES) | {"admin_only", "staff_identity"}
+_VALID_IDENTITIES = frozenset({"any", "staff", "admin"})
+
+# 加载时校验：identity 是动作门的判据，写错一个字符串不能等到请求进来才发现。
+for _name, _rule in _ACTION_RULES.items():
+    if _rule.identity not in _VALID_IDENTITIES:
+        raise ValueError(f"工作台动作 {_name} 的 identity 非法: {_rule.identity}")
+del _name, _rule
+
+# 公开视图（票 07）：动作名与 identity 档。测试从这里取，别再抄一份动作名——
+# 抄的那份会漂（考勤测试曾自己维护过一个 `_ACTION_NAMES`）。
+ACTION_NAMES: frozenset[str] = frozenset(_ACTION_RULES)
+ACTION_IDENTITIES: Mapping[str, str] = {
+    name: rule.identity for name, rule in _ACTION_RULES.items()
+}
 
 
 async def _identity_actor(
@@ -144,40 +165,8 @@ async def _identity_actor(
     return _actor(identity)
 
 
-async def _staff_identity_actor(
-    identity: dict = Depends(require_staff_identity),
-) -> WorkbenchActor:
-    """只认员工会话：员工端 `/me` 那一侧。管理端 cookie 在这里也是 401。"""
-    return _actor(identity)
-
-
-async def _admin_only_session(
-    session_id: str = Depends(require_session),
-) -> WorkbenchActor:
-    """只认管理端会话（加班 `/admin` 那一侧）：员工与匿名都拿 401「需要登录」。"""
-    return WorkbenchActor(kind="admin", name="管理端", session_id=session_id)
-
-
-def _admin_only_denial(label: str):
-    """`admin_only` 的 403 变体（备货 manager 那一侧）：员工的拒绝句按路由给。"""
-
-    async def _gate(
-        identity: dict = Depends(require_any_identity_session),
-    ) -> WorkbenchActor:
-        if identity.get("kind") == "admin":
-            return _actor(identity)
-        raise HTTPException(
-            status_code=403,
-            detail=f"员工不能{label}",
-            headers={"X-Error-Code": "admin_only"},
-        )
-
-    return _gate
-
-
 def _capability_gate(rule: _ActionRule):
-    if rule.identity == "staff":
-        return _staff_capability_gate(rule)
+    """any 档：管理端直接放行，员工要有能力键。"""
 
     async def _gate(
         identity: dict = Depends(require_any_identity_session),
@@ -185,35 +174,69 @@ def _capability_gate(rule: _ActionRule):
         actor = _actor(identity)
         if actor.kind == "admin":
             return actor
-        if rule.capability is None or not actor.has_cap(rule.capability):
+        if rule.capability is not None and not actor.has_cap(rule.capability):
             raise HTTPException(
                 status_code=403,
                 detail=rule.denial,
-                headers={"X-Error-Code": "capability_required"},
+                headers={"X-Error-Code": rule.code},
             )
         return actor
 
     return _gate
 
 
-def _staff_capability_gate(rule: _ActionRule):
-    """员工身份门 + 能力判据：管理端 cookie 在这里是 401，不回落成「admin 放行」。
+def _staff_gate(rule: _ActionRule):
+    """staff 档：只认员工会话（管理端 cookie 也是 401），再过能力门。
 
-    加班审批（`overtime_review`）是唯一用这一档的动作 —— 店长就是花名册上一个真人
-    加员工会话（ADR 0103），给他开管理端账号不是这一票的选项。
+    `staff_identity` 是这一档里 `capability=None` 的特例：只解析身份，不判能力。
+    加班审批（`overtime_review`）是唯一「只认员工会话 + 能力」的动作 —— 店长就是
+    花名册上一个真人加员工会话（ADR 0103）。
     """
 
     async def _gate(
         identity: dict = Depends(require_staff_identity),
     ) -> WorkbenchActor:
         actor = _actor(identity)
-        if rule.capability is None or not actor.has_cap(rule.capability):
+        if rule.capability is not None and not actor.has_cap(rule.capability):
             raise HTTPException(
                 status_code=403,
                 detail=rule.denial,
-                headers={"X-Error-Code": "capability_required"},
+                headers={"X-Error-Code": rule.code},
             )
         return actor
+
+    return _gate
+
+
+def _admin_gate(rule: _ActionRule, label: Optional[str]):
+    """admin 档：只放管理端会话，员工即使有相应能力键也过不去。
+
+    两种拒绝形态按现行路由逐字保留：无 `label`（加班 `/admin`）走 `require_session`，
+    员工与匿名都 401「需要登录」；带 `label`（备货 manager）先过「任一身份」门，
+    员工读 403「员工不能{label}」+ `admin_only`。
+    """
+    if label is None:
+
+        async def _gate(
+            session_id: str = Depends(require_session),
+        ) -> WorkbenchActor:
+            return WorkbenchActor(
+                kind="admin", name="管理端", session_id=session_id
+            )
+
+        return _gate
+
+    async def _gate(
+        identity: dict = Depends(require_any_identity_session),
+    ) -> WorkbenchActor:
+        actor = _actor(identity)
+        if actor.kind == "admin":
+            return actor
+        raise HTTPException(
+            status_code=403,
+            detail=f"员工不能{label}",
+            headers={"X-Error-Code": rule.code},
+        )
 
     return _gate
 
@@ -224,17 +247,16 @@ def require_action(action: str, *, label: Optional[str] = None):
     `label` 只用于 `admin_only` 的 403 变体：备货 manager 那几条路由各自有一句话
     （「员工不能查看天气配置」……），由调用方传进来，本层不维护路由文案表。
     """
-    if action not in _ACTION_NAMES:
+    rule = _ACTION_RULES.get(action)
+    if rule is None:
         raise ValueError(f"未知的工作台动作: {action}")
-    if action == "admin_only":
-        if label is not None:
-            return _admin_only_denial(label)
-        return _admin_only_session
-    if action == "staff_identity":
-        if label is not None:
-            raise ValueError("staff_identity 不接受 label")
-        return _staff_identity_actor
-    return _capability_gate(_ACTION_RULES[action])
+    if rule.identity == "admin":
+        return _admin_gate(rule, label)
+    if label is not None:
+        raise ValueError(f"label 只用于 admin_only: {action}")
+    if rule.identity == "staff":
+        return _staff_gate(rule)
+    return _capability_gate(rule)
 
 
 # 两个预设 + 「只解析身份」的公开名字：03–06 的票面按这三个名字接线。
@@ -295,10 +317,10 @@ class WorkbenchErrors:
 
 
 def wrap_unhandled(exc: Exception, action: str) -> HTTPException:
-    """没有码表的模块用的兜底翻译（同 `api/prep_plan.py` 的 `_wrap`）。
+    """没有码表的模块用的兜底翻译（备货计划已接线，同原 `_wrap` 的用法）。
 
-    本票只定义，05 备货迁移时才接线：PermissionError → 403、ValueError → 400、
-    其余 → 500 并 `logger.exception`。返回而不抛出，保持原 `_wrap` 的用法。
+    PermissionError → 403、ValueError → 400、其余 → 500 并 `logger.exception`；
+    返回而不抛出，调用方 `raise wrap_unhandled(exc, "...")` 即可。
     """
     if isinstance(exc, PermissionError):
         return HTTPException(status_code=403, detail="只能操作自己档口的备货项")

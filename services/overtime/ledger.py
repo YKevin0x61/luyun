@@ -30,6 +30,7 @@ import asyncpg
 
 from db_core.utils import CHINA_TZ
 from services.identity import EmployeeAccounts, serialized_write
+from services.identity.capabilities import CAP_SCHEDULE
 
 logger = logging.getLogger(__name__)
 
@@ -168,7 +169,7 @@ class EntryActor:
             return cls()
         return cls(
             employee_id=int(actor.employee_id),
-            can_backfill=bool(actor.has_cap("schedule")),
+            can_backfill=bool(actor.has_cap(CAP_SCHEDULE)),
         )
 
 

@@ -106,11 +106,7 @@ _ERROR_DETAILS = {
 }
 
 _ERROR_STATUS = {
-    # `not_migrated` 不是「参数写错了」，是这台机器还没升级完 —— 503 比 400 诚实。
-    "not_migrated": 503,
-    # 封过的月 = 这次的写入与台账里已经定稿的那一行**冲突**：409 比 400 诚实
-    # （同逐日改格的 `pending_request` 与封账的 `already_sealed`）。
-    "month_sealed": 409,
+    # `not_migrated`（503）与 `month_sealed`（409）由共享例外表提供，本域不再复写。
     # 手填列的写口上那个 id **压根没有人**（返工 ④）：缺的是**资源本身**，不是参数格式
     # —— 404 比 400 诚实，也正是排班（`api/scheduling.py`）与加班（`api/overtime.py`）
     # 里同名 code 的状态码。
