@@ -29,7 +29,7 @@ import re
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Sequence
 
 import asyncpg
 
@@ -1021,6 +1021,51 @@ class WastageStore:
             "top_items": top_items,
             "daily_stats": daily_stats,
         }
+
+    # ── 复盘读口 ────────────────────────────────────────────────────────────
+    @_needs_migration
+    async def scrap_quantities(
+        self,
+        start_date: Any,
+        end_date: Any,
+        reasons: Sequence[str],
+    ) -> list[dict]:
+        """一段自然日内、指定原因集合的报废登记量（复盘对账用的窄读口）。
+
+        只回四个事实字段，不替调用方分桶、也不猜 id 与品名谁该回落——那是复盘
+        成本算法的语义（见 `services/prep_review/summary.py`）。**撤回的记录不回**
+        （台账契约：所有读路径把 `revoked_at` 当不存在）；原因集合由调用方给，
+        「哪些原因算多备代价」是复盘口径，不是台账口径。日期含两端；`reasons`
+        必须非空，静默回空会把调用方的错藏起来。
+        """
+        first = _require_date(start_date)
+        last = _require_date(end_date)
+        if first > last:
+            raise WastageError("invalid_range", "invalid_range")
+        if not reasons:
+            raise WastageError("missing_reasons", "missing_reasons")
+        keys = [_require_reason(reason) for reason in reasons]
+        placeholders = ", ".join("?" for _ in keys)
+        rows = await self._rows(
+            "SELECT wastage_date, prep_item_id, item_name, quantity"
+            " FROM wastage_records"
+            " WHERE revoked_at IS NULL"
+            " AND wastage_date >= ? AND wastage_date <= ?"
+            f" AND reason IN ({placeholders})"
+            " ORDER BY wastage_date, id",
+            (first, last, *keys),
+        )
+        return [
+            {
+                "wastage_date": str(row["wastage_date"] or ""),
+                "prep_item_id": (
+                    int(row["prep_item_id"]) if row["prep_item_id"] is not None else None
+                ),
+                "item_name": row["item_name"] or "",
+                "quantity": float(row["quantity"] or 0.0),
+            }
+            for row in rows
+        ]
 
     # ── 历史建议 ────────────────────────────────────────────────────────────
     @_needs_migration

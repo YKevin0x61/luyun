@@ -28,6 +28,7 @@ from api.security import require_any_identity_session, verify_admin_token
 from database import CHINA_TZ, DatabaseManager, get_db
 from services.prep_review.summary import review_summary
 from services.prep_plan_service import PrepPlanService
+from services.wastage.store import WastageActor, WastageStore
 
 ITEM_NAME = "虾饺馅"
 UNIT = "份"
@@ -185,7 +186,9 @@ class ReviewFixture(unittest.IsolatedAsyncioTestCase):
                     f"{day}T07:00:00+08:00",
                 ),
             )
+            record_id = cursor.lastrowid
         await tdb.commit()
+        return record_id
 
     async def _seed_order(self, day, qty, total_amount, *, hour=9,
                           dish_name=DISH_NAME, status="已结"):
@@ -402,6 +405,30 @@ class CostTests(ReviewFixture):
         self.assertEqual(cost["pending_trajectory"], 1)
         self.assertIn("excess", cost["wastage_reasons"])
         self.assertNotIn("damaged", cost["wastage_reasons"])
+
+    async def test_revoked_wastage_is_not_counted_in_cost(self):
+        """撤回的那笔不进 cost.wastage，也不进 wastage_recorded_qty（台账契约）。"""
+        item_id = await self._seed_item()
+        await self._seed_rule(item_id=item_id, factor=1.0)
+        await self._seed_snapshot("2026-10-19", item_id, 100)
+        await self._seed_actual("2026-10-19", item_id, 80)
+        await self._seed_wastage("2026-10-19", 3, item_id=item_id, reason="expired")
+        gone = await self._seed_wastage(
+            "2026-10-19", 5, item_id=item_id, reason="excess"
+        )
+        admin = WastageActor(kind="admin", employee_id=None, name="管理端")
+        revoked = await WastageStore(self.db).revoke_record(admin, gone)
+        self.assertIsNotNone(revoked["revoked_at"])
+
+        body = await self._summary("2026-10-22", days=10)
+        cost = body["cost"]
+        self.assertAlmostEqual(cost["overfill_qty"], 20)
+        self.assertAlmostEqual(cost["wastage"], 3)
+        self.assertAlmostEqual(cost["wastage_recorded_qty"], 3)
+        self.assertAlmostEqual(
+            cost["next_day_sold"] + cost["wastage"] + cost["unexplained"],
+            cost["overfill_qty"],
+        )
 
 
 class SnapshotDayTests(ReviewFixture):

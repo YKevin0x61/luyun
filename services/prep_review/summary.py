@@ -32,21 +32,21 @@
   - `next_day_sold`：次日仍卖掉的增量 `min(多备量, max(0, sold_next_day − sold_qty))`。
     `sold_next_day` 为 NULL 表示 24 小时观测点还没到，这部分暂记 0 并计入
     `pending_trajectory`（不是「没卖掉」，是「还不知道」）。
-  - `wastage`：同期登记的报废量。`wastage_records` 没有 status 列，按 `reason`
-    识别报废类：`excess` 备货过量 / `expired` 过期丢弃 / `spoiled` 变质腐败；
-    `damaged` 破损、`production_fail` 制作失败属操作事故、`other` 原因不明，都不算
-    「备多了的代价」。先按 `prep_item_id` 匹配，登记行缺 id 时按品名匹配；
-    单条多备最多吃掉它自己的量（`min(剩余, 已登记报废)`），不跨品-天挪账。
-    目前损耗登记还没有写 0049 预留的 `window_start`（登记入口不区分钟点窗口），
-    所以按 `wastage_date` 落到自然日，再与当天的 07:00 品-天对齐。
+  - `wastage`：同期登记的报废量。走台账读口 `WastageStore.scrap_quantities`
+    （撤回的记录不存在）；原因集合仍是复盘的 `WASTAGE_REASONS`：`excess` 备货过量 /
+    `expired` 过期丢弃 / `spoiled` 变质腐败；`damaged` 破损、`production_fail` 制作失败
+    属操作事故、`other` 原因不明，都不算「备多了的代价」。先按 `prep_item_id` 匹配，
+    登记行缺 id 时按品名匹配；单条多备最多吃掉它自己的量（`min(剩余, 已登记报废)`），
+    不跨品-天挪账。登记行虽然带 07:00 的 `window_start/window_end`，复盘仍按
+    `wastage_date` 落到自然日，再与当天的 07:00 品-天对齐（登记入口不区分钟点）。
   - `unexplained`：扣掉上两项剩下的部分（负值归 0）。三项之和恒等于总多备量。
   - `estimated_amount`：多备量 × 估算单价。单价用 `period` 内订单的加权成交均价：
     `Σtotal_amount / Σ(quantity × 配方系数)`，即「每个半成品单位的销售额」。
     一张菜映射到多个半成品时按各自配方系数占比分摊金额，避免把整道菜价重复算给
     每个配料。没有订单证据的品单价按 0 处理，所以金额是**估算**（`estimated=true`），
     不是成本核算。
-- `wastage_recorded_qty` 是同期报废类登记的原始总量（不封顶），用来和损耗台账对账；
-  它可能大于 `wastage`，因为只有「多备」的品-天才会被分摊。
+- `wastage_recorded_qty` 是同期报废类登记的原始总量（不封顶、撤回的不算），
+  用来和损耗台账对账；它可能大于 `wastage`，因为只有「多备」的品-天才会被分摊。
 
 只读：本模块不写任何表。
 """
@@ -61,6 +61,7 @@ from database import CHINA_TZ
 from services.dish_normalize import normalize_dish_name
 from services.prep_plan_service import LOUMIAN_STATION, prep_plan_service
 from services.prep_review import retention
+from services.wastage.store import WastageStore
 
 logger = logging.getLogger(__name__)
 
@@ -243,32 +244,26 @@ async def _load_contexts(db, start_day: date, end_day: date) -> Dict[str, Dict[s
 async def _load_wastage(
     db, start_day: date, end_day: date
 ) -> Tuple[Dict[Tuple[str, int], float], Dict[Tuple[str, str], float], float]:
-    """期间内报废类登记量。按 id / 品名分两桶返回（两桶互斥），附原始总量。"""
-    tdb = db.table("wastage_records")
-    placeholders = ", ".join("?" for _ in WASTAGE_REASONS)
-    async with tdb.conn.cursor() as cursor:
-        await cursor.execute(
-            f"""
-            SELECT wastage_date, prep_item_id, item_name, quantity
-            FROM wastage_records
-            WHERE wastage_date >= ? AND wastage_date <= ?
-              AND reason IN ({placeholders})
-            """,
-            (start_day.isoformat(), end_day.isoformat(), *WASTAGE_REASONS),
-        )
-        raw = await cursor.fetchall()
+    """期间内报废类登记量。按 id / 品名分两桶返回（两桶互斥），附原始总量。
+
+    读走台账的 `scrap_quantities` 窄读口：撤回的记录在那边已经排除，这里只负责
+    分桶与累加，不再自己写 SQL。
+    """
+    rows = await WastageStore(db).scrap_quantities(
+        start_day.isoformat(), end_day.isoformat(), WASTAGE_REASONS
+    )
 
     by_id: Dict[Tuple[str, int], float] = defaultdict(float)
     by_name: Dict[Tuple[str, str], float] = defaultdict(float)
     recorded = 0.0
-    for row in raw:
-        qty = float(row["quantity"] or 0.0)
+    for row in rows:
+        qty = row["quantity"]
         recorded += qty
-        day = str(row["wastage_date"] or "")
+        day = row["wastage_date"]
         if row["prep_item_id"] is not None:
-            by_id[(day, int(row["prep_item_id"]))] += qty
+            by_id[(day, row["prep_item_id"])] += qty
         else:
-            by_name[(day, row["item_name"] or "")] += qty
+            by_name[(day, row["item_name"])] += qty
     return by_id, by_name, recorded
 
 

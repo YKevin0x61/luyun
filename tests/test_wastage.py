@@ -637,6 +637,12 @@ class WastageStoreTest(unittest.IsolatedAsyncioTestCase):
             [t["item_name"] for t in templates["templates"]], ["豆腐"]
         )
 
+        # 复盘对账读口同样看不见撤回的那笔。
+        scrap = await self.store.scrap_quantities(
+            TODAY, TODAY, ("excess", "expired", "spoiled")
+        )
+        self.assertEqual([row["item_name"] for row in scrap], ["豆腐"])
+
         # 行没有被物理删：撤回时间与撤回人都在。
         cur = await self.db._conn.execute(
             'SELECT revoked_at, revoked_by_kind, revoked_by_employee_id'
@@ -647,6 +653,75 @@ class WastageStoreTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(row["revoked_at"])
         self.assertEqual(row["revoked_by_kind"], "staff")
         self.assertEqual(row["revoked_by_employee_id"], employee["id"])
+
+    async def test_scrap_quantities_reads_facts_without_revoked_rows(self):
+        """复盘读口：只回四样事实；撤回的记录不存在；reason 过滤、日期含两端。"""
+        employee = await self._employee()
+        actor = _staff(employee["id"])
+        await self.store.add_record(
+            actor, item_name="豆腐", quantity=1.5, unit="盒", reason="expired",
+            wastage_date=YESTERDAY,
+        )
+        gone = await self.store.add_record(
+            actor, item_name="青菜", quantity=2, unit="份", reason="spoiled",
+            wastage_date=TODAY,
+        )
+        await self.store.add_record(
+            actor, item_name="五花肉", quantity=3, unit="kg", reason="damaged",
+            wastage_date=YESTERDAY,
+        )
+        await self.store.revoke_record(actor, gone["id"])
+
+        rows = await self.store.scrap_quantities(
+            YESTERDAY, TODAY, ("excess", "expired", "spoiled")
+        )
+        self.assertEqual(
+            rows,
+            [
+                {
+                    "wastage_date": YESTERDAY,
+                    "prep_item_id": None,
+                    "item_name": "豆腐",
+                    "quantity": 1.5,
+                }
+            ],
+        )
+        # 端点包含：只查起始那天也有它。
+        only_start = await self.store.scrap_quantities(
+            YESTERDAY, YESTERDAY, ("expired",)
+        )
+        self.assertEqual([row["item_name"] for row in only_start], ["豆腐"])
+
+        # 结束端也包含：只查结束那天能读到当天那笔。
+        await self.store.add_record(
+            actor, item_name="土豆", quantity=0.5, unit="kg", reason="excess",
+            wastage_date=TODAY,
+        )
+        only_end = await self.store.scrap_quantities(
+            TODAY, TODAY, ("excess",)
+        )
+        self.assertEqual([row["item_name"] for row in only_end], ["土豆"])
+
+    async def test_scrap_quantities_rejects_empty_reasons_and_bad_range(self):
+        with self.assertRaises(WastageError) as ctx:
+            await self.store.scrap_quantities(TODAY, TODAY, ())
+        self.assertEqual(ctx.exception.code, "missing_reasons")
+
+        with self.assertRaises(WastageError) as ctx:
+            await self.store.scrap_quantities(TODAY, TODAY, ("",))
+        self.assertEqual(ctx.exception.code, "invalid_reason")
+
+        with self.assertRaises(WastageError) as ctx:
+            await self.store.scrap_quantities(TODAY, TODAY, ("excess", "wrong"))
+        self.assertEqual(ctx.exception.code, "invalid_reason")
+
+        with self.assertRaises(WastageError) as ctx:
+            await self.store.scrap_quantities(TODAY, YESTERDAY, ("excess",))
+        self.assertEqual(ctx.exception.code, "invalid_range")
+
+        with self.assertRaises(WastageError) as ctx:
+            await self.store.scrap_quantities("2026-02-30", TODAY, ("excess",))
+        self.assertEqual(ctx.exception.code, "invalid_date")
 
     async def test_revoke_writes_a_revision_with_the_whole_snapshot(self):
         """撤回也留修订：before = 撤回前的整行快照，after 是空对象。"""
