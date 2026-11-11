@@ -157,6 +157,9 @@ async function mountView(component, path, identity = 'staff', query = null) {
         // 页内相机挂的是真组件（`getUserMedia` 在 jsdom 里没有）：这里替身只负责
         // 「在不在、交不交得回一张图」。
         HygieneLiveCamera: { name: 'HygieneLiveCamera', template: '<div class="stub-camera" />' },
+        // 全屏相机与图片灯箱都 Teleport 到 body：测试里换成普通容器，断言才找得到内容
+        // （真机上仍是 Teleport，见 WastageRegisterView 的 .loss-cam）。
+        Teleport: { name: 'Teleport', template: '<div class="stub-teleport"><slot /></div>' },
       },
     },
   })
@@ -384,18 +387,21 @@ describe('损耗登记页（员工端）', () => {
       '改日期',
       '＋备货品',
     ])
-    // 默认全收着：照片区、备注框、日期快捷都不在 DOM 里（首屏一屏看完）。
+    // 默认：照片条不占位（还没拍照）、备注框与日期快捷也不在 DOM 里（首屏一屏看完）。
     expect(wrapper.find('.loss-photo').exists()).toBe(false)
     expect(wrapper.find('textarea').exists()).toBe(false)
     expect(wrapper.find('.loss-day').exists()).toBe(false)
     expect(wrapper.findComponent({ name: 'HygieneLiveCamera' }).exists()).toBe(false)
 
-    // 点开第一颗 → 照片区出现（仍在本表单里，仍是页内相机）。
+    // 点第一颗 → **直接**开全屏相机（2026-11-11：原来要先展开照片区、再点「拍一张」）。
     await moreButton(wrapper, '现场照片').trigger('click')
-    expect(wrapper.get('form.loss-block .loss-photo').exists() || wrapper.find('.loss-photo').exists()).toBe(true)
-    // 再点一次收起。
-    await moreButton(wrapper, '现场照片').trigger('click')
-    expect(wrapper.find('.loss-photo').exists()).toBe(false)
+    expect(wrapper.find('.loss-cam').exists()).toBe(true)
+    expect(wrapper.find('.loss-cam .stub-camera').exists()).toBe(true)
+    expect(document.body.style.overflow).toBe('hidden')
+    // 收起 → 浮层消失、页面滚动解锁。
+    await wrapper.get('.loss-cam-close').trigger('click')
+    expect(wrapper.find('.loss-cam').exists()).toBe(false)
+    expect(document.body.style.overflow).toBe('')
 
     // 备注：点开才出现。
     await moreButton(wrapper, '备注').trigger('click')
@@ -548,23 +554,19 @@ describe('损耗登记页（员工端）', () => {
     expect(wrapper.text()).toContain('选了「其他」要说明')
   })
 
-  it('现场照片：「＋现场照片」点开才在表单里，点「拍一张」就地开相机（不跳系统相机）', async () => {
+  it('现场照片：点「＋现场照片」一下就开全屏相机；拍完随手收起，缩略图留在表单里', async () => {
     const wrapper = await mountView(WastageRegisterView, '/workbench/staff/loss')
     await flushPromises()
 
     await moreButton(wrapper, '现场照片').trigger('click')
-    // 照片是**这一笔损耗**表单里的一节，不浮在卡片外面。
-    const form = wrapper.get('form.loss-block')
-    expect(form.find('.loss-photo').exists()).toBe(true)
-    expect(form.get('.loss-photo').text()).toContain('现场照片')
-
-    // 没有 file input：这一版不走「系统相机 / 相册」那条路 —— 那条路在 iPhone 上拿到的是
+    // 一次点击直达取景 —— 没有「先展开照片区、再点拍一张」那一层（2026-11-11 用户反馈）。
+    expect(wrapper.get('.loss-cam').find('.stub-camera').exists()).toBe(true)
+    expect(wrapper.find('.loss-photo').exists()).toBe(false)
+    // 没有 file input：不走「系统相机 / 相册」那条路 —— 那条路在 iPhone 上拿到的是
     // HEIC，后端认不出格式（用户真机上撞过）。
     expect(wrapper.find('input[type="file"]').exists()).toBe(false)
-    // 相机默认收着，点一下才展开 —— 页内取景，不跳出去。
-    expect(wrapper.find('.stub-camera').exists()).toBe(false)
-    await wrapper.get('.loss-shot-add').trigger('click')
-    expect(wrapper.find('.stub-camera').exists()).toBe(true)
+    // 浮层打开期间页面锁滚：取景框固定占满、不跟着手指滚。
+    expect(document.body.style.overflow).toBe('hidden')
 
     upload.mockResolvedValue({
       image: { capture_id: 'abc', url: '/api/wastage/images/abc' },
@@ -577,7 +579,44 @@ describe('损耗登记页（员工端）', () => {
     expect(upload).toHaveBeenCalledTimes(1)
     // 上传也带声明：图归属决定提交时能不能绑进这一笔。
     expect(upload.mock.calls[0][0]).toBe('/api/wastage/images?identity=staff')
-    expect(wrapper.findAll('.loss-shot')).toHaveLength(1)
+    // 没拍满：相机继续开着（下一张不用再点进来），缩略图已在浮层里排上。
+    expect(wrapper.find('.loss-cam').exists()).toBe(true)
+    expect(wrapper.findAll('.loss-cam-shot')).toHaveLength(1)
+
+    await wrapper.get('.loss-cam-close').trigger('click')
+    expect(wrapper.find('.loss-cam').exists()).toBe(false)
+    expect(document.body.style.overflow).toBe('')
+    // 表单里的照片条：能看、能删、能「再拍」。
+    expect(wrapper.get('.loss-photo').findAll('.loss-shot')).toHaveLength(1)
+    expect(wrapper.get('.loss-shot-add').text()).toContain('再拍')
+  })
+
+  it('现场照片：拍满 3 张自动收起相机，删掉一张后恢复「再拍」', async () => {
+    const wrapper = await mountView(WastageRegisterView, '/workbench/staff/loss')
+    await flushPromises()
+
+    await moreButton(wrapper, '现场照片').trigger('click')
+    for (const id of ['a1', 'a2', 'a3']) {
+      upload.mockResolvedValueOnce({
+        image: { capture_id: id, url: '/api/wastage/images/' + id },
+      })
+      wrapper
+        .findComponent({ name: 'HygieneLiveCamera' })
+        .vm.$emit('captured', new Blob(['jpeg'], { type: 'image/jpeg' }))
+      await flushPromises()
+    }
+
+    // 第 3 张一传完就自动收起（浮层还开着、按钮却点不动会像卡住）。
+    expect(wrapper.find('.loss-cam').exists()).toBe(false)
+    expect(document.body.style.overflow).toBe('')
+    expect(wrapper.findAll('.loss-photo .loss-shot')).toHaveLength(3)
+    expect(moreButton(wrapper, '现场照片').text()).toBe('现场照片 · 3/3')
+    expect(wrapper.find('.loss-shot-add').exists()).toBe(false)
+
+    // 删一张 → 照片条重新给「再拍」。
+    await wrapper.get('.loss-shot-x').trigger('click')
+    expect(wrapper.findAll('.loss-photo .loss-shot')).toHaveLength(2)
+    expect(wrapper.get('.loss-shot-add').text()).toContain('再拍')
   })
 
   it('日期快捷：点「昨天」提交的就是昨天（跨零点补记）', async () => {

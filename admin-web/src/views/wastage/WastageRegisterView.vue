@@ -37,6 +37,11 @@
  * 上一轮（2026-11-07 审查后）的六处仍然有效：错误就地、手机档吸底、选「其他」备注就地展开、
  * 日期「今天 / 昨天」快捷、物料「最近记过」chips、提交成功后重拉模板且原因不清空。
  *
+ * 2026-11-11（用户反馈「现场照片步骤太多、相机要固定占满屏」）：
+ * ⑧ 现场照片从「展开照片区 → 点拍一张」两步并成一步：点「＋现场照片 / 再拍」直接开**全屏**
+ *    取景浮层（Teleport 到 body、fixed 占满、打开期间锁页面滚动），拍满 3 张自动关；
+ *    已拍的缩略图直接列在表单里，可删可补拍。
+ *
  * 台账语义（GLOSSARY.md）：损耗记的是**已经发生的事**，24 小时内本人可以更正或撤回，每次
  * 更正留一条 revision；照片是现场证据，改的时候保留、不能换。
  */
@@ -95,11 +100,11 @@ const prepPickerInput = ref(null)
 const day = ref('')
 const images = ref([])
 const uploading = ref(false)
-/** 页内相机是否展开：点「拍一张」就地打开取景框（不跳系统相机），拍满 3 张自动收起。 */
+/** 全屏取景浮层是否打开：点「＋现场照片 / 再拍」一下就到（不跳系统相机），拍满 3 张自动关。 */
 const cameraOpen = ref(false)
 
-// 选填三项（照片 / 备注 / 日期）默认收起，点开才展开（spec 4.1.5）。
-const photoOpen = ref(false)
+// 备注 / 日期是选填项，默认收起、点开才展开（spec 4.1.5）。
+// 现场照片不再占一个折叠态：点「＋现场照片」直接开全屏相机（2026-11-11）。
 const remarkOpen = ref(false)
 const dateOpen = ref(false)
 /** 「对应备货品」也是选填：不选时复盘按品名兜底（0049 的 prep_item_id 可空）。
@@ -688,12 +693,6 @@ async function removeTemplate(tpl) {
   }
 }
 
-/** 点「＋现场照片」：展开/收起照片区（默认收起，选填项不占首屏）。 */
-function togglePhoto() {
-  photoOpen.value = !photoOpen.value
-  if (!photoOpen.value) cameraOpen.value = false
-}
-
 function toggleRemark() {
   remarkOpen.value = !remarkOpen.value
 }
@@ -715,7 +714,9 @@ const prepPickedLabel = computed(() => {
   return hit ? '备货品 · ' + [hit.item_name, hit.unit].filter(Boolean).join(' ') : '＋备货品'
 })
 
-/** 点「拍一张」：就地展开取景框（页内相机，不跳系统相机）。 */
+/** 点「＋现场照片 / 再拍」：**一下**就开全屏取景（页内相机，不跳系统相机）。
+ *  2026-11-11 之前要先展开「现场照片」那一节、再点「拍一张」：现场手忙脚乱时多点一次就
+ *  容易放弃拍（用户反馈「步骤太多，点好几次才打开相机」）。 */
 function openCamera() {
   if (images.value.length >= maxImages.value) {
     formError.value = '现场照片最多 ' + maxImages.value + ' 张'
@@ -723,10 +724,16 @@ function openCamera() {
   }
   formError.value = ''
   cameraOpen.value = true
+  // 浮层自己 fixed 占满，但底下的表单还能滚：锁住它，免得手指在取景框上划把页面带走。
+  if (typeof document !== 'undefined') document.body.style.overflow = 'hidden'
 }
 
 function closeCamera() {
   cameraOpen.value = false
+  // 从备货单选也是浮层，两个不会同时开；只放自己那把锁。
+  if (typeof document !== 'undefined' && !prepPickerOpen.value) {
+    document.body.style.overflow = ''
+  }
 }
 
 /** 页内相机交回一张 JPEG（长边 1600、q0.75）：直接传，传完缩略图就出现在首位那块里。
@@ -734,7 +741,7 @@ function closeCamera() {
  *  拍满 3 张自动收起相机 —— 否则取景框还开着、按钮已经点不动，看着像卡住了。 */
 async function onCaptured(blob) {
   await uploadOne(blob, 'wastage.jpg')
-  if (images.value.length >= maxImages.value) cameraOpen.value = false
+  if (images.value.length >= maxImages.value) closeCamera()
 }
 
 async function uploadOne(file, filename = 'wastage.jpg') {
@@ -775,11 +782,10 @@ function resetForm() {
 /** 提交成功之后（新建与修改共用）：清表单、收折叠区、删草稿、清来源提示。 */
 function afterSaved() {
   resetForm()
-  photoOpen.value = false
   remarkOpen.value = false
   dateOpen.value = false
   prepSelectOpen.value = false
-  cameraOpen.value = false
+  closeCamera()
   prepSource.value = ''
   clearDraft()
 }
@@ -822,8 +828,7 @@ async function startEdit(row) {
   remark.value = row.remark || ''
   day.value = row.wastage_date || today.value
   images.value = []
-  cameraOpen.value = false
-  photoOpen.value = false
+  closeCamera()
   remarkOpen.value = Boolean(row.remark)
   dateOpen.value = false
   formError.value = ''
@@ -1197,10 +1202,9 @@ onUnmounted(() => {
             v-if="!editingId"
             type="button"
             class="loss-more-btn"
-            :class="{ on: photoOpen }"
-            :aria-expanded="photoOpen"
-            @click="togglePhoto"
-          >{{ images.length ? '现场照片 · ' + images.length : '＋现场照片' }}</button>
+            :class="{ on: images.length }"
+            @click="openCamera"
+          >{{ images.length ? '现场照片 · ' + images.length + '/' + maxImages : '＋现场照片' }}</button>
           <span v-else class="loss-more-btn is-static">照片保留</span>
           <button
             type="button"
@@ -1240,12 +1244,9 @@ onUnmounted(() => {
           </select>
         </label>
 
-        <!-- 现场照片（展开后）：仍是页内相机，一次一张、最多三张，拍满自动收起。 -->
-        <div v-if="photoOpen && !editingId" class="loss-photo">
-          <div class="loss-photo-hd">
-            <span class="loss-label">现场照片</span>
-            <span class="loss-hint">最多 {{ maxImages }} 张，每张 {{ maxImageMb }} MB 以内</span>
-          </div>
+        <!-- 现场照片：点选填行那颗按钮**一下**就开全屏相机（2026-11-11）。已经拍了的缩略图
+             直接列在表单里 —— 不用再展开一层，删除与补拍都在这条上完成。 -->
+        <div v-if="!editingId && images.length" class="loss-photo">
           <div class="loss-shots">
             <figure v-for="(shot, index) in images" :key="shot.capture_id" class="loss-shot">
               <img :src="shot.url" alt="现场照片" />
@@ -1257,24 +1258,14 @@ onUnmounted(() => {
               >×</button>
             </figure>
             <button
-              v-if="images.length < maxImages && !cameraOpen"
+              v-if="images.length < maxImages"
               type="button"
               class="loss-shot-add loss-shot-camera"
               @click="openCamera"
             >
               <span class="loss-shot-plus" aria-hidden="true">＋</span>
-              <span>{{ uploading ? '上传中…' : '拍一张' }}</span>
+              <span>{{ uploading ? '上传中…' : '再拍' }}</span>
             </button>
-          </div>
-
-          <div v-if="cameraOpen" class="loss-camera">
-            <HygieneLiveCamera @captured="onCaptured" />
-            <div class="loss-camera-actions">
-              <button type="button" class="btn" @click="closeCamera">收起相机</button>
-              <span class="loss-hint">
-                {{ uploading ? '正在上传…' : '拍完自动上传，最多 ' + maxImages + ' 张' }}
-              </span>
-            </div>
           </div>
         </div>
 
@@ -1449,6 +1440,44 @@ onUnmounted(() => {
       </ul>
       <p v-else class="loss-muted">没有匹配的备货品，直接在上面手打名字也行。</p>
     </section>
+
+    <!-- 全屏相机（2026-11-11 用户要求）：固定占满屏幕、打开期间页面锁滚，取景框不跟着手指走。
+         组件负责开流 / 抓拍 / 传 Blob，这里只给舞台、进度与收起。 -->
+    <Teleport to="body">
+      <div
+        v-if="cameraOpen"
+        class="loss-cam"
+        role="dialog"
+        aria-modal="true"
+        aria-label="现场照片"
+        @keydown.esc="closeCamera"
+      >
+        <div class="loss-cam-hd">
+          <div class="loss-cam-copy">
+            <p class="loss-cam-title">现场照片 <b>{{ images.length }}/{{ maxImages }}</b></p>
+            <p class="loss-cam-sub">
+              {{ uploading ? '正在上传这一张…' : '拍一张就自动上传 · 每张 ' + maxImageMb + 'MB 以内' }}
+            </p>
+          </div>
+          <button type="button" class="loss-cam-close" @click="closeCamera">收起</button>
+        </div>
+        <p v-if="formError" class="loss-cam-err" role="alert">{{ formError }}</p>
+        <div v-if="images.length" class="loss-cam-shots">
+          <figure v-for="(shot, index) in images" :key="shot.capture_id" class="loss-cam-shot">
+            <img :src="shot.url" alt="现场照片" />
+            <button
+              type="button"
+              class="loss-shot-x"
+              :aria-label="'删掉第 ' + (index + 1) + ' 张'"
+              @click="removeImage(index)"
+            >×</button>
+          </figure>
+        </div>
+        <div class="loss-cam-stage">
+          <HygieneLiveCamera @captured="onCaptured" />
+        </div>
+      </div>
+    </Teleport>
   </div>
 </template>
 
@@ -1662,11 +1691,6 @@ onUnmounted(() => {
   margin-bottom: 14px; padding-bottom: 12px;
   border-bottom: 1px solid var(--line);
 }
-.loss-photo-hd {
-  display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
-  margin-bottom: 8px;
-}
-.loss-photo-hd .loss-label { margin-bottom: 0; }
 .loss-shot { position: relative; margin: 0; width: 84px; height: 84px; border-radius: 8px; overflow: hidden; }
 .loss-shot img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .loss-shot-x {
@@ -1683,9 +1707,63 @@ onUnmounted(() => {
 /* 首位那颗「拍一张」：竖排（加号在上、字在下），触控面积就是一整格。 */
 .loss-shot-camera { flex-direction: column; gap: 2px; }
 .loss-shot-plus { font-size: 20px; line-height: 1; }
-/* 页内相机：取景框 + 一条「收起相机」。视频尺寸由组件自己定（宽 100%、最小 240px 高）。 */
-.loss-camera { display: flex; flex-direction: column; gap: 10px; margin-top: 10px; }
-.loss-camera-actions { display: flex; align-items: center; gap: 10px; }
+/* 全屏相机浮层（2026-11-11）：fixed 占满视口、内部 flex 撑满 —— 取景框不跟页面一起滚。
+   z 用最高档 --z-queue（与图片灯箱同档）：相机开起来时底栏、吸底条都压不住它。 */
+.loss-cam {
+  position: fixed; inset: 0; z-index: var(--z-queue);
+  display: flex; flex-direction: column;
+  background: var(--surface-1);
+  overscroll-behavior: contain;
+}
+.loss-cam-hd {
+  flex: 0 0 auto;
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: calc(10px + var(--safe-t)) 14px 10px;
+  border-bottom: 1px solid var(--line);
+}
+/* 上传失败这句话必须出现在浮层里：吸底条那条错误提示被全屏浮层盖住了，用户看不到。 */
+.loss-cam-err {
+  flex: 0 0 auto; margin: 0; padding: 8px 14px;
+  background: var(--danger-soft); color: var(--danger-bright);
+  font-size: 13px; line-height: 1.5;
+}
+.loss-cam-title { margin: 0; font-size: 15px; font-weight: 700; color: var(--ink); }
+.loss-cam-title b { color: var(--action); }
+.loss-cam-sub { margin: 2px 0 0; font-size: 12px; line-height: 1.4; color: var(--ink-dim); }
+.loss-cam-close {
+  flex: 0 0 auto; min-height: var(--tap); padding: 0 18px;
+  border: 1px solid var(--line-strong); border-radius: 999px;
+  background: var(--surface-1); color: var(--ink);
+  font-family: inherit; font-size: 14px; font-weight: 600; cursor: pointer;
+}
+/* 已经拍好的缩略图：横滑一条，不抢取景框的高度。 */
+.loss-cam-shots {
+  flex: 0 0 auto; display: flex; gap: 8px;
+  padding: 8px 14px;
+  overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none;
+}
+.loss-cam-shots::-webkit-scrollbar { display: none; }
+.loss-cam-shot {
+  position: relative; margin: 0; flex: 0 0 auto;
+  width: 52px; height: 52px; border-radius: 6px; overflow: hidden;
+}
+.loss-cam-shot img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.loss-cam-stage { flex: 1 1 auto; min-height: 0; display: flex; background: var(--surface-2); }
+/* 组件本身是「提示 + 视频 + 一排按钮」的竖排：外层撑满，视频吃掉剩余高度并 cover 铺满。
+   组件里视频原来 min-height 240、object-fit contain（页内那一版），全屏时会留黑边与空隙。 */
+.loss-cam-stage :deep(.live-camera) { flex: 1 1 auto; min-height: 0; gap: 0; }
+.loss-cam-stage :deep(.live-video) {
+  flex: 1 1 auto; min-height: 0; height: auto; width: 100%;
+  object-fit: cover; border: 0; border-radius: 0;
+}
+.loss-cam-stage :deep(.live-actions) {
+  flex: 0 0 auto; gap: 9px;
+  padding: 10px 14px calc(10px + var(--safe-b));
+  background: var(--surface-1);
+}
+.loss-cam-stage :deep(.live-hint) { padding: 8px 14px 0; }
+.loss-cam-stage :deep(.live-alert) { margin: 10px 14px; }
+.loss-cam-stage :deep(.live-retry) { margin: 0 14px; }
 .loss-edit-photo { margin: -4px 0 12px; }
 /* 表单块底部留出吸底条高度（spec 4.1.8）：吸底条浮在视口下沿时，最后一个字段还能被滚到
    它上面，不会被按钮盖住。 */
