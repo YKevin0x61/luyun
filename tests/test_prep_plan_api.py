@@ -13,6 +13,8 @@ from fastapi.testclient import TestClient
 from api.prep_plan import manager_router, reader_router, router
 from api.security import require_any_identity_session, verify_admin_token
 from database import CHINA_TZ, DatabaseManager, get_db
+from services import auth_service
+from services.app_runtime import AppRuntime, set_runtime
 
 TODAY_MORNING = datetime(2026, 10, 22, 8, 0, tzinfo=CHINA_TZ)
 CANDIDATE_DAYS = ("2026-10-15", "2026-10-08", "2026-10-01", "2026-09-24")
@@ -356,3 +358,191 @@ def test_staff_cannot_post_plan_events(staff_client):
     )
     assert resp.status_code == 403, resp.text
     assert _events(db) == []
+
+
+# ── 票 05：工作台 HTTP 边界（动作门 + 错误码）────────────────────────────────
+#
+# 15 条路由里只有 7 条判动作：复盘 2 条（`prep_review`）与 manager 5 条
+# （`admin_only` 的 403 变体）；reader 6 条只解析身份，2 条 admin-token 路由不进边界。
+# 这里把两道门的四身份矩阵、5 条路由的逐字拒绝、以及 2 条 token 路由钉一次。
+
+_STAFF_WITH_REVIEW = {
+    "kind": "staff",
+    "employee": {"id": 7, "name": "阿明", "admin_caps": ["prep_review"]},
+}
+_STAFF_PLAIN = {"kind": "staff", "employee": {"id": 7, "name": "阿明", "admin_caps": []}}
+
+
+def _boundary_client(db, identity):
+    """identity=None 时不给会话覆盖：走真实的「任一身份」门（匿名 401）。"""
+    app = FastAPI()
+    app.include_router(reader_router)
+    app.include_router(manager_router)
+    app.include_router(router)
+    app.dependency_overrides[get_db] = lambda: db
+    app.dependency_overrides[verify_admin_token] = lambda: True
+    if identity is not None:
+        app.dependency_overrides[require_any_identity_session] = lambda: identity
+    return TestClient(app)
+
+
+@pytest.fixture
+def boundary_db():
+    db = DatabaseManager()
+    _run(db.connect())
+    yield db
+    _run(db.close())
+
+
+def test_prep_review_gate_admits_the_right_identity(boundary_db):
+    """`prep_review` 四身份矩阵：管理端 / 有能员工 200，无能员工 403，匿名 401。"""
+    cases = (
+        ("管理员会话", {"kind": "admin"}, 200),
+        ("有「备货复盘」的员工", _STAFF_WITH_REVIEW, 200),
+        ("没有能力的员工", _STAFF_PLAIN, 403),
+        ("匿名", None, 401),
+    )
+    for label, identity, expected in cases:
+        with _boundary_client(boundary_db, identity) as client:
+            resp = client.get("/api/prep-plan/review/summary")
+        assert resp.status_code == expected, (label, resp.text)
+        if expected == 403:
+            assert resp.json()["detail"] == "没有「备货复盘」权限"
+            assert resp.headers["X-Error-Code"] == "capability_required"
+        elif expected == 401:
+            # 鉴权门自己的 401 不带边界错误码。
+            assert resp.json()["detail"] == "未授权"
+            assert "x-error-code" not in resp.headers
+
+
+def test_snapshots_use_the_same_prep_review_gate(boundary_db):
+    """`/snapshots` 与 `/review/summary` 同一道门：员工无能力 403、匿名 401。"""
+    with _boundary_client(boundary_db, _STAFF_PLAIN) as client:
+        resp = client.get("/api/prep-plan/snapshots", params={"day": "2026-10-22"})
+    assert resp.status_code == 403
+    assert resp.json()["detail"] == "没有「备货复盘」权限"
+    assert resp.headers["X-Error-Code"] == "capability_required"
+
+    with _boundary_client(boundary_db, None) as client:
+        resp = client.get("/api/prep-plan/snapshots", params={"day": "2026-10-22"})
+    assert resp.status_code == 401
+    assert resp.json()["detail"] == "未授权"
+
+
+_ADMIN_ONLY_ROUTES = (
+    ("PUT", "/api/prep-plan/context/note", {"json": {"note": "备注"}}, "修改备货复盘备注"),
+    ("GET", "/api/prep-plan/context/weather", {}, "查看天气配置"),
+    ("PUT", "/api/prep-plan/context/weather", {"json": {"city": "北京"}}, "修改天气配置"),
+    ("POST", "/api/prep-plan/context/weather/test", {"json": {"city": "北京"}}, "测试天气配置"),
+    ("POST", "/api/prep-plan/events", {"json": {"kind": "plan_copied"}}, "记录备货埋点"),
+)
+
+
+def test_admin_only_routes_forbid_staff_with_the_per_route_label(boundary_db):
+    """5 条 manager 路由：员工 403「员工不能…」（逐路由文案）+ `admin_only`。"""
+    with _boundary_client(boundary_db, _STAFF_PLAIN) as client:
+        for method, path, kwargs, label in _ADMIN_ONLY_ROUTES:
+            resp = client.request(method, path, **kwargs)
+            assert resp.status_code == 403, (path, resp.text)
+            assert resp.json()["detail"] == f"员工不能{label}"
+            assert resp.headers["X-Error-Code"] == "admin_only"
+
+
+def test_admin_only_gate_admits_admin_and_rejects_anonymous(boundary_db):
+    """同一道门的管理端与匿名两侧：管理端放行，匿名 401 且不带边界错误码。"""
+    with _boundary_client(boundary_db, {"kind": "admin"}) as client:
+        assert client.get("/api/prep-plan/context/weather").status_code == 200
+
+    with _boundary_client(boundary_db, None) as client:
+        resp = client.put("/api/prep-plan/context/note", json={"note": "备注"})
+    assert resp.status_code == 401
+    assert resp.json()["detail"] == "未授权"
+    assert "x-error-code" not in resp.headers
+
+
+def test_reader_routes_still_reject_anonymous(boundary_db):
+    """reader 6 条只解析身份：没有会话一律 401「未授权」。"""
+    with _boundary_client(boundary_db, None) as client:
+        for path in (
+            "/api/prep-plan/today",
+            "/api/prep-plan/summary",
+            "/api/prep-plan/items",
+            "/api/prep-plan/staff-station",
+        ):
+            resp = client.get(path)
+            assert resp.status_code == 401, (path, resp.text)
+            assert resp.json()["detail"] == "未授权"
+
+
+def _done_by(db, entry_id):
+    async def work():
+        table = db.table("prep_plan_entries")
+        async with table.conn.cursor() as cursor:
+            await cursor.execute(
+                "SELECT done_by FROM prep_plan_entries WHERE id = ?", (entry_id,)
+            )
+            row = await cursor.fetchone()
+            return row["done_by"]
+
+    return _run(work())
+
+
+def test_entry_done_by_keeps_the_old_actor_mapping(boundary_db):
+    """勾选的 `done_by`：员工写入姓名，管理端写空串（与迁移前逐字一致）。"""
+    _seed(boundary_db)
+
+    with _boundary_client(boundary_db, _STAFF_PLAIN) as client:
+        assert (
+            client.post(
+                "/api/prep-plan/staff-station", json={"station": "熟笼"}
+            ).status_code
+            == 200
+        )
+        entry_id = _entry_id(client)
+        resp = client.patch(
+            f"/api/prep-plan/today/entries/{entry_id}", json={"done": True}
+        )
+        assert resp.status_code == 200, resp.text
+        assert _done_by(boundary_db, entry_id) == "阿明"
+
+    with _boundary_client(boundary_db, {"kind": "admin"}) as client:
+        entry_id = _entry_id(client)
+        resp = client.patch(
+            f"/api/prep-plan/today/entries/{entry_id}", json={"done": True}
+        )
+        assert resp.status_code == 200, resp.text
+        assert _done_by(boundary_db, entry_id) == ""
+
+
+def test_admin_token_routes_stay_outside_the_session_boundary(boundary_db):
+    """2 条写面仍只认管理员凭据：无会话 + 正确 token 可用，错 token / 无 token 401。"""
+    app = FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[get_db] = lambda: boundary_db
+    set_runtime(AppRuntime(db=boundary_db))
+    try:
+        _run(auth_service.init_user("admin", "password123"))
+        plain, _ = _run(auth_service.issue_api_token(label="prep-plan-boundary-test"))
+        with TestClient(app) as client:
+            assert client.post("/api/prep-plan/today/recompute").status_code == 401
+            assert (
+                client.post(
+                    "/api/prep-plan/today/recompute",
+                    headers={"X-Admin-Token": "bogus-token"},
+                ).status_code
+                == 401
+            )
+
+            ok = client.post(
+                "/api/prep-plan/today/recompute", headers={"X-Admin-Token": plain}
+            )
+            assert ok.status_code == 200, ok.text
+
+            ok_item = client.patch(
+                "/api/prep-plan/items/1",
+                json={"kind": "made"},
+                headers={"X-Admin-Token": plain},
+            )
+            assert ok_item.status_code == 200, ok_item.text
+    finally:
+        set_runtime(None)
