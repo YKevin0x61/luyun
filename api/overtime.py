@@ -28,7 +28,7 @@ from services.overtime.ledger import (
     OvertimeError,
     OvertimeLedger,
 )
-from services.realtime.hub import realtime_hub
+from services.realtime.workbench import nudge_overtime as _overtime_nudge
 from services.wecom_request_notice import (
     notify_overtime_decision,
     notify_overtime_deduction,
@@ -202,22 +202,6 @@ _LIMITS = {
     "max_half_hours": HALF_HOURS_MAX,
     "max_reject_reason": MAX_REJECT_REASON,
 }
-
-
-async def _overtime_nudge(reason: str, *employee_ids: Optional[int]) -> None:
-    """台账动了，叫相关的人自己来拉一次（nudge 不带数据，见 `services/realtime/hub.py`）。
-
-    scope 里带 `employee_id`：员工连接只会收到**自己**那条（hub 的 `_staff_owns_scope`），
-    管理端那侧不受限 —— 它本来就要看全店。一人一条，不为「多人」在 hub 里开特例
-    （同 `api/scheduling.py` 的 `_scheduling_nudge`）：一笔登记只牵一个人，所以这里
-    通常只有一条；写成可变参数是为了跟排班那条同一个形状，读的人不用想「为什么它不一样」。
-
-    读路径不广播：列表被谁刷新都不改变数据形状。
-    """
-    for employee_id in {int(item) for item in employee_ids if item is not None}:
-        await realtime_hub.broadcast_nudge(
-            "overtime", {"reason": reason, "employee_id": employee_id}
-        )
 
 
 @router.get("/me")

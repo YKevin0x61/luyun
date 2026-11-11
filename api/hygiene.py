@@ -62,7 +62,7 @@ from services.hygiene.work import (
     HygieneWork,
     HygieneWorkError,
 )
-from services.realtime.hub import realtime_hub
+from services.realtime.workbench import nudge_hygiene as _hygiene_nudge
 from services.scheduling.store import SchedulingStore
 
 logger = logging.getLogger(__name__)
@@ -95,13 +95,6 @@ async def _read_upload_bounded(file: UploadFile, label: str) -> bytes:
         if len(data) > MAX_UPLOAD_BYTES:
             raise HTTPException(status_code=413, detail=_upload_too_large_detail(label))
     return bytes(data)
-
-
-async def _hygiene_nudge(resource: str, action: str, **scope) -> None:
-    await realtime_hub.broadcast_nudge(
-        "hygiene",
-        {"resource": resource, "action": action, **scope},
-    )
 
 
 def _clean_business_date(raw) -> str:

@@ -11,8 +11,8 @@
 票 06 给这扇门加了**第一个写动作**：逐日改格（把某天改成休、或换成另一个启用中的
 班次）。它**没有第二套写排班的方式** —— 走的是排班服务层的单日覆盖
 （`SchedulingStore.set_day_override`，结果行来源 `override`），这里只做三件事：
-挑出那扇门、把那层的错误翻成人话、按排班既有惯例（`api/scheduling.py` 的
-`_scheduling_nudge`）广播**一人一条**的排班通知。手填列在票 05。
+挑出那扇门、把那层的错误翻成人话、按排班既有惯例（`services/realtime/workbench.py` 的
+`nudge_scheduling`）广播**一人一条**的排班通知。手填列在票 05。
 
 票 04 加的是**封账上月**（`POST /api/attendance/seal`）：超级管理员点一次，上一个自然月
 的存假结余就落进月度考勤台账（`services/attendance/store.py` 的 `AttendanceStore.seal`）。
@@ -41,9 +41,10 @@ from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel
 
 from api.scheduling import _bad_request as _scheduling_bad_request
-from api.scheduling import _require_scheduler, _scheduling_nudge
+from api.scheduling import _require_scheduler
 from api.security import require_staff_session
 from database import get_db
+from services.realtime.workbench import nudge_scheduling as _scheduling_nudge
 from services.attendance import (
     LEDGER_WRITE_FIELDS,
     AttendanceError,

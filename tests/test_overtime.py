@@ -23,6 +23,7 @@ from fastapi.testclient import TestClient
 import api.admin as admin_module
 import api.auth as auth_module
 import api.overtime as overtime_module
+import services.realtime.workbench as workbench_module
 import main as main_module
 from config import settings
 from database import CHINA_TZ, DatabaseManager
@@ -1218,17 +1219,17 @@ def test_every_move_broadcasts_one_data_less_nudge_to_the_owner(
     employee = _employee_id(accounts)
     _staff_cookie(client, accounts)
     broadcast = AsyncMock()
-    monkeypatch.setattr(overtime_module.realtime_hub, "broadcast_nudge", broadcast)
+    monkeypatch.setattr(workbench_module.realtime_hub, "broadcast_nudge", broadcast)
 
     def calls():
         return [call.args for call in broadcast.await_args_list]
 
     entry = _submit(client, TODAY, 4, "下午加班")
-    assert ("overtime", {"reason": "entry_submitted", "employee_id": employee}) in calls()
+    assert calls() == [("overtime", {"reason": "entry_submitted", "employee_id": employee})]
 
     broadcast.reset_mock()
     client.delete(f"/api/overtime/me/{entry['id']}")
-    assert ("overtime", {"reason": "entry_cancelled", "employee_id": employee}) in calls()
+    assert calls() == [("overtime", {"reason": "entry_cancelled", "employee_id": employee})]
 
     second = _submit(client, TODAY, 2, "再一笔")
     _admin_login(client)
@@ -1236,7 +1237,7 @@ def test_every_move_broadcasts_one_data_less_nudge_to_the_owner(
     broadcast.reset_mock()
     approved = client.post(f"/api/overtime/admin/entries/{second['id']}/approve")
     assert approved.status_code == 200, approved.text
-    assert ("overtime", {"reason": "entry_approved", "employee_id": employee}) in calls()
+    assert calls() == [("overtime", {"reason": "entry_approved", "employee_id": employee})]
 
     third = _submit_for(client, accounts, TODAY, -2, "补钟一笔")
     broadcast.reset_mock()
@@ -1245,12 +1246,12 @@ def test_every_move_broadcasts_one_data_less_nudge_to_the_owner(
         json={"reason": "那天没有排班"},
     )
     assert rejected.status_code == 200, rejected.text
-    assert ("overtime", {"reason": "entry_rejected", "employee_id": employee}) in calls()
+    assert calls() == [("overtime", {"reason": "entry_rejected", "employee_id": employee})]
 
     broadcast.reset_mock()
     voided = client.post(f"/api/overtime/admin/entries/{second['id']}/void")
     assert voided.status_code == 200, voided.text
-    assert ("overtime", {"reason": "entry_voided", "employee_id": employee}) in calls()
+    assert calls() == [("overtime", {"reason": "entry_voided", "employee_id": employee})]
 
 
 def test_admin_month_stats_carry_the_pay_and_stay_admin_only(overtime_http):

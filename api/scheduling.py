@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 from api.security import require_any_identity_session, require_staff_session
 from database import get_db
 from services.identity.capabilities import CAP_SCHEDULE, has_cap
-from services.realtime.hub import realtime_hub
+from services.realtime.workbench import nudge_scheduling as _scheduling_nudge
 from services.scheduling import MAX_CYCLE_DAYS, MAX_REQUEST_NOTE, MAX_SHIFT_NAME
 from services.scheduling.store import KIND_LEAVE, SchedulingError, SchedulingStore
 from services.wecom_request_notice import notify_leave_decision, notify_leave_request
@@ -336,22 +336,6 @@ def _bad_request(exc: SchedulingError) -> HTTPException:
         detail=detail,
         headers={"X-Error-Code": exc.code},
     )
-
-
-async def _scheduling_nudge(reason: str, *employee_ids: Optional[int]) -> None:
-    """排班或申请动了，叫相关的人自己来拉一次（nudge 不带数据，见 `services/realtime/hub.py`）。
-
-    scope 里带 `employee_id`：员工连接只会收到**自己**那条（hub 的 `_staff_owns_scope`），
-    店长那侧不受限 —— 他本来就要看全店。换班牵两个人、批假牵一个人，所以这里收可变参数：
-    一人一条，不为「多人」在 hub 里开特例（那会让派发侧多一种要判的形状）。
-
-    读路径不广播：`expand()` 那种顺手补行不值得叫醒谁 —— 数据形状没变，谁也没多看到什么。
-    """
-    for employee_id in {int(item) for item in employee_ids if item is not None}:
-        await realtime_hub.broadcast_nudge(
-            "scheduling",
-            {"reason": reason, "employee_id": employee_id},
-        )
 
 
 async def _require_scheduler(identity: dict = Depends(require_any_identity_session)) -> dict:
@@ -798,7 +782,7 @@ async def week(
     那一周看到的是一片没有行的空格，而不是规则铺出来的结果。
 
     `start` 归一化到那一周的周一，缺省 = 今天所在那周；日期格式坏是 400。
-    **读路径不广播 nudge**（见 `_scheduling_nudge` 的 docstring）。
+    **读路径不广播 nudge**（见 `services/realtime/workbench.py` 的 `nudge_scheduling`）。
     """
     store = SchedulingStore(db)
     try:

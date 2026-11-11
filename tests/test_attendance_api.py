@@ -31,6 +31,7 @@ from openpyxl.utils import get_column_letter
 import api.attendance as attendance_module
 import api.auth as auth_module
 import api.scheduling as scheduling_module
+import services.realtime.workbench as workbench_module
 import main
 from config import settings
 from database import CHINA_TZ, DatabaseManager
@@ -561,7 +562,7 @@ def test_a_day_can_be_switched_to_another_shift_and_only_that_day_moves(
     async def _record(topic, scope=None):
         seen.append((topic, scope))
 
-    monkeypatch.setattr(scheduling_module.realtime_hub, "broadcast_nudge", _record)
+    monkeypatch.setattr(workbench_module.realtime_hub, "broadcast_nudge", _record)
 
     # 1) 今天是规则铺的白班 → 换成夜班。今天那一格必须立刻变（这是店长看的那一眼）。
     resp = _edit(client, admin, employee_id, TODAY, {"shift_id": shifts["夜班"]})
@@ -620,7 +621,7 @@ def test_a_day_can_be_turned_into_rest_without_moving_anything_else(attendance_h
     async def _record(topic, scope=None):
         seen.append((topic, scope))
 
-    monkeypatch.setattr(scheduling_module.realtime_hub, "broadcast_nudge", _record)
+    monkeypatch.setattr(workbench_module.realtime_hub, "broadcast_nudge", _record)
 
     # 昨天本来是「待补」（没有行）→ 改成休：**行被写进去了**，于是它从「待补」变成「休」
     # ——「那天休」与「没铺到」在表上必须是两件事（票 01 验收 3 的口径）。
@@ -663,7 +664,7 @@ def test_a_day_that_still_has_an_undecided_request_is_refused_and_nothing_is_wri
     async def _record(topic, scope=None):
         seen.append((topic, scope))
 
-    monkeypatch.setattr(scheduling_module.realtime_hub, "broadcast_nudge", _record)
+    monkeypatch.setattr(workbench_module.realtime_hub, "broadcast_nudge", _record)
     # 1) 员工自己提了今天的请假，还没人批 → 店长不能在这一页把它冲掉。
     leave = _run(store.submit_leave(employee_id, TODAY, note="家里有事"))
     refused = _edit(client, admin, employee_id, TODAY, {"is_rest": True})
@@ -1956,7 +1957,7 @@ def test_a_day_can_be_marked_half_rest_and_unmarked(attendance_http, monkeypatch
     async def _record(topic, scope=None):
         seen.append((topic, scope))
 
-    monkeypatch.setattr(scheduling_module.realtime_hub, "broadcast_nudge", _record)
+    monkeypatch.setattr(workbench_module.realtime_hub, "broadcast_nudge", _record)
 
     resp = _half(client, admin, employee_id, TODAY)
 

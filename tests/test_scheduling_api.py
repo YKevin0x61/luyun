@@ -17,6 +17,7 @@ from fastapi.testclient import TestClient
 
 import api.auth as auth_module
 import api.scheduling as scheduling_module
+import services.realtime.workbench as workbench_module
 from config import settings
 from database import CHINA_TZ, DatabaseManager
 from services.app_runtime import AppRuntime, set_runtime
@@ -1542,7 +1543,7 @@ def test_a_batch_broadcasts_one_nudge_per_painted_person(scheduling_http, monkey
     async def _record(topic, scope=None):
         seen.append((topic, scope))
 
-    monkeypatch.setattr(scheduling_module.realtime_hub, "broadcast_nudge", _record)
+    monkeypatch.setattr(workbench_module.realtime_hub, "broadcast_nudge", _record)
 
     resp = _batch(
         client,
@@ -2861,7 +2862,7 @@ def test_submitting_a_request_broadcasts_a_scoped_nudge(scheduling_http, monkeyp
     async def _record(topic, scope=None):
         seen.append((topic, scope))
 
-    monkeypatch.setattr(scheduling_module.realtime_hub, "broadcast_nudge", _record)
+    monkeypatch.setattr(workbench_module.realtime_hub, "broadcast_nudge", _record)
 
     submitted = client.post(
         "/api/scheduling/me/requests",

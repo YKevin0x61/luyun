@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 
 import api.auth as auth_module
 import api.hygiene as hygiene_module
+import services.realtime.workbench as workbench_module
 from config import settings
 from database import CHINA_TZ, DatabaseManager
 from services import auth_service
@@ -1160,14 +1161,16 @@ def test_daily_submit_broadcasts_data_less_hygiene_nudges(hygiene_http, monkeypa
     item = _add_anban_item(work)
     _staff_login(client, PHONE)
     broadcast = AsyncMock()
-    monkeypatch.setattr(hygiene_module.realtime_hub, "broadcast_nudge", broadcast)
+    monkeypatch.setattr(workbench_module.realtime_hub, "broadcast_nudge", broadcast)
 
     submitted = _submit_daily(client, item["id"], SHOT_A)
 
     assert submitted.status_code == 200
     calls = [call.args for call in broadcast.await_args_list]
-    assert ("hygiene", {"resource": "daily", "action": "submitted", "item_id": item["id"]}) in calls
-    assert ("hygiene", {"resource": "boards", "action": "changed"}) in calls
+    assert calls == [
+        ("hygiene", {"resource": "daily", "action": "submitted", "item_id": item["id"]}),
+        ("hygiene", {"resource": "boards", "action": "changed"}),
+    ]
 
 
 def test_admin_sets_zone_shifts_staff_cannot_self_pick_any_zone(hygiene_http):
