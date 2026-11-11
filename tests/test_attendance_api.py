@@ -3410,6 +3410,9 @@ def test_the_six_action_gates_are_one_matrix_over_four_identities(attendance_htt
 
     `admin_only` 的默认形态是加班 `/admin` 那一侧（401 变体）：管理员放行，员工与
     匿名都拿 401「需要登录」；`staff_identity` 是员工端 `/me` 那一侧。
+
+    `overtime_review` 是唯一**只认员工会话**的能力动作（ADR 0134 的裁定）：店长没有
+    管理端账号、审批面长在员工手机端，所以管理端 cookie 在这扇门上是 401，不是放行。
     """
     client, _db, accounts = attendance_http
     admin_session = _admin_cookie(client)
@@ -3433,11 +3436,6 @@ def test_the_six_action_gates_are_one_matrix_over_four_identities(attendance_htt
             "schedule_edit",
             "schedule",
             "只有开了「人事管理」权限的人能改排班与考勤：请找超级管理员在花名册里开通",
-        ),
-        (
-            "overtime_review",
-            "schedule",
-            "只有开了「人事管理」的人能审批加班登记：请找超级管理员在花名册里开通",
         ),
         (
             "wastage_view_all",
@@ -3483,6 +3481,35 @@ def test_the_six_action_gates_are_one_matrix_over_four_identities(attendance_htt
         assert anonymous.status_code == 401, (action, anonymous.text)
         assert anonymous.json()["detail"] == "未授权"
         assert "x-error-code" not in anonymous.headers
+
+    # overtime_review：只认员工会话（ADR 0134 的裁定）。管理端 cookie 是 401，
+    # 员工侧仍按 CAP_SCHEDULE 判 —— 与迁移前的 `_require_reviewer` 逐字一致。
+    _as_admin()
+    refused = probe.get("/overtime_review")
+    assert refused.status_code == 401
+    assert refused.json()["detail"] == "需要员工登录"
+    assert "x-error-code" not in refused.headers
+
+    _run(accounts.set_admin_caps(employee_id, ["schedule"]))
+    _as_staff()
+    allowed = probe.get("/overtime_review")
+    assert allowed.status_code == 200, allowed.text
+    assert allowed.json()["caps"] == ["schedule"]
+
+    _run(accounts.set_admin_caps(employee_id, []))
+    _as_staff()
+    refused = probe.get("/overtime_review")
+    assert refused.status_code == 403
+    assert refused.json()["detail"] == (
+        "只有开了「人事管理」的人能审批加班登记：请找超级管理员在花名册里开通"
+    )
+    assert refused.headers["X-Error-Code"] == "capability_required"
+
+    _as_anonymous()
+    refused = probe.get("/overtime_review")
+    assert refused.status_code == 401
+    assert refused.json()["detail"] == "需要员工登录"
+    assert "x-error-code" not in refused.headers
 
     # admin_only 的默认形态：加班 /admin 那一侧。员工拿的是 401 而不是 403 ——
     # 那里从来没有「员工被拒」这句话，只认管理端会话。

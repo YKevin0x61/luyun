@@ -1598,3 +1598,131 @@ def test_rejecting_an_entry_carries_the_reason_to_the_group(overtime_http, monke
     assert call["approved"] is False
     assert call["note"] == "那半小时是排班内的收尾"
     assert call["entry"]["id"] == entry["id"]
+
+
+# ── 票 03：工作台 HTTP 边界（动作门 + 错误码）────────────────────────────────
+#
+# 错误文案本来就是逐字契约：这里给几条**有状态码的**代表各钉一次，顺带钉住边界新增
+# 的 `X-Error-Code` 头。状态码 / detail 一个字都没变，新增的只有那个头。
+
+
+def test_the_three_doors_keep_their_identity_shape(overtime_http):
+    """`/me` 只认员工、`/admin` 只认管理端、`/review` 只认员工 + 能力（ADR 0134）。"""
+    client, _db, accounts = overtime_http
+
+    # 夹具默认是管理端会话：`/admin` 放行；两扇员工门都是 401。
+    assert client.get("/api/overtime/admin/pending").status_code == 200
+    refused = client.get("/api/overtime/me")
+    assert refused.status_code == 401
+    assert refused.json()["detail"] == "需要员工登录"
+    assert client.get("/api/overtime/review/pending").status_code == 401
+
+    _employee_id(accounts)
+    _staff_cookie(client, accounts)
+    assert client.get("/api/overtime/me").status_code == 200
+    refused = client.get("/api/overtime/admin/pending")
+    assert refused.status_code == 401
+    assert refused.json()["detail"] == "需要登录"
+
+    client.cookies.clear()
+    assert client.get("/api/overtime/me").json()["detail"] == "需要员工登录"
+    assert client.get("/api/overtime/review/pending").json()["detail"] == "需要员工登录"
+    assert client.get("/api/overtime/admin/pending").json()["detail"] == "需要登录"
+
+
+def test_the_review_door_only_takes_employee_sessions_and_carries_the_code(
+    overtime_http,
+):
+    """`/review` 的门搬进边界后语义不变：管理端 cookie 401、员工按能力判 403/放行。
+
+    这条也钉住 ADR 0134 的裁定 —— `overtime_review` **不是** admin 直接放行。
+    """
+    client, _db, accounts = overtime_http
+
+    # 管理端会话（夹具里已登录）：这 8 条从来只认员工会话。
+    refused = client.get("/api/overtime/review/pending")
+    assert refused.status_code == 401
+    assert refused.json()["detail"] == "需要员工登录"
+    assert "x-error-code" not in refused.headers
+
+    client.cookies.clear()
+    refused = client.get("/api/overtime/review/pending")
+    assert refused.status_code == 401
+    assert refused.json()["detail"] == "需要员工登录"
+
+    supervisor_id = _supervisor(accounts)
+    _staff_cookie(client, accounts, phone=SUPERVISOR_PHONE)
+    assert client.get("/api/overtime/review/pending").status_code == 200
+
+    # 收掉能力，下一次请求就是 403 + 能力码（文案逐字不变）。
+    _run(accounts.set_admin_caps(supervisor_id, []))
+    refused = client.get("/api/overtime/review/pending")
+    assert refused.status_code == 403
+    assert refused.json()["detail"] == (
+        "只有开了「人事管理」的人能审批加班登记：请找超级管理员在花名册里开通"
+    )
+    assert refused.headers["X-Error-Code"] == "capability_required"
+
+
+def test_an_unknown_entry_is_404_with_its_sentence_and_code(overtime_http):
+    client, _db, accounts = overtime_http
+    _employee_id(accounts)
+    _staff_cookie(client, accounts)
+
+    refused = client.delete("/api/overtime/me/999999")
+    assert refused.status_code == 404, refused.text
+    assert refused.json()["detail"] == "这条登记不存在：可能已经被撤回，刷新看看"
+    assert refused.headers["X-Error-Code"] == "unknown_entry"
+
+
+def test_approving_your_own_entry_is_403_with_its_sentence_and_code(overtime_http):
+    client, _db, accounts = overtime_http
+    _supervisor(accounts)
+    _staff_cookie(client, accounts, phone=SUPERVISOR_PHONE)
+    mine = _submit(client, TODAY, 2, "自己提的")
+
+    refused = client.post(f"/api/overtime/review/{mine['id']}/approve")
+    assert refused.status_code == 403, refused.text
+    assert refused.json()["detail"] == (
+        "交这笔的人不能自己批：请让另一位有「人事管理」权限的管理员来处理"
+    )
+    assert refused.headers["X-Error-Code"] == "cannot_self_accept"
+
+
+def test_a_filled_template_error_keeps_its_sentence_and_carries_its_code(overtime_http):
+    """带 `{}` 的 400：上限由服务层 args[0] 填，文案里不写死 12。"""
+    client, _db, accounts = overtime_http
+    _employee_id(accounts)
+    _staff_cookie(client, accounts)
+
+    refused = client.post(
+        "/api/overtime/me",
+        json={"entry_date": TODAY, "half_hours": 25, "reason": "超长的一笔"},
+    )
+    assert refused.status_code == 400, refused.text
+    assert refused.json()["detail"] == "单笔最多 12 小时：超过了请分成两笔"
+    assert refused.headers["X-Error-Code"] == "hours_too_large"
+
+
+def test_a_missing_overtime_table_is_503_with_its_sentence_and_code(overtime_http):
+    client, db, accounts = overtime_http
+    _employee_id(accounts)
+    _staff_cookie(client, accounts)
+
+    async def _rename(source, target):
+        await db._conn.execute(f"ALTER TABLE {source} RENAME TO {target}")
+        await db._conn.commit()
+
+    _run(_rename("overtime_entries", "overtime_entries_tmp"))
+    try:
+        refused = client.get("/api/overtime/me")
+        assert refused.status_code == 503, refused.text
+        assert refused.json()["detail"] == (
+            "加班登记表还没建好：请在 Admin「系统更新 → 数据库迁移」应用 "
+            "migrations/pg/0021_overtime_entries.sql、"
+            "migrations/pg/0022_overtime_salary_snapshots.sql 与 "
+            "migrations/pg/0042_overtime_leave_deductions.sql，然后刷新本页"
+        )
+        assert refused.headers["X-Error-Code"] == "not_migrated"
+    finally:
+        _run(_rename("overtime_entries_tmp", "overtime_entries"))

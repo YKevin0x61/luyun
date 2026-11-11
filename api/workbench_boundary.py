@@ -120,7 +120,9 @@ _ACTION_RULES = {
         "只有开了「人事管理」权限的人能改排班与考勤：请找超级管理员在花名册里开通",
     ),
     "overtime_review": _ActionRule(
-        "any",
+        # 唯一一档「只认员工会话」的能力动作：店长没有管理端账号，审批面长在员工
+        # 手机端（ADR 0134 的裁定 / ADR 0103）。管理端 cookie 在这 8 条上是 401。
+        "staff",
         CAP_SCHEDULE,
         "只有开了「人事管理」的人能审批加班登记：请找超级管理员在花名册里开通",
     ),
@@ -174,12 +176,37 @@ def _admin_only_denial(label: str):
 
 
 def _capability_gate(rule: _ActionRule):
+    if rule.identity == "staff":
+        return _staff_capability_gate(rule)
+
     async def _gate(
         identity: dict = Depends(require_any_identity_session),
     ) -> WorkbenchActor:
         actor = _actor(identity)
         if actor.kind == "admin":
             return actor
+        if rule.capability is None or not actor.has_cap(rule.capability):
+            raise HTTPException(
+                status_code=403,
+                detail=rule.denial,
+                headers={"X-Error-Code": "capability_required"},
+            )
+        return actor
+
+    return _gate
+
+
+def _staff_capability_gate(rule: _ActionRule):
+    """员工身份门 + 能力判据：管理端 cookie 在这里是 401，不回落成「admin 放行」。
+
+    加班审批（`overtime_review`）是唯一用这一档的动作 —— 店长就是花名册上一个真人
+    加员工会话（ADR 0103），给他开管理端账号不是这一票的选项。
+    """
+
+    async def _gate(
+        identity: dict = Depends(require_staff_identity),
+    ) -> WorkbenchActor:
+        actor = _actor(identity)
         if rule.capability is None or not actor.has_cap(rule.capability):
             raise HTTPException(
                 status_code=403,

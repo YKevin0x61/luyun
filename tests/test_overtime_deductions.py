@@ -515,3 +515,33 @@ def test_approving_a_deduction_carries_the_name_back(deduction_http):
 
     assert approved["status"] == "approved"
     assert approved["employee_name"] == NAME
+
+
+def test_a_sealed_month_is_409_with_its_sentence_and_code(deduction_http):
+    """封账锁的 409 与文案逐字不变，新增的是边界那个 `X-Error-Code` 头。"""
+    client, db, accounts = deduction_http
+    employee_id = _employee_id(accounts)
+    attendance = AttendanceStore(db, now=lambda: FIXED_NOW)
+    _run(attendance.set_manual_columns(employee_id, {"opening_balance": 35.0}))
+    ledger = OvertimeLedger(db, now=lambda: FIXED_NOW)
+    entry = _run(
+        ledger.submit(
+            EntryActor(),
+            AUGUST_DAY,
+            -17,
+            "八月补钟",
+            target_employee_id=employee_id,
+        )
+    )
+    _run(ledger.approve(EntryActor(), entry["id"]))
+    assert _run(attendance.seal("2026-08"))["sealed_employees"] == 1
+
+    _staff_cookie(client, accounts)
+    refused = client.post(
+        "/api/overtime/me/deductions", json={"month": "2026-08", "days": 1}
+    )
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["detail"] == (
+        "这个月的账已经封了：封过的月份不能再抵扣，补钟只能按净时长算钱"
+    )
+    assert refused.headers["X-Error-Code"] == "month_sealed"

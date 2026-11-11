@@ -156,6 +156,21 @@ class EntryActor:
         """写进 `created_by` 的形状：`super` 或 `staff:<员工号>`。"""
         return "super" if self.is_super else f"staff:{int(self.employee_id)}"
 
+    @classmethod
+    def from_actor(cls, actor: Any) -> "EntryActor":
+        """边界 actor → 台账 actor（鸭子类型；本层不认识 API 的 `WorkbenchActor`）。
+
+        管理端（超管）没有员工号，`created_by` 写 `super`、代录时另给「这笔算谁的」；
+        员工按自己的能力键决定能不能补录任意过去日期 —— 能力跟人走，不跟路径走
+        （`docs/adr/0100` / `0103`）。员工端那扇门已保证 `employee_id` 存在。
+        """
+        if getattr(actor, "kind", None) == "admin":
+            return cls()
+        return cls(
+            employee_id=int(actor.employee_id),
+            can_backfill=bool(actor.has_cap("schedule")),
+        )
+
 
 class OvertimeError(ValueError):
     """台账层的输入错误。``code`` 是给 API 层查文案用的稳定标识，不是给员工看的文案。"""
