@@ -2,7 +2,7 @@
 /**
  * 员工端的「损耗登记」页（从 worktool2 那个小程序的 pages/wastage/add 搬过来）。
  *
- * 一页回答两件事：**记一笔**（物料 / 数量与单位 / 原因 / 日期 / 最多 3 张现场照片 / 备注），
+ * 一页回答两件事：**记一笔**（物料 / 原因 / 数量与单位 / 日期 / 最多 3 张现场照片 / 备注），
  * 以及**看自己最近记的几笔**（员工最常问的是「我那天记了没有」），记错了还能当场改或撤回。
  *
  * 两个身份都能进（页面清单里是 audience: both）：员工用员工会话、店长用管理端会话。
@@ -21,7 +21,7 @@
  * 弹走 850px，第 2~5 笔要手动滑回来）。
  *
  * 2026-11-07 这一轮（spec 4.1~4.5）改的七件事：
- * ① 表单重排：物料 / 数量与单位 chips / 原因三列两行 三项必填在前，照片、备注、日期收成
+ * ① 表单重排：物料 / 原因三列两行 / 数量与单位 chips 三项必填在前，照片、备注、日期收成
  *    一行小按钮（点开才展开），首屏一屏看完；单位从原生 select 改成 chips（手机上少一层面板）；
  * ② 提交按钮不再 disabled（只有 busy 时禁用）：点了就地校验、聚焦缺的那一项，按钮文案还会
  *    写着「还差什么」；那几条就地校验从句死代码变成真的会跑的路径；
@@ -108,7 +108,7 @@ const cameraOpen = ref(false)
 const remarkOpen = ref(false)
 const dateOpen = ref(false)
 /** 「对应备货品」也是选填：不选时复盘按品名兜底（0049 的 prep_item_id 可空）。
- *  2026-11-07 从必填三项中间挪进选填行 —— 它占 70px，会把「原因」挤出首屏。 */
+ *  2026-11-07 从必填三项中间挪进选填行 —— 它占 70px，会把必填项挤出首屏。 */
 const prepSelectOpen = ref(false)
 
 // 就地校验要聚焦的那几个控件。
@@ -242,9 +242,9 @@ const prepPickerList = computed(() => {
 /** 还差哪一项（按钮上那句小字「还差原因」）—— 只用于文案，校验仍是 firstMissing()。 */
 const missingLabel = computed(() => {
   if (!itemName.value.trim()) return '物料'
+  if (!reason.value) return '原因'
   if (!(Number(quantity.value) > 0)) return '数量'
   if (!unit.value) return '单位'
-  if (!reason.value) return '原因'
   if (isOther.value && !remark.value.trim()) return '说明'
   return ''
 })
@@ -595,14 +595,15 @@ function firstMissing() {
   if (!itemName.value.trim()) {
     return { message: '先填物料：哪个东西坏了？', target: () => itemInput.value }
   }
+  // 表单顺序是「物料 → 原因 → 数量与单位」（2026-11-11 用户要求），校验跟着视觉顺序走。
+  if (!reason.value) {
+    return { message: '请选一个损耗原因', target: () => reasonBox.value }
+  }
   if (!(Number(quantity.value) > 0)) {
     return { message: '数量要大于 0：坏了多少就填多少', target: () => quantityInput.value }
   }
   if (!unit.value) {
     return { message: '请选一个单位：多少份 / kg / 个', target: () => unitBox.value }
-  }
-  if (!reason.value) {
-    return { message: '请选一个损耗原因', target: () => reasonBox.value }
   }
   if (isOther.value && !remark.value.trim()) {
     // 「其他」的说明收在「＋备注」里：就地展开，员工才看得见要补什么。
@@ -1138,7 +1139,24 @@ onUnmounted(() => {
           </div>
         </div>
 
-        <!-- 必填二：数量 + 单位。单位从原生 select 改成 chips（手机上少一层面板，2026-11-07）。 -->
+        <!-- 必填二：原因。三列两行（6 个按钮），首屏省一行；先选原因再填数量与单位。 -->
+        <div class="loss-field">
+          <span class="loss-label">原因 <span class="loss-required">必填</span></span>
+          <div ref="reasonBox" class="loss-reasons" tabindex="-1">
+            <button
+              v-for="row in reasons"
+              :key="row.value"
+              type="button"
+              class="loss-reason"
+              :class="{ on: reason === row.value }"
+              :aria-pressed="reason === row.value"
+              @click="reason = row.value"
+            >{{ row.label }}</button>
+          </div>
+        </div>
+
+        <!-- 必填三：数量 + 单位。单位从原生 select 改成 chips（手机上少一层面板，2026-11-07）。
+             2026-11-11 用户把「原因」提到数量前面：先选为什么丢，再填丢了多少。 -->
         <div class="loss-field">
           <span class="loss-label">数量与单位 <span class="loss-required">必填</span></span>
           <input
@@ -1178,22 +1196,6 @@ onUnmounted(() => {
             maxlength="10"
             placeholder="填单位，例如：罐"
           />
-        </div>
-
-        <!-- 必填三：原因。三列两行（6 个按钮），首屏省一行。 -->
-        <div class="loss-field">
-          <span class="loss-label">原因 <span class="loss-required">必填</span></span>
-          <div ref="reasonBox" class="loss-reasons" tabindex="-1">
-            <button
-              v-for="row in reasons"
-              :key="row.value"
-              type="button"
-              class="loss-reason"
-              :class="{ on: reason === row.value }"
-              :aria-pressed="reason === row.value"
-              @click="reason = row.value"
-            >{{ row.label }}</button>
-          </div>
         </div>
 
         <!-- 选填三项收成一行小按钮（spec 4.1.5）：默认收起，点开才展开各自的区域。 -->

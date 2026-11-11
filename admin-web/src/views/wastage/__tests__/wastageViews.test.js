@@ -370,9 +370,9 @@ describe('损耗登记页（员工端）', () => {
 
     const form = wrapper.get('form.loss-block')
     const html = form.html()
-    // 必填三项：物料 → 数量与单位 → 原因，顺序不能乱。
-    expect(html.indexOf('wastage-item-name')).toBeLessThan(html.indexOf('loss-units'))
-    expect(html.indexOf('loss-units')).toBeLessThan(html.indexOf('loss-reasons'))
+    // 必填三项：物料 → 原因 → 数量与单位（2026-11-11 用户要求原因与数量单位对调）。
+    expect(html.indexOf('wastage-item-name')).toBeLessThan(html.indexOf('loss-reasons'))
+    expect(html.indexOf('loss-reasons')).toBeLessThan(html.indexOf('loss-units'))
     // 选填三项收在必填之后，一行三颗小按钮。
     expect(html.indexOf('loss-reasons')).toBeLessThan(html.indexOf('loss-more'))
     const moreButtons = wrapper.findAll('.loss-more-btn')
@@ -532,12 +532,20 @@ describe('损耗登记页（员工端）', () => {
     expect(actions.get('.loss-error').text()).toContain('先填物料')
     expect(document.activeElement).toBe(wrapper.get('#wastage-item-name').element)
 
-    // 物料有了，还差数量 —— 按钮文案与提示都跟着走。
+    // 物料有了，按新顺序（物料 → 原因 → 数量与单位）先差原因 —— 按钮文案与提示都跟着走。
     await wrapper.get('#wastage-item-name').setValue('五花肉')
-    expect(wrapper.get('.loss-actions .btn-primary').text()).toContain('还差数量')
+    expect(wrapper.get('.loss-actions .btn-primary').text()).toContain('还差原因')
     await wrapper.get('form').trigger('submit')
     await flushPromises()
     expect(post).not.toHaveBeenCalled()
+    expect(wrapper.get('.loss-actions .loss-error').text()).toContain('请选一个损耗原因')
+    expect(document.activeElement).toBe(wrapper.get('.loss-reasons').element)
+
+    // 选了原因，还差数量 —— 焦点落到数量输入框。
+    await wrapper.findAll('.loss-reason')[1].trigger('click')
+    expect(wrapper.get('.loss-actions .btn-primary').text()).toContain('还差数量')
+    await wrapper.get('form').trigger('submit')
+    await flushPromises()
     expect(wrapper.get('.loss-actions .loss-error').text()).toContain('数量要大于 0')
     expect(document.activeElement).toBe(wrapper.get('input[type="number"]').element)
   })
