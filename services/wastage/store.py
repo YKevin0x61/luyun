@@ -36,6 +36,7 @@ import asyncpg
 from db_core.errors import is_integrity_violation
 from db_core.utils import CHINA_TZ
 from services.identity import serialized_write
+from services.identity.capabilities import CAP_WASTAGE
 from services.prep_review.retention import PRIMARY_CLOCK
 
 logger = logging.getLogger(__name__)
@@ -169,6 +170,23 @@ class WastageActor:
         if self.name:
             return self.name
         return "管理端" if self.is_admin else f"员工{self.employee_id}"
+
+    @classmethod
+    def from_actor(cls, actor: Any) -> "WastageActor":
+        """边界 actor → 台账 actor（鸭子类型；本层不认识 API 的 `WorkbenchActor`）。
+
+        判据仍是「管理端直接看全店，员工看自己的能力」：员工的 `sees_all` 取边界上
+        已解析好的 `wastage` 能力，归属（`owner_key`）与 `operator_name` 原样带过来。
+        员工端那扇门已保证 `employee_id` 存在。
+        """
+        if getattr(actor, "kind", None) == KIND_ADMIN:
+            return cls(kind=KIND_ADMIN, employee_id=None, name="管理端")
+        return cls(
+            kind=KIND_STAFF,
+            employee_id=int(actor.employee_id),
+            name=actor.name,
+            sees_all=bool(actor.has_cap(CAP_WASTAGE)),
+        )
 
 
 class WastageError(ValueError):

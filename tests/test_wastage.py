@@ -1563,3 +1563,119 @@ def test_records_and_statistics_carry_the_a_batch_fields(wastage_http):
     assert stats["revoked_count"] == 0
     empty = client.get("/api/wastage/statistics", params={"month": "2026-07"}).json()
     assert (empty["revoked_count"], empty["edited_count"]) == (0, 0)
+
+
+# ── 票 04：工作台 HTTP 边界（动作门 + 错误码）────────────────────────────────
+#
+# 12 条路由里，`/statistics` 是唯一判动作的那条（`wastage_view_all`）；其余 11 条只
+# 解析身份。这里把统计那道门按四种身份钉一次，再把几个代表错误的状态码 / 逐字文案 /
+# `X-Error-Code` 头钉住 —— 文案本来就是契约，头是这次搬迁新增的唯一东西。
+
+
+def test_wastage_view_all_is_one_matrix_over_four_identities(wastage_http):
+    """`/statistics`：管理端放行；员工看「损耗分析」；匿名 401（ADR 0134）。"""
+    client, _db, accounts = wastage_http
+    employee_id = _employee_id(accounts)
+
+    def as_admin():
+        _admin_cookie(client)
+
+    def as_staff(caps):
+        _run(accounts.set_admin_caps(employee_id, caps))
+        _staff_cookie(client, accounts)
+
+    def as_anonymous():
+        client.cookies.clear()
+
+    cases = (
+        ("管理员会话", as_admin, 200),
+        ("有「损耗分析」的员工", lambda: as_staff(["wastage"]), 200),
+        ("没有能力的员工", lambda: as_staff([]), 403),
+        ("匿名", as_anonymous, 401),
+    )
+    for label, switch_to, expected in cases:
+        switch_to()
+        response = client.get(
+            "/api/wastage/statistics", params={"month": "2026-09"}
+        )
+        assert response.status_code == expected, (label, response.text)
+
+        if expected == 403:
+            assert response.json()["detail"] == (
+                "只有开了「损耗分析」权限的人能看全店损耗统计："
+                "请找超级管理员在花名册里开通"
+            )
+            assert response.headers["X-Error-Code"] == "capability_required"
+        elif expected == 401:
+            # 鉴权门自己的 401 不带边界错误码（边界只管动作门与业务错误）。
+            assert response.json()["detail"] == "未授权"
+            assert "x-error-code" not in response.headers
+
+
+def test_the_mapped_wastage_errors_carry_status_detail_and_code(wastage_http):
+    """三个带状态码的代表 + 一个带 `{}` 的 400：状态 / 文案 / 头各钉一次。"""
+    client, _db, accounts = wastage_http
+    _employee_id(accounts)
+    _employee_id(accounts, PHONE2, NAME2)
+    _staff_cookie(client, accounts)
+
+    created = client.post("/api/wastage/records", json=_record_body())
+    assert created.status_code == 200, created.text
+    record_id = created.json()["record"]["id"]
+
+    # 1) 不存在的登记：404
+    refused = client.patch("/api/wastage/records/999999", json={"quantity": 2})
+    assert refused.status_code == 404, refused.text
+    assert refused.json()["detail"] == "找不到这条登记：可能已经撤回了"
+    assert refused.headers["X-Error-Code"] == "unknown_record"
+
+    # 2) 别人的登记：403
+    _staff_cookie(client, accounts, phone=PHONE2)
+    refused = client.patch(
+        f"/api/wastage/records/{record_id}", json={"quantity": 2}
+    )
+    assert refused.status_code == 403, refused.text
+    assert refused.json()["detail"] == "只能改自己记的那几条"
+    assert refused.headers["X-Error-Code"] == "not_owner"
+
+    # 3) 过了 24 小时：409
+    _staff_cookie(client, accounts)
+    _CLOCK["now"] = FIXED_NOW + timedelta(hours=AMEND_WINDOW_HOURS + 1)
+    refused = client.patch(
+        f"/api/wastage/records/{record_id}", json={"quantity": 2}
+    )
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["detail"] == (
+        "超过 24 小时了，这一笔不能再改；如果记错了，另记一笔说明"
+    )
+    assert refused.headers["X-Error-Code"] == "amend_window_closed"
+
+    # 4) 带 `{}` 的 400：上限由服务层 args[0] 填，文案里不写死 50。
+    _CLOCK["now"] = FIXED_NOW
+    refused = client.post("/api/wastage/records", json=_record_body("菜" * 51))
+    assert refused.status_code == 400, refused.text
+    assert refused.json()["detail"] == "物料名称最多 50 个字：请缩短一点"
+    assert refused.headers["X-Error-Code"] == "item_name_too_long"
+
+
+def test_templates_are_usable_from_the_staff_session(wastage_http):
+    """模板三条也是「任何身份都能进」：员工会话存 / 列 / 删各走一次。"""
+    client, _db, accounts = wastage_http
+    _employee_id(accounts)
+    _staff_cookie(client, accounts)
+
+    saved = client.post(
+        "/api/wastage/templates",
+        json={"item_name": "青菜", "unit": "kg", "reason": "expired"},
+    )
+    assert saved.status_code == 200, saved.text
+
+    listed = client.get("/api/wastage/templates")
+    assert listed.status_code == 200, listed.text
+    custom = [row for row in listed.json()["templates"] if row["is_custom"]]
+    assert [row["item_name"] for row in custom] == ["青菜"]
+    template_id = custom[0]["id"]
+
+    removed = client.delete(f"/api/wastage/templates/{template_id}")
+    assert removed.status_code == 200, removed.text
+    assert client.get("/api/wastage/templates").json()["templates"] == []

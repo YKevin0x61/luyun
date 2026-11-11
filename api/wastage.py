@@ -2,7 +2,8 @@
 # -*- coding: utf-8 -*-
 """日常损耗登记的 HTTP 适配层。台账在 `services/wastage/store.py`，这里只管翻译。
 
-**两个身份走同一个面**（`require_any_identity_session`：管理端会话或员工会话）：
+**两个身份走同一个面**（边界层的 `identity_actor`：管理端会话或员工会话，任一有效
+即放行）：
 
 - 员工手机端（`/workbench/me/loss`）：登记、看自己的记录、存自己的模板；
 - 管理端工作台（`/workbench/kitchen/loss`）：看全店、按月统计、按条件翻明细；
@@ -12,8 +13,8 @@
 
 区别不在路径上，而在**归属**：员工那几档的读写都带 `employee_id` 过滤（服务层的
 `_scope_clause` 一处判），所以接口上根本没有「看别人的」这个参数。有能力看全店的
-员工由 `WastageActor.sees_all` 带出去（API 层现读 `admin_caps`，服务层只认这个标记）。
-统计是另一道门：`_require_wastage_reader`（管理端或带那一项能力的员工）。
+员工由 `WastageActor.sees_all` 带出去（边界层按能力解析，服务层只认这个标记）。
+统计是另一道门：`wastage_view_all` 动作（管理端直接放行，员工要那一项能力）。
 
 **共用电脑上两套 cookie 都在时，员工页用 `?identity=staff` 显式声明**（管理端页声明
 `admin`）：后端那个「任一身份」门的默认优先级是管理端优先，不声明的话员工在员工页
@@ -35,7 +36,6 @@
 
 from __future__ import annotations
 
-import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -43,16 +43,18 @@ from typing import Optional
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile
 from pydantic import BaseModel
 
-from api.security import require_any_identity_session
+from api.workbench_boundary import (
+    WorkbenchActor,
+    WorkbenchErrors,
+    identity_actor,
+    require_action,
+)
 from config import settings
 from database import get_db
 from db_core.utils import CHINA_TZ
 from services.hygiene.images import sniff_image_content_type
-from services.identity.capabilities import CAP_WASTAGE, has_cap
 from services.wastage.store import (
     AMEND_WINDOW_HOURS,
-    KIND_ADMIN,
-    KIND_STAFF,
     MAX_IMAGES,
     MAX_ITEM_NAME,
     MAX_QUANTITY,
@@ -66,8 +68,6 @@ from services.wastage.store import (
     WastageError,
     WastageStore,
 )
-
-logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/wastage", tags=["损耗登记"])
 
@@ -119,6 +119,9 @@ _ERROR_STATUS = {
     "unknown_image": 404,
     # 撤回过的登记对读接口就是「不存在」，改它也是同一个 404。
     "unknown_record": 404,
+    # 共享例外表把 `unknown_*` 通配成 404；这个 code 在损耗这边一直是 **400** —— 错的
+    # 是「选了一个不存在的备货品」，不是「要改的那条记录没了」。
+    "unknown_prep_item": 400,
     # 看得到不等于改得了：不是本人记的，403 比 404 诚实（这条不是没了，是不归你）。
     "not_owner": 403,
     # 窗口过了不是请求写错，是此刻不允许 —— 409 让前端能和 400 的「参数错」分开提示。
@@ -127,6 +130,18 @@ _ERROR_STATUS = {
     "not_migrated": 503,
     "images_unavailable": 503,
 }
+
+# 本域唯一的业务错误出口（票 04）：文案表与状态覆盖仍是原来那两份数据，边界只多做
+# 一件事 —— 每个由这里翻出来的拒绝都带 `X-Error-Code: <code>`。
+_WASTAGE_ERRORS = WorkbenchErrors(
+    domain="损耗登记请求",
+    texts=_ERROR_DETAILS,
+    status_overrides=_ERROR_STATUS,
+    default_text="损耗登记参数不合法",
+)
+
+# 12 条里唯一判动作的那条（ADR 0134）：管理端放行，员工要「损耗分析」能力。
+_wastage_view_all = require_action("wastage_view_all")
 
 
 class RecordRequest(BaseModel):
@@ -151,52 +166,6 @@ class TemplateRequest(BaseModel):
     item_name: Optional[str] = None
     unit: Optional[str] = None
     reason: Optional[str] = None
-
-
-def _bad_request(exc: WastageError) -> HTTPException:
-    detail = _ERROR_DETAILS.get(exc.code, "损耗登记参数不合法")
-    if "{}" in detail:
-        raw = exc.args[0] if exc.args else ""
-        if not raw or raw == exc.code:
-            logger.warning("损耗登记错误缺细节，用「？」占位: code=%s", exc.code)
-        detail = detail.replace("{}", raw if raw and raw != exc.code else "？")
-    logger.info("损耗登记请求被拒: code=%s", exc.code)
-    return HTTPException(status_code=_ERROR_STATUS.get(exc.code, 400), detail=detail)
-
-
-def _actor(identity: dict) -> WastageActor:
-    """两种会话 → 台账层的 actor。归属（谁能看谁记的）由它带出去。
-
-    员工的 `sees_all` 按 `admin_caps` 里那一项现读：开了「损耗分析」（`wastage`）的员工
-    看全店统计与明细，没开的那一档照旧只看自己记的。判据每次请求现读，所以收回能力与
-    给他能力一样，下一次请求就生效。
-    """
-    if identity.get("kind") == "staff":
-        employee = identity.get("employee") or {}
-        return WastageActor(
-            kind=KIND_STAFF,
-            employee_id=int(employee["id"]),
-            name=str(employee.get("name") or ""),
-            sees_all=has_cap(employee.get("admin_caps"), CAP_WASTAGE),
-        )
-    # 管理端那台共享账号：没有员工号，名字写「管理端」（明细里「谁登记的」那一列）。
-    return WastageActor(kind=KIND_ADMIN, employee_id=None, name="管理端")
-
-
-def _require_wastage_reader(identity: dict) -> None:
-    """全店统计的门：管理端，**或**开了「损耗分析」能力（`wastage`）的员工。
-
-    员工拿到的是 403「你没这个权限」，不是 404 —— 后者会把「权限不够」说成
-    「数据没了」。收回能力后下一次请求就 403（权限不在登录时快照）。
-    """
-    if identity.get("kind") == "admin":
-        return
-    employee = identity.get("employee") or {}
-    if not has_cap(employee.get("admin_caps"), CAP_WASTAGE):
-        raise HTTPException(
-            status_code=403,
-            detail="只有开了「损耗分析」权限的人能看全店损耗统计：请找超级管理员在花名册里开通",
-        )
 
 
 _capture_store = None
@@ -237,7 +206,7 @@ def _meta() -> dict:
 @router.get("/meta")
 async def read_meta(
     db=Depends(get_db),
-    identity: dict = Depends(require_any_identity_session),
+    actor: WorkbenchActor = Depends(identity_actor),
 ) -> dict:
     """登记页要的那几份清单与上限：原因六选一、常用单位、今天与上限。
 
@@ -252,13 +221,13 @@ async def read_meta(
 async def create_record(
     payload: RecordRequest,
     db=Depends(get_db),
-    identity: dict = Depends(require_any_identity_session),
+    actor: WorkbenchActor = Depends(identity_actor),
 ) -> dict:
     """登记一笔损耗。谁登记的就记在谁名下（员工看得到自己的，管理端看全店）。"""
     store = _store(db)
     try:
         record = await store.add_record(
-            _actor(identity),
+            WastageActor.from_actor(actor),
             item_name=payload.item_name,
             quantity=payload.quantity,
             unit=payload.unit,
@@ -269,7 +238,7 @@ async def create_record(
             prep_item_id=payload.prep_item_id,
         )
     except WastageError as exc:
-        raise _bad_request(exc) from exc
+        raise _WASTAGE_ERRORS.http(exc) from exc
     return {"record": record}
 
 
@@ -278,7 +247,7 @@ async def amend_record(
     record_id: int,
     payload: RecordRequest,
     db=Depends(get_db),
-    identity: dict = Depends(require_any_identity_session),
+    actor: WorkbenchActor = Depends(identity_actor),
 ) -> dict:
     """更正本人 24 小时内记的那一笔：只改传了值的字段，照片不参与（body 里的
     `image_ids` 会被忽略 —— 照片不可换，见服务层）。
@@ -290,7 +259,7 @@ async def amend_record(
     store = _store(db)
     try:
         record = await store.amend_record(
-            _actor(identity),
+            WastageActor.from_actor(actor),
             record_id,
             item_name=payload.item_name,
             quantity=payload.quantity,
@@ -300,7 +269,7 @@ async def amend_record(
             wastage_date=payload.wastage_date,
         )
     except WastageError as exc:
-        raise _bad_request(exc) from exc
+        raise _WASTAGE_ERRORS.http(exc) from exc
     return {"record": record}
 
 
@@ -308,14 +277,14 @@ async def amend_record(
 async def revoke_record(
     record_id: int,
     db=Depends(get_db),
-    identity: dict = Depends(require_any_identity_session),
+    actor: WorkbenchActor = Depends(identity_actor),
 ) -> dict:
     """撤回本人 24 小时内记的那一笔（软删）：读接口从此看不到它，修订里留整行快照。"""
     store = _store(db)
     try:
-        record = await store.revoke_record(_actor(identity), record_id)
+        record = await store.revoke_record(WastageActor.from_actor(actor), record_id)
     except WastageError as exc:
-        raise _bad_request(exc) from exc
+        raise _WASTAGE_ERRORS.http(exc) from exc
     return {"record": record}
 
 
@@ -328,7 +297,7 @@ async def list_records(
     offset: int = Query(0, ge=0),
     limit: int = Query(20, ge=1, le=100),
     db=Depends(get_db),
-    identity: dict = Depends(require_any_identity_session),
+    actor: WorkbenchActor = Depends(identity_actor),
 ) -> dict:
     """明细，新的在前。员工拿得到自己那几笔；开了「损耗分析」能力的员工与店长一样看全店
     （归属过滤在服务层的 `_scope_clause` 一处判）。
@@ -339,7 +308,7 @@ async def list_records(
     store = _store(db)
     try:
         data = await store.list_records(
-            _actor(identity),
+            WastageActor.from_actor(actor),
             start_date=start_date,
             end_date=end_date,
             reason=reason,
@@ -348,7 +317,7 @@ async def list_records(
             limit=limit,
         )
     except WastageError as exc:
-        raise _bad_request(exc) from exc
+        raise _WASTAGE_ERRORS.http(exc) from exc
     return data
 
 
@@ -358,42 +327,41 @@ async def read_statistics(
     start_date: Optional[str] = Query(None, description="YYYY-MM-DD"),
     end_date: Optional[str] = Query(None, description="YYYY-MM-DD"),
     db=Depends(get_db),
-    identity: dict = Depends(require_any_identity_session),
+    actor: WorkbenchActor = Depends(_wastage_view_all),
 ) -> dict:
     """按月（或一段日期）的汇总：总笔数、物料种类、原因分布、物料排行、逐日趋势，
     外加 `revoked_count` / `edited_count`（范围内撤回过、改过的笔数，空范围是 0 不是 None）。
 
-    门是「管理端或开了『损耗分析』能力的员工」（`_require_wastage_reader`）。
+    门是 `wastage_view_all`：管理端放行，员工要开了「损耗分析」能力。
     """
-    _require_wastage_reader(identity)
     store = _store(db)
     try:
         data = await store.statistics(
             month=month, start_date=start_date, end_date=end_date
         )
     except WastageError as exc:
-        raise _bad_request(exc) from exc
+        raise _WASTAGE_ERRORS.http(exc) from exc
     return {**data, "month": month or None, "meta": _meta()}
 
 
 @router.get("/suggestions")
 async def read_suggestions(
     db=Depends(get_db),
-    identity: dict = Depends(require_any_identity_session),
+    actor: WorkbenchActor = Depends(identity_actor),
 ) -> dict:
     """物料名称的历史建议（填名字时的补全）。员工看自己近 30 天的，管理端看全店。"""
     store = _store(db)
-    return {"suggestions": await store.suggestions(_actor(identity))}
+    return {"suggestions": await store.suggestions(WastageActor.from_actor(actor))}
 
 
 @router.get("/templates")
 async def read_templates(
     db=Depends(get_db),
-    identity: dict = Depends(require_any_identity_session),
+    actor: WorkbenchActor = Depends(identity_actor),
 ) -> dict:
     """常用模板：我存过的 + 我最近常这么记的组合。"""
     store = _store(db)
-    data = await store.templates(_actor(identity))
+    data = await store.templates(WastageActor.from_actor(actor))
     return {**data, "max_templates": MAX_TEMPLATES}
 
 
@@ -401,19 +369,19 @@ async def read_templates(
 async def create_template(
     payload: TemplateRequest,
     db=Depends(get_db),
-    identity: dict = Depends(require_any_identity_session),
+    actor: WorkbenchActor = Depends(identity_actor),
 ) -> dict:
     """把「物料 + 单位 + 原因」存成常用模板（数量留空，登记时再填）。"""
     store = _store(db)
     try:
         template = await store.save_template(
-            _actor(identity),
+            WastageActor.from_actor(actor),
             item_name=payload.item_name,
             unit=payload.unit,
             reason=payload.reason,
         )
     except WastageError as exc:
-        raise _bad_request(exc) from exc
+        raise _WASTAGE_ERRORS.http(exc) from exc
     return {"template": template}
 
 
@@ -421,14 +389,14 @@ async def create_template(
 async def remove_template(
     template_id: int,
     db=Depends(get_db),
-    identity: dict = Depends(require_any_identity_session),
+    actor: WorkbenchActor = Depends(identity_actor),
 ) -> dict:
     """删一个自己存的模板（别人的模板对你是「不存在」）。"""
     store = _store(db)
     try:
-        await store.delete_template(_actor(identity), template_id)
+        await store.delete_template(WastageActor.from_actor(actor), template_id)
     except WastageError as exc:
-        raise _bad_request(exc) from exc
+        raise _WASTAGE_ERRORS.http(exc) from exc
     return {"ok": True}
 
 
@@ -478,7 +446,7 @@ def _looks_like_heif(data: bytes) -> bool:
 async def upload_image(
     file: UploadFile = File(...),
     db=Depends(get_db),
-    identity: dict = Depends(require_any_identity_session),
+    actor: WorkbenchActor = Depends(identity_actor),
 ) -> dict:
     """传一张现场照片，返回它的 `capture_id`（提交记录时带上）。
 
@@ -501,9 +469,9 @@ async def upload_image(
         raise HTTPException(status_code=400, detail="这不是一张能用的图片：请重新拍一张")
     store = _store(db)
     try:
-        image = await store.add_image(_actor(identity), data, content_type)
+        image = await store.add_image(WastageActor.from_actor(actor), data, content_type)
     except WastageError as exc:
-        raise _bad_request(exc) from exc
+        raise _WASTAGE_ERRORS.http(exc) from exc
     return {"image": image}
 
 
@@ -511,12 +479,12 @@ async def upload_image(
 async def read_image(
     capture_id: str,
     db=Depends(get_db),
-    identity: dict = Depends(require_any_identity_session),
+    actor: WorkbenchActor = Depends(identity_actor),
 ) -> Response:
     """读一张照片。员工只读得到自己传的（开了「损耗分析」能力的员工看全部）；
     读不到一律 404（不区分「没有」与「不是你的」）。"""
     store = _store(db)
-    found = await store.image_bytes(_actor(identity), capture_id)
+    found = await store.image_bytes(WastageActor.from_actor(actor), capture_id)
     if found is None:
         raise HTTPException(status_code=404, detail="照片不存在")
     data, content_type = found
