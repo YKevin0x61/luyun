@@ -60,6 +60,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from database import CHINA_TZ
 from services.business_day import REVIEW_CLOCK
 from services.dish_normalize import normalize_dish_name
+from services.prep_item_identity import id_of, item_key, rule_key
 from services.prep_plan_service import LOUMIAN_STATION, prep_plan_service
 from services.prep_review import retention
 from services.wastage.store import WastageStore
@@ -114,13 +115,6 @@ def _json_dict(raw: Any) -> Dict[str, Any]:
     except (TypeError, ValueError):
         return {}
     return value if isinstance(value, dict) else {}
-
-
-def _identity(prep_item_id: Any, item_name: Any, unit: Any) -> Tuple:
-    """品的主键：优先 `prep_item_id`，没对齐主数据时回落 (品名, 单位)。"""
-    if prep_item_id is not None:
-        return ("id", int(prep_item_id))
-    return ("name", str(item_name or ""), str(unit or ""))
 
 
 def _weather_bucket(context: Optional[Dict[str, Any]]) -> str:
@@ -206,8 +200,9 @@ async def _load_rows(db, start_day: date, end_day: date) -> List[Dict[str, Any]]
         rows.append(
             {
                 "day": row["plan_day"] or str(row["snapshot_at"] or "")[:10],
-                "key": _identity(row["prep_item_id"], row["item_name"], row["unit"]),
+                "key": item_key(row["prep_item_id"], row["item_name"], row["unit"]),
                 "item_name": row["item_name"] or "",
+                "unit": row["unit"] or "",
                 "suggested": float(suggested or 0.0),
                 "sold": None if sold is None else float(sold),
                 "sold_next_day": None if next_day is None else float(next_day),
@@ -300,7 +295,7 @@ async def _load_unit_prices(
         amount = float(row["total_amount"] or 0.0)
         qty = float(row["quantity"] or 0.0)
         for rule in rules:
-            key = _identity(rule.get("prep_item_id"), rule["semi_name"], rule["unit"])
+            key = rule_key(rule)
             factor = float(rule["factor"] or 0.0)
             # 一道菜映射到多个半成品时按系数占比分摊金额；单价仍按各自单位数算。
             revenue[key] += amount * factor / total_factor
@@ -403,8 +398,9 @@ def _cost(
         next_day_total += next_day
 
         remaining = overfill - next_day
-        if row["key"][0] == "id":
-            registered = wastage_by_id.get((row["day"], row["key"][1]), 0.0)
+        item_id = id_of(row["key"])
+        if item_id is not None:
+            registered = wastage_by_id.get((row["day"], item_id), 0.0)
         else:
             registered = 0.0
         # 登记行自己缺 id 时按品名兜底；两桶互斥，不会重复计。
@@ -413,7 +409,12 @@ def _cost(
         wastage_total += wastage
         unexplained = max(0.0, remaining - wastage)
         unexplained_total += unexplained
-        amount_total += overfill * prices.get(row["key"], 0.0)
+        # 价格表按规则身份建键、用快照行身份查（ADR 0141）：id 键优先，id 键不存在
+        # 时才回落名字键。价格是规则的加权均价，不能把 id 桶与同名文本桶相加。
+        price = prices.get(row["key"])
+        if price is None and row["key"][0] == "id":
+            price = prices.get(item_key(None, row["item_name"], row["unit"]), 0.0)
+        amount_total += overfill * (price or 0.0)
 
     return {
         "overfill_qty": round(overfill_total, 2),

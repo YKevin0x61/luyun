@@ -29,11 +29,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from database import CHINA_TZ
 from services.business_day import REVIEW_CLOCK, review_day_range
 from services.dish_normalize import normalize_dish_name
-from services.prep_plan_service import (
-    LOUMIAN_STATION,
-    _rule_totals_key,
-    prep_plan_service,
-)
+from services.prep_item_identity import keys_for, rule_usage
+from services.prep_plan_service import LOUMIAN_STATION, prep_plan_service
 from services.prep_review.events import record_sold_out
 
 logger = logging.getLogger(__name__)
@@ -149,7 +146,7 @@ async def _load_orders(
 def _build_timelines(
     orders: List[Dict[str, Any]], exact_rules, norm_rules
 ) -> Dict[Any, List[Tuple[datetime, float]]]:
-    """按备货品聚合「这一单贡献了多少份」，键与 `_sold_qty_for` 完全一致。"""
+    """按备货品聚合「这一单贡献了多少份」，键用 ADR 0141 的规范键。"""
     timelines: Dict[Any, List[Tuple[datetime, float]]] = defaultdict(list)
     for row in orders:
         order_at = prep_plan_service._order_datetime(row["order_time"])
@@ -165,11 +162,10 @@ def _build_timelines(
         dishes = exact_rules.get(dish_name) or norm_rules.get(
             normalize_dish_name(dish_name), ()
         )
-        for rule in dishes:
-            amount = quantity * rule["factor"]
+        for key, amount in rule_usage(dishes, quantity):
             if amount <= 0:
                 continue
-            timelines[_rule_totals_key(rule)].append((order_at, amount))
+            timelines[key].append((order_at, amount))
     for pairs in timelines.values():
         pairs.sort(key=lambda pair: pair[0])
     return timelines
@@ -229,11 +225,12 @@ async def infer_sold_out(db, plan_day: str) -> dict:
 
     written = 0
     for item in targets.values():
-        pairs = list(timelines.get(item["prep_item_id"], ()))
-        # 规则没接上主数据时按 (品名, 单位) 文本键；两种键相加，与 `_sold_qty_for` 一致。
-        pairs.extend(
-            timelines.get((item["item_name"], item["unit"]), ())
-        )
+        # 规则没接上主数据时落名字键；一个品可能两种桶都有，两桶相加（ADR 0141）。
+        pairs = [
+            pair
+            for key in keys_for(item)
+            for pair in timelines.get(key, ())
+        ]
         pairs = [
             (at, amount)
             for at, amount in pairs

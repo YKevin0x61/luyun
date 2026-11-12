@@ -20,7 +20,8 @@ import unittest
 from datetime import datetime, timedelta
 
 from database import CHINA_TZ, DatabaseManager
-from services.prep_plan_service import PrepPlanService, _sold_qty_for
+from services.prep_item_identity import total_for
+from services.prep_plan_service import PrepPlanService
 
 ITEM_NAME = "虾饺馅"
 UNIT = "份"
@@ -213,13 +214,13 @@ class AlignmentTests(PrepActualsFixture):
         self.assertEqual(row["sold_qty"], 4)
         self.assertTrue(any(ITEM_NAME in line and "prep_item_id" in line for line in logs.output))
 
-    async def test_sold_qty_map_exposes_both_key_shapes(self):
-        """`_sold_qty_map` 的输出契约：有 id 写 int 键，缺 id 写文本键，两种都查得到。"""
+    async def test_sold_qty_map_uses_canonical_keys(self):
+        """`_sold_qty_map` 的输出契约：有 id 写 ("id", n) 键，缺 id 写 ("name", 品名, 单位) 键。"""
         item_id = await self._seed_item()
         await self._seed_rule(prep_item_id=item_id)
         await self._seed_order(flow_id="in-09", at=_at(1), qty=2)
         totals = await self.service._sold_qty_map(self.db, WINDOW_START, WINDOW_END)
-        self.assertEqual(totals, {item_id: 2.0})
+        self.assertEqual(totals, {("id", item_id): 2.0})
 
         rules = self.db.table("semi_finished_rules")
         async with rules.conn.cursor() as cursor:
@@ -227,8 +228,8 @@ class AlignmentTests(PrepActualsFixture):
         await rules.commit()
         self.service = PrepPlanService()
         totals = await self.service._sold_qty_map(self.db, WINDOW_START, WINDOW_END)
-        self.assertEqual(totals, {(ITEM_NAME, UNIT): 2.0})
-        self.assertEqual(_sold_qty_for(totals, {
+        self.assertEqual(totals, {("name", ITEM_NAME, UNIT): 2.0})
+        self.assertEqual(total_for(totals, {
             "prep_item_id": item_id, "item_name": ITEM_NAME, "unit": UNIT,
         }), 2.0)
 

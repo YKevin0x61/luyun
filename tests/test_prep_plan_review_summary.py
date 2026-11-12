@@ -406,6 +406,30 @@ class CostTests(ReviewFixture):
         self.assertIn("excess", cost["wastage_reasons"])
         self.assertNotIn("damaged", cost["wastage_reasons"])
 
+    async def test_price_falls_back_to_name_key_when_rule_has_no_prep_item_id(self):
+        """ADR 0141：规则没接主数据时价格表只有名字键，快照行按 id 也要查得到。
+
+        旧实现用 `prices.get(("id", item_id))`，名字桶里的价查不到，金额静默为 0。
+        """
+        item_id = await self._seed_item()
+        # 规则的 semi_name / unit 与快照行一致，方便按名字键对上。
+        await self._seed_rule(item_id=item_id, factor=1.0)
+        rules = self.db.table("semi_finished_rules")
+        async with rules.conn.cursor() as cursor:
+            await cursor.execute("UPDATE semi_finished_rules SET prep_item_id = NULL")
+        await rules.commit()
+        # 10-19：建议 100、实际 80 → 多备 20
+        await self._seed_snapshot("2026-10-19", item_id, 100)
+        await self._seed_actual("2026-10-19", item_id, 80)
+        # 10 份菜卖 200 → 每个半成品单位 20
+        await self._seed_order("2026-10-19", 10, 200)
+
+        body = await self._summary("2026-10-22", days=10)
+        cost = body["cost"]
+        self.assertAlmostEqual(cost["overfill_qty"], 20)
+        self.assertAlmostEqual(cost["estimated_amount"], 20 * 20)
+        self.assertTrue(cost["estimated"])
+
     async def test_revoked_wastage_is_not_counted_in_cost(self):
         """撤回的那笔不进 cost.wastage，也不进 wastage_recorded_qty（台账契约）。"""
         item_id = await self._seed_item()
@@ -649,3 +673,25 @@ def test_staff_session_without_cap_is_403(staff_plain_client):
     resp = client.get("/api/prep-plan/snapshots", params={"day": "2026-10-19"})
     assert resp.status_code == 403
     assert "备货复盘" in resp.json()["detail"]
+
+
+def test_cost_price_prefers_id_bucket_and_falls_back_to_name_bucket():
+    """ADR 0141：价格按 id 键优先、缺 id 才回落名字键；两桶都有价时不相加。"""
+    from services.prep_review.summary import _cost
+
+    row = {
+        "day": "2026-10-19",
+        "key": ("id", 7),
+        "item_name": ITEM_NAME,
+        "unit": UNIT,
+        "suggested": 10.0,
+        "sold": 0.0,
+        "sold_next_day": 0.0,
+    }
+    args = ([row], {}, {}, 0.0)
+
+    cost = _cost(*args, {("id", 7): 2.0, ("name", ITEM_NAME, UNIT): 99.0})
+    assert cost["estimated_amount"] == 20.0
+
+    cost = _cost(*args, {("name", ITEM_NAME, UNIT): 3.0})
+    assert cost["estimated_amount"] == 30.0

@@ -247,6 +247,21 @@ class ActualsRefreshTests(PrepQualityFixture):
         )
         self.assertEqual(refreshed["sold_qty"], 20)
 
+    async def test_relinking_a_rule_to_an_item_changes_fingerprint(self):
+        """ADR 0141 决定 7：规则从「没接主数据」改成接上 id，也算配方变过。"""
+        item_id = await self._seed_item()
+        await self._seed_rule()  # 先不接主数据
+        before = await self.service._rules_fingerprint(self.db)
+
+        rules = self.db.table("semi_finished_rules")
+        async with rules.conn.cursor() as cursor:
+            await cursor.execute(
+                "UPDATE semi_finished_rules SET prep_item_id = ?", (item_id,)
+            )
+        await rules.commit()
+
+        self.assertNotEqual(await self.service._rules_fingerprint(self.db), before)
+
 
 # ------------------------------------------------------------------ 环境信号
 

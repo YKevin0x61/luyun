@@ -28,6 +28,7 @@ from typing import Dict, List, Optional, Tuple
 
 from database import CHINA_TZ
 from services.dish_normalize import normalize_dish_name
+from services.prep_item_identity import Key, keys_for, rule_key, rule_usage
 
 # 展开那一栏的用量柱形图：今天 + 前面 7 个完整营业日。今天那根只算到此刻，
 # 要和前 7 个整天比趋势就得给 8 根，否则一天是半天、其余是整天，看着像生意掉了。
@@ -163,12 +164,12 @@ class _UsageIndex:
     """
 
     def __init__(self) -> None:
-        self._by_key: Dict[Tuple[date, Tuple[str, str]], List[Tuple[int, float]]] = defaultdict(list)
+        self._by_key: Dict[Tuple[date, Key], List[Tuple[int, float]]] = defaultdict(list)
         self._raw: Dict[date, List[Tuple[int, float]]] = defaultdict(list)
-        self._idx: Dict[Tuple[date, Tuple[str, str]], List[int]] = {}
+        self._idx: Dict[Tuple[date, Key], List[int]] = {}
         self._raw_idx: Dict[date, List[int]] = {}
 
-    def add(self, day: date, key: Tuple[str, str], epoch: int, qty: float) -> None:
+    def add(self, day: date, key: Key, epoch: int, qty: float) -> None:
         self._by_key[(day, key)].append((epoch, qty))
 
     def add_raw(self, day: date, epoch: int, qty: float) -> None:
@@ -209,7 +210,7 @@ class _UsageIndex:
             return 0.0
         return sum(row[1] for row in rows[lo:hi])
 
-    def window(self, day: date, key: Tuple[str, str], start: int, end: int) -> float:
+    def window(self, day: date, key: Key, start: int, end: int) -> float:
         rows = self._by_key.get((day, key))
         if not rows:
             return 0.0
@@ -290,7 +291,7 @@ def compute_reference(
     usage = _UsageIndex()
     # 主力品判据用「订单行数」：跨单位可比（个/条/份/斤/包 不能直接相加），
     # 含义也直白——有多少次被点到。
-    line_counts: Dict[Tuple[str, str], int] = {}
+    line_counts: Dict[Key, int] = {}
     dish_lines: Dict[str, int] = {}
     for row in orders:
         parsed = order_datetime(row["order_time"])
@@ -306,10 +307,9 @@ def compute_reference(
         dishes = exact_rules.get(row["dish_name"]) or norm_rules.get(
             normalize_dish_name(row["dish_name"]), ()
         )
-        for rule in dishes:
-            key = (rule["semi_name"], rule["unit"])
+        for key, amount in rule_usage(dishes, qty):
             line_counts[key] = line_counts.get(key, 0) + 1
-            usage.add(day, key, epoch, qty * rule["factor"])
+            usage.add(day, key, epoch, amount)
     usage.finalize()
     total_lines = sum(line_counts.values()) or 1
     mapped_keys = usage.nonzero_keys()
@@ -345,21 +345,37 @@ def compute_reference(
         start = _at(day, clock_t)
         return start, start + timedelta(hours=horizon)
 
-    def bucket_qty(day, key):
-        """day 那天那 24 小时里，这一品能做多少。"""
+    def bucket_qty(day, keys):
+        """day 那天那 24 小时里，这一品能做多少（id 桶 + 名字桶）。"""
         start, end = _day_span(day)
+        lo, hi = _epoch(start), _epoch(end)
         return sum(
-            usage.window(d, key, _epoch(start), _epoch(end))
+            usage.window(d, key, lo, hi)
+            for key in keys
             for d in _span_days_from(start, 24)
         )
 
-    def window_qty(day, key):
+    def window_qty(day, keys):
         """day 起整个窗口的量：同星期几柱形图上那一根（多段时是各段之和）。"""
         start, end = _window_span(day)
+        lo, hi = _epoch(start), _epoch(end)
         return sum(
-            usage.window(d, key, _epoch(start), _epoch(end))
+            usage.window(d, key, lo, hi)
+            for key in keys
             for d in _span_days_from(start, horizon)
         )
+
+    def hour_qty(day, keys):
+        """day 的同钟点起 1 小时里，这一品能做多少（页面「接下来一小时」）。"""
+        start = _at(day, clock_t)
+        lo, hi = _epoch(start), _epoch(start + timedelta(hours=1))
+        return sum(usage.window(day, key, lo, hi) for key in keys)
+
+    def day_total_qty(day, keys):
+        """day 自然日全天的量（8 天历史柱形图）。"""
+        lo = _epoch(_at(day, time(0, 0)))
+        hi = _epoch(_at(day, time(23, 59, 59)))
+        return sum(usage.window(day, key, lo, hi) for key in keys)
 
     def bucket_volume(day):
         """整店水位用的量：day 那 24 小时全店卖了多少。"""
@@ -409,27 +425,30 @@ def compute_reference(
         return factor
 
     factor = day_factor(today)
+    # 规则侧身份键（ADR 0141）：有 prep_item_id 按 id，没接上主数据才回落
+    # (semi_name, unit)。备货品侧用 keys_for 同时查两种桶。
     rule_index = {
-        (rule["semi_name"], rule["unit"])
+        rule_key(rule)
         for rules in exact_rules.values()
         for rule in rules
     }
     # 每个备货品被哪些明细菜品引用：配方在、但这些菜近两周一条订单都没有时，
     # 说明是「配方接不上菜」（系数被存成 0、明细被清空），不是真没需求。
-    rule_dishes: Dict[Tuple[str, str], set] = {}
+    rule_dishes: Dict[Key, set] = {}
     for dish_name, rules in exact_rules.items():
         for rule in rules:
-            rule_dishes.setdefault((rule["semi_name"], rule["unit"]), set()).add(dish_name)
+            rule_dishes.setdefault(rule_key(rule), set()).add(dish_name)
 
     entries: List[dict] = []
     for item in items:
-        key = (item["item_name"], item["unit"])
-        has_rule = key in rule_index
-        line_share = line_counts.get(key, 0) / total_lines
+        # 备货品侧的身份键（ADR 0141）：有 id 时同时查 id 桶与名字桶，缺 id 只查名字桶。
+        item_keys = keys_for(item)
+        has_rule = any(key in rule_index for key in item_keys)
+        line_share = sum(line_counts.get(key, 0) for key in item_keys) / total_lines
         quantile_used = (
             cfg["quantile_major"] if line_share >= cfg["major_share"] else cfg["quantile"]
         )
-        values = [window_qty(day, key) for day in active_candidates]
+        values = [window_qty(day, item_keys) for day in active_candidates]
         fallback_applied = False
         # 每段的分位落点（未乘水位、未取整）；页面据此显示「几段相加＝合计」
         slice_bases: List[float] = []
@@ -442,8 +461,10 @@ def compute_reference(
         elif not active_candidates:
             demand_qty = 0.0
             status = "no_history"
-        elif key not in mapped_keys and any(
-            dish_lines.get(name) for name in rule_dishes.get(key, ())
+        elif not any(key in mapped_keys for key in item_keys) and any(
+            dish_lines.get(name)
+            for key in item_keys
+            for name in rule_dishes.get(key, ())
         ):
             # 配方条目在、明细菜品也在卖，但一整段回看期一条量都算不出来：
             # 系数被存成 0 或明细被清空的典型形态。这种「静默 0」会真的少备一天货
@@ -459,7 +480,7 @@ def compute_reference(
                     for day in active_candidates
                     if (day + shift) in days_with_orders
                 ]
-                values_k = [bucket_qty(day, key) for day in active_k]
+                values_k = [bucket_qty(day, item_keys) for day in active_k]
                 base_k = _quantile(values_k, quantile_used) if values_k else 0.0
                 if base_k <= 0:
                     # 该段候选日全撞在淡日/采集断档上，但近两周这一段有量：退回均值，不给 0
@@ -467,7 +488,7 @@ def compute_reference(
                     usable = [
                         q
                         for q in (
-                            bucket_qty(day_k - timedelta(days=i), key)
+                            bucket_qty(day_k - timedelta(days=i), item_keys)
                             for i in range(1, STALE_FALLBACK_DAYS + 1)
                         )
                         if q > 0
@@ -483,7 +504,7 @@ def compute_reference(
         floor_applied = False
         if status in ("ok", "no_history") and demand_qty < SPARSE_FLOOR_QTY:
             # 分位会把偶发品压成 0；近 7 天真的卖出过就保底 1 个单位
-            if any(bucket_qty(dd, key) > 0 for dd in recent_days):
+            if any(bucket_qty(dd, item_keys) > 0 for dd in recent_days):
                 demand_qty = SPARSE_FLOOR_QTY
                 floor_applied = True
 
@@ -491,12 +512,7 @@ def compute_reference(
         # 师傅拿它减掉自己看到的实物库存，决定还要备多少。
         suggested = demand_qty
 
-        hour_values = [
-            usage.window(
-                day, key, _epoch(_at(day, clock_t)), _epoch(_at(day, clock_t) + timedelta(hours=1))
-            )
-            for day in active_candidates
-        ]
+        hour_values = [hour_qty(day, item_keys) for day in active_candidates]
         next_hour_qty = (
             fit_qty((sum(hour_values) / len(hour_values)) * factor, item["kind"])
             if hour_values
@@ -545,14 +561,7 @@ def compute_reference(
                 "history": [
                     {
                         "day": day.isoformat(),
-                        "qty": round(
-                            usage.window(
-                                day, key,
-                                _epoch(_at(day, time(0, 0))),
-                                _epoch(_at(day, time(23, 59, 59))),
-                            ),
-                            1,
-                        ),
+                        "qty": round(day_total_qty(day, item_keys), 1),
                     }
                     for day in (today - timedelta(days=i) for i in range(0, HISTORY_DAYS))
                 ],

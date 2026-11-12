@@ -67,17 +67,18 @@ class PrepPlanRebuildFixture(unittest.IsolatedAsyncioTestCase):
         await items.commit()
         return item_id
 
-    async def _seed_rule(self, *, dish_name=DISH_NAME, semi_name=ITEM_NAME, unit=UNIT, factor=1):
+    async def _seed_rule(self, *, dish_name=DISH_NAME, semi_name=ITEM_NAME, unit=UNIT,
+                         factor=1, prep_item_id=None):
         rules = self.db.table("semi_finished_rules")
         async with rules.conn.cursor() as cursor:
             await cursor.execute(
                 """
                 INSERT INTO semi_finished_rules (
                     dish_name, semi_name, position, factor, unit, category,
-                    notes, created_at, updated_at
-                ) VALUES (?, ?, '熟笼', ?, ?, '半成品', '', ?, ?)
+                    notes, created_at, updated_at, prep_item_id
+                ) VALUES (?, ?, '熟笼', ?, ?, '半成品', '', ?, ?, ?)
                 """,
-                (dish_name, semi_name, factor, unit, self.stamp, self.stamp),
+                (dish_name, semi_name, factor, unit, self.stamp, self.stamp, prep_item_id),
             )
         await rules.commit()
 
@@ -404,3 +405,68 @@ class IntegerQtyTests(PrepPlanRebuildFixture):
 
         again = await self.service.get_today(self.db, now=TODAY_MORNING)
         self.assertEqual(self._entry(again, item_name="河粉")["final_qty"], 2.4)
+
+
+class IdentityMatchTests(PrepPlanRebuildFixture):
+    """ADR 0141：规则有 `prep_item_id` 就按 id 对齐，品名/单位漂移不再报 missing_rule。
+
+    这两条在旧实现里都是 missing_rule（键是规则侧 `(semi_name, unit)`，与备货品的
+    `(item_name, unit)` 对不上），参考量算成 0。
+    """
+
+    async def test_renamed_rule_with_prep_item_id_still_gets_a_reference(self):
+        item_id = await self._seed_item()
+        # 规则的半成品名还是旧名，只靠 prep_item_id 对齐到现名主数据。
+        await self._seed_rule(prep_item_id=item_id, semi_name=f"{ITEM_NAME}-旧名")
+        await self._seed_stationary()
+
+        computed = await self.service.compute_suggestions(self.db, TODAY_MORNING)
+        self.assertNotIn(ITEM_NAME, computed["missing_rule"])
+        entry = self._entry(computed)
+        self.assertEqual(entry["basis"]["status"], "ok")
+        self.assertGreater(entry["suggested_qty"], 0)
+
+        payload = await self.service.get_today(self.db, now=TODAY_MORNING)
+        entry = self._entry(payload)
+        self.assertEqual(entry["basis"]["status"], "ok")
+        self.assertGreater(entry["suggested_qty"], 0)
+
+    async def test_unit_drift_still_matches_by_prep_item_id(self):
+        item_id = await self._seed_item(unit=UNIT)  # 备货品按「份」
+        # 规则板单位漂成「斤」：旧实现文本键对不上 → missing_rule；按 id 仍应命中。
+        await self._seed_rule(prep_item_id=item_id, unit="斤")
+        await self._seed_stationary()
+
+        payload = await self.service.get_today(self.db, now=TODAY_MORNING)
+        entry = self._entry(payload)
+        self.assertEqual(entry["basis"]["status"], "ok")
+        self.assertGreater(entry["suggested_qty"], 0)
+
+
+class RenamedItemSnapshotTests(PrepPlanRebuildFixture):
+    """ADR 0141：同一 id 当天改名后，快照明细并成一行；显示名取最新，hours 按时间排。"""
+
+    async def test_renamed_item_merges_into_one_row_with_sorted_hours(self):
+        # 第一次快照用「乙馅」，改名成「甲馅」；按旧文本分桶，行序里 08:00 会排在
+        # 07:00 前面，hours 不再按时间递增。
+        item_id = await self._seed_item(item_name="乙馅")
+        await self._seed_rule(prep_item_id=item_id)
+        await self._seed_stationary()
+        await self.service.write_snapshot(self.db, TODAY_MORNING)
+
+        items = self.db.table("prep_items")
+        async with items.conn.cursor() as cursor:
+            await cursor.execute(
+                "UPDATE prep_items SET item_name = ? WHERE id = ?", ("甲馅", item_id)
+            )
+        await items.commit()
+        await self.service.write_snapshot(self.db, TODAY_MORNING + timedelta(hours=1))
+
+        day = await self.service.get_snapshot_day(self.db, TODAY_MORNING.date().isoformat())
+        self.assertEqual(len(day["items"]), 1)
+        row = day["items"][0]
+        self.assertEqual(row["item_name"], "甲馅")
+        self.assertEqual(len(row["hours"]), 2)
+        stamps = [hour["snapshot_at"] for hour in row["hours"]]
+        self.assertEqual(stamps, sorted(stamps))
+        self.assertEqual(len(set(stamps)), 2)

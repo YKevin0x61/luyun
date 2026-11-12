@@ -35,6 +35,7 @@ from config import KITCHEN_STATIONS
 from database import CHINA_TZ
 from services.business_day import REVIEW_CLOCK, is_primary_clock
 from services.dish_normalize import normalize_dish_name
+from services.prep_item_identity import Key, item_key, keys_for, rule_usage, total_for
 from services.prep_plan_forecast import (
     FORECAST_HORIZON_HOURS,
     FORECAST_QUANTILE,
@@ -103,41 +104,16 @@ def _loads_json(raw: Optional[str]) -> dict:
         return {}
 
 
-def _rule_totals_key(rule: dict):
-    """实际销量的聚合键：优先 `prep_item_id`，规则没接上主数据时回落 (品名, 单位)。
-
-    `prep_item_id` 是 0035 加、0036 回填的对齐主键。存量规则回填不到（新建规则、
-    主数据里暂时没有这个半成品）时仍然要能算，所以保留文本键；两种键在
-    `_sold_qty_map` 的同一张表里共存，读取端用 `_sold_qty_for` 一起取。
-    """
-    prep_item_id = rule.get("prep_item_id")
-    if prep_item_id is not None:
-        return int(prep_item_id)
-    return (rule["semi_name"], rule["unit"])
-
-
-def _sold_qty_for(totals: Dict[Any, float], item: dict) -> float:
-    """按备货品取实际销量，兼容新旧两种键。
-
-    一个备货品可能同时有「接了主数据的规则」和「没接上的规则」，所以两处相加，
-    不是二选一。
-    """
-    if not totals:
-        return 0.0
-    qty = float(totals.get(int(item["prep_item_id"]), 0.0))
-    qty += float(totals.get((item["item_name"], item["unit"]), 0.0))
-    return qty
-
-
-def _hourly_json(hourly: Dict[Any, Dict[str, float]], item: dict) -> str:
+def _hourly_curve(hourly: Dict[Any, Dict[str, float]], item: dict) -> str:
     """把逐小时分桶序列化成 0049 的 `hourly_json`（`[{"hour":"07:00","qty":12}]`）。
 
-    与 `_sold_qty_for` 同一套键兼容：接了主数据的规则按 int 键、没接上的按
-    (品名, 单位) 文本键，两处相加再按时间排序。小时用 `CHINA_TZ` 的墙上时间
-    （`order_datetime` 已归一到 CHINA_TZ），所以求和恒等于同一窗口的 `sold_qty`。
+    分桶键是 ADR 0141 的规范键（`services/prep_item_identity`）：一个备货品可能同时
+    有 id 桶与名字桶（接了主数据的规则 + 没接上的老规则），按 `keys_for` 两处相加再
+    按时间排序。小时用 `CHINA_TZ` 的墙上时间（`order_datetime` 已归一到 CHINA_TZ），
+    所以求和恒等于同一窗口的 `sold_qty`。
     """
     merged: Dict[str, float] = {}
-    for key in (int(item["prep_item_id"]), (item["item_name"], item["unit"])):
+    for key in keys_for(item):
         for hour, qty in (hourly.get(key) or {}).items():
             merged[hour] = merged.get(hour, 0.0) + float(qty)
     payload = [{"hour": hour, "qty": round(qty, 2)} for hour, qty in sorted(merged.items())]
@@ -193,9 +169,9 @@ class PrepPlanService:
             exact[row["dish_name"] or ""].append(entry)
             norm[normalize_dish_name(row["dish_name"] or "")].append(entry)
             if entry["prep_item_id"] is None:
-                rule_key = (entry["semi_name"], entry["unit"])
-                if rule_key not in self._warned_missing_rule_ids:
-                    self._warned_missing_rule_ids.add(rule_key)
+                warn_key = (entry["semi_name"], entry["unit"])
+                if warn_key not in self._warned_missing_rule_ids:
+                    self._warned_missing_rule_ids.add(warn_key)
                     # 只警告、不中断：老规则（0035 回填不到）仍要能算实际销量，
                     # 但运维要知道是哪个品在靠名字对齐（改名就会断）。
                     logger.warning(
@@ -714,8 +690,8 @@ class PrepPlanService:
     async def _sold_qty_map(self, db, start_dt: datetime, end_dt: datetime) -> Dict[Any, float]:
         """一段时间里「卖出菜品 × 配方系数」的用量，按备货品聚合。复盘用。
 
-        键优先 `prep_item_id`（int），规则缺 id 时回落 `(品名, 单位)` 文本键；
-        读取端一律走 `_sold_qty_for`，两种键都能查到。
+        键是 ADR 0141 的规范键（`("id", prep_item_id)` / `("name", 品名, 单位)`）；
+        读取端一律走 `total_for`，一个品的 id 桶与名字桶相加。
         """
         stats = await self._sold_stats(db, start_dt, end_dt, tail_hours=0)
         return stats["window"]
@@ -734,7 +710,7 @@ class PrepPlanService:
         按「每行 1 份 × 配方系数」近似，返回在 `refund` 里。这是已知下限口径，
         跨配方改动会失真，页面会标「近似」。
 
-        返回值：
+        返回值（各 `key` 都是 ADR 0141 的规范键）：
             {
               "window": {key: qty}, "sold_1h": ..., "sold_2h": ..., "sold_next_day": ...,
               "dine_in": {key: qty}, "delivery": {key: qty}, "refund": {key: qty},
@@ -772,23 +748,21 @@ class PrepPlanService:
             quantity = row["quantity"] or 0.0
             # 退菜行数量已归零：每行按 1 份近似（见 docstring）。
             refund_portions = max(quantity, 1.0) if is_refund else 0.0
-            for rule in dishes:
-                key = _rule_totals_key(rule)
-                factor = rule["factor"]
-                if is_refund:
-                    if order_at <= end_dt:
-                        refund[key] += refund_portions * factor
-                    continue
-                if quantity == 0:
-                    continue
-                if order_at <= marks[0]:
-                    sold_1h[key] += quantity * factor
-                if order_at <= marks[1]:
-                    sold_2h[key] += quantity * factor
-                if order_at <= marks[2]:
-                    sold_next_day[key] += quantity * factor
+            if is_refund:
                 if order_at <= end_dt:
-                    amount = quantity * factor
+                    for key, amount in rule_usage(dishes, refund_portions):
+                        refund[key] += amount
+                continue
+            if quantity == 0:
+                continue
+            for key, amount in rule_usage(dishes, quantity):
+                if order_at <= marks[0]:
+                    sold_1h[key] += amount
+                if order_at <= marks[1]:
+                    sold_2h[key] += amount
+                if order_at <= marks[2]:
+                    sold_next_day[key] += amount
+                if order_at <= end_dt:
                     window[key] += amount
                     source = row["source"]
                     if source == "delivery":
@@ -818,12 +792,14 @@ class PrepPlanService:
         tdb = db.table("semi_finished_rules")
         async with tdb.conn.cursor() as cursor:
             await cursor.execute(
-                "SELECT dish_name, semi_name, unit, factor FROM semi_finished_rules"
+                "SELECT dish_name, semi_name, unit, factor, prep_item_id "
+                "FROM semi_finished_rules"
             )
             rows = await cursor.fetchall()
         parts = sorted(
             f"{row['dish_name'] or ''}|{row['semi_name'] or ''}|{row['unit'] or ''}|"
-            f"{float(row['factor'] or 1):.6f}"
+            f"{float(row['factor'] or 1):.6f}|"
+            f"{'' if row['prep_item_id'] is None else int(row['prep_item_id'])}"
             for row in rows
         )
         return hashlib.md5("\n".join(parts).encode("utf-8")).hexdigest()
@@ -995,14 +971,14 @@ class PrepPlanService:
             window_rows = 0
             async with adb.conn.cursor() as cursor:
                 for item in items:
-                    hourly = _hourly_json(stats["hourly"], item)
-                    sold_qty = round(_sold_qty_for(stats["window"], item), 2)
-                    sold_1h = round(_sold_qty_for(stats["sold_1h"], item), 2)
-                    sold_2h = round(_sold_qty_for(stats["sold_2h"], item), 2)
-                    sold_next_day = round(_sold_qty_for(stats["sold_next_day"], item), 2)
-                    dine_in = round(_sold_qty_for(stats["dine_in"], item), 2)
-                    delivery = round(_sold_qty_for(stats["delivery"], item), 2)
-                    refund = round(_sold_qty_for(stats["refund"], item), 2)
+                    hourly = _hourly_curve(stats["hourly"], item)
+                    sold_qty = round(total_for(stats["window"], item), 2)
+                    sold_1h = round(total_for(stats["sold_1h"], item), 2)
+                    sold_2h = round(total_for(stats["sold_2h"], item), 2)
+                    sold_next_day = round(total_for(stats["sold_next_day"], item), 2)
+                    dine_in = round(total_for(stats["dine_in"], item), 2)
+                    delivery = round(total_for(stats["delivery"], item), 2)
+                    refund = round(total_for(stats["refund"], item), 2)
                     await cursor.execute(
                         """
                         INSERT INTO prep_plan_actuals (
@@ -1157,22 +1133,22 @@ class PrepPlanService:
                     values: List[Any] = []
                     if one_ready:
                         columns.append("sold_1h = ?")
-                        values.append(round(_sold_qty_for(stats["sold_1h"], item), 2))
+                        values.append(round(total_for(stats["sold_1h"], item), 2))
                     if two_ready:
                         columns.append("sold_2h = ?")
-                        values.append(round(_sold_qty_for(stats["sold_2h"], item), 2))
+                        values.append(round(total_for(stats["sold_2h"], item), 2))
                     if next_day_ready:
                         columns.append("sold_next_day = ?")
-                        values.append(round(_sold_qty_for(stats["sold_next_day"], item), 2))
+                        values.append(round(total_for(stats["sold_next_day"], item), 2))
                     columns.extend([
                         "dine_in_qty = ?", "delivery_qty = ?",
                         "refund_qty = ?", "hourly_json = ?",
                     ])
                     values.extend([
-                        round(_sold_qty_for(stats["dine_in"], item), 2),
-                        round(_sold_qty_for(stats["delivery"], item), 2),
-                        round(_sold_qty_for(stats["refund"], item), 2),
-                        _hourly_json(stats["hourly"], item),
+                        round(total_for(stats["dine_in"], item), 2),
+                        round(total_for(stats["delivery"], item), 2),
+                        round(total_for(stats["refund"], item), 2),
+                        _hourly_curve(stats["hourly"], item),
                     ])
                     await cursor.execute(
                         "UPDATE prep_plan_actuals SET " + ", ".join(columns) + """
@@ -1242,22 +1218,28 @@ class PrepPlanService:
                 if event["prep_item_id"] is not None:
                     sold_out_at[int(event["prep_item_id"])] = event["sold_out_at"]
 
-        by_item: Dict[Tuple[str, str], dict] = {}
+        # ADR 0141：按备货品身份聚合（有 id 按 id，没 id 才回落名字键）。同一 id 当天
+        # 改过名会并成一行；显示名 / 单位取当天最新一条快照的名字。
+        by_item: Dict[Key, dict] = {}
+        latest_stamp: Dict[Key, str] = {}
         for row in rows:
-            key = (row["item_name"] or "", row["unit"] or "")
+            key = item_key(row["prep_item_id"], row["item_name"], row["unit"])
             bucket = by_item.setdefault(
                 key,
                 {
-                    "item_name": key[0],
-                    "unit": key[1],
+                    "item_name": row["item_name"] or "",
+                    "unit": row["unit"] or "",
                     "station": row["station"] or "",
                     "prep_item_id": row["prep_item_id"],
                     "sold_out_at": None,
                     "hours": [],
                 },
             )
-            if bucket["prep_item_id"] is None and row["prep_item_id"] is not None:
-                bucket["prep_item_id"] = row["prep_item_id"]
+            snapshot_at = str(row["snapshot_at"] or "")
+            if snapshot_at >= latest_stamp.get(key, ""):
+                latest_stamp[key] = snapshot_at
+                bucket["item_name"] = row["item_name"] or ""
+                bucket["unit"] = row["unit"] or ""
             same_rules = (row["rules_fingerprint"] or "") == (row["actual_fingerprint"] or "")
             bucket["hours"].append(
                 {
@@ -1278,6 +1260,9 @@ class PrepPlanService:
             bucket["sold_out_at"] = (
                 sold_out_at.get(int(prep_item_id)) if prep_item_id is not None else None
             )
+            # 同一 id 当天改过名时，快照行按名字分组进同一个桶，追加顺序不再等于
+            # snapshot_at；页面按快照钟点画曲线，这里显式按时间排好。
+            bucket["hours"].sort(key=lambda hour: hour["snapshot_at"] or "")
         items = sorted(by_item.values(), key=lambda b: (-len(b["hours"]), b["item_name"]))
         snapshots = self._snapshot_groups(rows, sold_out_at)
         return {
