@@ -27,6 +27,7 @@ from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 from database import CHINA_TZ
+from services.business_day import REVIEW_CLOCK, review_day_range
 from services.dish_normalize import normalize_dish_name
 from services.prep_plan_service import (
     LOUMIAN_STATION,
@@ -34,7 +35,6 @@ from services.prep_plan_service import (
     prep_plan_service,
 )
 from services.prep_review.events import record_sold_out
-from services.prep_review.retention import PRIMARY_CLOCK
 
 logger = logging.getLogger(__name__)
 
@@ -61,18 +61,17 @@ def _to_china(raw: Any) -> Optional[datetime]:
     return parsed.astimezone(CHINA_TZ)
 
 
-def _day_bounds(plan_day: str) -> Tuple[datetime, datetime]:
-    """快照缺窗口时的兜底：按自然日切（与备货计划的营业日口径一致）。"""
-    day = date.fromisoformat(plan_day)
-    start = datetime(day.year, day.month, day.day, tzinfo=CHINA_TZ)
-    return start, start + timedelta(days=1)
-
-
 def _window(row: Dict[str, Any], plan_day: str) -> Tuple[datetime, datetime]:
+    """快照自己的窗口；缺窗口 / 坏窗口时按 07:00 复盘日兜底。
+
+    窗口列是 TEXT（可能为空串或解析不了的坏值）：这类行必须落到与主口径一致的
+    品-天 `[当日 07:00, 次日 07:00)`，不能退回自然日——同一份建议量的实际销量
+    会因此配上另一个窗口（ADR 0140）。
+    """
     start = _to_china(row.get("window_start"))
     end = _to_china(row.get("window_end"))
     if start is None or end is None or end <= start:
-        return _day_bounds(plan_day)
+        return review_day_range(plan_day)
     return start, end
 
 
@@ -97,7 +96,7 @@ async def _load_targets(db, plan_day: str) -> Dict[int, Dict[str, Any]]:
                    ) = ?
              ORDER BY snapshot_at DESC
             """,
-            (plan_day, PRIMARY_CLOCK),
+            (plan_day, REVIEW_CLOCK),
         )
         rows = await cursor.fetchall()
 
@@ -292,7 +291,7 @@ async def _plan_days_with_primary_snapshot(db, start: date, end: date) -> List[s
                    ) = ?
              ORDER BY plan_day
             """,
-            (start.isoformat(), end.isoformat(), PRIMARY_CLOCK),
+            (start.isoformat(), end.isoformat(), REVIEW_CLOCK),
         )
         rows = await cursor.fetchall()
     return [row["plan_day"] for row in rows if row["plan_day"]]

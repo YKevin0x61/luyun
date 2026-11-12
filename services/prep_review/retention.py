@@ -24,26 +24,25 @@ from datetime import date, datetime, timedelta
 from typing import Any, Dict, Optional
 
 from database import CHINA_TZ
+from services.business_day import REVIEW_CLOCK
 
 logger = logging.getLogger(__name__)
 
 #: 原始小时快照与事件的保留天数；更早的快照只留主口径。
 RETENTION_DAYS = 90
 
-#: 复盘页的主口径钟点（师傅真正下单备货那一次，ADR 0129）。
-PRIMARY_CLOCK = "07:00"
-
 #: 时间列是 TEXT ISO8601（带 +08:00 偏移，仓库既有口径）。判断「本地钟点」时先
 #: 转 timestamptz 再落到门店时区，这样即使将来有别的偏移写进来也不会看错钟点。
 LOCAL_TIME_ZONE = "Asia/Shanghai"
 
+# 主口径钟点的唯一实现是切日模块（ADR 0140）：这里只借它拼清理 SQL，不再自己持有。
 _DELETE_SNAPSHOTS_SQL = """
 DELETE FROM prep_plan_snapshots
 WHERE snapshot_at::timestamptz < ?
   AND to_char(
         snapshot_at::timestamptz AT TIME ZONE '{tz}', 'HH24:MI'
       ) <> '{clock}'
-""".format(tz=LOCAL_TIME_ZONE, clock=PRIMARY_CLOCK)
+""".format(tz=LOCAL_TIME_ZONE, clock=REVIEW_CLOCK)
 
 _DELETE_EVENTS_SQL = """
 DELETE FROM prep_plan_events

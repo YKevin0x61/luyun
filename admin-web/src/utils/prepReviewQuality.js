@@ -12,18 +12,16 @@
  * 这一条是解释项，采集正常的日子不该被一条误报盖住；而老库（票 08 之前）根本没有这个键。
  *
  * 阈值是「明显不对」的量级，不是精度判断：
- *   · 营业时段 07:00–21:00 一共 15 个整点，覆盖不到预期的一半才算断档；
+ *   · 按 `context.runtime` 的开店/打烊时段算，缺省 07:00–21:30 共 15 个整点，
+ *     覆盖不到预期的一半才算断档；
  *   · 正常一天是几百条订单，不到 20 条基本就是没采到。
  */
 import {
   prepReviewQualityFewOrders,
   prepReviewQualitySparseHours,
 } from './prepPlanCopy'
+import { expectedSnapshotSlots } from './reviewDay'
 
-/** 营业日内的整点快照上限（07:00…21:00）。 */
-export const QUALITY_EXPECTED_SLOTS = 15
-/** 当天的第一个快照钟点（07:00 主口径）。 */
-export const QUALITY_FIRST_SLOT_HOUR = 7
 /** 覆盖不到的预期比例：低于它才算「覆盖很少」。 */
 export const QUALITY_COVERAGE_RATIO = 0.6
 /** 不到这个张数的订单算「明显偏少」。 */
@@ -69,19 +67,11 @@ function pickCoveredHours(quality) {
   return null
 }
 
-/** 今天还没过完：预期覆盖 = 已经过去的整点数（至少 1 个），不拿「才早上 8 点」告警。 */
-function expectedSlots(isToday, nowHour) {
-  if (!isToday) return QUALITY_EXPECTED_SLOTS
-  const hour = Number.isFinite(Number(nowHour)) ? Number(nowHour) : QUALITY_FIRST_SLOT_HOUR
-  const elapsed = hour - QUALITY_FIRST_SLOT_HOUR + 1
-  return Math.min(QUALITY_EXPECTED_SLOTS, Math.max(1, elapsed))
-}
-
 /** 数据质量提示的原因（已经本地化）；空数组 = 数据看不出问题。 */
-export function qualityReasons(raw, { isToday = false, nowHour = null } = {}) {
+export function qualityReasons(raw, { runtime = null, isToday = false, nowHour = null } = {}) {
   const quality = readDataQuality(raw)
   const reasons = []
-  const expected = expectedSlots(isToday, nowHour)
+  const expected = expectedSnapshotSlots({ runtime, isToday, nowHour })
   const covered = pickCoveredHours(quality)
 
   // 预期不到 4 个钟点的时段（清早、刚部署）不判覆盖：那时少本来正常。

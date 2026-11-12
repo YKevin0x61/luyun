@@ -84,6 +84,7 @@ import {
   reviewCsvFilename,
   reviewSoldOutTime,
 } from '../utils/prepReviewCsv'
+import { REVIEW_CLOCK_FALLBACK } from '../utils/reviewDay'
 
 /**
  * 备货复盘（ADR 0123 / 0129）。
@@ -103,7 +104,6 @@ import {
 workbenchDocumentTitle('备货复盘')
 
 const REVIEW_DAYS = 90
-const REVIEW_CLOCK_FALLBACK = '07:00'
 
 const stations = useStationsStore()
 // 2026-11-10 用户裁定：这一页开只读给勾了「备货复盘」的管理员（员工会话）。
@@ -205,6 +205,7 @@ const qualityLine = computed(() => {
   if (!ctx) return ''
   const raw = ctx.data_quality_json ?? ctx.data_quality
   const reasons = qualityReasons(raw, {
+    runtime: ctx.runtime,
     isToday: day.value === new Date().toLocaleDateString('sv-SE'),
     nowHour: new Date().getHours(),
   })

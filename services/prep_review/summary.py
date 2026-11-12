@@ -58,15 +58,13 @@ from datetime import date, datetime, time, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 from database import CHINA_TZ
+from services.business_day import REVIEW_CLOCK
 from services.dish_normalize import normalize_dish_name
 from services.prep_plan_service import LOUMIAN_STATION, prep_plan_service
 from services.prep_review import retention
 from services.wastage.store import WastageStore
 
 logger = logging.getLogger(__name__)
-
-#: 复盘主口径钟点（与 ADR 0129 / 保留策略同源）。
-PRIMARY_CLOCK = retention.PRIMARY_CLOCK
 
 #: 分组样本下限：不足 5 天不给偏差数值（页面显示「样本不足」）。
 MIN_GROUP_DAYS = 5
@@ -195,7 +193,7 @@ async def _load_rows(db, start_day: date, end_day: date) -> List[Dict[str, Any]]
               AND substr(s.snapshot_at, 12, 5) = ?
             ORDER BY s.plan_day, s.item_name
             """,
-            (start_day.isoformat(), end_day.isoformat(), PRIMARY_CLOCK),
+            (start_day.isoformat(), end_day.isoformat(), REVIEW_CLOCK),
         )
         raw = await cursor.fetchall()
 
@@ -471,7 +469,7 @@ async def review_summary(
             "end": end_day.isoformat(),
             "days": days,
         },
-        "primary_clock": PRIMARY_CLOCK,
+        "primary_clock": REVIEW_CLOCK,
         "min_group_days": MIN_GROUP_DAYS,
         "metrics": _metrics(rows),
         "groups": _groups(day_aggs, day_keys),

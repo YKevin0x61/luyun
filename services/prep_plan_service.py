@@ -33,6 +33,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from config import KITCHEN_STATIONS
 from database import CHINA_TZ
+from services.business_day import REVIEW_CLOCK, is_primary_clock
 from services.dish_normalize import normalize_dish_name
 from services.prep_plan_forecast import (
     FORECAST_HORIZON_HOURS,
@@ -61,9 +62,6 @@ LOUMIAN_STATION = "loumian"
 # 之后才进库，而轨迹列本来就会重算；只冻结 `sold_qty` 会让复盘里的「实际量」长期偏小。
 # 3 天足够覆盖补录与隔日对账，再往前就是历史事实，不再动。
 ACTUALS_REFRESH_DAYS = 3
-
-# 复盘页的主口径钟点：师傅真正下单备货的时刻，其余钟点只是「越晚越不准」的参照
-_PRIMARY_CLOCK = "07:00"
 
 
 def _parse_hhmm(text: Optional[str], fallback: str) -> time:
@@ -1287,8 +1285,8 @@ class PrepPlanService:
             "day": day,
             "items": items,
             "snapshots": snapshots,
-            "primary_clock": _PRIMARY_CLOCK if any(
-                g["clock"] == _PRIMARY_CLOCK for g in snapshots
+            "primary_clock": REVIEW_CLOCK if any(
+                is_primary_clock(g["clock"]) for g in snapshots
             ) else (snapshots[0]["clock"] if snapshots else None),
             "rows": len(rows),
         }

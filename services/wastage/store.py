@@ -35,9 +35,9 @@ import asyncpg
 
 from db_core.errors import is_integrity_violation
 from db_core.utils import CHINA_TZ
+from services.business_day import review_day_range
 from services.identity import serialized_write
 from services.identity.capabilities import CAP_WASTAGE
-from services.prep_review.retention import PRIMARY_CLOCK
 
 logger = logging.getLogger(__name__)
 
@@ -286,13 +286,11 @@ def _clean_prep_item_id(value: Any) -> Optional[int]:
 def _window_bounds(day: str) -> tuple[str, str]:
     """自然日 ``YYYY-MM-DD`` → 当天的 07:00 窗口（`[day T07:00, day+1 T07:00)`）。
 
-    钟点复用复盘主口径（`services.prep_review.retention.PRIMARY_CLOCK`）：损耗落在哪个
-    品-天，与复盘读的是同一个 07:00 窗口，两处各写一个 "07:00" 就会漂。
+    窗口由切日模块的 `review_day_range` 独占实现（ADR 0140）：损耗落在哪个品-天，
+    与复盘读的是同一个 07:00 窗口，两处各写一个 "07:00" 就会漂。
     """
-    hour, minute = (int(part) for part in PRIMARY_CLOCK.split(":"))
-    parsed = date.fromisoformat(day)
-    start = datetime(parsed.year, parsed.month, parsed.day, hour, minute, tzinfo=CHINA_TZ)
-    return start.isoformat(), (start + timedelta(days=1)).isoformat()
+    start, end = review_day_range(day)
+    return start.isoformat(), end.isoformat()
 
 
 def _clean_keyword(value: Any) -> str:

@@ -465,6 +465,27 @@ describe('数据质量提示（票 09）', () => {
     expect(banner.text()).toContain('别把采集断档读成「备多了」')
   })
 
+  it('质量提示按 context.runtime 的开店/打烊时段算，不再写死 07:00 起', async () => {
+    // 10 点、08:00 开门 → 预期只过了 3 个整点；覆盖 2 个不算断档。
+    vi.setSystemTime(new Date('2026-11-07T10:00:00+08:00'))
+    const quality = JSON.stringify({ order_lines: 420, covered_hours: 2 })
+    const payload = withQuality(quality)
+    payload.context = { ...payload.context, runtime: { open: '08:00', close: '22:00' } }
+    vi.stubGlobal('fetch', probeFetch({ day: payload }))
+    const wrapper = await mountView()
+
+    expect(wrapper.find('.pr-quality').exists()).toBe(false)
+  })
+
+  it('context 缺 runtime 时仍按缺省 07:00 起算（同一份数据会提示）', async () => {
+    vi.setSystemTime(new Date('2026-11-07T10:00:00+08:00'))
+    const quality = JSON.stringify({ order_lines: 420, covered_hours: 2 })
+    vi.stubGlobal('fetch', probeFetch({ day: withQuality(quality) }))
+    const wrapper = await mountView()
+
+    expect(wrapper.get('.pr-quality').text()).toContain('快照只覆盖 2 个钟点')
+  })
+
   it('数据正常时不出提示', async () => {
     const quality = JSON.stringify({ order_lines: 420, covered_hours: 14 })
     vi.stubGlobal('fetch', probeFetch({ day: withQuality(quality) }))

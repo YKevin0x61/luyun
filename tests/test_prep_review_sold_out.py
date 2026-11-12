@@ -101,6 +101,7 @@ class SoldOutFixture(unittest.IsolatedAsyncioTestCase):
         suggested=0.0,
         final_qty=None,
         clock_hour=7,
+        with_window=True,
     ):
         snapshot_at = _at(plan_day, clock_hour)
         snapshots = self.db.table("prep_plan_snapshots")
@@ -116,8 +117,8 @@ class SoldOutFixture(unittest.IsolatedAsyncioTestCase):
                 """,
                 (
                     snapshot_at.isoformat(),
-                    snapshot_at.isoformat(),
-                    (snapshot_at + timedelta(hours=24)).isoformat(),
+                    snapshot_at.isoformat() if with_window else "",
+                    (snapshot_at + timedelta(hours=24)).isoformat() if with_window else "",
                     plan_day,
                     item_id,
                     item_name,
@@ -189,6 +190,31 @@ class InferenceTests(SoldOutFixture):
         await sold_out.infer_sold_out(self.db, PLAN_DAY)
 
         self.assertEqual(await self._events(kind=prep_review_events.SOLD_OUT), [])
+
+    async def test_snapshot_without_window_falls_back_to_review_day(self):
+        """快照缺窗口 → 按 07:00 复盘日 `[07:00, 次日 07:00)` 兜底，不再是自然日。
+
+        `prep_plan_snapshots.window_start/window_end` 在 schema 里是 NOT NULL（0034），
+        所以「缺窗口」在库里只能是空串 / 坏值，NULL 进不来；空串与 NULL 走的是
+        `_to_china` 的同一个 None 分支。
+
+        造数：建议 5；06:30 卖 2（复盘日窗口之外）、09:00 卖 2、10:00 卖 3。
+        按 07:00 窗口算，10:00 累计 2→5 跨线，售罄就是 10:00；
+        若退回自然日 00:00，06:30 那 2 份会算进来，09:00 累计就到 4，
+        跨线插值成 09:20 —— 两个时刻可区分。
+        """
+        item_id = await self._seed_item()
+        dish_name = await self._seed_rule(item_id)
+        await self._seed_snapshot(PLAN_DAY, item_id, suggested=5, with_window=False)
+        await self._seed_order("nowin-1", _at(PLAN_DAY, 6, 30), 2, dish_name=dish_name)
+        await self._seed_order("nowin-2", _at(PLAN_DAY, 9, 0), 2, dish_name=dish_name)
+        await self._seed_order("nowin-3", _at(PLAN_DAY, 10, 0), 3, dish_name=dish_name)
+
+        await sold_out.infer_sold_out(self.db, PLAN_DAY)
+
+        events = await self._events(kind=prep_review_events.SOLD_OUT)
+        self.assertEqual(len(events), 1, events)
+        self.assertEqual(datetime.fromisoformat(events[0]["at"]), _at(PLAN_DAY, 10, 0))
 
     async def test_snapshot_without_orders_writes_nothing(self):
         """07:00 快照有、当天零订单 → 没跨线，无事件。"""

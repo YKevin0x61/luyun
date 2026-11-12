@@ -25,7 +25,7 @@
 import json
 import logging
 import statistics
-from datetime import date, datetime, time, timedelta
+from datetime import datetime
 from typing import Any, Dict, Optional, Tuple
 from urllib.parse import urlparse
 
@@ -33,6 +33,7 @@ import httpx
 
 from database import CHINA_TZ
 from services.app_runtime import get_runtime
+from services.business_day import workbench_day_range
 from services.identity.zones import ZoneDirectory
 from services.prep_plan_service import (
     DEFAULT_CLOSE,
@@ -150,16 +151,6 @@ def _to_int(value: Any) -> int:
         return int(value or 0)
     except (TypeError, ValueError):
         return 0
-
-
-def _day_bounds(plan_day: str) -> Optional[Tuple[datetime, datetime]]:
-    """自然日的 [00:00, 次日 00:00)：与 `prep_plan_service` 的营业日口径一致。"""
-    try:
-        day = date.fromisoformat((plan_day or "").strip())
-    except ValueError:
-        return None
-    start = datetime.combine(day, time.min, tzinfo=CHINA_TZ)
-    return start, start + timedelta(days=1)
 
 
 def _parse_iso_datetime(raw: Optional[str]) -> Optional[datetime]:
@@ -635,6 +626,9 @@ class PrepPlanContextService:
     async def _data_quality(self, db, plan_day: str) -> Dict[str, Any]:
         """当天数据可不可信：订单条数 / 首末单时刻 / 快照覆盖小时 / 采集最近成功。
 
+        窗口跟**工作台日**（自然日 00:00，ADR 0125）走：这是解释「当天为什么多做 /
+        少做」的信号，不跟随复盘日 07:00 的品-天窗口（ADR 0140）。
+
         `scraper_last_success` 先读运行时状态里的成功时间戳；`PosSession.session_status`
         目前没有这个字段，所以回落到当日订单行最后落库时间（`orders.updated_at`）——
         它就是「采集器最后一次成功写入」的代理口径。两者都读不到才是 None。
@@ -646,10 +640,10 @@ class PrepPlanContextService:
             "snapshot_hours": 0,
             "scraper_last_success": self._scraper_last_success(),
         }
-        bounds = _day_bounds(plan_day)
-        if bounds is None:
+        try:
+            start, end = workbench_day_range((plan_day or "").strip())
+        except ValueError:
             return empty
-        start, end = bounds
         tdb = db.table("orders")
         async with tdb.conn.cursor() as cursor:
             await cursor.execute(
@@ -730,6 +724,9 @@ class PrepPlanContextService:
     async def _kitchen_stats(self, db, plan_day: str) -> Dict[str, Any]:
         """当天厨房节奏：已出餐行数 / 中位出餐分钟 / 催菜行数 / 等叫行数。
 
+        窗口与 `_data_quality` 一样跟**工作台日**（自然日 00:00）走，不跟复盘日 07:00
+        窗口：厨房节奏解释的是「当天现场什么状态」，不是品-天的销量口径（ADR 0140）。
+
         `ready_time` 非空才算已出餐；时长 = `ready_time - order_time`，坏时间戳与
         「ready 早于 order」的坏行跳过、不参与中位数。一行有效时长都没有时中位数是
         None —— 写 0 会被读成「瞬间出餐」。
@@ -748,10 +745,10 @@ class PrepPlanContextService:
         }
         if not KDS_LIVE:
             return {**empty, "reason": "kds_not_live"}
-        bounds = _day_bounds(plan_day)
-        if bounds is None:
+        try:
+            start, end = workbench_day_range((plan_day or "").strip())
+        except ValueError:
             return empty
-        start, end = bounds
         tdb = db.table("orders")
         async with tdb.conn.cursor() as cursor:
             await cursor.execute(
