@@ -60,20 +60,37 @@ function doPrint() {
         <button class="btn btn-sm" @click="emit('push')">推送</button>
       </div>
     </div>
-    <div style="flex:1;overflow-y:auto" class="luyun-scrollbar">
+    <div class="semi-scroll luyun-scrollbar">
       <table class="data-table">
         <thead><tr><th>岗位</th><th>半成品</th><th style="text-align:right">用量</th></tr></thead>
         <tbody>
-          <tr v-if="!filtered.length"><td colspan="3" class="empty-state">暂无换算规则，请先添加规则</td></tr>
+          <tr v-if="!filtered.length"><td colspan="3" class="empty-state">{{ semiFinished.length ? '没有匹配的半成品' : '暂无半成品用量数据' }}</td></tr>
           <template v-for="pos in filtered" :key="pos.position">
             <tr v-for="item in pos.items" :key="pos.position + item.semi_name">
               <td><span class="badge">{{ pos.position }}</span></td>
               <td>{{ item.semi_name }}</td>
-              <td style="text-align:right">{{ item.qty }} {{ item.unit }}</td>
+              <td style="text-align:right">{{ item.qty }} <span class="semi-unit">{{ item.unit }}</span></td>
             </tr>
           </template>
+
         </tbody>
       </table>
     </div>
   </div>
 </template>
+
+<style scoped>
+/* R10：与菜品表一样限制内部滚动高度，别把异常明细推到页面很后面。 */
+.semi-scroll {
+  flex: 1;
+  overflow-y: auto;
+  max-height: 62vh;
+}
+
+/* R52：单位从用量数字里拆出来，用小字弱化。 */
+.semi-unit {
+  margin-left: 3px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+</style>

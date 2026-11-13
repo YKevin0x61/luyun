@@ -2,8 +2,10 @@
 import { onMounted, ref } from 'vue'
 import { api } from '../../api/client'
 import SvgIcon from '../SvgIcon.vue'
+import { useModalA11y } from '../../composables/useModalA11y'
 
-const emit = defineEmits(['close'])
+const emit = defineEmits(['close', 'changed'])
+const boxRef = useModalA11y(() => emit('close'))
 
 const fixedDishes = ref([]) // {id, dish_name, notes}
 const allDishNames = ref([])
@@ -35,14 +37,27 @@ function availableOptions() {
 
 async function addSelected() {
   if (!selectedDish.value) return
-  const res = await api.post('/api/report-dishes/', { dish_name: selectedDish.value, notes: '' })
-  fixedDishes.value.push({ id: res.id, dish_name: selectedDish.value, notes: '' })
-  selectedDish.value = ''
+  errorMsg.value = ''
+  try {
+    const res = await api.post('/api/report-dishes/', { dish_name: selectedDish.value, notes: '' })
+    fixedDishes.value.push({ id: res.id, dish_name: selectedDish.value, notes: '' })
+    selectedDish.value = ''
+    emit('changed')
+  } catch (e) {
+    errorMsg.value = e.message || '添加失败'
+  }
 }
 
-async function removeDish(id) {
-  await api.delete(`/api/report-dishes/${id}`)
-  fixedDishes.value = fixedDishes.value.filter((d) => d.id !== id)
+async function removeDish(item) {
+  if (!window.confirm(`删除固定菜品「${item.dish_name}」？`)) return
+  errorMsg.value = ''
+  try {
+    await api.delete(`/api/report-dishes/${item.id}`)
+    fixedDishes.value = fixedDishes.value.filter((d) => d.id !== item.id)
+    emit('changed')
+  } catch (e) {
+    errorMsg.value = e.message || '删除失败'
+  }
 }
 
 async function saveReorder() {
@@ -69,17 +84,25 @@ function onDrop(idx) {
 
 <template>
   <div class="modal-overlay" @click.self="emit('close')">
-    <div class="modal-box" style="width:500px">
+    <div
+      ref="boxRef"
+      class="modal-box"
+      style="width:min(500px,100%)"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="report-dish-title"
+      tabindex="-1"
+    >
       <div class="modal-header">
-        <h3><SvgIcon name="settings" :size="15" /> 固定报表菜品设置</h3>
-        <button class="btn btn-sm" @click="emit('close')"><SvgIcon name="x" :size="14" /></button>
+        <h3 id="report-dish-title"><SvgIcon name="settings" :size="15" /> 固定报表菜品设置</h3>
+        <button class="btn btn-sm" aria-label="关闭" @click="emit('close')"><SvgIcon name="x" :size="14" /></button>
       </div>
       <p style="font-size:12px;color:var(--text-dim);margin-bottom:8px">
         文字版导出将仅输出以下菜品（拖拽可调整顺序），未售出显示 0
       </p>
       <input class="input" v-model="searchKeyword" placeholder="搜索菜品名称..." style="width:100%;margin-bottom:8px">
       <div style="display:flex;gap:8px;margin-bottom:10px">
-        <select class="select" v-model="selectedDish" style="flex:1">
+        <select class="select" v-model="selectedDish" style="flex:1;min-width:0">
           <option value="">— 从菜品库选择添加 —</option>
           <option v-for="n in availableOptions()" :key="n" :value="n">{{ n }}</option>
         </select>
@@ -99,7 +122,7 @@ function onDrop(idx) {
           <span style="color:var(--text-dim);display:inline-flex"><SvgIcon name="menu" :size="12" /></span>
           <span style="flex:1">{{ d.dish_name }}</span>
           <span v-if="d.notes" style="color:var(--text-dim);font-size:12px">{{ d.notes }}</span>
-          <button class="btn btn-sm btn-danger" @click="removeDish(d.id)">删除</button>
+          <button class="btn btn-sm btn-danger" @click="removeDish(d)">删除</button>
         </div>
       </div>
       <div v-if="errorMsg" style="color:var(--red);font-size:12px;margin-top:8px">{{ errorMsg }}</div>

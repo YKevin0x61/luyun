@@ -1021,16 +1021,18 @@ def test_workbench_page_wall_accepts_a_staff_session(auth_app_client):
 
 
 def test_system_management_surface_rejects_a_staff_session(auth_app_client):
-    """系统管理面留在工作台外面：同一个员工会话对它任何一页都无效，仍然 302 登录页。"""
-    from urllib.parse import quote
+    """系统管理面留在工作台外面：员工会话对它任何一页都无效。
 
+    2026-11-13 审查 R48：员工已经登录时不再丢回 `/login?next=`（会让人以为账号坏了），
+    而是直接送到工作台的 forbidden 页。
+    """
     client, _ = auth_app_client
     _staff_only_client(client)
 
     for path in SYSTEM_PAGES:
         resp = client.get(path, headers=_html_headers(), follow_redirects=False)
         assert resp.status_code == 302, (path, resp.status_code)
-        assert resp.headers["location"] == f"/login?next={quote(path, safe='')}", path
+        assert resp.headers["location"] == "/workbench/forbidden", path
 
 
 def test_workbench_page_wall_fails_closed_before_staff_accounts_are_wired(

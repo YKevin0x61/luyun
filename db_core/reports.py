@@ -70,7 +70,12 @@ class _ReportsMixin:
         station_clause = ""
         if station and station != 'all':
             station_clause = " AND station = ?"; params.append(station)
+        elif station == 'all':
+            # `all` 是真正的「全店」：含楼面（套餐/茶位）。区分它是为了避免
+            # 「汇总排除楼面、走势图含楼面」的两套口径（本页审查 R3）。
+            station_clause = ""
         else:
+            # 默认口径 = 厨房出品，排除楼面；页面要标注「不含楼面」。
             station_clause = " AND station != 'loumian'"
 
         # 1. 菜品销量（查 orders 表）。右端是**开区间**（次日 06:00），与
@@ -79,7 +84,10 @@ class _ReportsMixin:
         async with orders_tdb.conn.cursor() as cursor:
             await cursor.execute(
                 f"""SELECT dish_name, station, SUM(quantity) as total_qty,
-                           SUM({ORDER_LINE_REVENUE_SQL}) as total_amount, COUNT(*) as order_count
+                           SUM({ORDER_LINE_REVENUE_SQL}) as total_amount, COUNT(*) as order_count,
+                           COUNT(CASE WHEN COALESCE(quantity, 0) > 0
+                                       AND LOWER(COALESCE(status, '')) NOT LIKE '%退%'
+                                      THEN 1 END) as effective_count
                     FROM orders WHERE order_time >= ? AND order_time < ?{station_clause}
                     GROUP BY dish_name, station ORDER BY total_qty DESC""",
                 params
@@ -95,7 +103,8 @@ class _ReportsMixin:
             dish_sales.append({
                 "dish_name": row[0], "station": row[1] or "",
                 "qty": qty, "total_amount": round(amount, 2),
-                "order_count": row[4],
+                # R43：每道菜的「单数」不再把退菜/零数量行算进去（以前会出现单数 > 份数）。
+                "order_count": row[5] if row[5] is not None else 0,
             })
 
         # 2. 半成品换算规则（查 semi_finished_rules 表）
@@ -129,6 +138,23 @@ class _ReportsMixin:
         for dish in dish_sales:
             dish["has_rules"] = dish["dish_name"] in semi_map or normalize(dish["dish_name"]) in norm_map
 
+        # 1b. 账单数：`business_flow_id` 形如
+        # ``YY001301-261113-0001_(外卖)酱皇豉椒蒸凤爪_001``，第一个下划线之前是账单前缀。
+        # 「订单数」和客单价的分母都应该是账单数，而不是菜品行数（本页审查 R2）。
+        # 退菜行 / 数量 0 的行不计入账单，避免整单退菜被当成营业单。
+        async with orders_tdb.conn.cursor() as cursor:
+            await cursor.execute(
+                f"""SELECT COUNT(DISTINCT NULLIF(
+                               regexp_replace(COALESCE(business_flow_id, ''), '_.*$', ''),
+                               ''))
+                    FROM orders
+                    WHERE order_time >= ? AND order_time < ?{station_clause}
+                      AND COALESCE(quantity, 0) > 0
+                      AND LOWER(COALESCE(status, '')) NOT LIKE '%退%'""",
+                params,
+            )
+            total_bills = (await cursor.fetchone())[0] or 0
+
         # 3. 按岗位聚合用量
         position_agg: Dict[str, Dict] = {}
         for dish in dish_sales:
@@ -155,7 +181,10 @@ class _ReportsMixin:
                 return v
 
         semi_finished = []
-        for pos in sorted(position_agg.keys()):
+        # R40：原来按中文键的 Unicode 码位排序（案板/煎炸/明档…），跟用量无关；
+        # 改成按该岗位半成品总量降序，页面上「用得最多的岗位」排在前面。
+        position_totals = {p: sum(items.values()) for p, items in position_agg.items()}
+        for pos in sorted(position_agg.keys(), key=lambda p: (-position_totals[p], p)):
             items = []
             for (semi_name, unit, category, sub_category), qty in sorted(position_agg[pos].items(), key=lambda x: x[1], reverse=True):
                 normalized_sub_category = sub_category or category or ""
@@ -169,17 +198,35 @@ class _ReportsMixin:
                 })
             semi_finished.append({"position": pos, "items": items})
 
-        covered = sum(1 for d in dish_sales if d.get("has_rules"))
+        # 菜品名去重：同一道菜可能出现在多个档口（堂食/外卖），页面「菜品数」与
+        # 「规则覆盖」按菜名算，不按 dish_name+station 组合算（本页审查 R22）。
+        unique_dish_names = {d["dish_name"] for d in dish_sales}
+        covered_dish_names = {d["dish_name"] for d in dish_sales if d.get("has_rules")}
+        if station and station != "all":
+            scope = "station"
+        elif station == "all":
+            scope = "full"
+        else:
+            scope = "kitchen"
 
         return {
             "date_range": {"start": start_date, "end": end_date},
             "station_filter": station or "all",
+            # scope 告诉前端这份汇总覆盖什么：kitchen=默认（不含楼面）、
+            # full=全店（含楼面）、station=指定档口。页面据此标注口径。
+            "scope": scope,
+            "excluded_stations": ["loumian"] if scope == "kitchen" else [],
             "summary": {
+                # total_orders / total_order_lines 是菜品行数（旧字段，保留兼容）；
+                # 页面上的「订单数」与客单价分母改用 total_bills（账单数）。
                 "total_orders": total_orders,
+                "total_order_lines": total_orders,
+                "total_bills": total_bills,
                 "total_dishes": sum(d["qty"] for d in dish_sales),
                 "total_revenue": round(total_revenue, 2),
-                "unique_dishes": len(dish_sales),
-                "covered_rules": covered,
+                "unique_dishes": len(unique_dish_names),
+                "dish_station_pairs": len(dish_sales),
+                "covered_rules": len(covered_dish_names),
             },
             "dish_sales": dish_sales,
             "semi_finished": semi_finished,
@@ -376,6 +423,11 @@ class _ReportsMixin:
         if station and station != "all":
             station_clause = " AND station = ?"
             params.append(station)
+        elif station == "all":
+            # 全店含楼面，与 compute_sales_report 的 `all` 语义保持一致（审查 R3）。
+            station_clause = ""
+        else:
+            station_clause = " AND station != 'loumian'"
         if granularity == "hour":
             bucket_expr = "CAST(strftime('%H', order_time) AS INTEGER)"
         elif granularity == "month":
@@ -389,6 +441,11 @@ class _ReportsMixin:
             await cursor.execute(
                 f"""SELECT {bucket_expr} as bucket,
                            COUNT(*) as order_lines,
+                           COUNT(DISTINCT CASE
+                               WHEN COALESCE(quantity, 0) > 0
+                                AND LOWER(COALESCE(status, '')) NOT LIKE '%退%'
+                               THEN NULLIF(regexp_replace(COALESCE(business_flow_id, ''), '_.*$', ''), '')
+                           END) as bills,
                            SUM(quantity) as total_quantity,
                            SUM({ORDER_LINE_REVENUE_SQL}) as revenue
                     FROM orders
@@ -401,8 +458,9 @@ class _ReportsMixin:
             {
                 "period": row[0],
                 "order_lines": row[1] or 0,
-                "total_quantity": row[2] or 0,
-                "revenue": round(row[3] or 0, 2),
+                "bills": row[2] or 0,
+                "total_quantity": row[3] or 0,
+                "revenue": round(row[4] or 0, 2),
             }
             for row in rows
         ]
@@ -418,15 +476,23 @@ class _ReportsMixin:
         _, end_dt = _business_day_range(end_date)
         params: List[Any] = [start_dt.isoformat(), end_dt.isoformat()]
         station_clause = ""
+        loumian_clause = ""
         if station and station != "all":
             station_clause = " AND station = ?"
             params.append(station)
+        elif station == "all":
+            # 全店含楼面：不再无条件排除 loumian（审查 R6）。
+            station_clause = ""
+        else:
+            station_clause = ""
+            loumian_clause = " AND COALESCE(station, '') <> 'loumian'"
         tdb = self._connection.table("orders")
         async with tdb.conn.cursor() as cursor:
             await cursor.execute(
                 f"""SELECT COUNT(*) FROM orders
                     WHERE order_time >= ? AND order_time < ?{station_clause}
-                      AND (quantity < 0 OR LOWER(COALESCE(status,'')) LIKE '%退%')""",
+                      AND (quantity < 0 OR LOWER(COALESCE(status,'')) LIKE '%退%')
+                      {loumian_clause}""",
                 params,
             )
             refund_lines = (await cursor.fetchone())[0] or 0
@@ -435,6 +501,7 @@ class _ReportsMixin:
                     FROM orders
                     WHERE order_time >= ? AND order_time < ?{station_clause}
                       AND (quantity < 0 OR LOWER(COALESCE(status,'')) LIKE '%退%')
+                      {loumian_clause}
                     GROUP BY dish_name, station
                     ORDER BY qty ASC LIMIT 50""",
                 params,

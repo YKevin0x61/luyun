@@ -1,23 +1,34 @@
 <script setup>
 import { useStationsStore } from '../../stores/stations'
 import SvgIcon from '../SvgIcon.vue'
+import { useModalA11y } from '../../composables/useModalA11y'
 
 const props = defineProps({
   items: { type: Array, default: () => [] },
 })
-const emit = defineEmits(['close'])
+const emit = defineEmits(['close', 'show-detail'])
+const boxRef = useModalA11y(() => emit('close'))
 const stationsStore = useStationsStore()
 </script>
 
 <template>
   <div class="modal-overlay" @click.self="emit('close')">
-    <div class="modal-box" style="width:520px">
+    <div
+      ref="boxRef"
+      class="modal-box"
+      style="width:min(520px,100%)"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="refund-title"
+      tabindex="-1"
+    >
       <div class="modal-header">
-        <h3>退菜明细</h3>
-        <button class="btn btn-sm" @click="emit('close')"><SvgIcon name="x" :size="14" /></button>
+        <h3 id="refund-title">退菜明细（订单表口径）</h3>
+        <button class="btn btn-sm" aria-label="关闭" @click="emit('close')"><SvgIcon name="x" :size="14" /></button>
       </div>
       <p style="font-size:12px;color:var(--text-dim);margin-bottom:8px">
-        数量为负数或状态包含「退」的订单行，按菜品和档口汇总。
+        数量为负数或状态包含「退」的订单行，按菜品和档口汇总；楼面档口的菜品不计入。
+        这里是从订单行状态推断的，和页面下方「异常明细」（商龙异常汇总一手数据）是两套口径。
       </p>
       <div style="max-height:360px;overflow-y:auto;border:1px solid var(--border);border-radius:8px" class="luyun-scrollbar">
         <div v-if="!items.length" class="empty-state">暂无退菜明细</div>
@@ -32,6 +43,7 @@ const stationsStore = useStationsStore()
         </div>
       </div>
       <div class="modal-footer">
+        <button class="btn" @click="emit('show-detail')">查看商龙异常明细</button>
         <button class="btn" @click="emit('close')">关闭</button>
       </div>
     </div>

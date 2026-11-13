@@ -639,7 +639,8 @@ def test_staff_session_matches_the_audience_column(audience_client):
                 f"{path} 在清单里是管理端专属，员工会话硬导航却拿到了页面壳"
                 f"（{response.status_code}）—— 员工可达的入口多了一个。"
             )
-            assert response.headers["location"].startswith("/login"), (
+            # 2026-11-13 审查 R48：员工已登录时直接送 forbidden，不再丢回登录页。
+            assert response.headers["location"] == "/workbench/forbidden", (
                 path,
                 response.headers.get("location"),
             )

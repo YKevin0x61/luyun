@@ -122,7 +122,8 @@ onMounted(load)
   overflow: auto;
   max-height: 560px;
 }
-.rr-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+/* R30：390 下 6 列被压到 56px 逐字换行；给表格一个下限宽度，改为横向滚动。 */
+.rr-table { width: 100%; min-width: 720px; border-collapse: collapse; font-size: 12.5px; }
 .rr-table thead th {
   position: sticky;
   top: 0;
@@ -142,7 +143,8 @@ onMounted(load)
 }
 .rr-table tbody tr:last-child td { border-bottom: 0; }
 .rr-table tbody tr:hover td { background: var(--card2); }
-.rr-fac { color: var(--accent); font-variant-numeric: tabular-nums; white-space: nowrap; }
+/* R54：.rr-table td 的 (0,1,1) 会盖掉 (0,1,0) 的 .rr-fac，这里提高一级。 */
+.rr-table td.rr-fac { color: var(--accent); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .rr-ch { color: var(--text-dim); font-size: 11.5px; }
-.rr-var { display: block; font-style: normal; font-size: 10.5px; color: var(--text-dim); margin-top: 1px; }
+.rr-var { display: block; font-style: normal; font-size: 11px; color: var(--text-dim); margin-top: 1px; }
 </style>

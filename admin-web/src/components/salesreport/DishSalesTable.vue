@@ -55,7 +55,7 @@ const filtered = computed(() => {
         <LuyunNumberInput v-model="minQty" compact :min="0" placeholder="最低数" />
       </div>
     </div>
-    <div style="flex:1;overflow-y:auto" class="luyun-scrollbar">
+    <div class="dish-scroll luyun-scrollbar">
       <table class="data-table">
         <thead>
           <tr>
@@ -82,3 +82,12 @@ const filtered = computed(() => {
     </div>
   </div>
 </template>
+
+<style scoped>
+/* R10：表格在卡片内自己滚，卡片高度不再随 109 行内容把并排的半成品卡拉出 2000px 空白。 */
+.dish-scroll {
+  flex: 1;
+  overflow-y: auto;
+  max-height: 62vh;
+}
+</style>

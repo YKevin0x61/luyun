@@ -7,18 +7,24 @@ export function resolveSubCategory(semiItem) {
 }
 
 export function normalizeDishName(name) {
-  return String(name ?? '')
-    .replace(/\(-\)$/, '')
-    .replace(/^\(外卖\)/, '')
-    .replace(/^\(普通\)/, '')
-    .replace(/\(\d+只\)$/, '')
-    .replace(/\(\d+个\)$/, '')
-    .replace(/\(\d+条\)$/, '')
-    .replace(/^\(小份\)/, '')
-    .replace(/^\(中份\)/, '')
-    .replace(/^\(大份\)/, '')
-    .replace(/^\(半份\)/, '')
-    .trim()
+  // 前缀可以叠加（(外卖)(普通)xxx），循环剥到稳定，与后端 normalize_dish_name 一致（R39）。
+  let text = String(name ?? '')
+  for (let i = 0; i < 8; i += 1) {
+    const before = text
+    text = text
+      .replace(/\(-\)$/, '')
+      .replace(/^\(外卖\)/, '')
+      .replace(/^\(普通\)/, '')
+      .replace(/\(\d+只\)$/, '')
+      .replace(/\(\d+个\)$/, '')
+      .replace(/\(\d+条\)$/, '')
+      .replace(/^\(小份\)/, '')
+      .replace(/^\(中份\)/, '')
+      .replace(/^\(大份\)/, '')
+      .replace(/^\(半份\)/, '')
+    if (text === before) break
+  }
+  return text.trim()
 }
 
 export function buildSemiUsageLinesTemplateC(semiFinished) {
@@ -64,7 +70,13 @@ export function buildTextReport(reportData, fixedDishes) {
   const lines = []
   const rangeText = d.date_range.start === d.date_range.end ? d.date_range.start : `${d.date_range.start} ~ ${d.date_range.end}`
   lines.push(`【销售报表】${rangeText}`)
-  lines.push(`订单数：${s.total_orders}  菜件总数：${s.total_dishes}  菜品数：${s.unique_dishes}  规则覆盖：${s.covered_rules}`)
+  if ((!d.dish_sales || !d.dish_sales.length) && (!d.semi_finished || !d.semi_finished.length)) {
+    return `【销售报表】${rangeText}\n本期无销售数据`
+  }
+  // 与页面同口径：订单数用账单数；规则覆盖显示 87/109（80%）而不是单个数字（R12/R44）。
+  const bills = s.total_bills ?? s.total_orders
+  const coverage = s.unique_dishes ? Math.round((s.covered_rules / s.unique_dishes) * 100) : 0
+  lines.push(`订单数：${bills}  菜件总数：${s.total_dishes}  菜品数：${s.unique_dishes}  规则覆盖：${s.covered_rules}/${s.unique_dishes}（${coverage}%）`)
   lines.push('')
   lines.push('【菜品销量】')
   if (fixedDishes && fixedDishes.length) {

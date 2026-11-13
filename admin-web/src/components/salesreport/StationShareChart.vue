@@ -23,7 +23,13 @@ const total = computed(() => rows.value.reduce((s, [, amt]) => s + amt, 0))
 <template>
   <div>
     <div v-if="!rows.length" class="empty-state" style="padding:28px 0">暂无数据</div>
-    <div v-else v-for="[station, amount] in rows" :key="station" class="bar-row">
+    <div
+      v-else
+      v-for="[station, amount] in rows"
+      :key="station"
+      class="bar-row"
+      :title="`${station === '未知' ? '未分类' : stationsStore.nameOf(station)}：¥${Number(amount).toFixed(2)}`"
+    >
       <div class="bar-label">{{ station === '未知' ? '未分类' : stationsStore.nameOf(station) }}</div>
       <div class="bar-track">
         <div

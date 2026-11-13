@@ -1,5 +1,6 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { useStationsStore } from '../stores/stations'
 import { useSalesReport } from '../composables/useSalesReport'
 import { quickRange } from '../utils/dateRange'
@@ -15,6 +16,7 @@ import RulesReadonlyTable from '../components/salesreport/RulesReadonlyTable.vue
 import TextExportModal from '../components/salesreport/TextExportModal.vue'
 import WecomPushModal from '../components/salesreport/WecomPushModal.vue'
 import RefundModal from '../components/salesreport/RefundModal.vue'
+import RefundDetailTable from '../components/salesreport/RefundDetailTable.vue'
 import ReportDishSettingsModal from '../components/salesreport/ReportDishSettingsModal.vue'
 import { api } from '../api/client'
 import LuyunDatePicker from '../components/ui/LuyunDatePicker.vue'
@@ -23,12 +25,24 @@ const stationsStore = useStationsStore()
 const {
   startDate, endDate, station,
   reportData, dishSalesCache, semiFinishedCache, refundStatsCache,
+  refundDetailCache, refundDetailPage, refundDetailKind, refundDetailLoading, refundDetailError,
+  changeRefundPage, changeRefundKind,
   trendSeries, trendGranularity, trendError, revenueCompareSub, revenueCompareTrend, hourSeries, hourError,
-  refreshInfo, loadReport, bindRealtime, teardownRealtime,
+  refreshInfo, loadError, lastLoadedAt, isPartialPeriod, loadReport, bindRealtime, teardownRealtime,
 } = useSalesReport({ refreshStations: () => stationsStore.load(true) })
+
+const route = useRoute()
+const router = useRouter()
+
+// 筛选条件写进 URL（审查 R27）：刷新/分享/前进后退都还原同一份报表。
+// 只在 URL 显式带了合法值时才覆盖默认「今天」，避免空串把页面打空。
+if (typeof route.query.start === 'string' && route.query.start) startDate.value = route.query.start
+if (typeof route.query.end === 'string' && route.query.end) endDate.value = route.query.end
+if (typeof route.query.station === 'string' && route.query.station) station.value = route.query.station
 
 const activeTab = ref('report') // 'report' | 'rules'
 const fixedDishes = ref([])
+const refundSection = ref(null)
 
 const modal = ref(null) // 'text-export' | 'wecom-push' | 'refund' | 'report-dish-settings'
 const wecomMode = ref('report')
@@ -40,6 +54,12 @@ const stationShareTotal = computed(() => {
 })
 const textExportContent = computed(() => buildTextReport(reportData.value, fixedDishes.value))
 const semiPushContent = computed(() => buildSemiReportText(reportData.value))
+const scopeLabel = computed(() => {
+  const scope = reportData.value?.scope
+  if (scope === 'full') return '全店（含楼面套餐/茶位）'
+  if (scope === 'station') return '指定档口'
+  return '厨房出品（不含楼面）'
+})
 
 async function loadFixedDishes() {
   try {
@@ -52,7 +72,6 @@ function setQuick(type) {
   const { start, end } = quickRange(type)
   startDate.value = start
   endDate.value = end
-  loadReport()
 }
 
 function switchTab(tab) {
@@ -76,6 +95,13 @@ function openWecom(mode) {
   modal.value = 'wecom-push'
 }
 
+// CSV 公式注入防护：Excel 会把 = + - @ 开头的单元格当公式执行（审查 R42）。
+function csvCell(value) {
+  let text = String(value ?? '')
+  if (/^[=+\-@\t\r]/.test(text)) text = "'" + text
+  return `"${text.replace(/"/g, '""')}"`
+}
+
 function exportCsvClient() {
   if (!reportData.value) {
     window.alert('请先查询报表')
@@ -91,26 +117,63 @@ function exportCsvClient() {
       rows.push(['半成品', item.semi_name, block.position || '', item.qty, '', item.unit || '', item.sub_category || item.category || ''])
     })
   })
-  const csv = rows.map((r) => r.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\n')
+  const csv = rows.map((r) => r.map(csvCell).join(',')).join('\n')
   const blob = new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8' })
   const a = document.createElement('a')
   a.href = URL.createObjectURL(blob)
   a.download = `销售报表_${d.date_range.start}_${d.date_range.end}.csv`
   a.click()
+  URL.revokeObjectURL(a.href)
 }
 
-function exportServerCsv() {
+async function exportServerCsv() {
   if (!reportData.value) {
     window.alert('请先查询报表')
     return
   }
-  let url = `/api/export/sales-report.csv?start_date=${encodeURIComponent(startDate.value)}&end_date=${encodeURIComponent(endDate.value)}`
-  if (station.value) url += `&station=${encodeURIComponent(station.value)}`
-  window.location.href = url
+  const params = new URLSearchParams({
+    start_date: startDate.value,
+    end_date: endDate.value || startDate.value,
+  })
+  if (station.value) params.set('station', station.value)
+  try {
+    // 走 fetch + blob：422/500 在页面上提示，而不是把整页导航到 JSON 错误体（审查 R6）。
+    await api.download(
+      `/api/export/sales-report.csv?${params.toString()}`,
+      `销售报表_${startDate.value}_${endDate.value || startDate.value}.csv`,
+    )
+  } catch (e) {
+    window.alert('导出失败：' + (e.message || '未知错误'))
+  }
 }
 
+function showRefundDetail() {
+  modal.value = null
+  refundSection.value?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+}
+
+function syncQuery() {
+  const query = {}
+  if (startDate.value) query.start = startDate.value
+  if (endDate.value) query.end = endDate.value
+  if (station.value) query.station = station.value
+  router.replace({ query }).catch(() => {})
+}
+
+// R28/R27：改日期或档口后自动查询，并把条件同步进地址栏。
+watch([startDate, endDate, station], () => {
+  if (!startDate.value) return
+  syncQuery()
+  loadReport()
+})
+
 onMounted(async () => {
-  await stationsStore.load()
+  // R53：页面原先没有 H1、document.title 也不带页面名，读屏器和浏览器标签都认不出这是哪一页。
+  document.title = '销售报表 · 厨务管家'
+  // 首次进入也把默认「今天」写进 URL，刷新/分享才不会丢筛选条件（R27）。
+  syncQuery()
+  // 档口列表失败只影响下拉选择，不能阻断整张报表（审查 R7）。
+  stationsStore.load().catch(() => {})
   await loadReport()
   await loadFixedDishes()
   bindRealtime()
@@ -118,12 +181,14 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   teardownRealtime()
+  document.title = '厨务管家'
 })
 </script>
 
 <template>
   <div>
-    <div class="card" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px">
+    <h1 class="sr-only">销售报表</h1>
+    <div v-if="activeTab === 'report'" class="card" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px">
       <label style="font-size:12px;color:var(--text-dim)">日期</label>
       <LuyunDatePicker v-model="startDate" style="width:150px" />
       <label style="font-size:12px;color:var(--text-dim)">至</label>
@@ -138,7 +203,8 @@ onBeforeUnmount(() => {
       </div>
       <label style="font-size:12px;color:var(--text-dim)">档口</label>
       <select class="select" v-model="station">
-        <option value="">全部档口</option>
+        <option value="">厨房出品（不含楼面）</option>
+        <option value="all">全店（含楼面）</option>
         <option v-for="s in stationsStore.list" :key="s.id" :value="s.id">{{ s.name }}</option>
       </select>
       <button class="btn btn-primary btn-sm" @click="loadReport"><SvgIcon name="search" :size="13" /> 查询报表</button>
@@ -153,6 +219,18 @@ onBeforeUnmount(() => {
     <div class="view-tabs">
       <button class="view-tab" :class="{ active: activeTab === 'report' }" @click="switchTab('report')"><SvgIcon name="bar-chart" :size="13" /> 报表数据</button>
       <button class="view-tab" :class="{ active: activeTab === 'rules' }" @click="switchTab('rules')"><SvgIcon name="settings" :size="13" /> 换算规则</button>
+    </div>
+
+    <div v-if="loadError" class="dash-error-banner load-error-banner">
+      <SvgIcon name="alert-triangle" :size="14" />
+      <span>
+        {{ loadError.startsWith('请选择') ? loadError : '加载失败：' + loadError }}<template v-if="reportData">（下方为 {{ lastLoadedAt || '上次' }} 的旧数据）</template>
+      </span>
+      <button class="btn btn-sm" @click="loadReport">重试</button>
+    </div>
+
+    <div v-if="activeTab === 'report'" class="scope-note">
+      口径：{{ scopeLabel }}<template v-if="isPartialPeriod"> · 本期尚未结束，环比仅供参考</template>
     </div>
 
     <div v-if="activeTab === 'report'" style="display:flex;flex-direction:column;gap:8px">
@@ -180,7 +258,7 @@ onBeforeUnmount(() => {
           </div>
           <div class="insight-card-body"><StationShareChart :dish-sales="dishSalesCache" /></div>
         </div>
-        <div class="insight-card">
+        <div class="insight-card insight-card--period">
           <div class="insight-card-header">
             <h3>时段分析</h3>
             <span class="badge">早 / 午 / 晚</span>
@@ -192,6 +270,21 @@ onBeforeUnmount(() => {
       <div class="two-col">
         <DishSalesTable :dishes="dishSalesCache" />
         <SemiFinishedTable :semi-finished="semiFinishedCache" :report-data="reportData" @push="openWecom('semi')" />
+      </div>
+
+      <div ref="refundSection">
+      <RefundDetailTable
+        :items="refundDetailCache.items"
+        :total="refundDetailCache.total"
+        :page="refundDetailPage"
+        :page-size="refundDetailCache.page_size || 50"
+        :summary="refundDetailCache.summary"
+        :kind="refundDetailKind"
+        :loading="refundDetailLoading"
+        :error="refundDetailError"
+        @page-change="changeRefundPage"
+        @kind-change="changeRefundKind"
+      />
       </div>
     </div>
 
@@ -209,8 +302,17 @@ onBeforeUnmount(() => {
       :content="wecomMode === 'semi' ? semiPushContent : textExportContent"
       @close="modal = null"
     />
-    <RefundModal v-if="modal === 'refund'" :items="refundStatsCache?.items || []" @close="modal = null" />
-    <ReportDishSettingsModal v-if="modal === 'report-dish-settings'" @close="modal = null" />
+    <RefundModal
+      v-if="modal === 'refund'"
+      :items="refundStatsCache?.items || []"
+      @close="modal = null"
+      @show-detail="showRefundDetail"
+    />
+    <ReportDishSettingsModal
+      v-if="modal === 'report-dish-settings'"
+      @close="modal = null"
+      @changed="loadFixedDishes"
+    />
   </div>
 </template>
 
@@ -223,5 +325,80 @@ onBeforeUnmount(() => {
 .insight-card--share .insight-card-body {
   height: auto;
   max-height: 240px;
+}
+
+/* R8：≤1100px 时段卡变一列后，主题里 110px 的固定 body 高度会把晚市裁掉。 */
+.insight-card--period .insight-card-body {
+  height: auto;
+  max-height: 240px;
+}
+
+/* R10/R34：并排两卡不再被 grid 等高拉满（菜品表 109 行会把半成品卡撑出
+   2000px 空白，并把异常明细推到第 9 屏）；菜品表自己内部滚动。 */
+.two-col {
+  align-items: start;
+  min-height: 0;
+}
+
+.two-col .table-card {
+  height: auto;
+}
+
+/* R9/R31：窄屏横滑时菜名固定在左侧，sticky 表头也因为表格有了滚动容器而生效。 */
+@media (max-width: 900px) {
+  :deep(.data-table th:nth-child(2)),
+  :deep(.data-table td:nth-child(2)) {
+    position: sticky;
+    left: 0;
+    z-index: var(--z-tabbar);
+    background: var(--card);
+  }
+}
+
+/* R15：移动端触控目标不小于 44px（按钮与下拉）。 */
+@media (max-width: 900px) {
+  :deep(.btn),
+  :deep(.select) {
+    min-height: 44px;
+  }
+}
+
+/* R13：本页不在工作台命名空间下，--focus-ring 未定义会让 focus-visible 直接 outline:none。 */
+:deep(:focus-visible) {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* 主接口失败时把「旧数据」和「新结果」明确分开：以前只有右上角一行小字，
+   用户会把没刷新的数据当成刷新后的结果（审查 R5）。配色复用主题里的
+   .dash-error-banner，这里只补布局。 */
+.load-error-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0;
+}
+
+.load-error-banner .btn {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.scope-note {
+  margin: 0 0 8px;
+  font-size: 11px;
+  color: var(--text-dim);
 }
 </style>
