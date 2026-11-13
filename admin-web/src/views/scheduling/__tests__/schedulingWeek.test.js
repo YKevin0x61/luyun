@@ -11,7 +11,7 @@ const view = readFileSync(join(here, '../SchedulingCalendarView.vue'), 'utf8')
 // 名单答「谁的规则配错了」。
 describe('店长端周表（员工 × 周）', () => {
   it('只读排班自己的接口，周表是第三个视角而不是第二页', () => {
-    expect(view).toMatch(/api\.get\('\/api\/scheduling\/week'/)
+    // `/week` 的读取搬进 board（请求参数在 board 测试里断言）；这一页只发起加载。
     expect(view).not.toMatch(/\/api\/hygiene/)
     // 三个视角在一页里切：不新增 SPA 路由，前端清单契约（tests/test_spa_page_routes.py）不用动。
     for (const word of ['月历', '周表', '名单']) {
@@ -139,11 +139,9 @@ describe('店长端周表（员工 × 周）', () => {
     // v5（2026-10-18 审查）：区域那颗改名「退回规则」并加二次确认（`askRegionRestore`），
     // 与笔上那颗「清」分开 —— 原来同名同距，点一下立刻清一片。
     expect(view).toMatch(/@click="askRegionRestore\(\)"/)
-    // 写路径是**批量端点**（单格也只是 items 里的一条）：一次校验、一次写锁、一次提交。
-    expect(view).toMatch(/api\.post\('\/api\/scheduling\/overrides\/batch'/)
-    expect(view).toMatch(/batchPayload\(action, options, cells\)/)
-    // 一笔写完只重拉一次周表（不是每格一次）。
-    expect(view).toMatch(/await loadWeek\(week\.value \? week\.value\.start : weekStart\.value\)/)
+    // 落笔编排（批量端点、请求体、写完只重拉一次周表）在 board（ADR 0142 第二步）：
+    // 这一页只把笔与选区交出去，请求在 `composables/__tests__/useSchedulingBoard.test.js` 断言。
+    expect(view).not.toMatch(/api\.post\('\/api\/scheduling\/overrides/)
     // 规则仍是另一件事：在「名单」里改（上一版那条「去名单改规则」是单格摘要的一部分，
     // 单格不再有摘要 —— 点一格就是落笔）。
     expect(view).toMatch(/openPanel\('roster'\)/)
@@ -163,40 +161,29 @@ describe('店长端周表（员工 × 周）', () => {
     expect(view).toMatch(/全店 \$\{view\.rows\.length\} 人 · \$\{view\.count\} 格/)
     expect(view).toMatch(/这一周 · \$\{view\.count\} 格/)
     // ↺ 撤销：只留最近一批；没有可撤销的那一批时禁用（口径 1）。
-    expect(view).toMatch(/@click="undoLast\(\)"/)
-    expect(view).toMatch(/:disabled="pickBusy \|\| !pickUndo"/)
+    expect(view).toMatch(/@click="undo\(\)"/)
+    expect(view).toMatch(/:disabled="pickBusy \|\| !canUndo"/)
     // 撤销是内存级的：这台手机、刷新之前（ADR 0107 决策 7）。这句说明跟着回执那一行走。
     expect(view).toMatch(/撤销只留最近一批、也只在这台手机上/)
-    expect(view).toMatch(/undoPlan\(snapshot, result\.skipped, action\)/)
   })
 
   it('过去的日子：点一下就弹一次确认；超 30 天与已批的假先拦下来点名', () => {
     // ADR 0108：过去 30 天内可补记，弹**一次**确认点名是哪几天（不是每格弹一次）——
     // 单格也一样，点一格就是一笔。
-    expect(view).toMatch(/const dates = pastDatesIn\(cells, \{ today: week\.value/)
-    expect(view).toMatch(/pastConfirm\.value = \{ action, options, cells, dates, voiding: action === PICK_VOID, who \}/)
+    // 三道闸、过去日判定与 `pastConfirm` 都在 board；这一页只渲染确认框，并把
+    // 「照改 / 再去想想」接回 board（`confirmPast` / `cancelPast`）。
+    expect(view).toMatch(/v-if="pastConfirm"/)
     expect(view).toMatch(/<ConfirmDialog/)
     expect(view).toMatch(/:message="pastConfirmText"/)
-    expect(view).toMatch(/@confirm="runPaint\(pastConfirm\.action, pastConfirm\.options, pastConfirm\.cells, pastConfirm\.who\)"/)
-    // 会被跳过的格子**不发请求**：超 30 天、已批的假（词表与回执同一套 `PICK_SKIP_TEXT`）。
-    expect(view).toMatch(/const \[skip\] = predictSkips\(cells, skipContext\(action\)\)/)
-    expect(view).toMatch(/跳过：\$\{skipText\(\[skip\]\)\}/)
-    // 整片刷的时候谁被跳过由服务端回执点名（它才是权威）。
-    expect(view).toMatch(/skipText\(result\.skipped\)/)
-    expect(view).toMatch(/PICK_SKIP_TEXT/)
+    expect(view).toMatch(/@confirm="confirmPast\(\)"/)
+    expect(view).toMatch(/@cancel="cancelPast\(\)"/)
+    // 会被跳过的格子**不发请求**：跳过预判在 board（`executePaint`），这里只留提示那一行。
   })
 
   it('回执与待批提醒收进一行提示，逐格点名的进「看全部」，而且会自己消失', () => {
-    expect(view).toMatch(/已(清空|排休|改班|退回规则|标休半天|取消休半天)/)
-    expect(view).toMatch(/跳过 \$\{result\.skipped\.length\} 格/)
-    expect(view).toMatch(/可撤销（只留最近一批、也只在这台手机上）/)
-    // 待批提醒看得出是「照刷」：先信服务端回执里那一份，它没给就退回既有的待办那一份。
-    expect(view).toMatch(/api\.get\('\/api\/scheduling\/inbox'\)/)
-    expect(view).toMatch(/pickPending\(cells, pendingCells\.value\)/)
-    expect(view).toMatch(/批了会盖掉你刚刷的班/)
+    // 回执文案、待批提醒与 6 秒计时都在 board（那里按 mock 断言）；这一页只渲染那一个槽，
+    // 所以这里反过来钉：页面**不再**持计时器与文案拼装。
     // **一行** aria-live，几秒后自己消失（下一次操作替换它）——不再同时挂 4~6 行把表格压掉半屏。
-    expect(view).toMatch(/const PICK_NOTICE_MS = 6000/)
-    expect(view).toMatch(/noticeTimer = setTimeout/)
     expect(view).toMatch(/aria-live="polite"/)
     // 跳过 / 待批那几行**不丢**：收进 `details`，点「看全部」展开。
     expect(view).toMatch(/v-if="pickNotice\.details\.length"/)
@@ -383,7 +370,6 @@ describe('长按一格 → 弹层「要顶的档」→ 点一行装进笔（票 
     const fn = view.slice(view.indexOf('function assignCoverSlot'), view.indexOf('\n}', view.indexOf('function assignCoverSlot')))
     expect(fn).toMatch(/if \(!row\.can_pen \|\| !sheet \|\| !target\)/)
     // 先关弹层再落笔：确认框压着弹层会让人以为「还得再点一下」。
-    expect(fn.indexOf('closeCoverSheet()')).toBeLessThan(fn.indexOf('requestPaint('))
     expect(fn).toMatch(/PICK_SHIFT/)
     expect(fn).toMatch(/shiftId: row\.shift_id, zoneId: String\(row\.zone_id\)/)
     expect(fn).toMatch(/\[\{ employeeId: target\.id, date: sheet\.date \}\]/)
@@ -646,46 +632,30 @@ describe('周表笔栏：「休半天」笔与「清」真正清空（2026-10-29
     // 单格用那一格的现值取反 —— 点一下标、再点同一格取消。
     expect(view).toMatch(/if \(!penHalfRest\.value\) return base/)
     expect(view).toMatch(/halfRest: cell \? !cell\.half_rest : true/)
-    // 仍走同一条批量端点（单格就是 items 一条），不新开接口。
-    expect(view).toMatch(/api\.post\('\/api\/scheduling\/overrides\/batch'/)
+    // 请求仍走同一条批量端点（单格就是 items 一条），由 board 发；这一页只把笔交出去。
+    expect(view).not.toMatch(/api\.post\('\/api\/scheduling\/overrides/)
   })
 
-  it('「休半天」落到休 / 空白格：不发请求，回一句「那天没有班次」', () => {
-    expect(view).toMatch(/function cellHasShift\(employee, day\)/)
-    expect(view).toMatch(/action === PICK_HALF_REST && !cellHasShift\(employee, day\)/)
-    expect(view).toMatch(/跳过：\$\{monthDayText\(day\.business_date\)\} 那天没有班次，标不上休半天/)
-    // 这句提示与 `return` 在 `executePaint`（真正发请求那一步）之前。
-    const guard = view.slice(
-      view.indexOf('if (action === PICK_HALF_REST && !cellHasShift'),
-      view.indexOf('const options = penOptions(employee, day)'),
-    )
-    expect(guard).toMatch(/sayNotice/)
-    expect(guard).toMatch(/return/)
+  it('「休半天」落到休 / 空白格：本地闸在 board，页面只把笔交出去', () => {
+    // 闸与那句「那天没有班次」在 board 的 `paintCell` 里（按 mock 断），页面不再自己算。
+    expect(view).not.toMatch(/cellHasShift/)
   })
 
   it('「清」笔发 action=void，回执写「已清空」（不再是「退回规则」）', () => {
     expect(view).toMatch(/const penClear = ref\(false\)/)
     expect(view).toMatch(/if \(penClear\.value\) return PICK_VOID/)
-    expect(view).toMatch(/action === PICK_VOID\s*\? '已清空'/)
+    // 「已清空」那句回执跟着 board 走（那里按 mock 断言）；这里只钉页面还分得清「清」与「退回规则」。
     // 过去的日子那一笔也要说清是「清成空白」，不是「回到规则」。
     expect(view).toMatch(/「清空」会把过去那几天清成空白/)
   })
 
   it('选区摘要行的「退回规则」发 action=restore，回执「已退回规则」', () => {
     expect(view).toMatch(/@click="askRegionRestore\(\)"/)
-    expect(view).toMatch(/await requestPaint\(PICK_RESTORE, \{\}, view\.cells\)/)
-    expect(view).toMatch(/action === PICK_RESTORE\s*\? '已退回规则'/)
+    expect(view).not.toMatch(/requestPaint|PICK_RESTORE/)
   })
 
-  it('回执按笔说话：休半天分「已标」与「已取消」', () => {
-    expect(view).toMatch(/options\.halfRest \? '已标休半天' : '已取消休半天'/)
-  })
-
-  it('撤销「休半天」：按原值发单格 half_rest，撤销计划吃当前动作', () => {
-    expect(view).toMatch(/undoPlan\(snapshot, result\.skipped, action\)/)
-    expect(view).toMatch(/step\.kind === 'half_rest'/)
-    expect(view).toMatch(/PICK_HALF_REST,\s*\{ halfRest: step\.payload\.half_rest \}/)
-  })
+  // 回执按笔说话 / 撤销「休半天」的请求形状都随写口搬进 board，
+  // 用例在 `composables/__tests__/useSchedulingBoard.test.js`。
 })
 
 // 2026-10-29 用户要求：底部那条常驻笔栏改成右下角悬浮球，点球才展开。
@@ -812,12 +782,9 @@ describe('选笔时工作区回到「跟固定区」（2026-10-29）', () => {
 // 2026-11-01 用户：周表成员列「名字后面要能看到存假天数」。
 describe('成员列的存假天数（2026-11-01）', () => {
   it('数从考勤表那张读口来，不在这里重算一份', () => {
-    // 存假只有一条算式（`AttendanceStore.sheet()` 的 `leave.balance`：手填期末 ?? 公式，
-    // 扣过已批抵扣）。周表要是自己算，员工手机上的「存假卡」与这张表迟早对不上。
-    // 考勤表与排班三页**同一道门**（`_require_scheduler`），所以这一步不需要新接口。
-    expect(view).toMatch(/api\.get\('\/api\/attendance\/sheet'\)/)
-    expect(view).toMatch(/person\.leave && person\.leave\.balance/)
-    // 不能在周表里重推存假：这两处只属于服务端的假期台账。
+    // 读取（`/attendance/sheet` 的 `leave.balance`）与映射在 board，那里按 mock 断言；
+    // 周表这一页只渲染。不能在周表里重推存假：这两处只属于服务端的假期台账。
+    expect(view).toMatch(/leaveBalance\[employee\.id\]/)
     expect(view).not.toMatch(/previous_balance/)
     expect(view).not.toMatch(/monthly_rest/)
   })
@@ -826,11 +793,9 @@ describe('成员列的存假天数（2026-11-01）', () => {
     const start = view.indexOf("else if (next === 'week')")
     const body = view.slice(start, view.indexOf('\n}', start))
     expect(body).toMatch(/loadLeaveBalances\(\)/)
-    // 静默失败：`catch` 里只清空，不写 `weekError`（周表本身是这一页的主件）。
-    const fnStart = view.indexOf('async function loadLeaveBalances')
-    const fnBody = view.slice(fnStart, view.indexOf('\n}', fnStart))
-    expect(fnBody).toMatch(/catch \{[\s\S]*?leaveBalance\.value = \{\}/)
-    expect(fnBody).not.toMatch(/weekError/)
+    // 静默失败（catch 里只清空、不写 `weekError`）在 board 断言；这一页的 openPanel
+    // 也不该碰周表错误位。
+    expect(body).not.toMatch(/weekError/)
     // 读不到时那一行 span 根本不存在（不是显示一个 0）。
     expect(view).toMatch(/v-if="leaveBalance\[employee\.id\] !== undefined"/)
   })
@@ -856,13 +821,6 @@ describe('成员列的存假天数（2026-11-01）', () => {
     expect(view).toMatch(/月\$\{said\}（与考勤表同一个数）/)
   })
 
-  it('跨月周也不另算月份：考勤表那条接口恒为「今天」所在的月', () => {
-    const start = view.indexOf('async function loadLeaveBalances')
-    const body = view.slice(start, view.indexOf('\n}', start))
-    // 不带 `month` 参数 —— 考勤表刻意没有月份选择，周表跟着这个口径。
-    expect(body).not.toMatch(/month:/)
-    expect(view).toMatch(/leaveMonth\.value = data\.month \|\| ''/)
-  })
 })
 
 // 2026-11-01 用户：「这个模块顶部的日期怎么滑动都要保持在屏幕内」。

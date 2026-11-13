@@ -16,7 +16,10 @@ import { api } from '../../api/client'
 // 共享样式表由壳加载（`SchedulingLayout.vue`）：三个子页各加载一份会挂出重复的
 // <link>，壳一层管住就跟卫生管理端一个做法。
 import { useNudgePull } from '../../composables/useNudgePull'
-import { SHIFT_COLOR_NEUTRAL, mergeShiftList, shiftColorClass } from '../../utils/shiftTable'
+// 读状态、loader、写口编排与回执收在 board（ADR 0142）：这一页只留 URL 同步、
+// 笔 / 选区 / 编辑表单 / 弹窗 / 模板，以及规则那条写路径。
+import { useSchedulingBoard } from '../../composables/useSchedulingBoard'
+import { SHIFT_COLOR_NEUTRAL, shiftColorClass } from '../../utils/shiftTable'
 // 天数的写法只有一份（`12 天` / `19.5 天` / `0 天`，负数带全角减号 = 欠班）：
 // 周表成员列那行存假与考勤表卡片写同一个字面，别在这里另起一套格式。
 import { formatDays } from '../../utils/attendanceSheet'
@@ -25,29 +28,19 @@ import { eachDayInRange } from '../../utils/dateRange'
 // 这一页只渲染（票 03 的长按弹层与票 04 的名单面板那一节吃同一份输出）。
 import { BLOCKED_SHIFT_INACTIVE, BLOCKED_ZONE_DELETED, coverSlotsFor } from '../../utils/weekCoverSlots'
 // 周表的落笔与选区（票 14 / ADR 0107，2026-10-13 方向修订）：纯逻辑在
-// `utils/schedulingWeekPick.js` 里 —— 这一页只负责把手柄接上去、把笔与回执接上去。
+// `utils/schedulingWeekPick.js` 里 —— 这一页只负责把手柄接上去、把笔接上去；
+// 落笔编排（请求体、闸、撤销、回执）第二步起在 board（ADR 0142）。
 // `cellHandle` 不再被这一页用：格子从「选区手柄」改回「点一下就落笔」，手柄只剩
 // 日期列头与人名两种（纯逻辑那边仍覆盖格子手柄，见它的单测）。
 import {
   PICK_HALF_REST,
-  PICK_MAX_CELLS,
   PICK_REST,
-  PICK_RESTORE,
   PICK_SHIFT,
-  PICK_SKIP_TEXT,
   PICK_VOID,
-  batchPayload,
   colHandle,
-  normalizeResult,
-  overLimit,
-  pastDatesIn,
   pickAt,
-  pickPending,
   pickRegion,
-  predictSkips,
   rowHandle,
-  snapshotCells,
-  undoPlan,
 } from '../../utils/schedulingWeekPick'
 
 
@@ -104,16 +97,54 @@ const WEEK_HEADS = ['一', '二', '三', '四', '五', '六', '日'] // 周表�
 // 色值在 `theme.workbench.css` 的 `--shift-<key>` 里，深浅主题共用同一套。
 // 撞色仍然只算辅助：格子里一定留班次缩写，图例写全名。
 
-const loading = ref(true)
-const errorText = ref('')
-const shifts = ref([])
-const zones = ref([])
-const calendar = ref(null)
-const selectedDate = ref('')
-const dayDetail = ref(null)
-const monthValue = ref('')
-const panel = ref('month') // 'month' | 'roster'
-const roster = ref([])
+// 四个投影与附属数据全从 board 拿；页面不再自己声明这些 ref（ADR 0142 决策 3 / 8）。
+const board = useSchedulingBoard()
+const {
+  calendar,
+  dayDetail,
+  editError,
+  errorText,
+  inboxRequests,
+  leaveBalance,
+  leaveMonth,
+  loading,
+  loadDay,
+  loadLeaveBalances,
+  loadPendingMarks,
+  loadRoster,
+  maxCycleDays,
+  monthValue,
+  notice: pickNotice,
+  overrideBusy,
+  pastConfirm,
+  canUndo,
+  cancelPast,
+  confirmPast,
+  pendingCount,
+  pendingMarks,
+  pickBusy,
+  refreshNotes,
+  roster,
+  selectedDate,
+  setView,
+  shifts,
+  undo,
+  view: panel, // 'month' | 'week' | 'roster'
+  week,
+  weekError,
+  weekStart,
+  zones,
+} = board
+
+// 回执「看全部 / 收起」的开关住在 board 里；模板里有就地赋值（`noticeOpen = true`），
+// 这里用可写 computed 桥接 —— 不要对解构出来的 ref 直接赋值（编译器只知道它是 maybe-ref）。
+const noticeOpen = computed({
+  get: () => board.noticeOpen.value,
+  set: (value) => {
+    board.noticeOpen.value = value
+  },
+})
+
 const busyEmployeeId = ref(null)
 // 单日覆盖（票 07）：点当天卡里的一个人，就地改这一天。
 // `day` 是**打开编辑器那一刻的那一天**（冻在这里）：换一天看名单时 `selectedDate` 会变，
@@ -123,8 +154,6 @@ const busyEmployeeId = ref(null)
 const editing = ref(null) // { id, name, day, overridden, undoable } | null
 const editShift = ref('') // 班次 id 的字符串，或 'rest'（那天休）
 const editZone = ref('') // 工作区 id 的字符串；'' = 跟这个班次的固定区
-const editError = ref('')
-const overrideBusy = ref(false)
 
 const today = computed(() => (calendar.value && calendar.value.today) || '')
 const shiftById = computed(() => {
@@ -240,78 +269,15 @@ function cellCounts(day) {
   }))
 }
 
-// 月历请求的序号（见 `loadCalendar`）：慢网下只认最后一次请求的响应。
-let calendarSeq = 0
-
-async function loadCalendar(month, silent = false) {
-  errorText.value = ''
-  const value = month || monthValue.value || currentMonthValue()
-  // 请求序号：慢网下连点「上月」（或「上月」与「本月」并发）时，先到的旧响应会把后点的
-  // 那个月覆盖掉（审查发现的 A9）。只有最后一次请求的响应算数。
-  const seq = (calendarSeq += 1)
-  // 月份**立刻**更新：原来只在成功之后才写 `monthValue`，于是连点两次算出来的目标是
-  // 同一个月，第二次点击看起来像没反应。
-  monthValue.value = value
-  // `silent`：实时 nudge 触发的重读不翻 loading —— 每来一条就闪一下白，很吵。
-  if (!silent) loading.value = true
-  try {
-    const data = await api.get('/api/scheduling/calendar', { month: value })
-    if (seq !== calendarSeq) return
-    calendar.value = data
-    shifts.value = data.shifts || []
-    monthValue.value = data.month
-    // 选中那天：今天在这个月就选今天，否则选 1 号（原型 B 一进来就是「今天」那格）。
-    const inMonth = (data.days || []).some((day) => day.business_date === data.today)
-    selectedDate.value = inMonth && data.today ? data.today : (data.days[0] || {}).business_date || ''
-    await loadDay(selectedDate.value)
-  } catch (err) {
-    if (seq !== calendarSeq) return
-    errorText.value = err.message || '排班月历加载失败'
-  } finally {
-    if (seq === calendarSeq) {
-      if (!silent) loading.value = false
-      syncQuery()
-    }
-  }
-}
-
-async function loadDay(businessDate) {
-  if (!businessDate) {
-    dayDetail.value = null
-    return
-  }
-  selectedDate.value = businessDate
-  // 换一天先把上一天的人清掉（模板对 null 有「读取中…」兜底）：请求失败时表头已经是
-  // 新那天、名单却还列着旧那天的人，超级管理员会照着错的名单改班（审查发现的 A2）。
-  dayDetail.value = null
-  try {
-    dayDetail.value = await api.get('/api/scheduling/day', { date: businessDate })
-    // 成功就把上一次那句错误收掉：原来只有 `loadCalendar` 清 `errorText`，一条失败提示
-    // 会一直挂在页面上，看着像页面坏了。
-    errorText.value = ''
-  } catch (err) {
-    errorText.value = err.message || '这一天读不出来'
-  }
-}
-
-async function loadRoster() {
-  try {
-    const data = await api.get('/api/scheduling/roster')
-    roster.value = data.employees || []
-    // 并集，不是替换：名单这份只有启用的班次，直接换上去会把「这个月还有行」的停用
-    // 班次从月历的格子、图例和当天卡上挤掉（`mergeShiftList` 里写了为什么不能那么走）。
-    if (data.shifts && data.shifts.length) shifts.value = mergeShiftList(shifts.value, data.shifts)
-    // 工作区名单来自公共层（读的是卫生建的那份），所以卫生那边新建一个区，
-    // 这里刷新一下就能选到 —— 不需要重启，也不用在排班这边再建一份。
-    zones.value = data.zones || []
-    if (data.max_cycle_days) maxCycleDays.value = data.max_cycle_days
-  } catch (err) {
-    errorText.value = err.message || '名单读不出来'
-  }
+// 读月在 board（ADR 0142 决策 5）；这一层只补页面自己的 URL 同步 —— 决策 4：
+// URL 归页面，board 不 import router。
+async function loadCalendar(month) {
+  await board.loadMonth(month)
+  syncQuery()
 }
 
 async function openPanel(next) {
-  panel.value = next
+  setView(next)
   // 切走就把选区与展开的笔栏收掉：动作条只在周表这一栏有意义。
   if (next !== 'week') {
     clearPick()
@@ -342,27 +308,7 @@ async function openPanel(next) {
   }
 }
 
-// 「还没配的人」= 在职（已批准、没停用）但一条规则都没有。名单面板和底下那根
-// 提示条要用同一个口径，所以只写这一份纯函数。
-function needsRule(employee) {
-  // 「配了但读不出来」也要算进来：那种人在月历上同样不会有新班（`expand()` 会跳过他们），
-  // 而名单上只写「还没配」的话，超级管理员会以为是没配过 —— 两拨都是要处理的人。
-  return (!employee.rule || employee.rule.invalid) && !employee.resigned && employee.approved
-}
-
-function countPending(employees) {
-  return (employees || []).filter(needsRule).length
-}
-
-// 名单上还没配的人数 —— 进页面时单独问一次，给底下那根条用（原型 B 的 .gPend）。
-//
-// 这里**不碰 `shifts`**：那位是「月历显示用的班次列」，归 `/calendar` 管。名单这份只有
-// 启用的班次（`list_shifts()` 不带停用的），覆盖过去会让停用班次从这个月的格子、图例和
-// 当天卡的颜色里凭空消失 —— 而它在这个月明明还有行（票 11 验收②：停用之后历史排班照旧
-// 显示）。数人只需要 `employees`。
-//
-// 读不出来时置 `null`（**不是 0**）：显示成「全员都配好了」是一句假话，超级管理员会照着它放心。
-const pendingCount = ref(null)
+// 「还没配的人」的口径（`needsRule`）随 `pendingCount` 一起进了 board：页面只读结果。
 /** 手机：点一天后当天名单走底部抽屉（桌面是右栏常驻）。 */
 const mobileDayOpen = ref(false)
 /** 周表「搜成员」收进成员列头的放大镜。 */
@@ -429,50 +375,10 @@ const pendingText = computed(() => {
   if (pendingCount.value === null) return '名单没读出来：点开重试一次'
   return pendingCount.value ? '点这里给谁配固定班' : '全员都配好了'
 })
-async function loadPendingCount() {
-  try {
-    const data = await api.get('/api/scheduling/roster')
-    pendingCount.value = countPending(data.employees)
-  } catch (err) {
-    pendingCount.value = null
-  }
-}
 
-// 月历上的**待批角标**（spec US 11）：哪天有等着批的请假 / 换班。
-//
-// 数据现成 —— `/inbox` 每条申请带 `start_date` / `end_date`，这里按天摊开数一遍就够了，
-// 不用后端再出一个接口。这条验收在票 02 与票 06 之间被转手两次、一直没人接，结果是超级管理员
-// 只能滑到底、点进待办页才知道有几条在等他批。
-//
-// 读不出来就**不标**（空表）：宁可少一个角标，也不能在一个没读到的日子上标错数字。
-const pendingMarks = ref({})
-// 待办那一份原样留一手：周表每格没有「待批」字段，票 14 的待批提醒只能从这儿按天 / 按人取
-// （`pendingCells` 就是它摊平出来的）（多读一次接口不值当）。
-const inboxRequests = ref([])
-async function loadPendingMarks() {
-  try {
-    const data = await api.get('/api/scheduling/inbox')
-    const marks = {}
-    for (const request of data.requests || []) {
-      // 换班只有一天（起止同值），请假是一段 —— 同一个展开函数覆盖两种。
-      const days = eachDayInRange(
-        request.start_date,
-        request.end_date || request.start_date,
-      )
-      for (const day of days) marks[day] = (marks[day] || 0) + 1
-    }
-    pendingMarks.value = marks
-    inboxRequests.value = data.requests || []
-  } catch (err) {
-    pendingMarks.value = {}
-    inboxRequests.value = []
-  }
-}
-
-/** 底下那根条与月历角标一起刷：批一条、撤回一条都会同时动到这两个。 */
-async function refreshNotes() {
-  await Promise.all([loadPendingCount(), loadPendingMarks()])
-}
+// 月历上的**待批角标**（spec US 11）：哪天有等着批的请假 / 换班。数据在 board 里按
+// `/inbox` 摊开（`pendingMarks`）；待办原样那一份（`inboxRequests`）也归 board ——
+// 周表每格没有「待批」字段，`pendingCells` 从那一份摊出来。
 
 // ── 周表：员工 × 周（2026-09-30 加，按门店在用的那套排班页的形式）──────────────
 // 月历回答「哪天缺人」，当天卡回答「这天是谁、在哪个区」，名单回答「谁的规则配错了」——
@@ -482,9 +388,6 @@ async function refreshNotes() {
 // 周起点是**周一**：2026-09-30 全模块从周日开头改过来（店里的口头习惯），跟月历的
 // `lead`、员工端月历的 `MONTH_HEADS` 是同一套。服务端会把 `start` 归一到周一，
 // 下面这两个函数只是为了让「上周 / 下周」点下去算的是同一周。
-const week = ref(null)
-const weekStart = ref('')
-const weekError = ref('')
 
 function toLocalDate(value) {
   const [year, month, day] = String(value || '').split('-').map(Number)
@@ -530,24 +433,15 @@ const weekRangeLabel = computed(() => {
   return `${shortDate(data.start)}–${shortDate(data.end)}${same ? ' · 本周' : ''}`
 })
 
+// 周表加载在 board（ADR 0142 决策 5）；这一层只补页面自己的两件事：翻周时收起选区、
+// 写完 URL（决策 4：URL 归页面）。
 async function loadWeek(start) {
-  weekError.value = ''
   const previousStart = weekStart.value
-  try {
-    // `start` 空着就交给服务端按「今天所在周」算：首屏还没读到 today 时也点得动。
-    const data = await api.get('/api/scheduling/week', { start: start || '' })
-    week.value = data
-    weekStart.value = data.start
-    // 并集：周表这份带的是「这 7 天真有行的停用班次」，直接替换会把月历那边的班次列挤掉
-    // （`mergeShiftList` 里写了为什么不能那么走）。
-    if (data.shifts && data.shifts.length) shifts.value = mergeShiftList(shifts.value, data.shifts)
-    // 翻到别的周就把选区收起来：它冻着的是上一周那几天，留在屏幕上会让人以为刷的是新这一周
-    // 的同一天（票 07 那条「换一天就收编辑器」是同一个道理）。**同一周重读不收** ——
-    // 应用完接着点下一列继续刷，正是这个交互的意义（ADR 0107 决策 3）。
-    if (previousStart && data.start !== previousStart) clearPick(true)
-  } catch (err) {
-    weekError.value = err.message || '周表读不出来'
-  }
+  await board.loadWeek(start)
+  // 翻到别的周就把选区收起来：它冻着的是上一周那几天，留在屏幕上会让人以为刷的是新这一周
+  // 的同一天（票 07 那条「换一天就收编辑器」是同一个道理）。**同一周重读不收** ——
+  // 应用完接着点下一列继续刷，正是这个交互的意义（ADR 0107 决策 3）。
+  if (previousStart && weekStart.value !== previousStart) clearPick(true)
   syncQuery()
 }
 
@@ -576,26 +470,8 @@ const weekFilteredOut = computed(() => weekEmployees.value.length - weekRows.val
 // 为什么是当月：那条接口刻意没有月份参数（考勤表页只算当月），周表跟着这个口径；
 // 跨月的周（10/26–11/1）两边的格子都在，但数字仍是服务器「今天」那个月 ——
 // 存假本来就是月度概念，硬按周切反而会给出一个考勤表上没有的数。
-const leaveBalance = ref({})   // employeeId → 天数（负数是欠班）
-const leaveMonth = ref('')     // 这份数字属于哪个月（'YYYY-MM'），只进 title
-
-async function loadLeaveBalances() {
-  try {
-    const data = await api.get('/api/attendance/sheet')
-    const map = {}
-    for (const person of data.employees || []) {
-      const days = person.leave && person.leave.balance
-      if (typeof days === 'number') map[person.id] = days
-    }
-    leaveBalance.value = map
-    leaveMonth.value = data.month || ''
-  } catch {
-    // **静默失败**：存假是这一列的附加信息，读不到就是不显示那一行小字，
-    // 不该把整张周表拖成报错（周表本身是这一页的主件）。
-    leaveBalance.value = {}
-    leaveMonth.value = ''
-  }
-}
+// 存假（`leaveBalance` / `leaveMonth`）与它的 loader 一起在 board：数只有一个来源
+// （考勤表的 `leave.balance`），周表只渲染，不重算。读不到就是静默不显示，不拖垮周表。
 
 /** 名字后面那个带圈的数字：**只写数**（`36.5` / `4` / `−0.5`），单位与「存假 / 欠班」两个字
  *  都不占版面 —— 含义交给颜色（绿=攒下的假、橙=欠班）与悬停提示（`leaveTitle`）。
@@ -678,13 +554,6 @@ function weekCellZone(employee, day) {
 function weekCellHalf(employee, day) {
   const cell = cellOf(employee, day)
   return Boolean(cell && cell.half_rest)
-}
-
-/** 这一格有没有班次（休 / 请假 / 空白都没有）：标「休半天」得有班次可挂，与 `weekCellZone`
- *  是同一套判据。点「休半天」笔落到这种格子上时本地就拦下来、不发请求。 */
-function cellHasShift(employee, day) {
-  const cell = cellOf(employee, day)
-  return Boolean(cell && cell.scheduled && cell.shift_id !== null && cell.shift_id !== undefined)
 }
 
 function weekCellClass(employee, day) {
@@ -791,10 +660,8 @@ const penZoneOpen = ref(false) // 工作区按钮点开才多展开一行
 // 收起时页面不再被 76px 的笔栏占掉；球面写着当前那支笔，省得展开才知道。
 const penOpen = ref(false)
 const pick = ref(null) // { anchor, target } | null；手柄只有日期列头与人名两种
-const pickBusy = ref(false)
-// 撤销只留**最近一批**、内存级（ADR 0107 决策 7）：刷新或换设备就没了。
-const pickUndo = ref(null) // { plan: [...] } | null
-const pastConfirm = ref(null) // { action, options, cells, dates, voiding }：过去的二次确认（只弹一次）
+// 落笔的忙碌态、撤销快照、过去日确认与回执都在 board（ADR 0142 第二步）：
+// 这一页只把笔与选区接上去，模板从 board 的同名状态取 `pickBusy` / `pastConfirm` / `pickNotice`。
 /** 区域「退回规则」的二次确认（4 秒不点自动复位）。 */
 const regionRestoreArmed = ref(false)
 let regionRestoreTimer = 0
@@ -976,18 +843,6 @@ function employeeName(employeeId) {
   return employee ? employee.name : `#${employeeId}`
 }
 
-function dayAt(date) {
-  return weekDays.value.find((day) => day.business_date === date) || null
-}
-
-/** 那一格的当前值：原值快照（撤销）、跳过预判（已批的假）都要它。
- *  `cellOf` 收的是**当天那一列**（用 `day.business_date` 取格），不是日期字符串。 */
-function weekCellAt(employeeId, date) {
-  const employee = employeeAt(employeeId)
-  const day = dayAt(date)
-  return employee && day ? cellOf(employee, day) : null
-}
-
 function onColPick(day) {
   if (!day.in_window) return
   nextPick(colHandle(day.business_date))
@@ -1013,8 +868,8 @@ function nextPick(handle) {
  *  `dropUndo` 只在**换了周**时给：那一批属于上一周，留着撤的是一个看不见的选区。 */
 function clearPick(dropUndo = false) {
   pick.value = null
-  pastConfirm.value = null
-  if (dropUndo) pickUndo.value = null
+  board.cancelPast()
+  if (dropUndo) board.dropUndo()
 }
 
 // 筛一次人 = 重新选一遍：选区是按**看得见的行**算的（见 `pickAxes`），筛完还留着，
@@ -1037,165 +892,27 @@ function onPageClick(event) {
   if (penOpen.value) penOpen.value = false
 }
 
-// ── 提示：一行，几秒后自己消失（票 14 修订口径 4）─────────────────────────────
-// 原来同时挂 4~6 行（预判、回执、待批提醒、撤销说明、错误）把表格压掉半屏。现在只有一个槽：
-// 最新的那条说了算，几秒后自己消失。逐格点名（谁被跳过、谁有待批申请）收进 `details`，
-// 由「看全部」展开 —— 跳过与待批的信息**不能丢**，但也不必常驻。
-const PICK_NOTICE_MS = 6000
-const pickNotice = ref(null) // { text, details: [], warn } | null
-const noticeOpen = ref(false)
-let noticeTimer = null
-
-function sayNotice(text, details = [], warn = false) {
-  if (noticeTimer) clearTimeout(noticeTimer)
-  noticeTimer = null
-  noticeOpen.value = false
-  pickNotice.value = text || details.length ? { text, details, warn } : null
-  if (!pickNotice.value) return
-  noticeTimer = setTimeout(() => {
-    pickNotice.value = null
-    noticeTimer = null
-  }, PICK_NOTICE_MS)
-}
-
 onUnmounted(() => {
-  if (noticeTimer) clearTimeout(noticeTimer)
-  noticeTimer = null
   // 长按的两个计时器（300ms 按压态 / 550ms 触发）也得收掉：页面切走时还挂着一个，
-  // 回来就会在没按任何格子的情况下弹出上一页那一格的清单。
+  // 回来就会在没按任何格子的情况下弹出上一页那一格的清单。提示的定时器跟 board 走。
   cancelPress()
+  board.dispose()
 })
 
-function skipText(items) {
-  return items.map((item) => {
-    const why = PICK_SKIP_TEXT[item.reason] || item.reason
-    return `${employeeName(item.employeeId)} ${shortDate(item.date)} ${why}`
-  }).join('、')
-}
+// 待批提醒的数据来源在 board（`pendingCells`）：周表每格没有「待批」这个字段，
+// 只有既有的待办那一份（按天粒度），回执里的提醒由 board 自己算。
 
-function skipContext(action) {
-  return {
-    action: action || PICK_SHIFT,
-    today: week.value ? week.value.today : '',
-    windowEnd: week.value ? week.value.window_end : '',
-    cellOf: weekCellAt,
-  }
-}
-
-// 待批提醒的数据来源：周表每格没有「待批」这个字段，只有既有的待办那一份（按天粒度）。
-const pendingCells = computed(() => {
-  const map = {}
-  for (const request of inboxRequests.value) {
-    const days = eachDayInRange(request.start_date, request.end_date || request.start_date)
-    for (const day of days) map[`${request.employee_id}|${day}`] = request.kind
-  }
-  return map
-})
-
-function reminderText(items) {
-  const who = items.map((item) => `${employeeName(item.employeeId)} ${shortDate(item.date)}`).join('、')
-  return `待批提醒：${who} 那天有申请等着批，批了会盖掉你刚刷的班。`
-}
-
-/** 一次落笔之后的回执（**一行**）：写了几格、跳过几格、能不能撤。
- *  逐格点名的那几行收进 `details`（「看全部」展开）—— 跳过与待批的信息不丢。 */
-function sayResult(result, cells, action, options, who = '') {
-  const undoable = !!pickUndo.value && pickUndo.value.plan.length > 0
-  const parts = []
-  // 回执说清**这一笔是什么**：原来一律「已刷 N 格」，选错笔（清当成了休）也看不出来。
-  // 「休半天」按这一笔实际写的值说话（单格就是那一格的新值，整片刷统一标上）。
-  const verb = action === PICK_VOID
-    ? '已清空'
-    : action === PICK_RESTORE
-      ? '已退回规则'
-      : action === PICK_HALF_REST
-        ? (options && options.halfRest ? '已标休半天' : '已取消休半天')
-        : action === PICK_REST ? '已排休' : '已改班'
-  if (result.applied) parts.push(`${verb} ${result.applied} 格${who ? ` · 写给 ${who}` : ''}`)
-  if (result.skipped.length) parts.push(`跳过 ${result.skipped.length} 格`)
-  if (!parts.length) parts.push('没有格子被改动')
-  // 「撤销只留最近一批、只在这台手机上」这句说明跟着回执走（ADR 0107 决策 7）。
-  const text = `${parts.join(' · ')}${undoable ? ' · 可撤销（只留最近一批、也只在这台手机上）' : ''}`
-  const details = []
-  if (result.skipped.length) details.push(`跳过：${skipText(result.skipped)}`)
-  // 待批提醒：先信服务端回执里那一份（它知道谁那天真有申请），它没给就退回既有的待办那一份。
-  let reminders = result.reminders
-  if (!reminders.length) {
-    const missed = new Set(result.skipped.map((item) => `${item.employeeId}|${item.date}`))
-    reminders = pickPending(cells, pendingCells.value)
-      .filter((item) => !missed.has(`${item.employeeId}|${item.date}`))
-  }
-  if (reminders.length) details.push(reminderText(reminders))
-  sayNotice(text, details)
-}
-
-/** 连点不丢格：上一笔还在写时，点到的格子进队列，等这一笔落库后再按点击顺序写。
- *  同一格重复点只留最后一次（用户要的是最后那个班次）；上限 20，超了只提示、不排队。
- *  **不做乐观更新**：格子的样子仍以服务端回执 + 重读为准。 */
-const PENDING_PAINT_LIMIT = 20
-const pendingPaints = ref([]) // [{ key, employee, day, action, options }]
-let drainingPaints = false
-
-function queuePaint(employee, day, action, options) {
-  const key = `${employee.id}|${day.business_date}`
-  const rest = pendingPaints.value.filter((item) => item.key !== key)
-  if (rest.length >= PENDING_PAINT_LIMIT) {
-    sayNotice('点太快了，等这一笔写完', [], true)
-    return
-  }
-  rest.push({ key, employee, day, action, options })
-  pendingPaints.value = rest
-}
-
-/** 按序把队列里的格子写完：每写完一格，`runPaint` 会再回来 drain 一次。 */
-async function drainPendingPaints() {
-  if (drainingPaints || pickBusy.value) return
-  drainingPaints = true
-  try {
-    while (pendingPaints.value.length && !pickBusy.value && !pastConfirm.value) {
-      const next = pendingPaints.value[0]
-      pendingPaints.value = pendingPaints.value.slice(1)
-      await executePaint(next.employee, next.day, next.action, next.options)
-      // 队列里的格子也可能是过去的日子：确认框先处理，余下的等下一笔完成再继续。
-      if (pastConfirm.value) break
-    }
-  } finally {
-    drainingPaints = false
-  }
-}
-
-/** 真写一格（paintCell 与队列共用）：跳过预判 → requestPaint。 */
-async function executePaint(employee, day, action, options) {
-  const cells = [{ employeeId: employee.id, date: day.business_date }]
-  const [skip] = predictSkips(cells, skipContext(action))
-  if (skip) {
-    sayNotice(`跳过：${skipText([skip])}`)
-    return
-  }
-  await requestPaint(action, options, cells)
-}
+/** 连点不丢格：队列与上限都在 board（`paintCell` 里判 `pickBusy`）。 */
 
 /** 点一格 = 立刻用当前笔写这一格（票 14 修订口径 2）：不选区、不点「应用」，一步。
  *
- *  会被跳过的那种格子**不发请求**：超 30 天、已批的假（词表与回执同一套 `PICK_SKIP_TEXT`）。
- *  「休半天」还有一条本地闸：休 / 空白那格没有班次可挂，直接说一句、不发请求。
- *  整片刷的时候跳过由服务端回执点名（它才是权威），这里只是省掉一次注定被跳过的往返。
- *  **上一笔还在写时不再静默丢弃**：进队列，写完这一笔按顺序补（见上面 `queuePaint`）。 */
+ *  闸（超 30 天 / 已批的假 / 休半天没有班次）与队列都在 board；这一页只留「刚才点了哪一格」
+ *  那行提示 —— 它是版式的一部分，和回执无关。 */
 async function paintCell(employee, day) {
   lastCellText.value =
     `周${WEEK_HEADS[day.weekday]} · ${employee.name} ${weekCellText(employee, day)}` +
     `${weekCellHalf(employee, day) ? '半' : ''}`
-  const action = penAction()
-  if (action === PICK_HALF_REST && !cellHasShift(employee, day)) {
-    sayNotice(`跳过：${monthDayText(day.business_date)} 那天没有班次，标不上休半天`)
-    return
-  }
-  const options = penOptions(employee, day)
-  if (pickBusy.value) {
-    queuePaint(employee, day, action, options)
-    return
-  }
-  await executePaint(employee, day, action, options)
+  await board.paintCell(employee, day, penAction(), penOptions(employee, day))
 }
 
 // ── 长按一格 = 只看「那一天要顶的档」（票 03 / ADR 0127）─────────────────────
@@ -1303,7 +1020,7 @@ function onCoverRowClick(row) {
 
 /** 把一个档直接写给**被长按的那个人**（2026-11-01 用户裁定：省掉「装进笔 → 再点格子」那一步）。
  *
- *  走的是同一条批量写路径（`requestPaint`）：过去 30 天的二次确认、已批请假的跳过与点名、
+ *  走的是同一条批量写路径（`board.paintRegion`）：过去 30 天的二次确认、已批请假的跳过与点名、
  *  写完只重拉一次周表、`↺` 撤销 —— 这些一个字都不重写。弹层先关，再落笔：确认框弹在
  *  弹层上面会让人以为「又要多点一下」。
  *
@@ -1313,12 +1030,12 @@ async function assignCoverSlot(row) {
   const sheet = coverSheet.value
   const target = coverTarget.value
   if (!row.can_pen || !sheet || !target) {
-    if (sheet && !target) sayNotice('这一格对应的那个人已经不在当前这一周里了：刷新后再试', [], true)
+    if (sheet && !target) board.sayNotice('这一格对应的那个人已经不在当前这一周里了：刷新后再试', [], true)
     return
   }
   const who = target.name
   closeCoverSheet()
-  await requestPaint(
+  await board.paintRegion(
     PICK_SHIFT,
     { shiftId: row.shift_id, zoneId: String(row.zone_id) },
     [{ employeeId: target.id, date: sheet.date }],
@@ -1436,7 +1153,7 @@ function penFromCoverSlot(row) {
   penHalfRest.value = false
   penClear.value = false
   coverSheet.value = null
-  sayNotice(`已装笔：${row.shift_name} × ${row.zone_name}，去点要顶的那一格`)
+  board.sayNotice(`已装笔：${row.shift_name} × ${row.zone_name}，去点要顶的那一格`)
 }
 
 /** 名单面板那一节点一行：装笔这件事只写一份 —— `penFromCoverSlot` 自带关弹层与那句提示，
@@ -1452,7 +1169,7 @@ function penFromRosterCover(row) {
 async function applyRegion() {
   const view = pickActive.value
   if (!view) return
-  await requestPaint(penAction(), penOptions(), view.cells)
+  await board.paintRegion(penAction(), penOptions(), view.cells)
 }
 
 /** 选区那一行的「退回规则」：撤掉这一片的手动覆盖，让他们回到轮转规则（action=restore；
@@ -1460,29 +1177,11 @@ async function applyRegion() {
 async function applyRegionRestore() {
   const view = pickActive.value
   if (!view) return
-  await requestPaint(PICK_RESTORE, {}, view.cells)
+  await board.restoreRegion(view.cells)
 }
 
-/** 落笔前的三道闸（有没有格子 / 超没超 200 格 / 请求体全不全）；这一笔里有过去的日子
- *  再弹**一次**确认并点名是哪几天（ADR 0108 决策 3），确认之后才真写。 */
-async function requestPaint(action, options, cells, who = '') {
-  if (!cells.length) return
-  if (overLimit(cells)) {
-    sayNotice(`一次最多 ${PICK_MAX_CELLS} 格，现在选了 ${cells.length} 格：缩小选区再刷。`, [], true)
-    return
-  }
-  if (!batchPayload(action, options, cells)) {
-    sayNotice('这一笔没有班次可写：先在笔栏上选一个班次。', [], true)
-    return
-  }
-  const dates = pastDatesIn(cells, { today: week.value ? week.value.today : '' })
-  if (dates.length) {
-    pastConfirm.value = { action, options, cells, dates, voiding: action === PICK_VOID, who }
-    return
-  }
-  await runPaint(action, options, cells, who)
-}
-
+/** 落笔前的三道闸与过去日确认都在 board（`paintRegion` / `pastConfirm`）；
+ *  确认框仍由这一页渲染 —— 文案要按「这一批几格 / 哪几天」说话，且这是版式的一部分。 */
 const pastConfirmText = computed(() => {
   const confirm = pastConfirm.value
   if (!confirm) return ''
@@ -1496,106 +1195,6 @@ const pastConfirmText = computed(() => {
   }
   return `${when}：改了以后员工看到的记录也会跟着变，而且没有「退回上一次」这一步。照改吗？`
 })
-
-/** 真写：一次请求写完（单格也只是 `items` 里的一条），写完只重拉一次周表。
- *  撤销要的是**应用前**的原值 —— 服务端不留快照（`staff_assignments` 是原地 upsert）。 */
-async function runPaint(action, options, cells, who = '') {
-  pastConfirm.value = null
-  pickBusy.value = true
-  const snapshot = snapshotCells(cells, weekCellAt)
-  try {
-    const result = normalizeResult(
-      await api.post('/api/scheduling/overrides/batch', batchPayload(action, options, cells)),
-    )
-    // 这一笔顶掉上一笔：撤销只留最近一批（ADR 0107 决策 7）。
-    // 「休半天」那一笔改的不是班次，撤销按原值写回 half_rest（见 `undoPlan` 的第三个参数）。
-    const plan = undoPlan(snapshot, result.skipped, action)
-    pickUndo.value = plan.length ? { plan } : null
-    sayResult(result, cells, action, options, who)
-    await loadWeek(week.value ? week.value.start : weekStart.value)
-    await refreshMonthCounts()
-  } catch (err) {
-    // 服务端把「为什么刷不上」说全了（超限、没这个班次…）：原话转过来，别拿一句「保存失败」盖掉。
-    sayNotice(err.message || '这一笔没写上去', [], true)
-  } finally {
-    pickBusy.value = false
-    void drainPendingPaints()
-  }
-}
-
-/** 撤销刚才那一笔：逐格还原（原本没覆盖的走删除覆盖、原本有覆盖的写回原值）。 */
-async function undoLast() {
-  const undo = pickUndo.value
-  if (!undo || !undo.plan.length) return
-  pickBusy.value = true
-  let undone = 0
-  let kept = 0
-  let processed = 0
-  const failed = []
-  const total = undo.plan.length
-  const UNDO_BATCH = 5
-  sayNotice(`撤销中 0/${total}`)
-  try {
-    // 每批 5 格并发（原来逐格串行，19 格要等 19 个来回）；批与批之间仍按顺序。
-    for (let start = 0; start < undo.plan.length; start += UNDO_BATCH) {
-      const batch = undo.plan.slice(start, start + UNDO_BATCH)
-      await Promise.all(batch.map(async (step) => {
-        if (step.kind === 'keep') {
-          // 那一格原本是**批出来的假**：覆盖行的 kind=leave 不是这两条接口写得回去的，
-          // 如实说「撤不回来」，不拿一个「休」把它盖掉。
-          kept += 1
-          return
-        }
-        try {
-          if (step.kind === 'clear') {
-            await api.delete(`/api/scheduling/overrides/${step.employeeId}/${step.date}`)
-          } else if (step.kind === 'half_rest') {
-            // 那一笔只改了半天休：按原值发一条单格的批量（与落笔同一个端点，不多开一条路）。
-            await api.post('/api/scheduling/overrides/batch', batchPayload(
-              PICK_HALF_REST,
-              { halfRest: step.payload.half_rest },
-              [{ employeeId: step.employeeId, date: step.date }],
-            ))
-          } else {
-            await api.put(`/api/scheduling/overrides/${step.employeeId}/${step.date}`, step.payload)
-          }
-          undone += 1
-        } catch (err) {
-          failed.push(step)
-        }
-      }))
-      processed += batch.length
-      if (processed < total) sayNotice(`撤销中 ${processed}/${total}`)
-    }
-    // 只留最近一批：撤过就没了（内存级，刷新或换设备也不在）。
-    pickUndo.value = null
-    sayNotice(`撤销中 ${total}/${total}`)
-    await loadWeek(week.value ? week.value.start : weekStart.value)
-    await refreshMonthCounts()
-  } finally {
-    pickBusy.value = false
-    void drainPendingPaints()
-  }
-  const details = []
-  // 失败逐格点名收进「看全部」（不是只报一个总数）。
-  if (failed.length) {
-    details.push(`没撤回来：${failed.map((step) => `${employeeName(step.employeeId)} ${shortDate(step.date)}`).join('、')}`)
-  }
-  if (kept) details.push(`有 ${kept} 格原本是批过的假，撤不回原样`)
-  sayNotice(`已撤销 ${undone} 格`, details, failed.length > 0)
-}
-
-/** 单日覆盖（票 07）写完之后，月历那一份的人数跟着变。 */
-async function refreshMonthCounts() {
-  if (!monthValue.value) return
-  try {
-    const data = await api.get('/api/scheduling/calendar', { month: monthValue.value })
-    calendar.value = data
-    if (data.shifts && data.shifts.length) shifts.value = mergeShiftList(shifts.value, data.shifts)
-  } catch (err) {
-    // 周表已经是最新的；月历这一份下次进页面再补，不拿一句错盖住刚做成的改动。
-  }
-}
 
 // 图例里那条「有申请等着批」：有角标才显示（没角标时图例列一个用不上的记号反而费解）。
 const hasPendingMarks = computed(() => Object.keys(pendingMarks.value).length > 0)
@@ -1653,10 +1252,9 @@ const cycleOpenId = ref(null)
 const cycleText = ref('')
 const cycleAnchor = ref('')
 const cycleError = ref('')
-// 最多写多少天由服务端说了算（`MAX_CYCLE_DAYS`，随 /roster 一起下来）。
-// 拿不到就**不设上限**（`null`）：前端不再猜一个 60 写死第二份 —— 超了由服务端回
-// 那句中文 400，它的文案里带的才是真实上限。
-const maxCycleDays = ref(null)
+// 最多写多少天由服务端说了算（`MAX_CYCLE_DAYS`，随 /roster 一起下来，落在 board）。
+// 拿不到就是 `null`：前端不再猜一个 60 写死第二份 —— 超了由服务端回那句中文 400，
+// 它的文案里带的才是真实上限。
 const REST_WORDS = ['休', '休息', '空', 'x', 'X', '-', '—']
 // 输入框的示例按**当前班次名**拼，不把「白班/夜班」写死在文案里（班次可配置，票 11）。
 // 名字取的是**还在用**的那份（`activeShifts`）：示例里出现一个停用班次，等于教超级管理员
@@ -1881,55 +1479,32 @@ watch(selectedDate, () => {
   if (editing.value) closeDayEdit()
 })
 
-// 写完之后底下那张当天卡要重读：`loadCalendar` 会把选中那天拨回「今天/1 号」，
-// 所以再把超级管理员刚才改的那天读回来（他刚改完还要看结果）。
-async function refreshAfterWrite(day) {
-  await loadCalendar(monthValue.value)
-  if (day) await loadDay(day)
-}
-
+// 单日覆盖的请求与错误处理在 board（`saveOverride` / `deleteOverride`）：
+// 这一页只留表单状态与对话框 —— 成功才关并从 board 重读，失败留在原地看 `editError`。
 async function saveOverride() {
   const person = editing.value
   // 写的是**打开编辑器那一刻**那一天，不是「现在选中的那天」。
   const day = person && person.day
   if (!person || !day) return
-  overrideBusy.value = true
-  editError.value = ''
-  try {
-    const payload =
-      editShift.value === 'rest'
-        ? { is_rest: true }
-        : {
-            shift_id: Number(editShift.value),
-            zone_id: editZone.value === '' ? null : Number(editZone.value),
-          }
-    await api.put(`/api/scheduling/overrides/${person.id}/${day}`, payload)
-    closeDayEdit()
-    await refreshAfterWrite(day)
-  } catch (err) {
-    // 后端把「为什么改不了」说全了（过去的日子、还没铺到的天、休不能带班次…），
-    // 原话转给超级管理员，别拿一句「保存失败」盖掉。
-    editError.value = err.message || '这一天没改上'
-  } finally {
-    overrideBusy.value = false
-  }
+  const ok = await board.saveOverride({
+    employeeId: person.id,
+    day,
+    shiftId: editShift.value,
+    zoneId: editZone.value,
+  })
+  if (!ok) return
+  closeDayEdit()
+  await board.refreshAfterWrite(day)
 }
 
 async function undoOverride() {
   const person = editing.value
   const day = person && person.day
   if (!person || !day) return
-  overrideBusy.value = true
-  editError.value = ''
-  try {
-    await api.delete(`/api/scheduling/overrides/${person.id}/${day}`)
-    closeDayEdit()
-    await refreshAfterWrite(day)
-  } catch (err) {
-    editError.value = err.message || '撤销没成功'
-  } finally {
-    overrideBusy.value = false
-  }
+  const ok = await board.deleteOverride({ employeeId: person.id, day })
+  if (!ok) return
+  closeDayEdit()
+  await board.refreshAfterWrite(day)
 }
 
 onMounted(async () => {
@@ -1940,8 +1515,12 @@ onMounted(async () => {
   const rawView = queryText(query.view)
   const wantView = VIEW_KEYS.includes(rawView) ? rawView : 'month'
   const rawStart = queryText(query.start)
-  if (QUERY_DATE_RE.test(rawStart)) weekStart.value = rawStart
-  monthValue.value = wantMonth
+  // 三样都从 URL 读出来再交给 board；首屏请求仍由这一页按 calendar → panel → notes 触发。
+  board.init({
+    month: wantMonth,
+    view: wantView,
+    weekStart: QUERY_DATE_RE.test(rawStart) ? rawStart : '',
+  })
   await loadCalendar(wantMonth)
   await openPanel(wantView)
   await refreshNotes()
@@ -1956,10 +1535,9 @@ useNudgePull({
   id: 'scheduling-calendar',
   topics: ['scheduling'],
   pull: async () => {
-    await loadCalendar(monthValue.value, true)
-    await refreshNotes()
-    // 周表开着的时候它也得跟着动：员工那边换了班，超级管理员盯着的正是这张表。
-    if (panel.value === 'week') await loadWeek(weekStart.value)
+    // 静默重读全在 board：月历（不翻 loading）→ 待批两根 → 周表开着时那 7 天。
+    await board.refreshVisible()
+    syncQuery()
   },
 })
 </script>
@@ -2484,10 +2062,10 @@ useNudgePull({
           <button
             class="gChip gPick-undo"
             type="button"
-            :disabled="pickBusy || !pickUndo"
+            :disabled="pickBusy || !canUndo"
             title="撤销只留最近一批、也只在这台手机上"
             aria-label="撤销刚才那一批"
-            @click="undoLast()"
+            @click="undo()"
           >↺</button>
         </div>
       </div>
@@ -2883,8 +2461,8 @@ useNudgePull({
         :message="pastConfirmText"
         :confirm-label="pastConfirm.voiding ? '照样清空' : '照改'"
         cancel-label="再想想"
-        @confirm="runPaint(pastConfirm.action, pastConfirm.options, pastConfirm.cells, pastConfirm.who)"
-        @cancel="pastConfirm = null"
+        @confirm="confirmPast()"
+        @cancel="cancelPast()"
       />
     </div>
   </div>

@@ -34,9 +34,9 @@ describe('店长端排班月历（原型 B）', () => {
   })
 
   it('only talks to the scheduling API', () => {
-    expect(view).toMatch(/\/api\/scheduling\/calendar/)
-    expect(view).toMatch(/\/api\/scheduling\/day/)
-    expect(view).toMatch(/\/api\/scheduling\/roster/)
+    // 读接口（calendar / day / roster）与写口都搬进 board（ADR 0142），调用与参数
+    // 在 `composables/__tests__/useSchedulingBoard.test.js` 里按 mock 断言；
+    // 这一页只剩规则 / 固定区那条写路径直发。
     expect(view).toMatch(/api\.put\(`\/api\/scheduling\/rules\/\$\{employee\.id\}`/)
     expect(view).toMatch(/api\.delete\(`\/api\/scheduling\/rules\/\$\{employee\.id\}`\)/)
     expect(view).not.toMatch(/\/api\/hygiene/)
@@ -65,7 +65,7 @@ describe('店长端排班月历（原型 B）', () => {
     // 区名单只有一份（卫生建的那张表），排班经公共层读出来 → 页面按 N 个区渲染，
     // 一个区名字都不写死。
     expect(view).toMatch(/\/api\/scheduling\/zone-defaults\/\$\{employee\.id\}/)
-    expect(view).toMatch(/data\.zones/)
+    // `zones` 的读取在 board（那里断 `/roster` 的 `data.zones`）；页面只按它渲染。
     expect(view).toMatch(/v-for="zone in zones"/)
     expect(view).toMatch(/v-for="person in group\.people"/)
     expect(view).toMatch(/person\.zone/)
@@ -80,7 +80,7 @@ describe('店长端排班月历（原型 B）', () => {
     expect(view).toMatch(/const cyclePlaceholder = computed/)
     expect(view).toMatch(/parseCycle/)
     expect(view).toMatch(/REST_WORDS/)
-    expect(view).toMatch(/data\.max_cycle_days/)
+    // `max_cycle_days` 随 board 的 `/roster` 读下来（那里断言），页面只把它当上限用。
     expect(view).toMatch(/anchor_date: cycleAnchor\.value \|\| null/)
     // 「固定某个班」和「编周期」走同一个 PUT /rules，不是两套逻辑。
     expect(view.match(/api\.put\(`\/api\/scheduling\/rules\//g)).toHaveLength(2)
@@ -93,11 +93,9 @@ describe('店长端排班月历（原型 B）', () => {
   it('changes one day without touching the rule (票 07)', () => {
     // 单日覆盖：点当天卡里的一个人 → 就地改这一天。写的是 `/overrides/<人>/<哪天>`，
     // 跟规则那条路分开 —— 「固定一个班 / 编周期」改的是规则，「改这一天」改的是那天的快照。
-    expect(view).toMatch(/api\.put\(`\/api\/scheduling\/overrides\/\$\{person\.id\}\/\$\{day\}`/)
-    expect(view).toMatch(/api\.delete\(`\/api\/scheduling\/overrides\/\$\{person\.id\}\/\$\{day\}`\)/)
-    // 改成休走 `is_rest`，不是「班次留空」；不给工作区 = 跟这个班次的固定区。
-    expect(view).toMatch(/is_rest: true/)
-    expect(view).toMatch(/zone_id: editZone\.value === '' \? null : Number\(editZone\.value\)/)
+    // 请求体与错误处理在 board（`saveOverride` / `deleteOverride`）：这一页只把
+    // 「打开编辑器那一刻那一天」与表单里的班次 / 工作区交出去，成功才关对话框。
+    expect(view).not.toMatch(/api\.(put|delete)\(`\/api\/scheduling\/overrides/)
     // 名字是一颗可以按的棋子；点开的是那一天的那个人。
     expect(view).toMatch(/class="gB-name"/)
     expect(view).toMatch(/@click="openDayEdit\(person, group\.shift\.id\)"/)
@@ -144,7 +142,6 @@ describe('店长端排班月历（原型 B）', () => {
     expect(view).toMatch(/v-if="editing\.overridden && !editing\.undoable"/)
     // 2026-10-18：过去的日子也能撤销了，这句改成「超出可补记窗口不给撤」。
     expect(view).toMatch(/超出可补记窗口/)
-    expect(view).toMatch(/editError\.value = err\.message/)
   })
 
   it('uses only tokens the shared stylesheet defines', () => {
@@ -239,21 +236,6 @@ describe('店长端排班月历（原型 B）', () => {
     expect(view).toMatch(/\.gB-zone\.leave \{ color: var\(--hy-aqua\); \}/)
   })
 
-  it('班次列以月历那份为准，名单那份不把它挤掉（停用班次照旧显示）', () => {
-    // `/roster` 的 shifts 只有启用的（服务层 `list_shifts()`），`/calendar` 那份是
-    // 「启用的全要 + 这个月真有行的停用班次」（`_shifts_for_display`）。以前数「还没配
-    // 规则的人」那一次顺手拿名单那份覆盖了班次列，于是停用班次从这个月的格子与图例上
-    // 消失，点开那天却还列着他 —— 格子数字与卡片合计互相打脸，票 11 的验收②
-    //（停用之后历史排班照旧显示）在界面上就不成立了。
-    expect(view).toMatch(/shifts\.value = data\.shifts \|\| \[\]/)
-    expect(view).toMatch(/mergeShiftList\(shifts\.value, data\.shifts\)/)
-    // 数人那一次只碰计数，不碰班次列。
-    expect(view).toMatch(
-      /async function loadPendingCount\(\) \{[\s\S]{0,400}?pendingCount\.value = countPending/
-    )
-    expect(view).not.toMatch(/async function loadPendingCount\(\) \{[\s\S]{0,400}?shifts\.value =/)
-  })
-
   it('配规则只挑还在用的班次；当天那个下拉能显示停用的，但不给选', () => {
     // 「只能用还在用的班次」是服务端的口径（`set_rule` 的 `_require_shifts_usable`，
     // 单日覆盖那条路也校验）：停用班次出现在周期的解析表或固定工作区的选择里，
@@ -278,7 +260,7 @@ describe('店长端排班月历（原型 B）', () => {
     // 这条验收在票 02 与票 06 之间被转手两次、一直没人接：结果是店长只能滑到底、
     // 点进待办页才知道有几条在等他批。数据本来就够（`/inbox` 每条申请带
     // `start_date`/`end_date`），按天摊开数一遍就行，不用后端再出一个接口。
-    expect(view).toMatch(/api\.get\('\/api\/scheduling\/inbox'\)/)
+    // `/inbox` 的读取与按天摊开在 board（那里断言 `pendingMarks`）；页面只渲染角标。
     expect(view).toMatch(/eachDayInRange\(/)
     expect(view).toMatch(/v-if="pendingMarks\[day\.business_date\]"/)
     expect(view).toMatch(/class="pend"/)
@@ -291,21 +273,15 @@ describe('店长端排班月历（原型 B）', () => {
   })
 
   it('名单读不出来时不写成「全员都配好了」', () => {
-    // 原来 catch 里写 `pendingCount = 0`，页面就显示「0 个人还没配规则 · 全员都配好了」
-    // —— 一句假话，店长会照着它放心。
-    expect(view).toMatch(/pendingCount\.value = null/)
+    // 置 `null` 的那一步在 board（那里断言失败后是 `null` 而不是 0）；这一页不再自己赋值，
+    // 但文案与「不是 0」的约束仍然钉在这里。
     expect(view).not.toMatch(/pendingCount\.value = 0\b/)
     expect(view).toMatch(/名单没读出来：点开重试一次/)
   })
 
-  it('换一天先清掉上一天的人；月份连点两次也算数', () => {
-    // 换天失败时表头已经是新那天、名单却还列着旧那天的人 —— 店长会照着错的名单改班。
-    expect(view).toMatch(/async function loadDay[\s\S]{0,500}?dayDetail\.value = null/)
-    // 慢网连点时，先到的旧响应不该覆盖后点的那个月；月份要立刻更新，否则第二次点击
-    // 算出来的目标还是同一个月，看起来像没反应。
-    expect(view).toMatch(/calendarSeq/)
-    expect(view).toMatch(/if \(seq !== calendarSeq\) return/)
-    // 首屏失败时 `monthValue` 是空串：`shiftMonth` 不能拼出一个真值的 `'NaN-NaN'`。
+  it('首屏失败时月份兜底：shiftMonth 不能拼出 NaN-NaN', () => {
+    // 「换一天先清人 / 月份连点两次算数」已随 loader 进 board（那里断言 dayDetail 先清、
+    // 旧响应被序号挡掉）；这一页只剩 shiftMonth 自己的兜底。
     expect(view).toMatch(/\(value \|\| currentMonthValue\(\)\)\.split\('-'\)/)
   })
 
@@ -315,17 +291,15 @@ describe('店长端排班月历（原型 B）', () => {
     // 页面得把「没配过」与「配了但读不出来」分开说，否则店长照着配一遍也修不好
     // （那条坏行还在），也看不出真正的原因。
     expect(view).toMatch(/if \(rule\.invalid\) return '规则坏了，重配一条'/)
-
-    expect(view).toMatch(/\(!employee\.rule \|\| employee\.rule\.invalid\)/)
+    // 「坏规则也算要处理的人」的口径随 countPending 进了 board（那里按名单断言）。
   })
 
   it('订阅排班 nudge：别人提了申请/改了排班，这一页自己重读（票 10 收尾）', () => {
     // 没有实时的话，店长只能靠反复刷新手动发现「有人提了假」「另一个页面改了排班」。
-    // nudge 不带数据，所以 pull 里重读；静默（`silent`）—— 每来一条就闪一下 loading 很吵。
+    // nudge 不带数据，所以 pull 交给 board 静默重读（静默语义在 board 测试里断言）。
     expect(view).toMatch(/useNudgePull\(\{/)
     expect(view).toMatch(/id: 'scheduling-calendar'/)
     expect(view).toMatch(/topics: \['scheduling'\]/)
-    expect(view).toMatch(/loadCalendar\(monthValue\.value, true\)/)
   })
 })
 
