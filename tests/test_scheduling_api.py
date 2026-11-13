@@ -687,16 +687,14 @@ def test_staff_month_returns_their_own_calendar(scheduling_http, monkeypatch):
 def test_half_rest_reaches_the_staff_pages_and_the_manager_views(scheduling_http, monkeypatch):
     """票 07 验收 2/3：半天休在员工端与店长那两版视图上都读得到，**只能读不能设**。
 
-    写它的是考勤表页那扇唯一的门（`AttendanceStore.set_half_rest`，鉴权与拒绝理由的
-    HTTP 用例在 `tests/test_attendance_api.py`）；这里验排班这一侧的四个读口都把它带出来，
-    且与「还没排 / 休 / 上班」分得开：
+    写实现是排班域唯一的那扇写口（`SchedulingStore.set_half_rest`，ADR 0143）；鉴权与
+    拒绝理由的 HTTP 用例在 `tests/test_attendance_api.py`。这里验排班这一侧的四个读口都把
+    它带出来，且与「还没排 / 休 / 上班」分得开：
 
     * `/me`（员工「今天上什么班」）：`half_rest=True` 且**仍然** `scheduled=True`、有班次；
     * `/me/month`（员工整月）：那天的格子也带着它；
     * `/week`（店长周表）与 `/day`（月历点开那天）：只读地显示，人数口径不变。
     """
-    from services.attendance.store import AttendanceStore
-
     client, db, accounts = scheduling_http
     employee_id = _employee_id(accounts)
     ids = _shift_ids(client)
@@ -715,7 +713,7 @@ def test_half_rest_reaches_the_staff_pages_and_the_manager_views(scheduling_http
         ).status_code
         == 200
     )
-    _run(AttendanceStore(db, now=lambda: FIXED_NOW).set_half_rest(employee_id, "2026-09-26", True))
+    _run(SchedulingStore(db).set_half_rest(employee_id, "2026-09-26", True))
 
     admin = _admin_cookie(client)
     _wire_staff_accounts(monkeypatch, accounts)

@@ -79,6 +79,8 @@ __all__ = [
     "DEFAULT_SHIFTS",
     "DUTY_SLOTS",
     "EXPANSION_DAYS",
+    "HALF_REST_NEEDS_SHIFT",
+    "HALF_REST_NEEDS_SHIFT_MESSAGE",
     "KIND_LEAVE",
     "KIND_MANUAL",
     "KIND_SWAP",
@@ -129,7 +131,7 @@ KIND_SWAP = "swap"
 # 退回规则。它写一条 `voided=1` 的覆盖行并删掉那天的结果行（见 0040 迁移的头注释）。
 #
 # `half_rest` 只改那天的「休半天」标志（ADR 0114），不换班次、不换工作区、不改来源
-# —— 与考勤表页 `AttendanceStore.set_half_rest` 同一口径。
+# —— 与单日写口 `set_half_rest` 同一口径（判据与 UPDATE 都只在本 module，ADR 0143）。
 BATCH_SHIFT = "shift"
 BATCH_REST = "rest"
 BATCH_CLEAR = "clear"
@@ -143,6 +145,13 @@ BATCH_ACTIONS = (
     BATCH_RESTORE,
     BATCH_VOID,
     BATCH_HALF_REST,
+)
+
+# 「休半天」写口的那一个拒绝理由与它的中文（ADR 0143）：reason 是稳定标识，考勤 /
+# 排班两张错误表都从这里取文案 —— 同一个事实不该在两张页面上说成两句不同的话。
+HALF_REST_NEEDS_SHIFT = "half_rest_needs_shift"
+HALF_REST_NEEDS_SHIFT_MESSAGE = (
+    "那天没有班次（休 / 还没排到），标不上「休半天」：先给那天排一个班次"
 )
 
 # 批量回执里「这个人这天有申请等着批」那一条的 kind（前端照它渲染提醒）。
@@ -1829,6 +1838,75 @@ class SchedulingStore:
                 (shift_id, zone_id, source, stamp, employee_id, day),
             )
 
+    # ── 半天休（ADR 0143：唯一写在排班，考勤只留三道闸） ────────────────
+
+    @_needs_migration
+    @serialized_write
+    async def set_half_rest(
+        self, employee_id: int, business_date: str, half_rest: bool = True
+    ) -> Optional[str]:
+        """把某人某一天标成「休半天」/ 取消 —— 全仓**唯一**的写实现（ADR 0143）。
+
+        成功返回 `None`；那天没有结果行、或结果行上 `shift_id` 为空（休 / 还没排到），
+        返回 `HALF_REST_NEEDS_SHIFT`。**不抛「没班次」的异常**：单日口整笔拒绝、周表
+        批量口逐格跳过，两扇门的传输语义各留各的，判据只做一次。
+
+        改的只有 `staff_assignments.half_rest` 与 `updated_at`：班次、工作区、来源
+        （`source`）与那天是不是单日覆盖**一个字都不动** —— 半天休不是第二个班次，
+        也不是一次「跟规则不一样」的改写。
+
+        **不做**在册 / 窗口 / 请假 / 封账 / 月份检查：那些闸留在各自入口——考勤表
+        路由（`api/attendance.py:set_attendance_day`）在分派前调
+        `AttendanceStore.ensure_day_editable`；周表批量口由 `set_overrides_batch`
+        的 cells 筛格先挡在册 / 窗口 / 过去日 / 已批请假。
+        """
+        day = _require_business_date(business_date)
+        employee_id = int(employee_id)
+        ready = await self._half_rest_ready_by_day([day])
+        if employee_id not in ready.get(day, set()):
+            return HALF_REST_NEEDS_SHIFT
+        await self._write_half_rest_rows(
+            [(employee_id, day)], bool(half_rest), self._now_iso()
+        )
+        await self._conn.commit()
+        logger.info(
+            "逐日改格：%s %s 的「休半天」=%s", employee_id, day, "是" if half_rest else "否"
+        )
+        return None
+
+    async def _half_rest_ready_by_day(self, days: list[str]) -> dict[str, set[int]]:
+        """按天查「那天真有班次」的人：``{营业日: {员工号}}``（ADR 0143 的唯一判据）。
+
+        「有结果行且 `shift_id` 非空」只在这里判：单日口传一天，周表批量口传整批涉及的
+        天。清空过的天（void）没有结果行，休的那天班次为空 —— 两种都不在集合里，都标
+        不上半天休。先按天去重再各查一次：200 格别逐格打一条 SQL。
+        """
+        ready: dict[str, set[int]] = {}
+        for day in dict.fromkeys(days):
+            cur = await self._conn.execute(
+                """SELECT employee_id FROM staff_assignments
+                   WHERE business_date = ? AND shift_id IS NOT NULL""",
+                (day,),
+            )
+            ready[day] = {int(dict(row)["employee_id"]) for row in await cur.fetchall()}
+        return ready
+
+    async def _write_half_rest_rows(
+        self, cells: list[tuple[int, str]], half_rest: bool, stamp: str
+    ) -> None:
+        """逐格改 `half_rest` 与 `updated_at`：只写、不加锁、不提交（ADR 0143）。
+
+        单日口与周表批量口共用这一句 `UPDATE`，由调用方各自持锁、各自提交。能走到这里
+        的格子都已确认「那天有结果行且班次非空」（`_half_rest_ready_by_day`），所以
+        `UPDATE` 一定命中。
+        """
+        for employee_id, day in cells:
+            await self._conn.execute(
+                """UPDATE staff_assignments SET half_rest = ?, updated_at = ?
+                   WHERE employee_id = ? AND business_date = ?""",
+                (1 if half_rest else 0, stamp, employee_id, day),
+            )
+
     # ── 批量落笔（票 14） ───────────────────────────────────────────────
 
     @_needs_migration
@@ -1927,8 +2005,8 @@ class SchedulingStore:
                 reasons[index] = "leave_approved"
 
         if action == BATCH_HALF_REST:
-            # 「休半天」只认**那一天真有班次**的结果行（休 / 空白都标不上）：与考勤表页
-            # 同一道闸（`AttendanceStore.set_half_rest` 的 `half_rest_needs_shift`），
+            # 「休半天」只认**那一天真有班次**的结果行（休 / 空白都标不上）：与单日写口
+            # 同一道闸（`_half_rest_ready_by_day` / `HALF_REST_NEEDS_SHIFT`，ADR 0143），
             # 只是这里逐格跳过而不是整笔拒绝。
             reasons = await self._half_rest_reasons(cells, reasons)
 
@@ -1986,28 +2064,22 @@ class SchedulingStore:
     async def _half_rest_reasons(
         self, cells: list[tuple[int, str]], reasons: list[Optional[str]]
     ) -> list[Optional[str]]:
-        """把「那天没有班次」的格子记为 `half_rest_needs_shift`（其余照旧）。
+        """把「那天没有班次」的格子记为 `HALF_REST_NEEDS_SHIFT`（其余照旧）。
 
-        判据与考勤表页那条同口径：那天**必须有结果行、且 `shift_id` 非空**。清空过的
-        天（void）没有结果行，休的那天班次为空 —— 两种都标不上半天休，逐格跳过。
-        按天分组查一次（同 `leave_days` 的写法）：200 格上别逐格打一条 SQL。
+        判据只有一份：`_half_rest_ready_by_day`（单日写口也调它，ADR 0143）—— 那天
+        **必须有结果行、且 `shift_id` 非空**。清空过的天（void）没有结果行，休的那天
+        班次为空 —— 两种都标不上半天休，逐格跳过。只查还没被别的闸挡掉的格子涉及的天，
+        200 格上别逐格打一条 SQL。
         """
-        ready: dict[str, set[int]] = {}
-        for index, (_, day) in enumerate(cells):
-            if reasons[index] is not None or day in ready:
-                continue
-            cur = await self._conn.execute(
-                """SELECT employee_id FROM staff_assignments
-                   WHERE business_date = ? AND shift_id IS NOT NULL""",
-                (day,),
-            )
-            ready[day] = {int(dict(row)["employee_id"]) for row in await cur.fetchall()}
+        ready = await self._half_rest_ready_by_day(
+            [day for index, (_, day) in enumerate(cells) if reasons[index] is None]
+        )
         gated = list(reasons)
         for index, (employee_id, day) in enumerate(cells):
             if gated[index] is not None:
                 continue
             if employee_id not in ready.get(day, set()):
-                gated[index] = "half_rest_needs_shift"
+                gated[index] = HALF_REST_NEEDS_SHIFT
         return gated
 
     @staticmethod
@@ -2107,19 +2179,14 @@ class SchedulingStore:
     async def _half_rest_batch_rows(
         self, cells: list[tuple[int, str]], half_rest: bool, stamp: str
     ) -> None:
-        """这一批「设 / 清休半天」：只 UPDATE 那个标志与 `updated_at`，最后一次提交。
+        """这一批「设 / 清休半天」：调无锁写入件，**循环外一次提交**（ADR 0143）。
 
-        班次 / 工作区 / 来源（`source`）与那一天是不是单日覆盖**一个字都不动** —— 与考勤表
-        页 `AttendanceStore.set_half_rest` 同一口径：半天休不是第二个班次，也不是一次
-        「跟规则不一样」的改写。能走到这里的格子都已确认「那天有结果行且班次非空」
-        （见 `_half_rest_reasons`），所以 UPDATE 一定命中。
+        班次 / 工作区 / 来源（`source`）与那一天是不是单日覆盖**一个字都不动** —— 与单日
+        写口 `set_half_rest` 同一口径、同一句 `UPDATE`（`_write_half_rest_rows`）：半天休
+        不是第二个班次，也不是一次「跟规则不一样」的改写。能走到这里的格子都已确认
+        「那天有结果行且班次非空」（见 `_half_rest_reasons`），所以 UPDATE 一定命中。
         """
-        for employee_id, day in cells:
-            await self._conn.execute(
-                """UPDATE staff_assignments SET half_rest = ?, updated_at = ?
-                   WHERE employee_id = ? AND business_date = ?""",
-                (1 if half_rest else 0, stamp, employee_id, day),
-            )
+        await self._write_half_rest_rows(cells, half_rest, stamp)
         await self._conn.commit()
 
     @serialized_write

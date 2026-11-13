@@ -23,6 +23,7 @@ from services.hygiene.accounts import EmployeeAccounts
 from services.identity.zones import ZoneDirectory
 from services.scheduling.store import (
     EXPANSION_DAYS,
+    HALF_REST_NEEDS_SHIFT,
     MAX_REQUEST_NOTE,
     SOURCE_RULE,
     SchedulingError,
@@ -1842,23 +1843,21 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
     async def test_a_half_rest_flag_hangs_on_the_row_and_a_rest_day_clears_it(self):
         """票 07（ADR 0114）：半天休是**结果行上一个标志** —— 一行、一个班次、来源不变。
 
-        写它的是考勤表页那扇唯一的门（`AttendanceStore.set_half_rest`，HTTP 面在
-        `tests/test_attendance_api.py`）；这里验的是它与排班那条写路径的接线：
+        写它的是排班域唯一的那扇写口（`SchedulingStore.set_half_rest`，ADR 0143；HTTP
+        面在考勤表页，见 `tests/test_attendance_api.py`）；这里验的是它落在排班结果行上
+        的形状：
 
         * 标志落在 `staff_assignments` 那一行上，**班次与 `source` 一个字都不动**；
         * 那天**改成休** → 标志跟着清掉（`休 + 休半天` 是自相矛盾的，留着的话哪天再
           改回班次，那一格会**自己**变成「休半天」——没人点过它）；
         * 只是换个班次 → 标志留着：店长改的是「上哪个班」，不是「上不上这半天」。
         """
-        from services.attendance.store import AttendanceStore
-
         employee = await self._employee()
         day = await self._shift_id("白班")
         night = await self._shift_id("夜班")
         await self.store.set_rule(employee["id"], [day])
-        attendance = AttendanceStore(self.db, now=lambda: self.fixed_now)
 
-        await attendance.set_half_rest(employee["id"], TODAY, True)
+        self.assertIsNone(await self.store.set_half_rest(employee["id"], TODAY, True))
 
         row = (await self._full_rows(employee["id"]))[TODAY]
         self.assertEqual((row["shift_id"], row["source"]), (day, SOURCE_RULE))
@@ -1878,11 +1877,41 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self._half_rest(employee["id"]))[TODAY], 0)
 
         # 取消（回到「上班」）：写口把它清成 0，班次仍在。
-        await attendance.set_half_rest(employee["id"], TODAY, True)
+        self.assertIsNone(await self.store.set_half_rest(employee["id"], TODAY, True))
         self.assertEqual((await self._half_rest(employee["id"]))[TODAY], 1)
-        await attendance.set_half_rest(employee["id"], TODAY, False)
+        self.assertIsNone(await self.store.set_half_rest(employee["id"], TODAY, False))
         self.assertEqual((await self._half_rest(employee["id"]))[TODAY], 0)
         self.assertEqual((await self._rows(employee["id"]))[0]["shift_id"], day)
+
+    async def test_set_half_rest_needs_a_shift_on_that_day(self):
+        """单日写口（ADR 0143）：那天没有班次就返回原因，一个字节都不写。
+
+        两种「没有班次」：还没排到的天**没有结果行**；改成休的那天**行在但 `shift_id`
+        为空**。返回的是稳定 reason（不是异常）—— 考勤表页拿它翻成拒绝，周表批量口拿它
+        逐格跳过，传输语义各留各的，判据只做这一次。
+        """
+        employee = await self._employee()
+        day = await self._shift_id("白班")
+
+        # 还没排到：没有结果行。
+        self.assertEqual(
+            await self.store.set_half_rest(employee["id"], TODAY, True),
+            HALF_REST_NEEDS_SHIFT,
+        )
+        self.assertEqual(await self._rows(employee["id"]), [])
+
+        # 改成休：结果行在，但班次为空。
+        await self.store.set_override(employee["id"], TODAY, is_rest=True)
+        self.assertEqual(
+            await self.store.set_half_rest(employee["id"], TODAY, True),
+            HALF_REST_NEEDS_SHIFT,
+        )
+        self.assertEqual((await self._half_rest(employee["id"]))[TODAY], 0)
+
+        # 有班次才写得进去，且返回 None。
+        await self.store.set_override(employee["id"], TODAY, shift_id=day)
+        self.assertIsNone(await self.store.set_half_rest(employee["id"], TODAY, True))
+        self.assertEqual((await self._half_rest(employee["id"]))[TODAY], 1)
 
     async def test_half_rest_shows_up_on_every_read_side(self):
         """票 07：那一个标志在**四个只读口**上都看得见，而且口径一致。
@@ -1892,14 +1921,10 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
         的计数与 `day_detail` 的名单）。**一处都不写**就等于「员工以为要上整天」
         （ADR 0114 的 Consequences），所以四处一起钉。
         """
-        from services.attendance.store import AttendanceStore
-
         employee = await self._employee()
         day = await self._shift_id("白班")
         await self.store.set_rule(employee["id"], [day])
-        await AttendanceStore(self.db, now=lambda: self.fixed_now).set_half_rest(
-            employee["id"], TODAY, True
-        )
+        await self.store.set_half_rest(employee["id"], TODAY, True)
 
         today_row = (await self.store.my_days(employee["id"]))["days"][0]
         self.assertEqual(
@@ -2190,8 +2215,8 @@ class SchedulingStoreTest(unittest.IsolatedAsyncioTestCase):
     async def test_batch_half_rest_only_touches_the_flag(self):
         """`half_rest` 只改标志与 `updated_at`：班次 / 工作区 / 来源一个字都不动。
 
-        与考勤表页 `AttendanceStore.set_half_rest` 同一口径（半天休不是第二个班次，
-        也不是一次「跟规则不一样」的改写），只是这里从周表那支笔进来。
+        与单日写口 `set_half_rest` 同一口径（半天休不是第二个班次，也不是一次「跟规则
+        不一样」的改写），只是这里从周表那支笔进来。
         """
         employee = await self._employee()
         day = await self._shift_id("白班")

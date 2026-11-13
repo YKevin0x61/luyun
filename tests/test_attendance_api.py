@@ -1924,8 +1924,9 @@ class StaffAssignmentHalfRestMigrationTest(unittest.TestCase):
 # ══ 票 07：半天休（下面这一整段都是票 07 加的） ══════════════════════════════
 #
 # 见 `GLOSSARY.md` 的「半天休」与 `docs/adr/0114`：半天休是**排班结果那一行上**的一个
-# 标志，不是第二个班次 —— 那天仍然只挂本来那个班次、仍然只有一行。只有考勤表页能设它
-# （`PUT /api/attendance/sheet/{员工}/{营业日}` 的 body 里那个 `half_rest`），
+# 标志，不是第二个班次 —— 那天仍然只挂本来那个班次、仍然只有一行。**日级**写口只有
+# 考勤表页能设它（`PUT /api/attendance/sheet/{员工}/{营业日}` 的 body 里那个
+# `half_rest`；周表批量口另设，见 ADR 0122 / 0143），
 # 排班月历 / 周表 / 员工端只**读**它并显示「休半天」。
 
 
@@ -2070,11 +2071,31 @@ def test_a_half_rest_day_counts_as_half_a_day_of_attendance(attendance_http):
     assert full_card["pool"] - half_card["pool"] == 0.5
 
 
-def test_only_the_attendance_sheet_can_set_half_rest(attendance_http):
-    """验收 7：员工会话只能读不能设；排班那扇门（单日覆盖）也设不了它。
+def test_half_rest_keeps_the_old_compact_date_spelling(attendance_http):
+    """路径写 `20260924` 这类旧格式：仍照旧规整成 `2026-09-24` 写入并回显。
 
-    这一条钉的是「写入口只有一处」：员工自己打不了，排班页那条 PUT 的 body 里塞
-    `half_rest` 也写不进去（它只认 `is_rest` / `shift_id` / `zone_id`）。
+    旧实现走 `date.fromisoformat`，路径参数又没过 Pydantic 的格式约束；收口时不能
+    让这类调用在排班侧的严格正则上变成 400（ADR 0143 决策 4）。
+    """
+    client, db, accounts = attendance_http
+    admin = _admin_cookie(client)
+    employee_id = _employee_id(accounts)
+    shifts = _shift_ids(db)
+    _run(_scheduler(db).set_rule(employee_id, [shifts["白班"]]))
+
+    compact = TODAY.replace("-", "")
+    response = _half(client, admin, employee_id, compact, True)
+    assert response.status_code == 200, response.text
+    assert response.json()["business_date"] == TODAY
+    assert _assignment_rows(employee_id, TODAY) == [(shifts["白班"], 1)]
+
+
+def test_only_the_attendance_sheet_can_set_half_rest_by_day(attendance_http):
+    """验收 7：员工会话只能读不能设；排班那条单日 PUT 也设不了它。
+
+    这一条钉的是「**日级**写入口只有一处」：员工自己打不了，排班页那条单日 PUT 的
+    body 里塞 `half_rest` 也写不进去（它只认 `is_rest` / `shift_id` / `zone_id`）。
+    周表那扇批量口是另一条路（`action=half_rest`，ADR 0122），由排班测试覆盖。
     """
     client, db, accounts = attendance_http
     admin = _admin_cookie(client)
@@ -2136,9 +2157,8 @@ def test_half_rest_does_not_touch_the_hygiene_duty(attendance_http):
 def test_sealing_the_last_month_also_folds_half_rest_at_half_a_day(attendance_http):
     """验收 4 的另一半（与票 04 的接线）：**封账那条算式**也按 0.5 天折算。
 
-    「休半天」只能在**当月**设（写口那一道闸），所以这一天是在它还叫「当月」的时候标上
-    的 —— 真实流程正是这样：8 月 31 日标上半天休，9 月封 8 月的账。这里用一个「8 月的
-    钟」走同一扇门，而不是往库里手写标志；封账仍走 9 月这张表的 HTTP 口。
+    「休半天」的写实现现在在排班域（`SchedulingStore.set_half_rest`，ADR 0143），没有
+    月份闸；这里直接走排班写口造 8 月那一天的数，封账仍走 9 月这张表的 HTTP 口。
 
     期望值：8 月铺 7 天班、其中 1 天标半天休 → 实际出勤 6.5 → 例休 1 → 池 7.5 →
     结余 7.5 − 31 = **−23.5**。当整天算会是 −23（8 − 31），当 0 天算会是 −24
@@ -2154,8 +2174,7 @@ def test_sealing_the_last_month_also_folds_half_rest_at_half_a_day(attendance_ht
                 employee_id, f"2026-08-{day:02d}", shift_id=shifts["白班"]
             )
         )
-    august = datetime(2026, 8, 31, 10, 0, tzinfo=CHINA_TZ)
-    _run(AttendanceStore(db, now=lambda: august).set_half_rest(employee_id, "2026-08-31", True))
+    _run(_scheduler(db).set_half_rest(employee_id, "2026-08-31", True))
 
     resp = _seal(client, admin)
 
@@ -2248,12 +2267,8 @@ def _export_employees(accounts, db):
 
 
 def _mark_half_rest(db, employee_id, business_date):
-    """标「休半天」走服务层那扇唯一的写口（票 07）—— 造数，不是断言通道。"""
-    _run(
-        AttendanceStore(db, now=lambda: FIXED_NOW).set_half_rest(
-            employee_id, business_date, True
-        )
-    )
+    """标「休半天」走排班域唯一的写口（ADR 0143）—— 造数，不是断言通道。"""
+    _run(_scheduler(db).set_half_rest(employee_id, business_date, True))
 
 
 # ── 票 08 验收 1/2/3/7：表名、表头逐字、列数随天数、汇总列顺序 ──────────────

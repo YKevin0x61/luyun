@@ -23,9 +23,9 @@
  * 票 06 起格子上多一个 `shift_id`、卡片上多一份 `shifts`（**启用中的**班次）：逐日改格
    要能标出「现在是哪个班」并挑另一个。
  * 票 07 起格子再多一个 `half_rest`（**半天休**，ADR 0114）：那天仍然只挂本来那个班次、
-   仍然只算「上班」，只是上半天。这一层是**唯一**设置它的地方（`set_half_rest`）——
-   排班月历 / 周表 / 员工端只读地显示它。除此之外这一层仍**只读**：逐日改格的写路径
-   在排班那一边（票 06）。
+   仍然只算「上班」，只是上半天。写它走排班域唯一的那扇门
+   `SchedulingStore.set_half_rest`（ADR 0143）；这一层与月历 / 周表 / 员工端一样**只读**
+   它。除此之外这一层仍**只读**：逐日改格的写路径在排班那一边（票 06）。
 
 「今天」取**营业日**（06:00 切，同排班）：考勤表的格子就是
 `staff_assignments.business_date`，两边的「哪一天」必须是同一个词。
@@ -263,16 +263,6 @@ class AttendanceStore:
             if cell.half_rest:
                 half_rests.setdefault(cell.employee_id, set()).add(cell.business_date)
         return rows, half_rests
-
-    async def _assignment_row(self, employee_id: int, day: str) -> Optional[dict]:
-        """某人某天那一行（没有则 ``None``）—— 逐日写口要判「那天到底有没有班次」。"""
-        cur = await self._conn.execute(
-            """SELECT shift_id, half_rest FROM staff_assignments
-               WHERE employee_id = ? AND business_date = ?""",
-            (int(employee_id), day),
-        )
-        row = await cur.fetchone()
-        return None if row is None else dict(row)
 
     async def _month_entries(self, first: str, next_month: str) -> tuple[dict[int, int], set[int]]:
         """当月加班登记：``(已批准的半小时数合计, 这个月有登记的人)``。
@@ -780,9 +770,10 @@ class AttendanceStore:
     async def ensure_day_editable(self, business_date: Any) -> str:
         """逐日写口（票 06 的改格 / 票 07 的休半天）**共用**的三道服务端闸。
 
-        这一页只算当月、只记已经发生的班。两条写路各自的旧实现各漏了一部分：
-        `set_half_rest` 只挡了非当月，排班那层的单日覆盖**能写未来日子、也能写已经封账的
-        上月**。三道闸所以统一在这里，路由在分派到任何一条支路**之前**先过它：
+        这一页只算当月、只记已经发生的班。写实现搬进排班域之后，
+        `SchedulingStore.set_half_rest` 本身**不再**挡在册 / 窗口 / 请假 / 封账 / 月份
+        （ADR 0143），排班那层的单日覆盖也能写未来日子、封账的上月。三道闸所以统一留在
+        这里，路由在分派到任何一条支路**之前**先过它：
 
         * **非当月**（`out_of_month`）：这一页不提供月份选择，别的月份一个格子都不显示；
         * **今天之后**（`future_day`，故事 45）：「还没到」不是「待补」，更不该被填成事实；
@@ -802,53 +793,6 @@ class AttendanceStore:
         if day > today:
             raise AttendanceError("future_day", day)
         return day
-
-    @_needs_migration
-    @serialized_write
-    async def set_half_rest(
-        self, employee_id: int, business_date: str, half_rest: bool = True
-    ) -> dict:
-        """把某人某一天标成「休半天」/ 取消（票 07，ADR 0114）。
-
-        2026-10-29 起它**不是唯一的门**：排班周表的「休半天」笔走批量端点
-        `action=half_rest`，与这里写同一个 `half_rest` 标志、同一句校验（那天得有
-        结果行且班次非空），见 ADR 0122。两处都是「只改标志」这一种终态。
-
-        改的是 `staff_assignments` 那一行上的 `half_rest` 一个字段：班次、工作区、来源
-        （`source`）与那一天是不是单日覆盖，**一个字都不动** —— 半天休不是第二个班次，
-        也不是一次「跟规则不一样」的改写（那天仍然只挂本来那个班次、仍然只有一行）。
-
-        三道闸，都在写之前：
-
-        * 日期得是 `YYYY-MM-DD`（坏格式 = `invalid_business_date`）；
-        * 得落在**当月**（这一页只算当月，写口也只认当月：上个月的格子它压根不显示）；
-        * 那天得**真有班次**（`shift_id` 非空）。没有排班行 = 「待补」、行在但班次空 =
-          「休」—— 两种都标不上「休半天」：那两天本来就没有半天班可言（`half_rest_needs_shift`）。
-
-        写完 `commit` 一次。广播与鉴权在 `api/attendance.py`（这一层不碰 HTTP）。
-        """
-        today = self.today()
-        day = _require_business_date(business_date)
-        if day[:7] != today[:7]:
-            raise AttendanceError("out_of_month", today)
-        employee_id = int(employee_id)
-        row = await self._assignment_row(employee_id, day)
-        if row is None or row["shift_id"] is None:
-            raise AttendanceError("half_rest_needs_shift", day)
-        await self._conn.execute(
-            """UPDATE staff_assignments SET half_rest = ?, updated_at = ?
-               WHERE employee_id = ? AND business_date = ?""",
-            (1 if half_rest else 0, self._now_iso(), employee_id, day),
-        )
-        await self._conn.commit()
-        logger.info(
-            "逐日改格：%s %s 的「休半天」=%s", employee_id, day, "是" if half_rest else "否"
-        )
-        return {
-            "employee_id": employee_id,
-            "business_date": day,
-            "half_rest": bool(half_rest),
-        }
 
     @_needs_migration
     @serialized_write

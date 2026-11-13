@@ -59,7 +59,12 @@ from services.attendance.export import (
     attendance_export_filename,
     build_attendance_workbook,
 )
-from services.scheduling.store import SchedulingError, SchedulingStore
+from services.scheduling.store import (
+    HALF_REST_NEEDS_SHIFT,
+    HALF_REST_NEEDS_SHIFT_MESSAGE,
+    SchedulingError,
+    SchedulingStore,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -97,7 +102,7 @@ _ERROR_DETAILS = {
     # 封过账的月既锁逐日改格（票 06 的闸）也锁**期末存假**那一格（票 09 的写口）：
     # 同一句话把两件事都说到，所以点的是「格子与存假」，不只是格子。
     "month_sealed": "{} 已经封账了：封过的月只读，它里面的格子与存假都不再改",
-    "half_rest_needs_shift": "那天没有班次（休 / 还没排到），标不上「休半天」：先给那天排一个班次",
+    HALF_REST_NEEDS_SHIFT: HALF_REST_NEEDS_SHIFT_MESSAGE,
     # 员工端读自己那个月（ADR 0124）：月份格式写错直说该怎么写。
     "invalid_month": "月份格式应该是 YYYY-MM（例如 2026-10）",
     # 月份选择器（R2-A）：能回看历史月，但不预读还没开始的月。`{}` 是服务层放在
@@ -422,10 +427,11 @@ async def set_attendance_day(
     （`past_day`）。那天还有**没批的**换班 / 请假申请时**拒绝**（409）且一个字都不写 ——
     店长不该在这一页把员工刚提的请求悄悄冲掉。
 
-    **「休半天」**（票 07，ADR 0114）走的是另一条路（`AttendanceStore.set_half_rest`）：
-    它只改结果行上的那个标志，**不是**一次单日覆盖 —— 那天仍然挂本来那个班次、仍然只有
-    一行、`source` 也不变（所以它没有「改完这天就跟规则不一样了」那个含义）。这是**全仓
-    唯一**能设置它的地方：排班月历 / 周表 / 员工端只读地显示它。
+    **「休半天」**（票 07，ADR 0114）走的是另一条路（`SchedulingStore.set_half_rest`，
+    ADR 0143）：它只改结果行上的那个标志，**不是**一次单日覆盖 —— 那天仍然挂本来那个
+    班次、仍然只有一行、`source` 也不变（所以它没有「改完这天就跟规则不一样了」那个
+    含义）。这是考勤表页这扇单日门；排班周表另有批量口（ADR 0122）。写实现与判据都在
+    排班域，这一层只做翻译与广播。
 
     两条路写完都按排班既有惯例广播：`_scheduling_nudge` 一人一条、scope 带他自己的
     `employee_id`（员工连接只收得到与自己有关的那条，见 `services/realtime/hub.py`）。
@@ -434,16 +440,19 @@ async def set_attendance_day(
     **收尾修复 ③：分派之前先过三道服务端闸**（`AttendanceStore.ensure_day_editable`）——
     非当月（这一页只算当月）、今天之后（故事 45）、那个月已经有封账行（故事 33）。
     它们加在**分派之前**，所以上面两条支路的门是同一条：改班次、改成休、标「休半天」
-    一个都绕不过去。
+    一个都绕不过去。写实现搬进排班域之后这几道闸更不能再少（ADR 0143）。
     """
-    # 三道闸在**任何写动作之前**：被拒的那一次一个字节都不写（同逐日改格的 409）。
+    # 三道闸在**任何写动作之前**：被拒的那一次一个字节都不写。
     try:
-        await AttendanceStore(db).ensure_day_editable(business_date)
+        day = await AttendanceStore(db).ensure_day_editable(business_date)
     except AttendanceError as exc:
         raise _ATTENDANCE_ERRORS.http(exc) from exc
     if payload.half_rest is not None:
+        # 用闸返回的规整日期：旧实现（`AttendanceStore.set_half_rest`）就接受
+        # `date.fromisoformat` 认得的写法再回显 `YYYY-MM-DD`；路径参数本身没有
+        # 格式约束，直接透传会让 `20260901` 这类旧调用在排班侧的严格正则上变 400。
         return await _set_half_rest(
-            db, employee_id, business_date, bool(payload.half_rest), payload
+            db, employee_id, day, bool(payload.half_rest), payload
         )
     store = SchedulingStore(db)
     try:
@@ -463,10 +472,14 @@ async def set_attendance_day(
 async def _set_half_rest(
     db, employee_id: int, business_date: str, half_rest: bool, payload: DayEditRequest
 ) -> dict:
-    """「休半天」那一支：先挡住「一次改两件事」，再交给服务层那扇唯一的写口。
+    """「休半天」那一支：先挡住「一次改两件事」，再交给排班域唯一的写口。
 
     `is_rest` 与 `shift_id` 与 `half_rest` 一起发是 400 —— 「改成休，但只休半天」不是
     一句说得通的话（那天到底上不上班？），服务层也不该替调用方猜。
+
+    写实现在 `SchedulingStore.set_half_rest`（ADR 0143）：这一层只把「那天没有班次」
+    翻成 `_ATTENDANCE_ERRORS` 里那一句并广播。三道服务端闸已经在 `set_attendance_day`
+    分派之前跑过，这里不重复；传进来的 `business_date` 是闸规整过的 `YYYY-MM-DD`。
     """
     if payload.is_rest or payload.shift_id is not None:
         raise HTTPException(
@@ -474,11 +487,20 @@ async def _set_half_rest(
             detail="「休半天」是一次单独的动作：不要再带班次或「改成休」；"
             "要换班次 / 改成休就单独发一次",
         )
-    store = AttendanceStore(db)
+    store = SchedulingStore(db)
     try:
-        result = await store.set_half_rest(employee_id, business_date, half_rest)
-    except AttendanceError as exc:
-        raise _ATTENDANCE_ERRORS.http(exc) from exc
+        reason = await store.set_half_rest(employee_id, business_date, half_rest)
+    except SchedulingError as exc:
+        # 写实现搬进排班域后，缺表 / 缺列由那边的 `_needs_migration` 换成了
+        # `SchedulingError("not_migrated")`；这一层仍按考勤的错误表翻回 503，
+        # 不能让店长看到一个 500 traceback（ADR 0143）。
+        raise _ATTENDANCE_ERRORS.http(AttendanceError(exc.code, str(exc))) from exc
+    if reason is not None:
+        raise _ATTENDANCE_ERRORS.http(AttendanceError(reason, business_date))
     # 员工手机上那一屏要跟着变（班次没变，但那天从「上班」变成了「上半天」）。
     await _scheduling_nudge("half_rest_set", employee_id)
-    return result
+    return {
+        "employee_id": int(employee_id),
+        "business_date": business_date,
+        "half_rest": bool(half_rest),
+    }

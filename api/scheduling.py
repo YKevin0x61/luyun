@@ -19,7 +19,13 @@ from api.workbench_boundary import (
 from database import get_db
 from services.realtime.workbench import nudge_scheduling as _scheduling_nudge
 from services.scheduling import MAX_CYCLE_DAYS, MAX_REQUEST_NOTE, MAX_SHIFT_NAME
-from services.scheduling.store import KIND_LEAVE, SchedulingError, SchedulingStore
+from services.scheduling.store import (
+    HALF_REST_NEEDS_SHIFT,
+    HALF_REST_NEEDS_SHIFT_MESSAGE,
+    KIND_LEAVE,
+    SchedulingError,
+    SchedulingStore,
+)
 from services.wecom_request_notice import notify_leave_decision, notify_leave_request
 
 logger = logging.getLogger(__name__)
@@ -70,9 +76,9 @@ _ERROR_DETAILS = {
     ),
     "invalid_batch_items": "这一批格子没看懂：请刷新页面重新选一次",
     "invalid_employee_id": "格子里的员工编号不合法：请刷新页面重新选一次",
-    # 「休半天」（2026-10-29 周表「休半天」笔）：跟考勤表页那条 `half_rest_needs_shift`
-    # 同一句文案 —— 同一个事实（那天没有班次）不该在两张页面上说成两句不同的话。
-    "half_rest_needs_shift": "那天没有班次（休 / 还没排到），标不上「休半天」：先给那天排一个班次",
+    # 「休半天」（2026-10-29 周表「休半天」笔）：文案跟考勤表页那条同一个常量 —— 同一个
+    # 事实（那天没有班次）不该在两张页面上说成两句不同的话（ADR 0143）。
+    HALF_REST_NEEDS_SHIFT: HALF_REST_NEEDS_SHIFT_MESSAGE,
     # `action=half_rest` 却没带 `half_rest`（或带了个不是布尔的值）：这一格要「标上」还是
     # 「取消」，客户端得说清楚，服务端不猜。
     "missing_half_rest": "「休半天」得说清是标上还是取消：请刷新页面重新点一次",
