@@ -40,7 +40,12 @@ from services.wecom_push_service import (
     resolve_report_dates,
     wecom_push_service,
 )
-from services.wecom_push_topics import PushTrigger, validate_params
+from services.wecom_push_topics import (
+    PushTrigger,
+    auto_business_date_mode,
+    get_topic,
+    validate_params,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -187,16 +192,22 @@ async def resolve_targets(db, topic_id: str) -> List[ResolvedTarget]:
     return targets
 
 
-def freeze_business_date(params: Mapping[str, Any], now: datetime) -> Dict[str, Any]:
+def freeze_business_date(
+    params: Mapping[str, Any], now: datetime, *, auto_mode: str = ""
+) -> Dict[str, Any]:
     """把参数里的「今天 / 昨天」解析成**具体营业日**并冻结（ADR 0095）。
 
     冻结必须发生在入队时：定时投递失败后要当天补发，补发那一刻已经过了 06:00 的话，
     再解析一次「今天」就落到下一个营业日，补发的日报成了空白的一天。冻结之后
     `date_range_mode` 从参数里消失（留着它等于留一个"以后再解析一次"的入口），
     换成渲染器直接可用的 `business_date`。
+
+    ``auto_mode`` 给**没有日期口径参数**的内容类型（运营日报）：口径由触发时间推断，
+    由调用方算好传进来。参数里自己带了 ``date_range_mode`` 时以参数为准 —— 页面能选
+    的永远优先于推断。
     """
-    mode = params.get("date_range_mode")
-    if mode is None:
+    mode = params.get("date_range_mode") or auto_mode
+    if not mode:
         return dict(params)
     if mode not in ("today", "yesterday"):
         raise ValueError(f"未知的日期口径: {mode}")
@@ -287,6 +298,7 @@ class WeComOutbox:
         targets: Optional[Sequence[ResolvedTarget]] = None,
         schedule_id: Optional[int] = None,
         summary: str = "",
+        scheduled_at: Optional[str] = None,
         commit: bool = True,
         now: Optional[datetime] = None,
     ) -> List[int]:
@@ -295,7 +307,8 @@ class WeComOutbox:
         - 参数按注册表校验（内容类型的 schema 是唯一入口），营业日在**这里**冻结；
         - 幂等键 = 内容类型 + 业务引用 + 目标：重复触发只落一行；
         - 停用的渠道也落一行，就地标成 skipped 并写明原因（订阅保留，投递跳过）；
-        - 零订阅 → 一条不发，只记日志。
+        - 零订阅 → 一条不发，只记日志；
+        - ``scheduled_at`` 给定时类内容：派发循环只捞已到点的 pending 行，NULL = 立即。
 
         ``now`` 是「这一次入队发生在什么时候」，只用于冻结营业日：调度循环把自己的
         假时钟（测试）或墙上时钟（生产）传进来，与它算 `last_sent_date` 用的是同一个
@@ -307,7 +320,14 @@ class WeComOutbox:
         终态与原因一样，只是晚 30 秒。
         """
         validated = validate_params(topic_id, params, trigger=trigger)
-        frozen = freeze_business_date(validated, now or self._now())
+        moment = now or self._now()
+        topic = get_topic(topic_id)
+        auto_mode = (
+            auto_business_date_mode(moment)
+            if topic is not None and topic.auto_business_date
+            else ""
+        )
+        frozen = freeze_business_date(validated, moment, auto_mode=auto_mode)
         if not business_reference:
             raise ValueError("出站记录必须带业务引用（幂等键的一半）")
 
@@ -328,6 +348,7 @@ class WeComOutbox:
                 "schedule_id": schedule_id,
                 "target_channel_id": target.channel_id,
                 "content_summary": content_summary,
+                "scheduled_at": scheduled_at,
                 "idempotency_key": build_idempotency_key(
                     topic_id, business_reference, target.channel_id
                 ),

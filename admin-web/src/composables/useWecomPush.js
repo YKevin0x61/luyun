@@ -733,7 +733,9 @@ export function defaultJobParams(topic) {
   const params = {}
   for (const [field, schema] of Object.entries(properties)) {
     if (schema && Object.prototype.hasOwnProperty.call(schema, 'default')) {
-      params[field] = schema.default
+      // 数组默认值必须克隆：schema 是 `/meta` 那份共享对象，多张任务卡照着它铺参数时
+      // 会拿到同一个 list，一处勾选另一处跟着变。
+      params[field] = Array.isArray(schema.default) ? [...schema.default] : schema.default
     }
   }
   return params

@@ -15,7 +15,8 @@ import { JsonForms } from '@jsonforms/vue'
 import { vanillaRenderers } from '@jsonforms/vue-vanilla'
 import { isEnumControl, isOneOfEnumControl, rankWith } from '@jsonforms/core'
 
-import { normalizeControlValues, toJsonFormsUiSchema } from '../../utils/jsonFormsControls'
+import { isCheckboxGroupControl, normalizeControlValues, toJsonFormsUiSchema } from '../../utils/jsonFormsControls'
+import PushCheckboxGroupControl from './PushCheckboxGroupControl.vue'
 import PushSelectControl from './PushSelectControl.vue'
 
 const props = defineProps({
@@ -34,6 +35,9 @@ const emit = defineEmits(['update:data'])
 // 正是空串 —— 浏览器按 value 选中前面那个空文案的选项，下拉就显示空白（D3）。
 // 其余控件照旧走 vanilla 的渲染器：字段名与控件类型一个都没写死。
 const renderers = markRaw([
+  // 多选的 rank 与下拉的 oneOf 相同，但 tester 不同（认 `format: 'checkbox-group'`），
+  // 两个匹配器不会同时命中一个字段。
+  { renderer: PushCheckboxGroupControl, tester: rankWith(6, isCheckboxGroupControl) },
   { renderer: PushSelectControl, tester: rankWith(6, isOneOfEnumControl) },
   { renderer: PushSelectControl, tester: rankWith(3, isEnumControl) },
   ...vanillaRenderers,

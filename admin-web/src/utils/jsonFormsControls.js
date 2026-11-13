@@ -15,6 +15,7 @@
 export const CONTROL_TIME = 'time'
 export const CONTROL_SELECT = 'select'
 export const CONTROL_TEXT = 'text'
+export const CONTROL_CHECKBOX_GROUP = 'checkbox-group'
 
 /**
  * 控件类型 → JSON Forms 认的 `options.format`。
@@ -24,6 +25,9 @@ export const CONTROL_TEXT = 'text'
  */
 const FORMAT_BY_CONTROL = {
   [CONTROL_TIME]: 'time',
+  // 多选没有原生控件对应，翻成 format 只是给自定义渲染器留一个能认的标记
+  // （`options.control` 在这一步会被删掉，渲染器的 tester 看不到它）。
+  [CONTROL_CHECKBOX_GROUP]: 'checkbox-group',
 }
 
 /**
@@ -70,6 +74,22 @@ export function splitEmptySelectOption(options) {
     emptyLabel: String(empty.label ?? ''),
     options: list.filter((_, index) => index !== emptyIndex),
   }
+}
+
+/**
+ * 是不是多选控件（复选框组）。`toJsonFormsUiSchema` 已经把 `options.control` 翻成了
+ * `options.format`，所以这里认的是 format。
+ */
+export function isCheckboxGroupControl(uischema) {
+  return Boolean(uischema && uischema.options && uischema.options.format === 'checkbox-group')
+}
+
+/** uischema 里声明成多选控件的字段名。 */
+export function checkboxGroupFields(uischema) {
+  return (uischema && Array.isArray(uischema.elements) ? uischema.elements : [])
+    .filter(isCheckboxGroupControl)
+    .map((element) => String(element.scope || '').split('/').pop())
+    .filter(Boolean)
 }
 
 /** `HH:MM:SS` → `HH:MM`（原生 time 控件在有的环境里会带上秒）。 */

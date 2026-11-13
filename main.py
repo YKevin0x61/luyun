@@ -359,8 +359,10 @@ async def lifespan(app: FastAPI):
         from services.hygiene.wecom_share import HygieneCaptureSharer
         from services.hygiene.work import HygieneWork
         from services.wecom_outbox import wecom_outbox
+        from services.wecom_daily_ops import DailyOpsReportRenderer
         from services.wecom_push_service import ScheduledReportRenderer, WeeklyScheduleRenderer
         from services.wecom_push_topics import (
+            TOPIC_DAILY_OPS_REPORT,
             TOPIC_HYGIENE_PHOTO,
             TOPIC_RECONCILE_DIFF,
             TOPIC_SALES_REPORT,
@@ -387,6 +389,11 @@ async def lifespan(app: FastAPI):
             # 下周排班表同理：出站行里只有内容类型与参数，正文要发送时从排班现算。
             wecom_outbox.register_renderer(
                 TOPIC_WEEKLY_SCHEDULE, WeeklyScheduleRenderer(db_manager).render
+            )
+            # 运营日报（ADR 0144）：出站行里只有冻结的营业日与勾选的模块，九块数据
+            # 与那张图都要发送时现算。
+            wecom_outbox.register_renderer(
+                TOPIC_DAILY_OPS_REPORT, DailyOpsReportRenderer(db_manager).render
             )
             hygiene_work = HygieneWork(
                 db_manager,
@@ -870,6 +877,10 @@ class HtmlAuthMiddleware(BaseHTTPMiddleware):
         # 前端路由 meta 与各接口自己的 401，服务端不替它们做页面级授权。
         if _is_workbench_page(path) and await _has_staff_session(request):
             return await call_next(request)
+        # 员工已经登录、却点进管理端页面：送到 forbidden，比丢回登录页准确
+        # （审查 R48 —— 员工看到「请登录」会以为账号坏了，实际是权限不够）。
+        if not _is_workbench_page(path) and await _has_staff_session(request):
+            return RedirectResponse(url="/workbench/forbidden", status_code=302)
         return _html_login_redirect(request)
 
 

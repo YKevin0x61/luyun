@@ -62,3 +62,44 @@
 .wp-params-form .control .required {
   color: var(--red);
 }
+
+/* ── 多选（复选框组）：运营日报的「勾选日报内容」────────────────────────────
+   vanilla 自带的 EnumArrayRenderer 没有字段标题、每个复选框还套着 34px 输入框的
+   外观；这里自己排：两列网格，勾选项是一个 checkbox + 文案的行，整行可点。 */
+.wp-checkbox-group {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 2px 10px;
+  width: 100%;
+}
+
+.wp-checkbox-group__item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 8px;
+  border-radius: 8px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.wp-checkbox-group__item:hover {
+  background: var(--card2);
+}
+
+.wp-checkbox-group__item.is-disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.wp-checkbox-group__label {
+  font-size: 13px;
+  line-height: 1.35;
+  color: var(--text);
+}
+
+@media (max-width: 560px) {
+  .wp-checkbox-group {
+    grid-template-columns: 1fr;
+  }
+}

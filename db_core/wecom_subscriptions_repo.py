@@ -536,7 +536,8 @@ class _WecomSubscriptionsRepoMixin:
             tdb = self._connection.table("wecom_push_outbox")
             async with tdb.conn.cursor() as cursor:
                 await cursor.execute(
-                    """SELECT id, topic_id, status, attempts, last_error, finished_at
+                    """SELECT id, topic_id, status, attempts, last_error, finished_at,
+                              scheduled_at
                        FROM wecom_push_outbox
                        WHERE topic_id = ? AND idempotency_key LIKE ?
                        ORDER BY id""",
@@ -547,6 +548,35 @@ class _WecomSubscriptionsRepoMixin:
         except Exception as e:
             logger.error(f"❌ 按业务引用获取出站记录失败: {e}")
             return []
+
+    async def wecom_outbox_discard_pending(
+        self, topic_id: str, reference_prefix: str
+    ) -> int:
+        """作废某条业务线更早版本的**待发**行，返回删除条数。
+
+        员工餐 10 点前反复改单只该推最新版：新版入队前，把这张单更早 ``push_seq``
+        的 pending 行删掉 —— 否则调度循环到点会把旧清单也发进群。只删 pending：
+        sent / failed / skipped 是投递历史，不能抹；sending 可能已经在路上，也不能删。
+
+        ``reference_prefix`` 是业务引用去掉版本号后的前缀（员工餐是
+        ``staff_meal_purchase:{使用日}:``），与 topic 一起拼成幂等键前缀匹配。
+        异常按本模块惯例记日志后返回 0，不让一次清理失败挡住当次提交。
+        """
+        try:
+            prefix = f"{str(topic_id)}:{str(reference_prefix)}%"
+            tdb = self._connection.table("wecom_push_outbox")
+            async with tdb.conn.cursor() as cursor:
+                await cursor.execute(
+                    """DELETE FROM wecom_push_outbox
+                        WHERE topic_id = ? AND status = ? AND idempotency_key LIKE ?""",
+                    (str(topic_id), SUB_OUTBOX_STATUS_PENDING, prefix),
+                )
+                removed = cursor.rowcount or 0
+            await tdb.commit()
+            return int(removed)
+        except Exception as e:
+            logger.error(f"❌ 作废旧待发记录失败: {e}")
+            return 0
 
     async def wecom_outbox_pending(self, limit: int = 20, now: Optional[str] = None) -> List[Dict]:
         """按先进先出取**已到点**的待发（调度循环每轮捞一批）。

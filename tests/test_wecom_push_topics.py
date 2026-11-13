@@ -57,12 +57,14 @@ class FakeOpsParams(BaseModel):
     )
 
 
-# 十三类内容类型：id / 显示名 / 触发方式（按声明顺序）。前八类的来源是票面与迁移 0016
+# 十四类内容类型：id / 显示名 / 触发方式（按声明顺序）。前八类的来源是票面与迁移 0016
 # 的头注释，第九类「下周排班表」是后加的（同一张订阅矩阵，不需要新迁移）；最后三类
 # 「请假申请」「加班/补钟申请」「员工餐采购计划」也是纯注册表新增（员工提交时入队，
-# 同样不需要迁移）。只有对账差异告警两种触发方式都支持。
+# 同样不需要迁移）。第十四类「运营日报」同样是纯注册表新增（ADR 0144）：复用订阅与
+# 出站两张表，没有结构变更。只有对账差异告警两种触发方式都支持。
 EXPECTED_TOPICS = [
     ("sales_report", "销售报表", ("scheduled",)),
+    ("daily_ops_report", "运营日报", ("scheduled",)),
     ("weekly_schedule", "下周排班表", ("scheduled",)),
     ("reconcile_diff", "对账差异告警", ("scheduled", "event")),
     ("unmapped_dish", "未映射菜品提醒", ("event",)),
@@ -85,6 +87,7 @@ EVENT_ONLY_TOPICS = [row[0] for row in EXPECTED_TOPICS if row[2] == ("event",)]
 # 下周排班表默认周日 13:00（每周一次，见 `PushTopic.weekly`）。
 EXPECTED_SCHEDULE_TIMES = {
     "sales_report": "21:30",
+    "daily_ops_report": "22:15",
     "weekly_schedule": "13:00",
     "reconcile_diff": "22:10",
 }
@@ -102,6 +105,11 @@ EXPECTED_PARAMS = {
     "reconcile_diff": {
         "schedule_time": ("time", False),
         "date_range_mode": ("select", False),
+    },
+    # 运营日报：只有推送时间与模块多选，**没有日期口径**（营业日由触发时间推断）。
+    "daily_ops_report": {
+        "schedule_time": ("time", False),
+        "modules": ("checkbox-group", False),
     },
     "weekly_schedule": {
         "schedule_time": ("time", False),
@@ -125,7 +133,9 @@ EXPECTED_PARAMS = {
     "work_task": {"text": ("text", True)},
 }
 
-CONTROL_TYPES = {"time", "select", "text"}
+# 前端 `admin-web/src/utils/jsonFormsControls.js` 要能画出这四种；多出来的控件
+# 会让页面把「勾选模块」渲染成一个裸输入框（见 ADR 0144）。
+CONTROL_TYPES = {"time", "select", "text", "checkbox-group"}
 
 
 def _payload(topic_id: str) -> dict:

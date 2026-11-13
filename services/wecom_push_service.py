@@ -12,7 +12,7 @@ import logging
 import re
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional, Sequence
 from urllib.parse import parse_qs, urlparse
 
 import httpx
@@ -24,6 +24,7 @@ from services.credentials_store import _fernet
 from services.dish_normalize import normalize_dish_name
 from services.scheduling.week_view import cell_caption, cell_state
 from services.wecom_push_topics import (
+    TOPIC_DAILY_OPS_REPORT,
     TOPIC_RECONCILE_DIFF,
     TOPIC_SALES_REPORT,
     TOPIC_TEST_MESSAGE,
@@ -134,6 +135,21 @@ def resolve_report_dates(date_range_mode: str, now: Optional[datetime] = None) -
     return business_date, business_date
 
 
+
+def daily_ops_business_date(now: Optional[datetime] = None) -> str:
+    """运营日报的营业日：按触发时间推断（ADR 0144）。
+
+    22:15 触发 = 当天（店里打烊、对账已出）；店长把时间改到早上 8 点 = 上一个营业日
+    （昨天的日报，而不是一张空的今天）。口径与 ``auto_business_date_mode`` 同一处，
+    差的是这里直接给出日期字符串，供预览 / 立即发送使用 —— 定时投递那条路在入队时
+    冻结（``freeze_business_date``），两者必须是同一个算法。
+    """
+    from services.wecom_push_topics import auto_business_date_mode
+
+    moment = now or datetime.now(CHINA_TZ)
+    business_date, _ = resolve_report_dates(auto_business_date_mode(moment), moment)
+    return business_date
+
 def _format_qty(value: Any) -> str:
     try:
         number = float(value)
@@ -173,11 +189,16 @@ def render_sales_report_text(report_data: Dict[str, Any], fixed_dishes: Optional
     report_date_text = start_date if start_date == end_date else f"{start_date} ~ {end_date}"
 
     title_line = f"【销售报表】{report_date_text}"
+    # 与页面同口径：订单数是账单数（total_bills），规则覆盖写 87/109（80%）（审查 R16）。
+    bills = summary.get("total_bills", summary.get("total_orders", 0))
+    unique_dishes = summary.get("unique_dishes", 0) or 0
+    covered = summary.get("covered_rules", 0) or 0
+    coverage = round(covered / unique_dishes * 100) if unique_dishes else 0
     summary_line = (
-        f"订单数：{summary.get('total_orders', 0)}  "
+        f"订单数：{bills}  "
         f"菜件总数：{summary.get('total_dishes', 0)}  "
-        f"菜品数：{summary.get('unique_dishes', 0)}  "
-        f"规则覆盖：{summary.get('covered_rules', 0)}"
+        f"菜品数：{unique_dishes}  "
+        f"规则覆盖：{covered}/{unique_dishes}（{coverage}%）"
     )
 
     dish_lines = ["【菜品销量】"]
@@ -548,6 +569,56 @@ class WeComPushService:
         grid = await self._weekly_grid(db, business_date=business_date, now=now)
         return render_weekly_schedule_png(grid)
 
+    async def _daily_ops_report(
+        self,
+        db: DatabaseManager,
+        *,
+        business_date: str = "",
+        modules: Optional[Sequence[str]] = None,
+        now: Optional[datetime] = None,
+    ):
+        """运营日报的数据（预览 / 立即发送 / 出站渲染共用这一份）。"""
+        from services.wecom_daily_ops import collect_report
+
+        return await collect_report(
+            db,
+            business_date=business_date or daily_ops_business_date(now),
+            modules=modules,
+        )
+
+    async def build_daily_ops_message(
+        self,
+        db: DatabaseManager,
+        *,
+        business_date: str = "",
+        modules: Optional[Sequence[str]] = None,
+        now: Optional[datetime] = None,
+    ) -> RenderedMessage:
+        """运营日报的**文字**版（出图失败时的降级、以及排查用）。"""
+        from services.wecom_daily_ops import render_text
+
+        report = await self._daily_ops_report(
+            db, business_date=business_date, modules=modules, now=now
+        )
+        content = render_text(report)
+        return RenderedMessage(content=content, byte_length=len(content.encode("utf-8")))
+
+    async def build_daily_ops_image(
+        self,
+        db: DatabaseManager,
+        *,
+        business_date: str = "",
+        modules: Optional[Sequence[str]] = None,
+        now: Optional[datetime] = None,
+    ) -> Optional[bytes]:
+        """运营日报的**图片**版；本机没有中文字体时返回 ``None``（调用方退文字）。"""
+        from services.wecom_daily_ops import render_png
+
+        report = await self._daily_ops_report(
+            db, business_date=business_date, modules=modules, now=now
+        )
+        return render_png(report, modules=modules)
+
     async def render_job_message(
         self, db: DatabaseManager, job: Mapping[str, Any], *, now: Optional[datetime] = None
     ) -> RenderedMessage:
@@ -573,6 +644,10 @@ class WeComPushService:
         if topic_id == TOPIC_WEEKLY_SCHEDULE:
             # 预览 / 立即发送用**此刻**的营业日：「下一周」对现在这一刻有意义。
             return await self.build_weekly_schedule_message(db, now=now)
+        if topic_id == TOPIC_DAILY_OPS_REPORT:
+            return await self.build_daily_ops_message(
+                db, modules=params.get("modules"), now=now
+            )
         text = str(params.get("text") or "").strip()
         if text:
             return RenderedMessage(content=text, byte_length=len(text.encode("utf-8")))
@@ -603,6 +678,18 @@ class WeComPushService:
             if image:
                 return RenderedDelivery(image_bytes=image)
             logger.warning("下周排班表没有可用的图片，改发文字版（中文字体缺失或图太大）")
+        if topic_id == TOPIC_DAILY_OPS_REPORT:
+            modules = job_params(job).get("modules")
+            try:
+                image = await self.build_daily_ops_image(db, modules=modules, now=now)
+            except Exception as exc:  # noqa: BLE001 —— 出图失败退文字
+                logger.warning("运营日报出图失败，改发文字版：%s", exc)
+                image = None
+            if image:
+                return RenderedDelivery(image_bytes=image)
+            logger.warning("运营日报没有可用的图片，改发文字版（中文字体缺失或图太大）")
+            message = await self.build_daily_ops_message(db, modules=modules, now=now)
+            return RenderedDelivery(text=message.content)
         message = await self.render_job_message(db, job, now=now)
         return RenderedDelivery(text=message.content)
 

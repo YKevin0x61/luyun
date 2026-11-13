@@ -25,17 +25,25 @@ uischema 不可能各说各话。
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from enum import Enum
-from typing import Any, Dict, Mapping, Optional, Type
+from typing import Any, Dict, List, Mapping, Optional, Type
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from config import KITCHEN_STATIONS
 
+# 日报的模块清单与默认勾选：日报的取数与排版在 services/wecom_daily_ops.py，
+# 但「有哪些模块可选」是注册表要输出的 schema 知识，所以从那边取，不在两处各写一份。
+from services.wecom_daily_ops import DEFAULT_MODULES, MODULE_LABELS
+
 # ── 控件类型（uischema 里 options.control 的取值）──────────────────────────────
 CONTROL_TIME = "time"
 CONTROL_SELECT = "select"
 CONTROL_TEXT = "text"
+# 多选一小撮固定选项（运营日报的模块）。前端为它专门写了一个控件，其余三类控件
+# 是 JSON Forms 自带渲染器就能画的形状。
+CONTROL_CHECKBOX_GROUP = "checkbox-group"
 
 # 档口下拉排除楼面：销售报表不带楼面（既有口径，见 db_core/reports.py 的
 # KDS_EXCLUDED_STATION 与页面上原先写死的 jobStations）。
@@ -46,6 +54,20 @@ _FLOOR_STATION_ID = "loumian"
 _SCHEDULE_TIME_PATTERN = r"^([01]\d|2[0-3]):[0-5]\d$"
 
 DATE_RANGE_LABELS = {"today": "当天", "yesterday": "昨天"}
+
+# 自动日期口径的切换点：12:00。之前触发按上一个营业日（早上补发昨天的日报），
+# 之后按当前营业日（22:15 发当天）。挑 12 点是因为它落在午市与晚市之间——
+# 店里这个时刻既不在早上补数、也不在打烊后出数，改时间到这一侧才有意义。
+AUTO_DATE_SWITCH_HOUR = 12
+
+
+def auto_business_date_mode(now: "datetime") -> str:
+    """``auto_business_date`` 的内容类型按触发时间选日期口径（ADR 0144）。
+
+    返回 ``"today"`` / ``"yesterday"``，直接交给 ``resolve_report_dates``：
+    「最近一个已结束的营业日」在 22:15 就是当天，在早上 8 点就是昨天。
+    """
+    return "today" if now.hour >= AUTO_DATE_SWITCH_HOUR else "yesterday"
 
 # 每周触发的日子：值是 `date.weekday()`（周一 = 0 … 周日 = 6），与排班 / 月历同一套
 # 编号（`services/scheduling/store.py` 的 `days[].weekday`）。中文名只有这一处声明，
@@ -222,6 +244,44 @@ class ReconcileDiffScheduleParams(_ScheduleFormParams):
     schedule_time: str = _schedule_time_field("22:10")
 
 
+class DailyOpsReportParams(_FormParams):
+    """运营日报：推送时间 + 勾选模块（ADR 0144）。
+
+    **没有日期口径参数**：营业日由触发时间推断（``PushTopic.auto_business_date``）——
+    22:15 推当天、改成早上 8 点就推上一个营业日。多一个下拉只会多一个「忘了改」的坑，
+    而店长真正要选的是「这张日报里放哪几块」。
+
+    ``modules`` 的值就是 ``services/wecom_daily_ops.py`` 的模块 id；默认全勾（九个模块
+    全放进图里约 2600px 高，群里点开滚三屏）。缺数据的模块不会消失，折叠成一行小字，
+    所以「勾了但今天没数据」与「没勾」在图上分得清。
+    """
+
+    schedule_time: str = _schedule_time_field("22:15")
+    # 用 `default=` 而不是 `default_factory=`：参数表单的默认值取自 JSON Schema 的
+    # `default`（`defaultJobParams` 只认它），而 pydantic 的 `default_factory` 不会
+    # 出现在 schema 里 —— 用 factory 的话新建任务时九个模块一个都不勾。pydantic 校验
+    # 时会深拷贝可变默认值，两个实例不会共用同一个 list（有测试钉这条）。
+    modules: List[str] = Field(
+        default=list(DEFAULT_MODULES),
+        title="日报模块",
+        description="勾选要出现在日报里的模块；没有数据的模块会折叠成一行小字。",
+        json_schema_extra={
+            "x-ui-control": CONTROL_CHECKBOX_GROUP,
+            "items": {"oneOf": [{"const": key, "title": label} for key, label in MODULE_LABELS.items()]},
+        },
+    )
+
+    @field_validator("modules")
+    @classmethod
+    def _check_modules(cls, value: List[str]) -> List[str]:
+        unknown = [item for item in value if item not in MODULE_LABELS]
+        if unknown:
+            raise ValueError(f"未知的日报模块: {', '.join(unknown)}")
+        if not value:
+            raise ValueError("至少勾选一个日报模块")
+        return value
+
+
 class WeeklyScheduleParams(_FormParams):
     """下一周排班表：每周固定某一天推「从下一个周一开始」的那一周。
 
@@ -364,6 +424,7 @@ TOPIC_LEAVE_REQUEST = "leave_request"
 TOPIC_OVERTIME_REQUEST = "overtime_request"
 TOPIC_STAFF_MEAL_PURCHASE = "staff_meal_purchase"
 TOPIC_WORK_TASK = "work_task"
+TOPIC_DAILY_OPS_REPORT = "daily_ops_report"
 
 
 def _format_errors(exc: ValidationError) -> str:
@@ -393,6 +454,10 @@ class PushTopic:
     # 每周触发一次（不是每天）：调度循环按参数里的 ``weekday`` 过滤，只在那一周的那一天
     # 入队。别的定时内容类型照旧每天到点就推。
     weekly: bool = False
+    # 日期口径**不进参数**、由触发时间推断（运营日报，ADR 0144）：22 点档发当天，
+    # 店长把时间改到早上就发上一个营业日。这样页面上少一个下拉，而「早上发的日报
+    # 不该是空的」也不必靠店长记得改口径。
+    auto_business_date: bool = False
 
     def __post_init__(self) -> None:
         if not self.id:
@@ -605,6 +670,17 @@ register_topic(PushTopic(
 # 每周一次的下周排班表：周日 13:00 把「下周一那一周」所有人的班次推到群里。
 # 一周只触发一次由 `weekly` 声明，调度循环按参数里的 weekday 过滤（见
 # `WeComPushService.dispatch_due_jobs`）。
+# 运营日报：一天结束把「营收外的九块」拼成一张图（ADR 0144）。与销售报表分开成两类，
+# 因为受众不同（店长看经营面：订单、排班、加班补钟、卫生、数据质量），而且销售报表里
+# 有金额、日报明确不要金额——同一个内容类型做两个开关只会让参数含义随勾选变化。
+# 日期口径由触发时间推断（``auto_business_date``），所以这里没有 date_range_mode。
+register_topic(PushTopic(
+    id=TOPIC_DAILY_OPS_REPORT,
+    name="运营日报",
+    triggers=frozenset({PushTrigger.SCHEDULED}),
+    schedule_params_model=DailyOpsReportParams,
+    auto_business_date=True,
+))
 register_topic(PushTopic(
     id=TOPIC_WEEKLY_SCHEDULE,
     name="下周排班表",
