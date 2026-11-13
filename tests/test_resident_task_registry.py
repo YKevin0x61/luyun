@@ -43,7 +43,7 @@ class ResidentTaskAccountingTest(unittest.TestCase):
             main_module.RESIDENT_TASK_TOTAL,
             main_module.BUSINESS_LOOP_TASK_COUNT + main_module.AUXILIARY_RESIDENT_TASK_COUNT,
         )
-        self.assertEqual(main_module.RESIDENT_TASK_TOTAL, 12)
+        self.assertEqual(main_module.RESIDENT_TASK_TOTAL, 13)
         # 断言**内容集合**而不只是数量：标签是注册与关闭共用的键，少一个/写错一个字
         # 都会让某个常驻 task 在关闭时被当成业务循环 cancel，或反过来漏登记。
         self.assertEqual(
@@ -94,7 +94,7 @@ class ResidentTaskAccountingTest(unittest.TestCase):
         self.assertIn("asyncio.create_task(coro)", registry)
 
     def test_business_loops_are_all_registered_by_label(self):
-        """7 个业务循环的标签都在 lifespan 里出现过（登记就会带上标签）。"""
+        """8 个业务循环的标签都在 lifespan 里出现过（登记就会带上标签）。"""
         source = (REPO_ROOT / "main.py").read_text(encoding="utf-8")
         for label in (
             "卫生逾期调度",
@@ -104,24 +104,25 @@ class ResidentTaskAccountingTest(unittest.TestCase):
             "餐厅爬虫采集",
             "日终对账调度",
             "未映射菜品巡检",
+            "任务实例物化",
         ):
             self.assertIn(f'"{label}"', source, f"业务循环 {label} 没走登记入口")
 
-    def test_docs_do_not_claim_seven_is_everything(self):
-        """`7 个常驻` 这个失真口径必须消失；提到 7 时必须同时给出辅助 task 的口径。"""
+    def test_docs_do_not_claim_eight_is_everything(self):
+        """`8 个常驻` 这个失真口径必须消失；提到 8 时必须同时给出辅助 task 的口径。"""
         for path in DOC_FILES:
             if not path.exists():
                 continue
             text = path.read_text(encoding="utf-8")
             self.assertNotIn(
-                "7 个常驻",
+                "8 个常驻",
                 text,
-                f"{path.name} 仍在说「7 个常驻」（把辅助 task 漏掉了）",
+                f"{path.name} 仍在说「8 个常驻」（把辅助 task 漏掉了）",
             )
-            for match in re.finditer(r"7 个业务循环", text):
+            for match in re.finditer(r"8 个业务循环", text):
                 window = text[max(0, match.start() - 200) : match.end() + 200]
                 self.assertTrue(
-                    "辅助" in window or "12 个" in window,
+                    "辅助" in window or "13 个" in window,
                     f"{path.name} 提到「7 个业务循环」但同一段没给辅助 task 的口径：{window!r}",
                 )
 
