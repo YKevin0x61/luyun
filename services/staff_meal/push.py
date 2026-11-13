@@ -18,16 +18,18 @@
 去订阅页勾上这一项。
 
 推送状态不靠出队回调：读单时按当前的 `push_seq` 查出站行，映射成
-`pushing / pushed / failed`（见 `latest_push_status`）。这样不引入第二套状态机，
-出站表仍是投递事实的唯一来源。
+`scheduled / pushing / pushed / failed`（见 `latest_push_status`）。这样不引入第二套
+状态机，出站表仍是投递事实的唯一来源。
 """
 
 from __future__ import annotations
 
 import logging
 import re
+from datetime import datetime
 from typing import Iterable, Optional
 
+from db_core.utils import CHINA_TZ
 from services.wecom_outbox import PushTrigger, wecom_outbox
 from services.wecom_push_topics import TOPIC_STAFF_MEAL_PURCHASE
 
@@ -105,8 +107,12 @@ async def enqueue_purchase_push(
     updated: bool = False,
     submitter_name: str = "",
     remark: str = "",
+    scheduled_at: Optional[str] = None,
 ) -> list[int]:
-    """渲染并登记一次投递，返回出站行 id（零订阅 → 空列表）。"""
+    """渲染并登记一次投递，返回出站行 id（零订阅 → 空列表）。
+
+    ``scheduled_at`` 非空 = 定时版：出站行落 pending 并带上计划时刻，调度循环到点才发。
+    """
     text = render_purchase_text(
         order_date,
         rows,
@@ -121,6 +127,7 @@ async def enqueue_purchase_push(
         trigger=PushTrigger.EVENT,
         business_reference=build_business_reference(order_date, push_seq),
         summary=text.splitlines()[0],
+        scheduled_at=scheduled_at,
     )
     if not ids:
         logger.warning(
@@ -130,12 +137,19 @@ async def enqueue_purchase_push(
     return list(ids)
 
 
-def map_outbox_status(rows: Iterable[dict]) -> Optional[tuple[str, str]]:
+def map_outbox_status(
+    rows: Iterable[dict], now: Optional[datetime] = None
+) -> Optional[tuple[str, str]]:
     """出站行 → 单据上的推送状态；没有行时返回 None（保持库里原值）。
 
     - 任一行 failed → failed（带最后一条错误）；
+    - pending 行里还有 ``scheduled_at`` 晚于 ``now`` 的 → scheduled（等定时到点）；
     - 还有 pending / sending → pushing；
     - 其余（sent，或渠道停用被 skipped）→ pushed。
+
+    优先级 fixed：failed > scheduled > pushing > pushed —— 失败要让人看见，定时只是
+    「还没到点」，不能盖住失败。``now`` 缺省取墙上时钟；服务层读单时传 store 的时钟，
+    测试用假时钟。
     """
     items = list(rows)
     if not items:
@@ -149,13 +163,30 @@ def map_outbox_status(rows: Iterable[dict]) -> Optional[tuple[str, str]]:
                 if error:
                     break
         return "failed", error or "企业微信推送失败"
+    now_dt = now or datetime.now(CHINA_TZ)
+    for row in items:
+        if str(row.get("status") or "") != "pending":
+            continue
+        scheduled = str(row.get("scheduled_at") or "").strip()
+        if not scheduled:
+            continue
+        try:
+            due = datetime.fromisoformat(scheduled)
+        except ValueError:
+            continue
+        if due > now_dt:
+            return "scheduled", ""
     if any(status in {"pending", "sending"} for status in statuses):
         return "pushing", ""
     return "pushed", ""
 
 
 async def latest_push_status(
-    db, order_date: str, push_seq: int
+    db,
+    order_date: str,
+    push_seq: int,
+    *,
+    now: Optional[datetime] = None,
 ) -> Optional[tuple[str, str]]:
     """按当前这一版（`push_seq`）查出站状态；出站行已被清理时返回 None。"""
     if push_seq <= 0:
@@ -163,4 +194,4 @@ async def latest_push_status(
     rows = await db.wecom_outbox_for_business_reference(
         PURCHASE_REFERENCE_PREFIX, build_business_reference(order_date, push_seq)
     )
-    return map_outbox_status(rows)
+    return map_outbox_status(rows, now)

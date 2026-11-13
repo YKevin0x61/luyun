@@ -22,9 +22,10 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, time, timedelta
 from typing import Any, Mapping, Optional
 
+from db_core.utils import CHINA_TZ
 from services.staff_meal import push
 from services.staff_meal.menu_import import (
     FREEFORM_MARKER,
@@ -121,6 +122,23 @@ def _norm_updated_at(value: Any) -> Optional[str]:
         return datetime.fromisoformat(text).isoformat()
     except ValueError:
         return text
+
+
+def _planned_push_at(order_date: str, store: StaffMealStore) -> Optional[str]:
+    """这一版该在什么时候推：None = 立即，否则计划时刻 ISO（北京时）。
+
+    规则（`.scratch/wb-review/push-schedule-contract.md` §1）：使用日距今天 ≥ 2 天
+    时，定时到「使用日前一天 10:00」；今天 / 明天提交一律立即。计划时刻已经过去
+    （前一天 10 点后才补填的远期单）也立即推 —— 不能排一个已经到点的定时。
+    """
+    target = datetime.strptime(str(order_date), "%Y-%m-%d").date()
+    today = datetime.strptime(str(store.today()), "%Y-%m-%d").date()
+    if (target - today).days < 2:
+        return None
+    due = datetime.combine(target - timedelta(days=1), time(10, 0), tzinfo=CHINA_TZ)
+    if due <= store._now_dt():
+        return None
+    return due.isoformat()
 
 
 def _dishes_from_menu_row(row: Mapping[str, Any]) -> list[dict]:
@@ -257,14 +275,19 @@ class StaffMealService:
 
     # ── 读 ────────────────────────────────────────────────────
 
-    async def _with_push_state(self, db, order: dict) -> dict:
-        """推送中的单现读出站状态（读时不回写业务行）。"""
+    async def _with_push_state(
+        self, db, store: StaffMealStore, order: dict
+    ) -> dict:
+        """推送中 / 待定时的单现读出站状态（读时不回写业务行）。"""
         if (
-            str(order.get("push_status") or "") == "pushing"
+            str(order.get("push_status") or "") in ("pushing", "scheduled")
             and int(order.get("push_seq") or 0) > 0
         ):
             mapped = await push.latest_push_status(
-                db, str(order["order_date"]), int(order["push_seq"])
+                db,
+                str(order["order_date"]),
+                int(order["push_seq"]),
+                now=store._now_dt(),
             )
             if mapped is not None:
                 status, error = mapped
@@ -283,7 +306,7 @@ class StaffMealService:
         `actor` 给了就多带一个 `can_edit`（当前身份改不改得动这张单）—— 前端用它
         决定「编辑区是否只读」，判据与 `_require_order_write` 同一份。
         """
-        order = await self._with_push_state(db, order)
+        order = await self._with_push_state(db, store, order)
         if actor is not None:
             order = {**order, "can_edit": self._can_order_write(actor, order)}
         order_id = int(order["id"])
@@ -310,6 +333,14 @@ class StaffMealService:
         store = self._store(db)
         menu_days = await store.menu_days_month(year_month)
         orders = await store.orders_month(year_month)
+        # 待定时 / 推送中的单现读出站状态：10 点调度循环到点后，页面要立刻从
+        # 「待推送」翻成「推送中 / 已推送」，不能等下次提交才刷新。
+        refreshed = []
+        for order in orders:
+            if str(order.get("push_status") or "") in ("pushing", "scheduled"):
+                order = await self._with_push_state(db, store, order)
+            refreshed.append(order)
+        orders = refreshed
         counts = await store.item_counts_for_month(year_month)
         order_by_date = {str(order["order_date"]): order for order in orders}
         dates = sorted(set(order_by_date) | {str(day["menu_date"]) for day in menu_days})
@@ -329,12 +360,18 @@ class StaffMealService:
                     "push_error": order.get("push_error"),
                     "submitter_name": order.get("submitter_name"),
                     "submitted_at": order.get("submitted_at"),
+                    # 定时推送的计划时刻（None = 立即 / 已不是待定时）：月历格用它
+                    # 显示「待推送」与「等待 X 10:00 推送」。
+                    "planned_push_at": order.get("planned_push_at"),
                     "filled_items": counts.get(int(order["id"]), 0),
                 }
             days.append({"menu_day": menu_day, "order": brief})
         submitted = sum(1 for order in orders if str(order["status"]) == SUBMITTED)
         failed = sum(
             1 for order in orders if str(order.get("push_status") or "") == "failed"
+        )
+        scheduled = sum(
+            1 for order in orders if str(order.get("push_status") or "") == "scheduled"
         )
         return {
             "month": year_month,
@@ -344,6 +381,9 @@ class StaffMealService:
                 "orders": len(orders),
                 "submitted": submitted,
                 "draft": len(orders) - submitted,
+                # 等待定时推送的单数（使用日 ≥ 后天的已提交单）：摘要 / 首页
+                # 「待推送 N 张」用它（契约 §5）。
+                "scheduled": scheduled,
                 # 推送失败的单数：页面摘要「· 推送失败 N 张」与顶部提示用它，员工 /
                 # 超管不用逐格翻也知道有没有单没发到群里（S1）。
                 "failed": failed,
@@ -564,40 +604,73 @@ class StaffMealService:
         return await self.order_detail(db, store, order, actor)
 
     async def _push_submitted(
-        self, db, store: StaffMealStore, order: dict, *, updated: bool, actor: StaffMealActor
+        self,
+        db,
+        store: StaffMealStore,
+        order: dict,
+        *,
+        updated: bool,
+        actor: StaffMealActor,
+        planned_push_at: Optional[str] = None,
     ) -> dict:
-        """单据已是 submitted：加一次推送序号、入队、回写推送状态。"""
+        """单据已是 submitted：加一次推送序号、入队、回写推送状态。
+
+        ``planned_push_at`` 非空 = 这一版排定时（使用日 ≥ 后天的提交）：出站行落
+        pending 并带计划时刻，10 点前再改单会作废旧 pending、只留最新版。
+
+        入队前先作废这张单更早序号的 pending 行 —— 同一张单同一时刻只该有一版待发。
+        """
         order_id = int(order["id"])
         push_seq = await store.bump_push_seq(order_id)
+        push_status = "scheduled" if planned_push_at else "pushing"
         await store.update_order(
             order_id,
             {
                 "status": SUBMITTED,
-                "push_status": "pushing",
+                "push_status": push_status,
+                "planned_push_at": planned_push_at,
                 "push_error": None,
                 "pushed_at": None,
             },
         )
+        order_date = str(order["order_date"])
+        removed = await db.wecom_outbox_discard_pending(
+            push.PURCHASE_REFERENCE_PREFIX,
+            f"{push.PURCHASE_REFERENCE_PREFIX}:{order_date}:",
+        )
+        if removed:
+            logger.info("员工餐采购单 %s 作废旧待发 %s 条", order_date, removed)
         summary = await store.summary_rows(order_id)
         try:
             outbox_ids = await push.enqueue_purchase_push(
                 db,
-                order_date=str(order["order_date"]),
+                order_date=order_date,
                 push_seq=push_seq,
                 rows=summary,
                 updated=updated,
                 submitter_name=str(order.get("submitter_name") or ""),
                 remark=str(order.get("remark") or ""),
+                scheduled_at=planned_push_at,
             )
         except Exception:
             logger.exception("员工餐采购单 %s 推送入队失败", order["order_date"])
             await store.update_order(
-                order_id, {"push_status": "failed", "push_error": PUSH_ENQUEUE_ERROR}
+                order_id,
+                {
+                    "push_status": "failed",
+                    "push_error": PUSH_ENQUEUE_ERROR,
+                    "planned_push_at": None,
+                },
             )
             raise StaffMealError("push_failed", PUSH_ENQUEUE_ERROR)
         if not outbox_ids:
             await store.update_order(
-                order_id, {"push_status": "failed", "push_error": ZERO_SUBSCRIBE_ERROR}
+                order_id,
+                {
+                    "push_status": "failed",
+                    "push_error": ZERO_SUBSCRIBE_ERROR,
+                    "planned_push_at": None,
+                },
             )
         return await self.order_detail(
             db, store, await store.order_by_id(order_id) or order, actor
@@ -628,6 +701,8 @@ class StaffMealService:
                 "no_items", "至少填一项采购数量再提交（不买的行留空即可）"
             )
         first_submit = str(order.get("status") or DRAFT) != SUBMITTED
+        # 使用日 ≥ 后天 → 排到「使用日前一天 10:00」；今天 / 明天 / 已过点 → 立即推。
+        planned_push_at = _planned_push_at(str(order_date), store)
         order = await store.update_order(
             order["id"],
             {
@@ -637,7 +712,12 @@ class StaffMealService:
             },
         )
         detail = await self._push_submitted(
-            db, store, order, updated=not first_submit, actor=actor
+            db,
+            store,
+            order,
+            updated=not first_submit,
+            actor=actor,
+            planned_push_at=planned_push_at,
         )
         logger.info(
             "员工餐采购单 %s 提交（%s），操作者 %s",
@@ -656,7 +736,9 @@ class StaffMealService:
         self._require_order_write(actor, order)
         if str(order.get("status") or DRAFT) != SUBMITTED:
             raise StaffMealError("not_submitted", "草稿还没提交，先点提交")
-        return await self._push_submitted(db, store, order, updated=True, actor=actor)
+        return await self._push_submitted(
+            db, store, order, updated=True, actor=actor, planned_push_at=None
+        )
 
     async def delete_draft(self, db, actor: StaffMealActor, order_id: int) -> dict:
         """删草稿单（已提交不可删 —— Q11 不做作废）。"""

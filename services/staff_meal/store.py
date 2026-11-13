@@ -45,7 +45,7 @@ _MENU_DAY_COLUMNS = (
 _ORDER_COLUMNS = (
     'id, order_date, status, remark, submitter_employee_id, submitter_name,'
     ' submitted_at, push_status, pushed_at, push_error, push_seq,'
-    ' created_at, updated_at'
+    ' planned_push_at, created_at, updated_at'
 )
 _DISH_COLUMNS = 'id, order_id, dish_name, meal, role, sort_order, created_at'
 _ITEM_COLUMNS = (
@@ -77,6 +77,8 @@ ORDER_WRITE_FIELDS = (
     "push_status",
     "pushed_at",
     "push_error",
+    # 定时推送的计划时刻（NULL = 立即推）；迁移 0055 加的列。
+    "planned_push_at",
 )
 
 

@@ -237,6 +237,16 @@ function nextMonthOf(dateText) {
 }
 
 /**
+ * 定时推送时间：后端给北京 ISO（`2026-11-16T10:00:00+08:00`）→ `11-16 10:00`。
+ *
+ * 直接截 ISO，不经过 `Date`：手机时区不一定在东八区，转一道反而可能差一天。
+ */
+function plannedPushClock(raw) {
+  const match = String(raw || '').match(/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})/)
+  return match ? `${match[2]}-${match[3]} ${match[4]}:${match[5]}` : ''
+}
+
+/**
  * 今天这张员工餐单的状态：今天没有菜单 / 未填 / 草稿 / 已提交 / 推送失败。
  *
  * 判据跟月历、单日页同一套（`StaffMealView` 的 `cellClass`）：已提交看 `push_status`，
@@ -253,6 +263,11 @@ function staffMealRow(data) {
   if (order.status === 'submitted') {
     if (order.push_status === 'failed') {
       return { text: '推送失败', led: 'bad', detail: order.push_error || '' }
+    }
+    if (order.push_status === 'scheduled') {
+      // 定时推：员工要知道「已提交」之外还排到了哪天几点，不然会以为已经发进群了。
+      const due = plannedPushClock(order.planned_push_at)
+      return { text: due ? `已提交 · ${due} 推` : '已提交 · 等待推送', led: 'ok' }
     }
     return { text: '已提交', led: 'ok' }
   }

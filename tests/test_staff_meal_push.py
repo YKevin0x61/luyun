@@ -14,6 +14,8 @@
 某一行（「清远鸡 3只」）切成两半。
 """
 
+from datetime import datetime
+
 from services.staff_meal.push import (
     build_business_reference,
     format_quantity,
@@ -214,3 +216,23 @@ def test_outbox_status_mapping():
     assert map_outbox_status(
         [{"status": "sent"}, {"status": "failed", "last_error": "超时"}]
     ) == ("failed", "超时")
+
+
+def test_outbox_status_mapping_distinguishes_scheduled():
+    """pending + 未来的 scheduled_at → scheduled；到点 / 无计划 → pushing（契约 §5）。"""
+    now = datetime.fromisoformat("2026-11-13T10:00:00+08:00")
+    future = {"status": "pending", "scheduled_at": "2026-11-14T10:00:00+08:00"}
+    due_now = {"status": "pending", "scheduled_at": "2026-11-13T10:00:00+08:00"}
+    past = {"status": "pending", "scheduled_at": "2026-11-12T10:00:00+08:00"}
+
+    assert map_outbox_status([future], now) == ("scheduled", "")
+    assert map_outbox_status([due_now], now) == ("pushing", "")
+    assert map_outbox_status([past], now) == ("pushing", "")
+    # 没到点也不能盖住失败：失败优先级最高，页面要让店长看见「没发出去」。
+    assert map_outbox_status(
+        [future, {"status": "failed", "last_error": "webhook 401"}], now
+    ) == ("failed", "webhook 401")
+    # 已发成功的一版即使 scheduled_at 还写着未来时刻，也按已推处理。
+    assert map_outbox_status(
+        [{"status": "sent", "scheduled_at": "2026-11-14T10:00:00+08:00"}], now
+    ) == ("pushed", "")

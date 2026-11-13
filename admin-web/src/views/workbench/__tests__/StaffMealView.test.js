@@ -7,9 +7,11 @@ import { createPinia, setActivePinia } from 'pinia'
 import StaffMealView, {
   AUTO_SAVE_DEBOUNCE_MS,
   cellBadgeText,
+  cellBadgeTitle,
   clockText,
   draftWithItemsInfo,
   firstFailedDate,
+  formatPlannedPush,
   parseDateQuery,
   shortDate,
   staffMonthSummary,
@@ -318,9 +320,29 @@ describe('员工餐页 · 月历徽章与失败单 / 导入预览', () => {
     expect(cellBadgeText({ menu_day: {} })).toBe('')
     expect(cellBadgeText({ order: { status: 'submitted', push_status: 'pushed' } })).toBe('已提交')
     expect(cellBadgeText({ order: { status: 'submitted', push_status: 'failed' } })).toBe('推送失败')
+    expect(cellBadgeText({ order: { status: 'submitted', push_status: 'scheduled' } })).toBe('待推送')
     expect(cellBadgeText({ order: { status: 'draft', filled_items: 3 } })).toBe('已填 · 3 项')
     expect(cellBadgeText({ order: { status: 'draft', filled_items: 0 } })).toBe('草稿')
     expect(cellBadgeText({ order: { status: 'draft' } })).toBe('草稿')
+  })
+
+  it('定时推送：月历格子写「待推送」，title 给完整时间；非定时单没有 title', () => {
+    expect(formatPlannedPush('2026-11-16T10:00:00+08:00')).toBe('11-16 10:00')
+    expect(formatPlannedPush('2026-11-16 10:00:00')).toBe('11-16 10:00')
+    expect(formatPlannedPush(null)).toBe('')
+    expect(formatPlannedPush('')).toBe('')
+    expect(formatPlannedPush('不是时间')).toBe('')
+
+    expect(
+      cellBadgeTitle({
+        order: { status: 'submitted', push_status: 'scheduled', planned_push_at: '2026-11-16T10:00:00+08:00' },
+      })
+    ).toBe('等待 11-16 10:00 推送')
+    expect(
+      cellBadgeTitle({ order: { status: 'submitted', push_status: 'scheduled', planned_push_at: null } })
+    ).toBe('等待推送')
+    expect(cellBadgeTitle({ order: { status: 'submitted', push_status: 'pushed' } })).toBe('')
+    expect(cellBadgeTitle(null)).toBe('')
   })
 
   it('firstFailedDate 取最早一张推失败的单（兼容缺 order_date）', () => {
@@ -415,6 +437,35 @@ describe('员工餐页 · 月历（失败可见 / 今天 / 身份口径）', () 
     // 术语：页面不再出现裸「管理员 / 店长」。
     expect(wrapper.text()).not.toMatch(/(?<!超级)管理员/)
     expect(wrapper.text()).not.toContain('店长')
+  })
+
+  it('定时推送：摘要带待推送张数，格子上是「待推送」+ 完整时间的 title', async () => {
+    const { wrapper } = await mountView({
+      identity: 'super',
+      fetchOptions: {
+        month: {
+          month: MONTH,
+          days: [
+            {
+              menu_day: menuDay(TODAY),
+              order: order({
+                order_date: TODAY,
+                status: 'submitted',
+                push_status: 'scheduled',
+                planned_push_at: '2026-11-16T10:00:00+08:00',
+                filled_items: 2,
+              }),
+            },
+          ],
+          summary: { days: 1, orders: 1, submitted: 1, draft: 0, scheduled: 1 },
+        },
+      },
+    })
+
+    expect(wrapper.get('.sm-sub').text()).toContain('待推送 1 张')
+    const badge = wrapper.get('.sm-cell-badge')
+    expect(badge.text()).toBe('待推送')
+    expect(badge.attributes('title')).toBe('等待 11-16 10:00 推送')
   })
 
   it('点失败提示直接打开第一张失败单，并在单日头show失败原因', async () => {
@@ -555,6 +606,84 @@ describe('员工餐页 · 单日流程（S3 重推确认 / S5 只读文案 / F14
     ])
   })
 
+  it('提交后推送还在路上：文案说清是「正在推送」，不写成排到那天', async () => {
+    const { wrapper } = await mountView({
+      identity: 'super',
+      path: directPath(),
+      fetchOptions: {
+        days: { [TODAY]: draftDay() },
+        submit: ({ date }) =>
+          jsonResponse({
+            ...draftDay(),
+            order: order({
+              order_date: date,
+              status: 'submitted',
+              push_status: 'pushing',
+            }),
+          }),
+      },
+    })
+
+    await findButton(wrapper, '提交并推送到核心群').trigger('click')
+    await flushPromises()
+    await flushPromises()
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('已提交，正在推送到核心群（几秒内发出）')
+    expect(wrapper.text()).not.toContain('排队')
+  })
+
+  it('已提交的定时单：单日头写「等待 MM-DD HH:MM 推送」，主按钮仍是保存修改', async () => {
+    const scheduled = dayPayload(TODAY, {
+      order: order({
+        order_date: TODAY,
+        status: 'submitted',
+        push_status: 'scheduled',
+        planned_push_at: '2026-11-16T10:00:00+08:00',
+        submitter_name: '张三',
+        filled_items: 2,
+      }),
+    })
+    const { wrapper } = await mountView({
+      identity: 'super',
+      path: directPath(),
+      fetchOptions: { days: { [TODAY]: scheduled } },
+    })
+
+    const push = wrapper.get('.sm-push')
+    expect(push.text()).toBe('等待 11-16 10:00 推送')
+    expect(push.classes()).toContain('push-scheduled')
+    expect(findButton(wrapper, '保存修改').classes()).toContain('sm-btn-primary')
+  })
+
+  it('提交后是定时推送：flash 写明哪天几点推，不说成正在推送', async () => {
+    const { wrapper } = await mountView({
+      identity: 'super',
+      path: directPath(),
+      fetchOptions: {
+        days: { [TODAY]: draftDay() },
+        submit: ({ date }) =>
+          jsonResponse({
+            ...draftDay(),
+            order: order({
+              order_date: date,
+              status: 'submitted',
+              push_status: 'scheduled',
+              planned_push_at: '2026-11-16T10:00:00+08:00',
+            }),
+          }),
+      },
+    })
+
+    await findButton(wrapper, '提交并推送到核心群').trigger('click')
+    await flushPromises()
+    await flushPromises()
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('已提交，将在 11-16 10:00 推送到核心群')
+    expect(wrapper.text()).not.toContain('正在推送到核心群')
+  })
+
   it('别人的单：只读 banner 说「只有提交者本人或超级管理员能改」', async () => {
     const locked = dayPayload(TODAY, {
       order: order({
@@ -640,7 +769,7 @@ describe('员工餐页 · 过去日只能存草稿（S6）', () => {
       },
     })
 
-    const submit = findButton(wrapper, '提交并推送到核心群')
+    const submit = findButton(wrapper, '已过期，不能提交')
     expect(submit.attributes('disabled')).toBeDefined()
     expect(wrapper.text()).toContain('这天已经过去了：草稿还能改，但不能再提交或推送')
 
@@ -724,6 +853,40 @@ describe('员工餐页 · 草稿自动保存（S8）', () => {
 
       expect(putCalls(fetchMock)).toHaveLength(0)
       expect(wrapper.find('.sm-autosave').exists()).toBe(false)
+    },
+    15000
+  )
+
+  it(
+    '自动保存成功不回填表单：新加的空行还在、正在输入的值不被冲掉',
+    async () => {
+      const { wrapper, fetchMock } = await mountView({
+        identity: 'staff',
+        path: directPath(),
+        fetchOptions: { days: { [TODAY]: draftDay() } },
+      })
+
+      const dishCard = () => wrapper.findAll('.sm-dish')[0]
+      // 点「+ 加食材」：2 条历史食材 + 1 条空行。
+      await dishCard().findAll('.sm-add')[0].trigger('click')
+      await flushPromises()
+      expect(dishCard().findAll('.sm-row')).toHaveLength(3)
+
+      // 2 秒后自动保存触发：旧实现会用服务端数据整份回填，把空行冲掉（用户报的 bug）。
+      await new Promise((resolve) => setTimeout(resolve, AUTO_SAVE_DEBOUNCE_MS + 300))
+      await flushPromises()
+      await flushPromises()
+      expect(putCalls(fetchMock)).toHaveLength(1)
+      expect(dishCard().findAll('.sm-row')).toHaveLength(3)
+
+      // 空行里正在输入的内容也要留着（再走一轮自动保存）。
+      await dishCard().findAll('.sm-row')[2].find('.sm-name').setValue('香菜')
+      await new Promise((resolve) => setTimeout(resolve, AUTO_SAVE_DEBOUNCE_MS + 300))
+      await flushPromises()
+      await flushPromises()
+      const nameInput = dishCard().findAll('.sm-row')[2].find('.sm-name')
+      expect(nameInput.element.value).toBe('香菜')
+      expect(putCalls(fetchMock).length).toBeGreaterThanOrEqual(2)
     },
     15000
   )

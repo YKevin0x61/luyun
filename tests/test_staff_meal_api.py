@@ -14,7 +14,8 @@
 """
 
 import asyncio
-from datetime import datetime
+import itertools
+from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import quote
 
@@ -70,6 +71,15 @@ def staff_meal_http(tmp_path, monkeypatch):
     # 「提交 11-12 的单」在 11-13 变成过期单，测试会随运行日期漂移。
     monkeypatch.setattr(
         StaffMealStore, "today", lambda self: FIXED_NOW.date().isoformat()
+    )
+    # 计划时刻（push schedule）用 store 自己的时钟判「是否已过 10 点」，不只 today：
+    # 真实挂钟与夹具日期不一致会把「11-13 提交」判成已过点、错走立即推。
+    # 每次读前进 1 秒：定时判定仍稳定，同时 updated_at 会推进（乐观锁用例依赖）。
+    ticks = itertools.count(1)
+    monkeypatch.setattr(
+        StaffMealStore,
+        "_now_dt",
+        lambda self: FIXED_NOW + timedelta(seconds=next(ticks)),
     )
 
     app = FastAPI()
@@ -183,7 +193,7 @@ def _submit(client, order_date):
 def _outbox(db):
     async def _scenario():
         cursor = await db._conn.execute(
-            "SELECT id, topic_id, status, idempotency_key, params_json"
+            "SELECT id, topic_id, status, idempotency_key, params_json, scheduled_at"
             " FROM wecom_push_outbox ORDER BY id"
         )
         return [dict(row) for row in await cursor.fetchall()]
@@ -842,3 +852,195 @@ def test_bad_parameters_get_readable_errors(staff_meal_http):
         data={"year": "2026", "month": "11"},
     )
     assert not_excel.status_code == 400
+
+
+# ── 定时推送（`.scratch/wb-review/push-schedule-contract.md`） ─────────────
+
+
+def _fill_and_submit(client, order_date):
+    """填一项「其他采购项」并提交，返回单据详情（不依赖当天菜单里的菜）。"""
+    saved = _save(
+        client, order_date, [{"item_name": "土豆", "quantity": 1, "unit": "斤"}]
+    )
+    assert saved.status_code == 200, saved.text
+    submitted = _submit(client, order_date)
+    assert submitted.status_code == 200, submitted.text
+    return submitted.json()["order"]
+
+
+def test_submit_schedules_far_days_and_pushes_soon_ones(staff_meal_http):
+    """今天 / 明天提交立即推；≥ 后天排到使用日前一天 10:00（契约 §1/§2/§5）。"""
+    client, db, _accounts = staff_meal_http
+    _admin_cookie(client)
+    assert _import(client).status_code == 200
+    _subscribe_meal_topic(db)
+
+    today = _fill_and_submit(client, "2026-11-11")
+    assert today["push_status"] == "pushing"
+    assert today["planned_push_at"] is None
+
+    tomorrow = _fill_and_submit(client, "2026-11-12")
+    assert tomorrow["push_status"] == "pushing"
+    assert tomorrow["planned_push_at"] is None
+
+    day_after = _fill_and_submit(client, "2026-11-13")
+    assert day_after["push_status"] == "scheduled"
+    assert day_after["planned_push_at"] == "2026-11-12T10:00:00+08:00"
+
+    far = _fill_and_submit(client, "2026-11-17")
+    assert far["push_status"] == "scheduled"
+    assert far["planned_push_at"] == "2026-11-16T10:00:00+08:00"
+
+    # 出站行按计划落 scheduled_at：待发行的 10:00 由调度循环把守，不发就是不发。
+    scheduled_rows = {
+        row["idempotency_key"].split(":")[2]: row
+        for row in _outbox(db)
+        if row["scheduled_at"]
+    }
+    assert set(scheduled_rows) == {"2026-11-13", "2026-11-17"}
+    assert (
+        scheduled_rows["2026-11-13"]["scheduled_at"]
+        == "2026-11-12T10:00:00+08:00"
+    )
+    assert (
+        scheduled_rows["2026-11-17"]["scheduled_at"]
+        == "2026-11-16T10:00:00+08:00"
+    )
+    immediate_rows = [row for row in _outbox(db) if row["scheduled_at"] is None]
+    assert {row["idempotency_key"].split(":")[2] for row in immediate_rows} == {
+        "2026-11-11",
+        "2026-11-12",
+    }
+
+    # 月历摘要与 brief 要带得出「待推送」：页面据此显示「待推送 N 张」。
+    month = client.get("/api/staff-meal/months/2026-11").json()
+    assert month["summary"]["scheduled"] == 2
+    briefs = {
+        day["order"]["order_date"]: day["order"]
+        for day in month["days"]
+        if day["order"] is not None
+    }
+    assert briefs["2026-11-13"]["planned_push_at"] == "2026-11-12T10:00:00+08:00"
+    assert briefs["2026-11-17"]["planned_push_at"] == "2026-11-16T10:00:00+08:00"
+    assert briefs["2026-11-11"]["planned_push_at"] is None
+    assert briefs["2026-11-13"]["push_status"] == "scheduled"
+
+    day = _day(client, "2026-11-13")
+    assert day["order"]["push_status"] == "scheduled"
+
+
+def test_fill_on_day_before_after_ten_is_immediate(staff_meal_http, monkeypatch):
+    """使用日前一天 10 点后才补填的远期单：计划时刻已过，立即推（契约 §1/§6）。"""
+    client, db, _accounts = staff_meal_http
+    _admin_cookie(client)
+    assert _import(client).status_code == 200
+    _subscribe_meal_topic(db)
+
+    later = datetime(2026, 11, 12, 11, 0, tzinfo=CHINA_TZ)
+    monkeypatch.setattr(StaffMealStore, "today", lambda self: "2026-11-12")
+    monkeypatch.setattr(StaffMealStore, "_now_dt", lambda self: later)
+
+    order = _fill_and_submit(client, "2026-11-13")
+    assert order["push_status"] == "pushing"
+    assert order["planned_push_at"] is None
+
+
+def test_draft_stays_unpushed_until_submitted_after_ten(
+    staff_meal_http, monkeypatch
+):
+    """到点仍是草稿不推；10 点后一提交立即推（契约 §6）。"""
+    client, db, _accounts = staff_meal_http
+    _admin_cookie(client)
+    assert _import(client).status_code == 200
+    _subscribe_meal_topic(db)
+
+    later = datetime(2026, 11, 16, 10, 30, tzinfo=CHINA_TZ)
+    monkeypatch.setattr(StaffMealStore, "today", lambda self: "2026-11-16")
+    monkeypatch.setattr(StaffMealStore, "_now_dt", lambda self: later)
+
+    draft = _day(client, "2026-11-17")
+    assert draft["order"]["status"] == "draft"
+    assert _outbox(db) == [], "草稿不该有出站行，到点也不推"
+
+    order = _fill_and_submit(client, "2026-11-17")
+    assert order["push_status"] == "pushing"
+    assert order["planned_push_at"] is None
+
+
+def test_resubmit_before_ten_replaces_pending_schedule(staff_meal_http):
+    """10 点前反复改单：旧待发行作废，只留最新一版 scheduled（契约 §4/§6）。"""
+    client, db, _accounts = staff_meal_http
+    _admin_cookie(client)
+    assert _import(client).status_code == 200
+    _subscribe_meal_topic(db)
+
+    first = _fill_and_submit(client, "2026-11-17")
+    assert first["push_status"] == "scheduled"
+    first_rows = _outbox(db)
+    assert len(first_rows) == 1
+    assert first_rows[0]["scheduled_at"] == "2026-11-16T10:00:00+08:00"
+
+    second = _fill_and_submit(client, "2026-11-17")
+    assert second["push_status"] == "scheduled"
+    rows = _outbox(db)
+    assert len(rows) == 1, "旧 pending 行应被作废，同一张单只留一版待发"
+    assert rows[0]["idempotency_key"].startswith(
+        "staff_meal_purchase:staff_meal_purchase:2026-11-17:2:"
+    )
+    assert rows[0]["scheduled_at"] == "2026-11-16T10:00:00+08:00"
+
+
+def test_resubmit_after_due_is_immediate(staff_meal_http, monkeypatch):
+    """10 点后改单：旧待发行作废，新一版立即推（标题「（更新）」）。"""
+    client, db, _accounts = staff_meal_http
+    _admin_cookie(client)
+    assert _import(client).status_code == 200
+    _subscribe_meal_topic(db)
+
+    first = _fill_and_submit(client, "2026-11-17")
+    assert first["push_status"] == "scheduled"
+    assert len(_outbox(db)) == 1
+
+    later = datetime(2026, 11, 16, 10, 30, tzinfo=CHINA_TZ)
+    monkeypatch.setattr(StaffMealStore, "today", lambda self: "2026-11-16")
+    monkeypatch.setattr(StaffMealStore, "_now_dt", lambda self: later)
+
+    second = _fill_and_submit(client, "2026-11-17")
+    assert second["push_status"] == "pushing"
+    assert second["planned_push_at"] is None
+    rows = _outbox(db)
+    assert len(rows) == 1
+    assert rows[0]["idempotency_key"].startswith(
+        "staff_meal_purchase:staff_meal_purchase:2026-11-17:2:"
+    )
+    assert rows[0]["scheduled_at"] is None
+
+
+def test_retry_push_is_immediate_and_clears_plan(staff_meal_http):
+    """手动重试永远立即：失败单的 planned_push_at 清空，新行不带 scheduled_at（契约 §3）。"""
+    client, db, _accounts = staff_meal_http
+    _admin_cookie(client)
+    assert _import(client).status_code == 200
+
+    first = _fill_and_submit(client, "2026-11-17")
+    assert first["push_status"] == "failed"
+    assert first["planned_push_at"] is None
+    assert _outbox(db) == []
+
+    _subscribe_meal_topic(db)
+    retried = client.post(f"/api/staff-meal/orders/{first['id']}/retry-push")
+    assert retried.status_code == 200, retried.text
+    order = retried.json()["order"]
+    assert order["push_status"] == "pushing"
+    assert order["planned_push_at"] is None
+
+    rows = _outbox(db)
+    assert len(rows) == 1
+    assert rows[0]["idempotency_key"].startswith(
+        "staff_meal_purchase:staff_meal_purchase:2026-11-17:2:"
+    )
+    assert rows[0]["scheduled_at"] is None
+
+    month = client.get("/api/staff-meal/months/2026-11").json()
+    assert month["summary"]["scheduled"] == 0
+    assert month["summary"]["failed"] == 0

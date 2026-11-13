@@ -226,6 +226,30 @@ describe('工作台首页 · 员工档的员工餐状态行', () => {
     expect(wrapper.get('.wbh-meal-state').text()).toBe('已提交')
   })
 
+  it('定时推送（scheduled）：说清哪天几点推，不写成已经发出去了', async () => {
+    const { wrapper } = await mountHome({
+      identity: 'staff',
+      table: staffData({
+        [`/api/staff-meal/days/${NATURAL_DAY}`]: mealDay({
+          order: {
+            id: 7,
+            order_date: NATURAL_DAY,
+            status: 'submitted',
+            push_status: 'scheduled',
+            planned_push_at: '2026-11-16T10:00:00+08:00',
+          },
+          summary: [{ name: '鸡蛋', unit: '个', quantity: 30 }],
+        }),
+      }),
+    })
+
+    const row = wrapper.get('.wbh-meal')
+    expect(row.get('.wbh-meal-state').text()).toBe('已提交 · 11-16 10:00 推')
+    // 还没到推送时间，不能有「推送失败」那句小字。
+    expect(row.find('.wbh-meal-detail').exists()).toBe(false)
+    expect(row.attributes('href')).toBe(`/workbench/kitchen/staff-meal?date=${NATURAL_DAY}`)
+  })
+
   it('404（今天没有菜单）：这一行仍然在，说清楚是没有菜单，也照样能点进页面', async () => {
     const { wrapper } = await mountHome({
       identity: 'staff',

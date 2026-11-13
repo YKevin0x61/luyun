@@ -57,6 +57,17 @@ export function shortDate(text) {
   return match ? `${match[1]}-${match[2]}` : ''
 }
 
+/**
+ * 定时推送时间给页面看：后端给北京 ISO（`2026-11-16T10:00:00+08:00`）→ `11-16 10:00`。
+ *
+ * 直接截 ISO 的日期/钟点，不经过 `Date`：手机时区不一定在东八区，转一道反而可能差一天；
+ * 后端字段本来就是北京时间，展示要跟它一致。
+ */
+export function formatPlannedPush(raw) {
+  const match = String(raw || '').match(/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})/)
+  return match ? `${match[2]}-${match[3]} ${match[4]}:${match[5]}` : ''
+}
+
 /** S9：导入预览里「已经填过东西的草稿」→ `{ count, dates }`（后端没这个字段时是 0 张）。 */
 export function draftWithItemsInfo(preview) {
   const items = preview?.draft_with_items
@@ -110,11 +121,21 @@ export function firstFailedDate(days = []) {
   return dates[0] || ''
 }
 
+/** 定时推送的完整说明（月历格子的 title）：`等待 11-16 10:00 推送`。 */
+export function cellBadgeTitle(row) {
+  if (!row?.order || row.order.push_status !== 'scheduled') return ''
+  const due = formatPlannedPush(row.order.planned_push_at)
+  return due ? `等待 ${due} 推送` : '等待推送'
+}
+
 /** 月历格子的小字：草稿只写「草稿」分不出「没人动过」，填过东西就写「已填 · N 项」。 */
 export function cellBadgeText(row) {
   if (!row || !row.order) return ''
   if (row.order.status === 'submitted') {
-    return row.order.push_status === 'failed' ? '推送失败' : '已提交'
+    if (row.order.push_status === 'failed') return '推送失败'
+    // 定时单已经提交、只是还没到推送时间：格子上要能跟「已推」区分开。
+    if (row.order.push_status === 'scheduled') return '待推送'
+    return '已提交'
   }
   const filled = Number(row.order.filled_items || 0)
   return filled > 0 ? `已填 · ${filled} 项` : '草稿'
@@ -227,6 +248,21 @@ const menuForm = reactive({
 })
 const deleteConfirm = ref(false)
 
+// 单位选择：不用原生 <select>（手机上原生 picker 会从底部盖住半屏、也跟工作台视觉不一致），
+// 改成底部弹层 + 流式按钮，点一下即选即关。unitPicker 存的是「正在改的那一行」的引用。
+const unitPicker = ref(null)
+function openUnitPicker(row) {
+  if (!dayEditable.value) return
+  unitPicker.value = row
+}
+function pickUnit(unit) {
+  if (unitPicker.value) unitPicker.value.unit = unit
+  unitPicker.value = null
+}
+function closeUnitPicker() {
+  unitPicker.value = null
+}
+
 // 导入
 const fileInput = ref(null)
 const importState = ref(null) // { file, preview } | null
@@ -241,6 +277,8 @@ const monthTitle = computed(() => {
 const summary = computed(() => monthData.value.summary || {})
 // 后端 `summary.failed` 是并行加的字段：老后端没有这个键时按 0 算（S1）。
 const pushFailedCount = computed(() => Number(summary.value.failed ?? 0) || 0)
+// 定时推送（使用日 ≥ 后天）的待推送张数：老后端没有这个键时按 0 算。
+const scheduledCount = computed(() => Number(summary.value.scheduled ?? 0) || 0)
 // 顶部提示点进去要落到「第一张失败单」：按日期取最早那张。
 const failedDate = computed(() => firstFailedDate(monthData.value.days || []))
 // 员工（非超管）看到的摘要口径：今天填没填 + 本月还差几天（S2）。
@@ -273,6 +311,13 @@ const canAutoSave = computed(
 const isPastDay = computed(
   () => Boolean(dayDate.value) && dayDate.value < today
 )
+// 过去日提交按钮置灰，原因直接写在按钮上：不再单独占一行提示，吸底只剩动作。
+const primaryLabel = computed(() => {
+  if (isSubmitted.value) {
+    return isPastDay.value ? '已过期，不能再推送' : '更新并重新推送'
+  }
+  return isPastDay.value ? '已过期，不能提交' : '提交并推送到核心群'
+})
 // S10：模板按月生成（30 天的月份、2 月天数不用再手删列），年月从当前查看的月份带给后端。
 const templateHref = computed(() => {
   const [year, month] = monthValue.value.split('-')
@@ -291,9 +336,15 @@ const submittedLabel = computed(() => {
   return match ? `${match[1]} ${match[2]}` : text
 })
 
-const pushLabel = computed(() =>
-  order.value ? PUSH_LABELS[order.value.push_status] || '' : ''
-)
+// 定时推送的单：状态还是「待推送」，但要显示排到什么时候，所以不放进静态表。
+const pushLabel = computed(() => {
+  if (!order.value) return ''
+  if (order.value.push_status === 'scheduled') {
+    const due = formatPlannedPush(order.value.planned_push_at)
+    return due ? `等待 ${due} 推送` : '等待推送'
+  }
+  return PUSH_LABELS[order.value.push_status] || ''
+})
 const dayTitle = computed(() => {
   if (!dayDate.value) return ''
   const [year, month, day] = dayDate.value.split('-').map(Number)
@@ -339,6 +390,11 @@ const calendarCells = computed(() => {
 
 function cellBadge(row) {
   return cellBadgeText(row)
+}
+
+// 模板只能读 setup 作用域的绑定；普通 <script> 的导出要包一层才能进模板。
+function cellTitle(row) {
+  return cellBadgeTitle(row)
 }
 
 function cellClass(row) {
@@ -570,6 +626,14 @@ async function saveDraft({ silent = false } = {}) {
       // 请求期间已经切到别的天了：这份回执不能往回写，免得把新一天的界面盖了。
       return null
     }
+    if (silent) {
+      // 后台自动保存只同步单据头（updated_at / 推送状态），绝不回填表单：
+      // 回填会把用户刚点出来还没填的空行、以及正在敲的内容一起冲掉（实测点「加食材」后
+      // 约 2 秒空行消失、没法继续输入）。空行只是本地草稿，本来也不进库。
+      dayData.value = { ...(dayData.value || {}), order: data.order }
+      syncedSignature = editSignature()
+      return data
+    }
     if (editSignature() === signature) {
       applyDay(data)
     } else {
@@ -653,6 +717,27 @@ watch(
   { deep: true }
 )
 
+let pushPollTimer = 0
+/**
+ * 推送是异步入队的：提交/重试后过几秒静默拉一次单日，把「正在推送」换成真实结果
+ * （已推送 / 失败原因）。只更新 order，不回填表单，免得冲掉正在敲的内容。
+ */
+function schedulePushStatusRefresh() {
+  window.clearTimeout(pushPollTimer)
+  pushPollTimer = window.setTimeout(async () => {
+    const date = dayDate.value
+    if (!date || view.value !== 'day') return
+    try {
+      const data = await api.get(`/api/staff-meal/days/${date}`)
+      if (dayDate.value === date && data.order) {
+        dayData.value = { ...(dayData.value || {}), order: data.order }
+      }
+    } catch {
+      /* 静默：状态刷新失败不影响主流程 */
+    }
+  }, 4000)
+}
+
 async function submitOrder() {
   repushConfirm.value = false
   if (!dayDate.value || !dayEditable.value) return
@@ -675,7 +760,16 @@ async function submitOrder() {
     if (status === 'failed') {
       flash(data.order?.push_error || '提交成功，但推送没发出去', 'error')
     } else if (status === 'pushing') {
-      flash(wasSubmitted ? '已重新排队推送（改完重推会带「（更新）」）' : '提交成功，已排队推送到核心群')
+      flash(
+        wasSubmitted
+          ? '已提交，正在把完整清单重新推送到核心群（带「（更新）」）'
+          : '已提交，正在推送到核心群（几秒内发出）'
+      )
+      schedulePushStatusRefresh()
+    } else if (status === 'scheduled') {
+      // 定时单：提交成功但不会马上发，必须把「什么时候发」写清楚，否则员工以为已经进群了。
+      const due = formatPlannedPush(data.order?.planned_push_at)
+      flash(due ? `已提交，将在 ${due} 推送到核心群` : '已提交，将在计划时间推送到核心群')
     } else {
       flash(wasSubmitted ? '这张单已推送（改后重推会带「（更新）」）' : '提交成功，已推送到核心群')
     }
@@ -723,11 +817,15 @@ async function retryPush() {
       `/api/staff-meal/orders/${order.value.id}/retry-push`
     )
     applyDay(data)
-    flash(
-      data.order?.push_status === 'failed'
-        ? data.order?.push_error || '还是没发出去'
-        : '已重新排队推送'
-    )
+    if (data.order?.push_status === 'failed') {
+      flash(data.order?.push_error || '还是没发出去', 'error')
+    } else if (data.order?.push_status === 'scheduled') {
+      const due = formatPlannedPush(data.order?.planned_push_at)
+      flash(due ? `已重新提交，将在 ${due} 推送到核心群` : '已重新提交，将在计划时间推送到核心群')
+    } else {
+      flash('已重新提交，正在推送')
+      schedulePushStatusRefresh()
+    }
   } catch (err) {
     flash(err.message || '重试推送失败', 'error')
   } finally {
@@ -877,6 +975,10 @@ onMounted(() => {
 onBeforeUnmount(() => {
   // 组件卸载（关页 / 切路由）时把挂着的改动补存一次，别让最后两秒的输入丢掉。
   flushAutoSaveNow()
+  if (pushPollTimer) {
+    window.clearTimeout(pushPollTimer)
+    pushPollTimer = 0
+  }
   if (noticeTimer) {
     window.clearTimeout(noticeTimer)
     noticeTimer = 0
@@ -912,9 +1014,10 @@ onBeforeUnmount(() => {
               本月 {{ summary.days || 0 }} 天 · 已提交 {{ summary.submitted || 0 }} 张
               <template v-if="summary.draft"> · 草稿 {{ summary.draft }} 张</template>
               <template v-if="pushFailedCount"> · 推送失败 {{ pushFailedCount }} 张</template>
+              <template v-if="scheduledCount"> · 待推送 {{ scheduledCount }} 张</template>
             </template>
             <template v-else>
-              {{ staffSummary.text }}<template v-if="pushFailedCount"> · 推送失败 {{ pushFailedCount }} 张</template>
+              {{ staffSummary.text }}<template v-if="pushFailedCount"> · 推送失败 {{ pushFailedCount }} 张</template><template v-if="scheduledCount"> · 待推送 {{ scheduledCount }} 张</template>
             </template>
           </p>
         </div>
@@ -972,7 +1075,7 @@ onBeforeUnmount(() => {
             <span v-if="cell.row?.order?.submitter_name" class="sm-cell-who">
               {{ cell.row.order.submitter_name }}
             </span>
-            <span v-if="cellBadge(cell.row)" class="sm-cell-badge">
+            <span v-if="cellBadge(cell.row)" class="sm-cell-badge" :title="cellTitle(cell.row) || undefined">
               {{ cellBadge(cell.row) }}
             </span>
           </template>
@@ -1013,6 +1116,9 @@ onBeforeUnmount(() => {
           {{ menuFormOpen ? '收起' : '改菜单' }}
         </button>
       </header>
+
+      <!-- 过去日只能存草稿：状态说明放页头，不占吸底 -->
+      <p v-if="isPastDay" class="sm-banner sm-banner-soft">{{ PAST_DAY_HINT }}</p>
 
       <p v-if="notice" class="sm-notice" :class="'is-' + noticeKind" role="status">
         {{ notice }}
@@ -1114,16 +1220,15 @@ onBeforeUnmount(() => {
                 placeholder="数量"
                 :disabled="!dayEditable"
               />
-              <select
-                v-model="row.unit"
-                class="sm-input sm-unit"
+              <button
+                type="button"
+                class="sm-input sm-unit sm-unit-btn"
                 :disabled="!dayEditable"
+                :aria-label="'选择单位，当前 ' + (row.unit || '未选')"
+                @click="openUnitPicker(row)"
               >
-                <option value="">单位</option>
-                <option v-for="unit in meta.units" :key="unit" :value="unit">
-                  {{ unit }}
-                </option>
-              </select>
+                {{ row.unit || '单位' }}
+              </button>
               <button
                 v-if="dayEditable"
                 class="sm-icon"
@@ -1175,12 +1280,15 @@ onBeforeUnmount(() => {
                 placeholder="数量"
                 :disabled="!dayEditable"
               />
-              <select v-model="row.unit" class="sm-input sm-unit" :disabled="!dayEditable">
-                <option value="">单位</option>
-                <option v-for="unit in meta.units" :key="unit" :value="unit">
-                  {{ unit }}
-                </option>
-              </select>
+              <button
+                type="button"
+                class="sm-input sm-unit sm-unit-btn"
+                :disabled="!dayEditable"
+                :aria-label="'选择单位，当前 ' + (row.unit || '未选')"
+                @click="openUnitPicker(row)"
+              >
+                {{ row.unit || '单位' }}
+              </button>
               <button
                 v-if="dayEditable"
                 class="sm-icon"
@@ -1210,16 +1318,24 @@ onBeforeUnmount(() => {
             </p>
           </section>
 
+          <!-- 推送口径滚到底看一次就够，不放进吸底（吸底只留动作） -->
+          <p class="sm-hint sm-push-note">
+            推送按「食材 + 单位」汇总，同食材不同单位分两行；标题带日期，改后重推带「（更新）」。
+          </p>
+
+          <!-- 危险操作不放吸底：跟主按钮挨着容易误触，滚到底才看到 -->
+          <div v-if="isAdmin && !isSubmitted" class="sm-danger-zone">
+            <button class="sm-link sm-danger" @click="deleteDraft">
+              {{ deleteConfirm ? '再点一次确认删除' : '删除这张草稿单' }}
+            </button>
+            <p class="sm-hint">删掉后这天就没有采购单了；菜单还在，重新导入会再建。</p>
+          </div>
+
           <footer class="sm-actions">
-            <p class="sm-hint">
-              推送按「食材 + 单位」汇总，同食材不同单位分两行；标题带日期，改后重推带「（更新）」。
-            </p>
             <!-- S8：草稿自动保存的回执（2s 防抖，只在真存成功后出现） -->
             <p v-if="dayEditable && !isSubmitted && autoSavedAt" class="sm-autosave">
               已自动保存 {{ autoSavedAt }}
             </p>
-            <!-- 过去日只能存草稿：按钮置灰，别等点了才被后端 409 拒 -->
-            <p v-if="isPastDay" class="sm-hint">{{ PAST_DAY_HINT }}</p>
             <div class="sm-actions-row">
               <button
                 v-if="dayEditable"
@@ -1237,7 +1353,7 @@ onBeforeUnmount(() => {
                 :disabled="busy || isPastDay"
                 @click="onPrimaryAction"
               >
-                {{ isSubmitted ? '更新并重新推送' : '提交并推送到核心群' }}
+                {{ primaryLabel }}
               </button>
               <button
                 v-if="dayEditable && order?.push_status === 'failed'"
@@ -1248,13 +1364,6 @@ onBeforeUnmount(() => {
                 重试推送
               </button>
             </div>
-            <button
-              v-if="isAdmin && !isSubmitted"
-              class="sm-link sm-danger"
-              @click="deleteDraft"
-            >
-              {{ deleteConfirm ? '再点一次确认删除' : '删除这张草稿单' }}
-            </button>
           </footer>
         </template>
       </template>
@@ -1320,6 +1429,37 @@ onBeforeUnmount(() => {
               {{ busy ? '推送中…' : '确定，更新并重新推送' }}
             </button>
           </div>
+        </div>
+      </div>
+    </Teleport>
+
+    <!-- 单位选择：底部弹层（替代原生 select；点一下即选即关） -->
+    <Teleport to="body">
+      <div
+        v-if="unitPicker"
+        class="sm-scrim sm-scrim-bottom"
+        @click.self="closeUnitPicker"
+      >
+        <div class="sm-sheet" role="dialog" aria-modal="true" aria-label="选择单位">
+          <div class="sm-sheet-head">
+            <h2>选择单位</h2>
+            <button class="sm-icon" aria-label="关闭" @click="closeUnitPicker">×</button>
+          </div>
+          <div class="sm-sheet-grid">
+            <button
+              v-for="unit in meta.units"
+              :key="unit"
+              type="button"
+              class="sm-sheet-opt"
+              :class="{ 'is-active': unitPicker.unit === unit }"
+              @click="pickUnit(unit)"
+            >
+              {{ unit }}
+            </button>
+          </div>
+          <button type="button" class="sm-sheet-clear" @click="pickUnit('')">
+            不填单位
+          </button>
         </div>
       </div>
     </Teleport>
@@ -1458,6 +1598,10 @@ onBeforeUnmount(() => {
 .sm-push.push-pushed {
   color: var(--ok);
 }
+/* 定时单：已提交但还没发，用提醒色跟「已推送」区分。 */
+.sm-push.push-scheduled {
+  color: var(--warn);
+}
 .sm-push-error {
   font-size: 11.5px;
   color: var(--danger-bright);
@@ -1477,6 +1621,15 @@ onBeforeUnmount(() => {
   margin: 0;
   font-size: 12px;
   color: var(--ink-dim);
+}
+.sm-danger-zone {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+  text-align: center;
+}
+.sm-danger-zone .sm-hint {
+  margin-top: 4px;
 }
 .sm-autosave {
   margin: 0;
@@ -1767,11 +1920,14 @@ onBeforeUnmount(() => {
   z-index: var(--z-tabbar);
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  margin-top: 14px;
-  padding: 10px 0 calc(6px + var(--safe-b));
+  gap: 6px;
+  margin-top: 10px;
+  padding: 8px 0 calc(4px + var(--safe-b));
   background: var(--surface-0);
   border-top: 1px solid var(--line);
+}
+.sm-push-note {
+  margin: 10px 0 2px;
 }
 .sm-actions-row {
   display: flex;
@@ -1865,6 +2021,72 @@ onBeforeUnmount(() => {
 }
 .sm-dialog-actions .sm-btn-primary {
   flex: 0 0 auto;
+}
+/* 单位选择：底部弹层（替代原生 select，手机上不再弹系统选择器） */
+.sm-scrim-bottom {
+  align-items: flex-end;
+  padding: 0;
+}
+.sm-sheet {
+  width: 100%;
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 14px 16px calc(14px + var(--safe-b));
+  border-radius: 16px 16px 0 0;
+  background: var(--surface-0);
+  color: var(--ink);
+  box-shadow: 0 -12px 36px var(--scrim);
+}
+.sm-sheet-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+.sm-sheet-head h2 {
+  margin: 0;
+  font-size: 16px;
+}
+.sm-sheet-grid {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 8px;
+}
+.sm-sheet-opt {
+  min-height: 44px;
+  border-radius: 10px;
+  border: 1px solid var(--line-strong);
+  background: var(--surface-2);
+  color: var(--ink);
+  font-size: 15px;
+  font-family: inherit;
+  cursor: pointer;
+}
+.sm-sheet-opt.is-active {
+  border-color: var(--accent);
+  background: var(--wb-ok-a10);
+  color: var(--accent);
+  font-weight: 600;
+}
+.sm-sheet-clear {
+  width: 100%;
+  min-height: 44px;
+  margin-top: 10px;
+  border-radius: 10px;
+  border: 1px dashed var(--line-strong);
+  background: transparent;
+  color: var(--ink-dim);
+  font-size: 14px;
+  font-family: inherit;
+  cursor: pointer;
+}
+.sm-unit-btn {
+  appearance: none;
+  text-align: left;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 @media (max-width: 720px) {
   .sm-actions {

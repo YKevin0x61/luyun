@@ -334,6 +334,7 @@ export const COLUMN_LABELS = {
   'staff_meal_orders.submitter_name': '提交人', 'staff_meal_orders.submitted_at': '提交时间',
   'staff_meal_orders.push_status': '推送状态', 'staff_meal_orders.pushed_at': '推送时间',
   'staff_meal_orders.push_error': '推送失败原因', 'staff_meal_orders.push_seq': '推送序号',
+  'staff_meal_orders.planned_push_at': '计划推送时刻',
   'staff_meal_orders.created_at': '创建时间', 'staff_meal_orders.updated_at': '更新时间',
   'staff_meal_order_dishes.order_id': '采购单ID', 'staff_meal_order_dishes.dish_name': '菜名',
   'staff_meal_order_dishes.meal': '餐次', 'staff_meal_order_dishes.role': '菜品位置',
