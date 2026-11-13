@@ -77,7 +77,7 @@ async def _seed_lines(db, lines):
                     created_at, updated_at)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
-                    f"flow-{index}",
+                    str(row.get("business_flow_id") or f"flow-{index}"),
                     row["table_number"],
                     row["dish_name"],
                     row["quantity"],
@@ -459,4 +459,226 @@ def test_v3_export_validates_before_the_real_report_layer(db):
     ), response.headers
     assert "类型,名称,档口/岗位" in body
     assert "虾饺" in body
+
+
+# ── 2026-11-13 页面审查修复：账单数 / 口径统一 ──────────────────────────────
+
+
+def test_bill_count_is_distinct_business_flow_prefix(db):
+    """「订单数」用账单数（business_flow_id 前缀去重），不是菜品行数。"""
+    _run(
+        _seed_lines(
+            db,
+            [
+                {"dish_name": "虾饺", "order_time": _ts(2026, 5, 2, 12, 0), "business_flow_id": "B1_虾饺_001"},
+                {"dish_name": "烧卖", "order_time": _ts(2026, 5, 2, 12, 1), "business_flow_id": "B1_烧卖_002"},
+                {"dish_name": "凤爪", "order_time": _ts(2026, 5, 2, 12, 2), "business_flow_id": "B1_凤爪_003"},
+                {"dish_name": "叉烧包", "order_time": _ts(2026, 5, 2, 13, 0), "business_flow_id": "B2_叉烧包_001"},
+            ],
+        )
+    )
+
+    summary = _run(db.reports.compute_sales_report(BIZ_DATE, BIZ_DATE))["summary"]
+
+    assert summary["total_order_lines"] == 4, summary
+    assert summary["total_bills"] == 2, summary
+    assert summary["total_orders"] == 4, "旧字段 total_orders 仍保留行数语义"
+
+
+def test_bill_count_ignores_refund_lines(db):
+    """退菜行不应把账单算成营业单。"""
+    _run(
+        _seed_lines(
+            db,
+            [
+                {"dish_name": "虾饺", "order_time": _ts(2026, 5, 2, 12, 0), "business_flow_id": "B1_虾饺_001"},
+                {
+                    "dish_name": "虾饺",
+                    "order_time": _ts(2026, 5, 2, 12, 5),
+                    "business_flow_id": "B1_虾饺_002",
+                    "quantity": -1,
+                    "total_amount": -10.0,
+                    "status": "已退",
+                },
+            ],
+        )
+    )
+
+    summary = _run(db.reports.compute_sales_report(BIZ_DATE, BIZ_DATE))["summary"]
+
+    assert summary["total_bills"] == 1, summary
+
+
+def test_dish_order_count_ignores_refund_lines(db):
+    """每道菜的 order_count 是有效行数：退菜行会让「单数 > 份数」，审查 R43。"""
+    _run(
+        _seed_lines(
+            db,
+            [
+                {"dish_name": "虾饺", "order_time": _ts(2026, 5, 2, 12, 0), "business_flow_id": "B1_虾饺_001"},
+                {
+                    "dish_name": "虾饺",
+                    "order_time": _ts(2026, 5, 2, 12, 5),
+                    "business_flow_id": "B1_虾饺_002",
+                    "quantity": 0,
+                    "total_amount": 0,
+                    "status": "退菜",
+                },
+            ],
+        )
+    )
+
+    report = _run(db.reports.compute_sales_report(BIZ_DATE, BIZ_DATE))
+    dish = report["dish_sales"][0]
+    assert dish["qty"] == 1, dish
+    assert dish["order_count"] == 1, dish
+    # 旧字段 total_orders 保留行数语义（含退菜行），与 order_count 不是同一个口径。
+    assert report["summary"]["total_orders"] == 2, report["summary"]
+
+
+def test_all_scope_includes_the_floor_and_default_excludes_it(db):
+    """`all` 是全店（含楼面）；不传 station 是厨房口径（排除楼面）。"""
+    _run(
+        _seed_lines(
+            db,
+            [
+                {
+                    "dish_name": "招牌手工点心2人餐",
+                    "order_time": _ts(2026, 5, 2, 12, 0),
+                    "station": "loumian",
+                    "business_flow_id": "C1_套餐_001",
+                    "total_amount": 100.0,
+                    "price": 100.0,
+                },
+                {
+                    "dish_name": "虾饺",
+                    "order_time": _ts(2026, 5, 2, 12, 0),
+                    "station": "steamer",
+                    "business_flow_id": "C2_虾饺_001",
+                },
+            ],
+        )
+    )
+
+    kitchen = _run(db.reports.compute_sales_report(BIZ_DATE, BIZ_DATE))
+    full = _run(db.reports.compute_sales_report(BIZ_DATE, BIZ_DATE, "all"))
+    floor = _run(db.reports.compute_sales_report(BIZ_DATE, BIZ_DATE, "loumian"))
+
+    assert kitchen["scope"] == "kitchen" and kitchen["excluded_stations"] == ["loumian"]
+    assert kitchen["summary"]["total_bills"] == 1 and kitchen["summary"]["total_revenue"] == 10.0
+    assert full["scope"] == "full" and full["excluded_stations"] == []
+    assert full["summary"]["total_bills"] == 2 and full["summary"]["total_revenue"] == 110.0
+    assert floor["scope"] == "station"
+    assert floor["summary"]["total_bills"] == 1 and floor["summary"]["total_revenue"] == 100.0
+
+
+def test_summary_and_trend_use_the_same_scope(db):
+    """同一档口口径下，汇总金额 = 走势图金额（修复前默认相差楼面）。"""
+    _run(
+        _seed_lines(
+            db,
+            [
+                {
+                    "dish_name": "套餐",
+                    "order_time": _ts(2026, 5, 2, 19, 0),
+                    "station": "loumian",
+                    "business_flow_id": "D1_套餐_001",
+                    "total_amount": 100.0,
+                    "price": 100.0,
+                },
+                {
+                    "dish_name": "虾饺",
+                    "order_time": _ts(2026, 5, 2, 12, 0),
+                    "station": "steamer",
+                    "business_flow_id": "D2_虾饺_001",
+                },
+            ],
+        )
+    )
+
+    for station, expected in ((None, 10.0), ("all", 110.0)):
+        report = _run(db.reports.compute_sales_report(BIZ_DATE, BIZ_DATE, station))
+        trend = _run(db.reports.aggregate_sales_trend(BIZ_DATE, BIZ_DATE, "day", station))
+        assert report["summary"]["total_revenue"] == expected, (station, report["summary"])
+        assert sum(row["revenue"] for row in trend) == expected, (station, trend)
+        assert sum(row["bills"] for row in trend) == report["summary"]["total_bills"]
+
+
+def test_unique_dishes_counts_names_not_station_pairs(db):
+    """同一道菜出现在两个档口，菜品数按菜名算 1，档口-菜品对仍是 2。"""
+    _run(
+        _seed_lines(
+            db,
+            [
+                {
+                    "dish_name": "虾饺",
+                    "order_time": _ts(2026, 5, 2, 12, 0),
+                    "station": "steamer",
+                    "business_flow_id": "E1_虾饺_001",
+                },
+                {
+                    "dish_name": "虾饺",
+                    "order_time": _ts(2026, 5, 2, 12, 0),
+                    "station": "mingdang1",
+                    "business_flow_id": "E2_虾饺_001",
+                },
+            ],
+        )
+    )
+
+    summary = _run(db.reports.compute_sales_report(BIZ_DATE, BIZ_DATE))["summary"]
+
+    assert summary["unique_dishes"] == 1, summary
+    assert summary["dish_station_pairs"] == 2, summary
+
+
+# ── 2026-11-13 页面审查修复：非法日期在 API 层就是 4xx，不再 500 ─────────────
+
+
+def _api_client(db, router):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from database import get_db
+
+    app = FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[get_db] = lambda: db
+    return TestClient(app)
+
+
+def test_sales_report_api_rejects_impossible_date_with_400():
+    from api import orders as orders_api
+
+    response = _api_client(_StubDb(), orders_api.router).get(
+        "/api/orders/sales-report", params={"start_date": "2026-02-30"}
+    )
+
+    assert response.status_code == 400, response.text
+    assert "start_date" in response.text
+
+
+def test_sales_report_api_rejects_malformed_or_missing_date_with_422():
+    from api import orders as orders_api
+
+    client = _api_client(_StubDb(), orders_api.router)
+
+    malformed = client.get("/api/orders/sales-report", params={"start_date": "不是日期"})
+    assert malformed.status_code == 422, malformed.text
+    assert "start_date" in malformed.text
+
+    missing = client.get("/api/orders/sales-report")
+    assert missing.status_code == 422, missing.text
+
+
+def test_sales_trend_api_rejects_impossible_date_with_400():
+    from api import analytics as analytics_api
+
+    response = _api_client(_StubDb(), analytics_api.router).get(
+        "/api/analytics/sales-trend",
+        params={"start_date": "2026-02-30", "end_date": BIZ_DATE},
+    )
+
+    assert response.status_code == 400, response.text
+    assert "start_date" in response.text
 

@@ -39,10 +39,19 @@ _PATTERNS = (
 
 
 def normalize_dish_name(name) -> str:
-    """归一化菜品名称，返回去除装饰前后缀后的规范名。"""
+    """归一化菜品名称，返回去除装饰前后缀后的规范名。
+
+    前缀可以叠加（如 ``(外卖)(普通)xxx``），单趟按固定顺序替换只剥掉一层，
+    另一层会留在 key 里导致换算规则匹配不上（审查 R39）。这里循环到不再变化，
+    并用轮数上限兜底，避免未来加入能互相生成的模式时死循环。
+    """
     text = str(name) if name is not None else ''
-    for pattern, repl in _PATTERNS:
-        text = pattern.sub(repl, text)
+    for _ in range(8):
+        before = text
+        for pattern, repl in _PATTERNS:
+            text = pattern.sub(repl, text)
+        if text == before:
+            break
     return text.strip()
 
 

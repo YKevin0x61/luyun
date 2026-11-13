@@ -24,6 +24,7 @@ from db_core.tables_repo import _TablesRepoMixin
 from db_core.dish_stations_repo import _DishStationsRepoMixin
 from db_core.semi_rules_repo import _SemiRulesRepoMixin
 from db_core.report_dishes_repo import _ReportDishesRepoMixin
+from db_core.refund_records_repo import _RefundRecordsRepoMixin
 from db_core.settings_repo import _SettingsRepoMixin
 from db_core.wecom_repo import _WecomRepoMixin
 from db_core.wecom_subscriptions_repo import _WecomSubscriptionsRepoMixin
@@ -65,6 +66,7 @@ class DatabaseManager(
     _DishStationsRepoMixin,
     _SemiRulesRepoMixin,
     _ReportDishesRepoMixin,
+    _RefundRecordsRepoMixin,
     _SettingsRepoMixin,
     _WecomRepoMixin,
     _WecomSubscriptionsRepoMixin,
@@ -86,6 +88,7 @@ class DatabaseManager(
     - _DishStationsRepoMixin: 菜品档口映射的集合式操作
     - _SemiRulesRepoMixin: 半成品换算规则
     - _ReportDishesRepoMixin: 固定报表菜品
+    - _RefundRecordsRepoMixin: 退菜明细（商龙退单同步，迁移 0056）
     - _SettingsRepoMixin: 应用运行配置（app_settings 键值表）
     - _WecomRepoMixin: 企业微信推送 webhook/任务/日志
     - _WecomSubscriptionsRepoMixin: 推送订阅 / 渠道群组与成员 / 出站记录（迁移 0016）

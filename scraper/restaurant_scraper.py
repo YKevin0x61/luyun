@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional
 from scraper._common import CHINA_TZ, ScraperSessionError
 from scraper.delivery_bill_tracker import DeliveryBillTracker
 from scraper.pos_session import PosSession
+from scraper.refund_tracker import RefundTracker, _DisabledRefunds
 from scraper.state_store import ScraperStateStore
 from scraper.table_change_detector import TableChangeDetector
 from scraper.yintai_session import YintaiSession
@@ -106,10 +107,12 @@ class RestaurantScraper:
             self.session = YintaiSession(dish_catalog, logger=self.logger)
             # 外卖/已结账单仍绑定 cy7mm 会话，移动银台下用占位实现（第一步范围）
             self.delivery = _DisabledDelivery(self.logger)
+            self.refunds = _DisabledRefunds(self.logger)
             self.logger.info("🔌 采集数据源：移动银台 Pro（HTTP，无浏览器；外卖暂未接入）")
         else:
             self.session = PosSession(dish_catalog, logger_=self.logger)
             self.delivery = DeliveryBillTracker(self.session, self.state, logger_=self.logger)
+            self.refunds = RefundTracker(self.session, logger_=self.logger)
             self.logger.info("🔌 采集数据源：cy7mm（Playwright）")
         self.tables = TableChangeDetector(self.session, self.state, logger_=self.logger)
 
@@ -352,6 +355,13 @@ class RestaurantScraper:
             await realtime_hub.broadcast_nudge(
                 "orders", {"count": len(delivery_orders), "source": "delivery"}
             )
+
+        # 退菜明细（cy7mm 异常汇总-退单）：自己按 5 分钟节流，失败只记日志 ——
+        # 这是报表的一手数据，不是 KDS 的实时链路，不能因为它拖停采集。
+        try:
+            await self.refunds.sync(db)
+        except Exception as exc:  # noqa: BLE001 - 退菜同步失败不影响本轮采集
+            self.logger.warning("⚠️ 退菜明细同步失败（不影响采集）: %s", exc)
 
         cancel_changes = self.last_delivery_cancel_count
         if cancel_changes:

@@ -24,6 +24,7 @@ from models import (
     FloorOrderIdsRequest,
 )
 from database import DatabaseManager, get_db, ensure_beijing_datetime, ConflictError
+from api.date_params import DATE_PATTERN, require_valid_date
 from services.kds_orders import complete_cooking as kds_complete_cooking
 from services.kds_orders import load_steamer as kds_load_steamer
 from services.kds_orders import move_steamer as kds_move_steamer
@@ -479,20 +480,24 @@ async def search_orders(
 
 @router.get("/sales-report")
 async def get_sales_report(
-    start_date: str = Query(..., description="开始日期 YYYY-MM-DD"),
-    end_date: str   = Query(None, description="结束日期 YYYY-MM-DD，默认同开始日期"),
+    start_date: str = Query(..., pattern=DATE_PATTERN, description="开始日期 YYYY-MM-DD"),
+    end_date: Optional[str] = Query(None, pattern=DATE_PATTERN, description="结束日期 YYYY-MM-DD，默认同开始日期"),
     station: Optional[str] = Query(None, description="档口筛选"),
     db: DatabaseManager = Depends(get_db)
 ):
     """基于数据库订单计算销售报表（含菜品销量和半成品用量）"""
+    if end_date is None:
+        end_date = start_date
+    # 形状由 pattern 挡（422），日历上不存在的日期在这里挡（400）。
+    # 必须在 try 之前：HTTPException 会被下面的 except Exception 吞成 500。
+    require_valid_date(start_date, "start_date")
+    require_valid_date(end_date, "end_date")
     try:
-        if end_date is None:
-            end_date = start_date
         result = await db.reports.compute_sales_report(start_date, end_date, station)
         return {"success": True, **result}
     except Exception as e:
         logger.error(f"销售报表计算失败: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="销售报表计算失败")
 
 
 async def _notify_orders_completed(stations: List[str]) -> None:

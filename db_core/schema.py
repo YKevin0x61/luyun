@@ -28,6 +28,10 @@ ALL_TABLES = [
     # 客流/翻台按小时汇总（迁移 0050，票 10）：桌台快照的派生指标，给备货复盘当
     # 「为什么备多/备少」的解释信号。
     "dining_traffic",
+    # 退菜明细（迁移 0056）：商龙云「异常汇总 → 退单」的菜品级数据，由
+    # scraper/refund_tracker.py 同步。订单表里的软取消行仍按实时口径服务 KDS 与
+    # 备货，这张表只给销售报表的退菜明细用，两边互不写回。
+    "refund_records",
     "wecom_push_webhooks",
     "wecom_push_jobs",
     "wecom_push_logs",

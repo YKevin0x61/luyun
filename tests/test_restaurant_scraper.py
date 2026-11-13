@@ -40,6 +40,9 @@ class RestaurantScraperCycleTests(unittest.IsolatedAsyncioTestCase):
         scraper.tables = MagicMock()
         scraper.delivery = MagicMock()
         scraper.delivery.last_delivery_cancel_count = 0
+        # 退菜明细同步也在 run_cycle 里（独立失败、不影响采集）。
+        scraper.refunds = MagicMock()
+        scraper.refunds.sync = AsyncMock(return_value=0)
         scraper.ensure_ready = AsyncMock(return_value=True)
         scraper.scrape_delivery_orders = AsyncMock(return_value=[])
         return scraper
@@ -83,6 +86,9 @@ class RestaurantScraperCycleTests(unittest.IsolatedAsyncioTestCase):
         scraper.tables = MagicMock()
         scraper.delivery = MagicMock()
         scraper.delivery.last_delivery_cancel_count = 0
+        # 退菜明细同步也在 run_cycle 里（独立失败、不影响采集）。
+        scraper.refunds = MagicMock()
+        scraper.refunds.sync = AsyncMock(return_value=0)
 
         scraper.ensure_ready = AsyncMock(return_value=True)
         scraper.scrape_table_data = AsyncMock(return_value=[{"table": "A1"}])
