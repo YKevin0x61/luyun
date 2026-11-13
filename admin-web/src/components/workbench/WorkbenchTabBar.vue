@@ -18,6 +18,7 @@ import { computed, onMounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { useNudgePull } from '../../composables/useNudgePull'
 import { useSchedulingPendingStore } from '../../stores/schedulingPending'
+import { useTaskPendingStore } from '../../stores/taskPending'
 import { useWorkbenchIdentityStore } from '../../stores/workbenchIdentity'
 import { IDENTITY_ADMIN } from '../../utils/workbenchIdentity'
 import { workbenchGroupOf, workbenchNavFor } from '../../utils/workbenchNav'
@@ -68,6 +69,27 @@ useNudgePull({
 // 另一台设备上提的假」补进来（那件事不会给本机发 nudge）。
 watch(() => route.path, refreshPending)
 
+/** 「任务」这一格的角标（票 07）：管理端会话读任务板的待验收数。员工会话不读 ——
+ *  任务板接口对员工是 403，员工端的任务数在首页自己那张卡上。 */
+const taskPendingStore = useTaskPendingStore()
+const canBadgeTasks = computed(() => identity.value === IDENTITY_ADMIN)
+
+function refreshTaskPending() {
+  if (!isPhoneWidth() || !canBadgeTasks.value) return
+  void taskPendingStore.refresh()
+}
+
+onMounted(refreshTaskPending)
+watch(canBadgeTasks, (can) => { if (can) refreshTaskPending() })
+// 任务动了（发布 / 提交 / 验收 / 撤回）：任务格的角标跟着动。
+useNudgePull({
+  id: 'workbench-tabbar-tasks',
+  topics: ['tasks'],
+  pull: refreshTaskPending,
+  fallback: false,
+})
+watch(() => route.path, refreshTaskPending)
+
 /** 一格一组（与顶栏同一个抽屉顺序）。表里同 key 的多条链接（后勤两扇门）在这里只留
  *  第一条当落点，标签仍用**组名**。 */
 const cells = computed(() => {
@@ -78,12 +100,17 @@ const cells = computed(() => {
       seen.set(item.key, { key: item.key, label: item.label, to: item.to })
     }
   }
-  const list = [...seen.values()]
-  if (!canApprove.value || !pendingStore.hasPending) return list
-  // 有待批：这一格改成待办页，并带上条数（角标）。
-  return list.map((cell) => (cell.key === 'hr'
-    ? { ...cell, to: INBOX_PATH, badge: pendingStore.count }
-    : cell))
+  return [...seen.values()].map((cell) => {
+    // 人事：有待批时这一格改成待办页，并带上条数（角标）。
+    if (cell.key === 'hr' && canApprove.value && pendingStore.hasPending) {
+      return { ...cell, to: INBOX_PATH, badge: pendingStore.count, badgeLabel: '条待批' }
+    }
+    // 任务：有待验收时标数字（落点不变，还是任务页）。
+    if (cell.key === 'tasks' && canBadgeTasks.value && taskPendingStore.hasPending) {
+      return { ...cell, badge: taskPendingStore.count, badgeLabel: '条待验收' }
+    }
+    return cell
+  })
 })
 
 /** 图标：手写的 21px 描边 SVG（同一支笔：1.7 的线宽、圆头圆角）。
@@ -126,6 +153,15 @@ const ICONS = {
     'M12 11.4a3.4 3.4 0 1 0 0-6.8 3.4 3.4 0 0 0 0 6.8z',
     'M5.2 20c0-3.2 3-5.4 6.8-5.4s6.8 2.2 6.8 5.4',
   ],
+  // 任务：清单 + 三个勾 —— 派下去的事、做完打勾（2026-11-11 新增的一级格）
+  tasks: [
+    'M4.6 6.6 5.8 7.8l2-2.2',
+    'M10.4 6.7h9',
+    'M4.6 11.8 5.8 13l2-2.2',
+    'M10.4 11.9h9',
+    'M4.6 17 5.8 18.2l2-2.2',
+    'M10.4 17.1h9',
+  ],
 }
 </script>
 
@@ -157,7 +193,7 @@ const ICONS = {
         <span
           v-if="cell.badge"
           class="wb-tab-badge"
-          :aria-label="`${cell.badge} 条待批`"
+          :aria-label="`${cell.badge} ${cell.badgeLabel || '条待批'}`"
         >{{ cell.badge > 99 ? '99+' : cell.badge }}</span>
       </span>
       <span class="wb-tab-label">{{ cell.label }}</span>

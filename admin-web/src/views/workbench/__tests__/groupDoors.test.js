@@ -13,6 +13,8 @@ import { PREP_ITEMS_PATH } from '../../../utils/prepItemPaths.js'
 import { PREP_RULES_PATH } from '../../../utils/prepRulePaths.js'
 import { RECIPE_HOME_PATH } from '../../../utils/recipePaths.js'
 import { WASTAGE_ANALYSIS_PATH } from '../../../utils/wastagePaths.js'
+import { STAFF_MEAL_PATH } from '../../../utils/staffMealPaths.js'
+import { TASKS_HOME_PATH } from '../../../utils/tasksPaths.js'
 import { workbenchPagesOf } from '../../../utils/workbenchNav.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -145,6 +147,8 @@ describe('人事壳（工作台级导航 + 本组四页）', () => {
     expect(hrefs).toEqual([
       WORKBENCH_HOME, WORKBENCH_HR_HOME, WORKBENCH_FIELD_HOME,
       RECIPE_HOME_PATH, PREP_PLAN_PATH, PREP_REVIEW_PATH, PREP_RULES_PATH, PREP_ITEMS_PATH, WASTAGE_ANALYSIS_PATH,
+      STAFF_MEAL_PATH,
+      TASKS_HOME_PATH,
     ])
     expect(wrapper.find(`.wb-nav-item[href="${WORKBENCH_HOME}"]`).exists()).toBe(true)
     // ③-2：组内页挪到左 rail（统一壳一处渲染），它自己的条数 = 本组可见页数。
@@ -242,6 +246,8 @@ describe('现场壳（rail 八项 + 内容区顶上的工作台级导航）', ()
     expect(hrefs).toEqual([
       WORKBENCH_HOME, WORKBENCH_HR_HOME, WORKBENCH_FIELD_HOME,
       RECIPE_HOME_PATH, PREP_PLAN_PATH, PREP_REVIEW_PATH, PREP_RULES_PATH, PREP_ITEMS_PATH, WASTAGE_ANALYSIS_PATH,
+      STAFF_MEAL_PATH,
+      TASKS_HOME_PATH,
     ])
     expect(wrapper.find(`.wb-nav-item[href="${WORKBENCH_HOME}"]`).exists()).toBe(true)
     // rail 自己的名字跟着组名走：工作台 · 现场（2026-10-19 信息架构重排第二层：

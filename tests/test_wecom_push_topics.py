@@ -57,10 +57,10 @@ class FakeOpsParams(BaseModel):
     )
 
 
-# 九类内容类型：id / 显示名 / 触发方式（按声明顺序）。前八类的来源是票面与迁移 0016
-# 的头注释，第九类「下周排班表」是后加的（同一张订阅矩阵，不需要新迁移）；最后两类
-# 「请假申请」「加班/补钟申请」也是纯注册表新增（员工提交时入队，同样不需要迁移）。
-# 只有对账差异告警两种触发方式都支持。
+# 十三类内容类型：id / 显示名 / 触发方式（按声明顺序）。前八类的来源是票面与迁移 0016
+# 的头注释，第九类「下周排班表」是后加的（同一张订阅矩阵，不需要新迁移）；最后三类
+# 「请假申请」「加班/补钟申请」「员工餐采购计划」也是纯注册表新增（员工提交时入队，
+# 同样不需要迁移）。只有对账差异告警两种触发方式都支持。
 EXPECTED_TOPICS = [
     ("sales_report", "销售报表", ("scheduled",)),
     ("weekly_schedule", "下周排班表", ("scheduled",)),
@@ -73,6 +73,8 @@ EXPECTED_TOPICS = [
     ("resource_watermark", "磁盘与内存水位", ("event",)),
     ("leave_request", "请假申请", ("event",)),
     ("overtime_request", "加班/补钟申请", ("event",)),
+    ("staff_meal_purchase", "员工餐采购计划", ("event",)),
+    ("work_task", "工作任务", ("event",)),
 ]
 
 TOPIC_IDS = [row[0] for row in EXPECTED_TOPICS]
@@ -119,6 +121,8 @@ EXPECTED_PARAMS = {
     # 「必须有正文」，所以 schema 里只有这一个字段。
     "leave_request": {"text": ("text", True)},
     "overtime_request": {"text": ("text", True)},
+    "staff_meal_purchase": {"text": ("text", True)},
+    "work_task": {"text": ("text", True)},
 }
 
 CONTROL_TYPES = {"time", "select", "text"}

@@ -143,7 +143,8 @@ describe('资料表折叠：主表恰 6 行、移出 5 项可达、路由未动�
     // 「我的」组的路由仍是那几条（今天 / 整月 / 加班与补钟 / 卫生 / 损耗登记）：本票
     // 的二级视图是页内弹层，多一条路由就是越界 —— 那几条各自是别的票的功能页。
     const me = JSON.stringify(routes).match(/"\/workbench\/staff\/[a-z]+"/g) || []
-    expect(new Set(me).size).toBe(5)
+    // 2026-11-11：员工端新增「我的任务」一页（票 01），员工前缀从五条变六条。
+    expect(new Set(me).size).toBe(6)
   })
 })
 

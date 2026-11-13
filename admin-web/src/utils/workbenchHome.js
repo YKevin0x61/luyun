@@ -60,6 +60,12 @@ export const HOME_LINKS = {
   myOvertime: '/workbench/staff/overtime',
   /** 员工档「我的班」卡下面那颗「损耗」→ 损耗登记（记一笔 + 看自己最近记的那几笔）。 */
   myWastage: WASTAGE_REGISTER_PATH,
+  /** 任务板（管理端）→「任务」页。 */
+  tasks: '/workbench/tasks',
+  /** 首页「待验收任务」→ 任务页并定位到「待验收」那段。 */
+  tasksPending: '/workbench/tasks?seg=pending',
+  /** 员工端「任务」卡 →「我的任务」页。 */
+  myTasks: '/workbench/staff/tasks',
 }
 
 /** 工作台身份 → 清单里的身份词。与 `utils/workbenchNav.js` 同一张表的两档词，
@@ -110,6 +116,26 @@ export function countOverdueFixes(fix, now = Date.now()) {
   }).length
 }
 
+/** 任务待验收条数（管理端）：任务板 counts 里的 `pending_review`。
+ *
+ *  读不到（没迁移 / 网络 / 没权限）给 `null`，页面画「—」—— 与首页其他格子同一口径。
+ */
+export function countTaskReviews(board) {
+  if (!board || !board.counts) return null
+  const value = board.counts.pending_review
+  return typeof value === 'number' ? value : null
+}
+
+/** 员工任务计数：待做 / 待我验收。读不到给 `null`；只要有一个数字缺失就整体当没读到。 */
+export function countStaffTasks(mine) {
+  const counts = mine && mine.counts
+  if (!counts) return null
+  const todo = typeof counts.todo === 'number' ? counts.todo : null
+  const review = typeof counts.review === 'number' ? counts.review : null
+  if (todo === null && review === null) return null
+  return { todo, review }
+}
+
 /** 店长首页「等我处理」：三类待办各取几条，拼成可点的行（2026-10-18 实用性改进）。
  *
  *  为什么要有它：四个读数只回答「有几件」，不回答「是哪几件」—— 店长得挨个点进去才
@@ -122,7 +148,7 @@ export function countOverdueFixes(fix, now = Date.now()) {
  */
 /** 首页只展示前 6 条（一屏摘要）；**总数**由调用方拿去写「还有 N 件」。 */
 export const MANAGER_TODO_LIMIT = 6
-export function managerTodoRows({ inbox = null, queue = null, fix = null, now = Date.now() } = {}) {
+export function managerTodoRows({ inbox = null, queue = null, fix = null, tasks = null, now = Date.now() } = {}) {
   const rows = []
   for (const row of (fix && fix.items) || []) {
     if (!row || row.status !== STATUS_FIX_TODO || !row.deadline) continue
@@ -145,6 +171,18 @@ export function managerTodoRows({ inbox = null, queue = null, fix = null, now = 
       title: [row.zone_name, row.item_name].filter(Boolean).join(' · ') || '日常验收',
       meta: [row.shift, row.submitter_phone].filter(Boolean).join(' · ') || '待验收',
       to: '/workbench/floor/daily',
+      tone: 'warn',
+    })
+  }
+  // 任务待验收：一条汇总行（不是每件任务一行 —— 首页是摘要，任务页里才逐条展开）。
+  const taskReviews = countTaskReviews(tasks)
+  if (taskReviews) {
+    rows.push({
+      key: 'tasks-pending',
+      kind: '任务',
+      title: '待验收任务',
+      meta: `${taskReviews} 件 · 等你看照片`,
+      to: HOME_LINKS.tasksPending,
       tone: 'warn',
     })
   }
@@ -339,6 +377,7 @@ export function workbenchHomeSummary({
   deep = null,
   daily = null,
   me = null,
+  tasks = null,
   now = Date.now(),
 } = {}) {
   if (isAdmin(identity)) {
@@ -356,7 +395,9 @@ export function workbenchHomeSummary({
       fixes: countOverdueFixes(fix, now),
       reminders: countHrReminders(reminders),
       // 四个数字的「展开版」：具体哪几件事（按急迫排，最多 6 条）。
-      todos: managerTodoRows({ inbox, queue, fix, now }),
+      // 任务待验收数：首页「等我处理」那一行 + 底栏任务格角标都读它。
+      tasks: countTaskReviews(tasks),
+      todos: managerTodoRows({ inbox, queue, fix, tasks, now }),
       me: null,
       work: null,
       incoming: null,
@@ -381,6 +422,7 @@ export function workbenchHomeSummary({
       me: { shift: staffShiftCell(today), next: staffNextDays(me) },
       work,
       incoming: work.incoming,
+      tasks: countStaffTasks(tasks),
       todos: null,
     }
   }
@@ -396,5 +438,6 @@ export function workbenchHomeSummary({
     me: null,
     work: null,
     incoming: null,
+    tasks: null,
   }
 }

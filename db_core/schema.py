@@ -153,6 +153,17 @@ WASTAGE_TABLES = (
     "wastage_record_revisions",
 )
 
+# 员工餐采购（迁移 0053，ADR 0135，`.scratch/staff-meal/`）：当月每日菜单、一天一张的
+# 采购单、单内菜品快照与采购条目。四张表只有 `services/staff_meal/store.py`
+# （StaffMealStore）一个写入口，与 WASTAGE_TABLES 同一个理由不进 ALL_TABLES ——
+# 不该出现在 Admin 的通用业务表写入口；数据浏览器里只读列出（分组「员工餐」）。
+STAFF_MEAL_TABLES = (
+    "staff_meal_menu_days",
+    "staff_meal_orders",
+    "staff_meal_order_dishes",
+    "staff_meal_order_items",
+)
+
 # Admin DataTable exposes these tables read-only; their owning feature pages
 # remain the only supported write paths.
 ADMIN_READ_ONLY_TABLES = (
@@ -165,6 +176,7 @@ ADMIN_READ_ONLY_TABLES = (
     *OVERTIME_TABLES,
     *ATTENDANCE_TABLES,
     *WASTAGE_TABLES,
+    *STAFF_MEAL_TABLES,
 )
 
 # 表按域分组的口径：Admin 数据浏览器与「备份 → 这个包里装了什么」共用同一份，
@@ -210,6 +222,7 @@ TABLE_GROUPS = (
     ) + WECOM_SUBSCRIPTION_TABLES),
     ("hr", "人事考勤", OVERTIME_TABLES + ATTENDANCE_TABLES),
     ("wastage", "损耗", WASTAGE_TABLES),
+    ("staff_meal", "员工餐", STAFF_MEAL_TABLES),
     ("config", "系统设置", ("app_settings",) + AUTH_PHYSICAL_TABLES + ("logs",)),
 )
 

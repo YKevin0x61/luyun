@@ -99,6 +99,7 @@ def test_catalog_includes_physical_tables_and_groups(admin_client):
         "wecom",      # 旧任务三张 + 迁移 0016 的订阅 / 出站 / 审计
         "hr",         # 加班与补钟（人事）+ 法定节假日 / 月度考勤台账
         "wastage",
+        "staff_meal",  # 员工餐采购（ADR 0135）：菜单日 / 采购单 / 菜品 / 采购条目
         "config",     # 应用设置 + 登录凭据三张 + 运行日志入口
     ]
 

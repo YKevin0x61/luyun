@@ -43,6 +43,20 @@ from api.wastage import router as wastage_router
 from api.attendance import router as attendance_router
 # 法定节假日日历（考勤表导出 票 02）：管理端专属，路由自己带 require_session。
 from api.attendance_holidays import router as attendance_holidays_router
+# 工作台「任务」（2026-11-11）：发布 / 验收 / 改派自己带能力门（管理端会话或花名册上
+# 勾了「任务管理」的员工会话），提交那几条自己带 require_staff_session，所以注册处
+# 不挂 verify_admin_token —— 员工手机端没有 API token（同排班 / 损耗的口径）。
+from api.tasks import router as tasks_router
+# 员工餐采购（2026-11-11，ADR 0135）：三条 router —— 管理端写面（导入 / 改菜单 / 删单）
+# 进业务面挂 verify_admin_token；读面与员工写面自己带 require_any_identity_session
+# （员工要拿到 403「没开权限」而不是 401「没登录」），注册处不挂管理员凭据。
+from api.staff_meal import (
+    manager_router as staff_meal_manager_router,
+)
+from api.staff_meal import (
+    reader_router as staff_meal_reader_router,
+)
+from api.staff_meal import router as staff_meal_router
 from api.tables import router as tables_router
 from api.analytics import router as analytics_router
 from api.export_api import router as export_router
@@ -151,6 +165,7 @@ restaurant_scraper = None
 scraper_task = None
 wecom_push_task = None
 prep_snapshot_task = None
+task_materialize_task = None
 hygiene_overdue_task = None
 hygiene_variant_task = None
 hygiene_maintenance_task = None
@@ -167,14 +182,14 @@ hygiene_archive = None
 # 常驻后台 task 的显式清单（PERF-06）
 # ---------------------------------------------------------------------------
 # 「必须单 worker」这条硬约束的论据是"这些循环没有分布式选主"，所以数目必须能被核对，
-# 而不是文档里各写各的。数量 = 本清单里的 7 个业务循环 + 5 个辅助 task，两处都在下面
+# 而不是文档里各写各的。数量 = 本清单里的 8 个业务循环 + 5 个辅助 task，两处都在下面
 # 列明白；`_register_resident_task()` 是唯一入口，启动日志按清单长度输出。
 #
 # 业务循环（**有副作用，多 worker 会重复采集/重复推送**）：
 #   1 卫生逾期调度  2 卫生图片补全  3 卫生图片维护  4 企微推送调度
-#   5 餐厅爬虫      6 日终对账调度  7 未映射菜品巡检
+#   5 餐厅爬虫      6 日终对账调度  7 未映射菜品巡检  8 任务实例物化
 # 辅助 task（幂等或本身可多实例，但仍是常驻协程）：
-#   8 内存监控  9 内存清理  10 磁盘守护  11 realtime Redis 订阅  12 日志落库消费者
+#   9 内存监控  10 内存清理  11 磁盘守护  12 realtime Redis 订阅  13 日志落库消费者
 #   —— 这份名单（含标签）的唯一来源是下面的 `_AUXILIARY_RESIDENT_TASKS`，
 #   `AUXILIARY_RESIDENT_TASK_COUNT` 必须与它等长（有测试钉着）。
 #
@@ -182,7 +197,7 @@ hygiene_archive = None
 # `disk_guard.start()`、`log_storage.start()`），11 由 `realtime_hub.start_bus()` 起；
 # 它们都登记进 `_resident_tasks` 供计数，句柄由各组件自己管（见
 # `_register_auxiliary_resident_tasks`）。
-BUSINESS_LOOP_TASK_COUNT = 7
+BUSINESS_LOOP_TASK_COUNT = 8
 AUXILIARY_RESIDENT_TASK_COUNT = 5
 RESIDENT_TASK_TOTAL = BUSINESS_LOOP_TASK_COUNT + AUXILIARY_RESIDENT_TASK_COUNT
 
@@ -427,6 +442,12 @@ async def lifespan(app: FastAPI):
                 "备货参考值快照", _prep_snapshot_loop(db_manager)
             )
             startup_results.append("备货参考值快照")
+            # 定期任务实例物化（ADR 0131 / 0133）：每 30 秒确保今天的期存在，并回补
+            # 最近 7 天（停机/重启不丢期）。幂等由 UNIQUE(definition_id, period_date)。
+            task_materialize_task = _start_resident_task(
+                "任务实例物化", _task_materialize_loop(db_manager)
+            )
+            startup_results.append("任务实例物化")
 
         # 启动日志持久化（PostgreSQL logs 表，与业务表同库）
         if background_enabled and await log_storage.start():
@@ -1096,6 +1117,9 @@ app.include_router(prep_plan.reader_router)  # 备货计划读面：任一身份
 # 备货复盘备注：任一身份能进门（员工要拿到 403，而不是 verify_admin_token 的 401），
 # 端点里再判管理员；见 api/prep_plan.py 的 manager_router。
 app.include_router(prep_plan.manager_router)
+# 员工餐采购的读面与员工写面：任一身份进门，服务层再判能力与归属（同备货复盘）。
+app.include_router(staff_meal_reader_router)
+app.include_router(staff_meal_manager_router)
 # —— 业务面：统一挂管理员凭据（会话 cookie / X-Admin-Token / Bearer）——
 app.include_router(orders.router, dependencies=[Depends(verify_admin_token)])
 app.include_router(dishes.router, dependencies=[Depends(verify_admin_token)])
@@ -1106,6 +1130,8 @@ app.include_router(report_dishes.router, dependencies=[Depends(verify_admin_toke
 # 票 08 把读端点开成「任一身份」之后，写端点仍只认管理端 —— ADR 0092 那一条：
 # 它进工作台只是换位置与统一导航，不扩权。
 app.include_router(prep_plan.router, dependencies=[Depends(verify_admin_token)])
+# 员工餐采购的管理端写面（导入整月菜单 / 手改菜单 / 删草稿单）：只有管理员能开。
+app.include_router(staff_meal_router, dependencies=[Depends(verify_admin_token)])
 app.include_router(tables_router, dependencies=[Depends(verify_admin_token)])
 app.include_router(analytics_router, dependencies=[Depends(verify_admin_token)])
 app.include_router(export_router, dependencies=[Depends(verify_admin_token)])
@@ -1137,6 +1163,8 @@ app.include_router(attendance_router)
 # 法定节假日日历（考勤表导出 票 02）：三条路由都只认管理端会话（`require_session`），
 # 匿名与员工 cookie 一律 401 —— 这张日历决定「法定节假日补休」怎么算，员工改不得。
 app.include_router(attendance_holidays_router)
+# 工作台「任务」（票 01 起）：同排班 / 损耗，路由自带身份与能力门。
+app.include_router(tasks_router)
 
 # 静态文件（仪表盘 + 管理后台）
 from fastapi.staticfiles import StaticFiles
@@ -1339,6 +1367,15 @@ SPA_PAGE_ROUTES = (
     # （`/workbench/staff/loss`，两种身份都能进：店长也登记）。
     # 同一批：漏一条就是直连 uvicorn 硬导航 404（前端侧由 tests/test_spa_page_routes.py 双向盯住）。
     "/workbench/kitchen/loss",
+    # 员工餐采购（ADR 0135 / 2026-11-11 用户裁定）：后勤组的一页 —— 月历 + 点某天进单。
+    # 页面清单里是 `audience: admin + staffCap: meal_purchase`（管理端直进、勾了能力的员工进）。
+    # 同这一批：漏一条就是直连 uvicorn 硬导航 404（前端侧由 tests/test_spa_page_routes.py 双向盯住）。
+    "/workbench/kitchen/staff-meal",
+    # 工作台「任务」（2026-11-11）：管理端两页（任务 / 定期任务）与员工端「我的任务」。
+    # 同这一批：漏一条就是直连 uvicorn 硬导航 404（前端侧由 tests/test_spa_page_routes.py 双向盯住）。
+    "/workbench/tasks",
+    "/workbench/tasks/recurring",
+    "/workbench/staff/tasks",
     "/workbench/staff/today",
     "/workbench/staff/month",
     # 加班与补钟（票 01）：员工自己提一笔、看自己的记录与月度净时长。同这一批：
@@ -1761,6 +1798,31 @@ async def _prep_snapshot_loop(db_manager):
         # 睡到下一个整点（误差再小也不打点，整点对齐是快照的语义）
         now = datetime.now(CHINA_TZ)
         await asyncio.sleep(INTERVAL - (now.minute * 60 + now.second) + 5)
+
+
+async def _task_materialize_loop(db_manager):
+    """定期任务实例物化：每 30 秒确保当天该有的期都生成了，并回补最近 7 天。
+
+    幂等由 `UNIQUE(tenant_id, definition_id, period_date)` + `ON CONFLICT DO NOTHING`
+    保证；单 worker 部署，不需要分布式选主（PERF-06 / ADR 0131）。
+    """
+    from services.tasks.service import TaskService
+
+    INTERVAL = 30
+    while True:
+        try:
+            service = TaskService(db_manager)
+            created = await service.materialize_recurring()
+            if created:
+                logger.info("定期任务实例物化：新建 %s 期", created)
+                # 只给「今天这一期」入队；回补的过去期不发群消息（票 09）。
+                await service.push_recurring_today()
+                await realtime_hub.broadcast_nudge("tasks", {"reason": "materialized"})
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning("定期任务实例物化失败，下一轮再试", exc_info=True)
+        await asyncio.sleep(INTERVAL)
 
 
 async def run_restaurant_scraper():

@@ -280,6 +280,8 @@ describe('管理端专属页不出现在员工可达的面上（票 05 那道门
       '/workbench/staff/clean',
       '/workbench/kitchen/recipe',
       '/workbench/kitchen/prep-plan',
+      // 员工餐采购（ADR 0135）：2026-11-11 起 `both`，员工默认看得见。
+      '/workbench/kitchen/staff-meal',
       '/workbench/staff/today',
     ])
     expect(unreachableEntries(wrapper, IDENTITY_STAFF)).toEqual([])
@@ -325,8 +327,12 @@ describe('员工专属页不出现在管理端导航里（同一道门的反向�
       // 备货品换算规则（2026-10-26）：只给管理端。
       '/workbench/kitchen/prep-rules',
       '/workbench/kitchen/prep-items',
-      // 损耗分析（从 worktool2 那个小程序搬过来）：后勤那一格的最后一条，只给管理端。
+      // 损耗分析（从 worktool2 那个小程序搬过来）：只给管理端。
       '/workbench/kitchen/loss',
+      // 员工餐采购（ADR 0135）：`both`，管理端也看得见。
+      '/workbench/kitchen/staff-meal',
+      // 任务（2026-11-11）：管理端新的一级格，落点是任务板。
+      '/workbench/tasks',
     ])
     expect(unreachableEntries(wrapper, IDENTITY_ADMIN)).toEqual([])
     wrapper.unmount()

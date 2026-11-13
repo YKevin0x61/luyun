@@ -109,3 +109,22 @@ describe('管理员条里的卫生复核小条（2026-11-10 用户裁定）', ()
     }
   })
 })
+
+// 2026-11-13 走查：员工档的顺序与一个非法嵌套链接。
+describe('走查的版面约束', () => {
+  const staff = src.slice(STAFF_AT, STAFF_END)
+
+  it('「今天要交」（带钟点）排在「员工餐」（无截止）之前', () => {
+    const hygiene = staff.indexOf('<StaffHygieneCard')
+    const meal = staff.indexOf('class="wbh-meal"')
+    expect(hygiene, '员工档里没有卫生卡').toBeGreaterThan(-1)
+    expect(meal, '员工档里没有员工餐那一行').toBeGreaterThan(-1)
+    expect(hygiene, '卫生卡被排到员工餐后面去了').toBeLessThan(meal)
+  })
+
+  it('「今天谁上班」整块是链接，里面不再套第二个链接（非法 a > a）', () => {
+    const admin = src.slice(ADMIN_AT, STAFF_AT)
+    expect(admin).toContain('<span class="wbh-more">月历 ›</span>')
+    expect(admin).not.toMatch(/<router-link class="wbh-more"[^>]*>月历/)
+  })
+})

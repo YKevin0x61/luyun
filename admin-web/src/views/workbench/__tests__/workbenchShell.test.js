@@ -12,6 +12,8 @@ import { PREP_PLAN_PATH, PREP_REVIEW_PATH } from '../../../utils/prepPlanPaths.j
 import { PREP_RULES_PATH } from '../../../utils/prepRulePaths.js'
 import { RECIPE_DETAIL_PATH, RECIPE_PRINT_PATH } from '../../../utils/recipePaths.js'
 import { WASTAGE_ANALYSIS_PATH } from '../../../utils/wastagePaths.js'
+import { STAFF_MEAL_PATH } from '../../../utils/staffMealPaths.js'
+import { TASKS_HOME_PATH } from '../../../utils/tasksPaths.js'
 import { PAGE_ROUTES, pageMeta, pageRow } from '../../../router/pageRoutes.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -196,10 +198,12 @@ describe('工作台外壳的导航', () => {
     // 名字（「选择岗位」/「备货计划」）：同一颗胶囊里写两遍「后勤」看不出哪一半是哪一页。
     // 2026-10-05 起员工这一档还多一格「卫生」（他们每天要做的活，一级入口）。
     // 员工那一档：第二格仍是「卫生」（员工端那一格名字没改）。
-    expect(items.map((item) => item.text())).toEqual(['今天', '卫生', '选择岗位', '备货计划', '我的'])
+    expect(items.map((item) => item.text())).toEqual([
+      '今天', '卫生', '选择岗位', '备货计划', '员工餐采购', '我的',
+    ])
     expect(items.map((item) => item.attributes('href'))).toEqual([
       '/workbench', '/workbench/staff/clean', '/workbench/kitchen/recipe', PREP_PLAN_PATH,
-      '/workbench/staff/today',
+      STAFF_MEAL_PATH, '/workbench/staff/today',
     ])
     expect(wrapper.findAll('.wb-nav-cell.is-multi')).toHaveLength(1)
     // 员工点不到店长那几页（它们在清单里是 admin，导航按身份过滤）。
@@ -215,8 +219,8 @@ describe('工作台外壳的导航', () => {
     // 整格亮：后勤那一格里两扇门都算"当前这一格"（同一组），`aria-current` 也挂在两半上
     // —— 与单条目那一格的老口径一致（外壳的高亮判据是页面的 `group`）。
     const on = wrapper.findAll('.wb-nav-item.is-on')
-    expect(on.map((item) => item.text())).toEqual(['选择岗位', '备货计划'])
-    expect(on.map((item) => item.attributes('aria-current'))).toEqual(['page', 'page'])
+    expect(on.map((item) => item.text())).toEqual(['选择岗位', '备货计划', '员工餐采购'])
+    expect(on.map((item) => item.attributes('aria-current'))).toEqual(['page', 'page', 'page'])
 
     // 但只有指到这一页的那半贴着"当前"：另一半不高亮成当前项。
     const current = wrapper.findAll('.wb-nav-item.is-current')
@@ -225,7 +229,7 @@ describe('工作台外壳的导航', () => {
     expect(current[0].attributes('href')).toBe(PREP_PLAN_PATH)
 
     const cell = wrapper.get('.wb-nav-cell.is-multi')
-    expect(cell.findAll('.wb-nav-item')).toHaveLength(2)
+    expect(cell.findAll('.wb-nav-item')).toHaveLength(3)
     expect(cell.classes()).toContain('is-on')
   })
 
@@ -278,10 +282,12 @@ describe('工作台外壳的导航', () => {
     const items = wrapper.findAll('.wb-nav-item')
     expect(items.map((item) => item.text())).toEqual([
       '今天', '人事', '现场', '选择岗位', '备货计划', '备货复盘', '换算规则', '备货品', '损耗分析',
+      '员工餐采购', '任务',
     ])
     expect(items.map((item) => item.attributes('href'))).toEqual([
       '/workbench', WORKBENCH_HR_HOME, WORKBENCH_FIELD_HOME,
       '/workbench/kitchen/recipe', PREP_PLAN_PATH, PREP_REVIEW_PATH, PREP_RULES_PATH, PREP_ITEMS_PATH, WASTAGE_ANALYSIS_PATH,
+      STAFF_MEAL_PATH, TASKS_HOME_PATH,
     ])
   })
 
@@ -298,7 +304,7 @@ describe('工作台外壳的导航', () => {
     expect(store.identity).toBe('staff')
     expect(wrapper.findAll('.wb-nav-item').map((item) => item.text())).toEqual([
       // 员工那一格叫「卫生」；管理端那一格 2026-10-19 起叫「现场」。
-      '今天', '卫生', '选择岗位', '备货计划', '我的',
+      '今天', '卫生', '选择岗位', '备货计划', '员工餐采购', '我的',
     ])
   })
 

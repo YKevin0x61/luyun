@@ -65,7 +65,7 @@ function readsWorkbenchTokens(file, depth = 2) {
 // 断言的是行为（注册出来的路由表长什么样），不是源码写法：router 怎么改结构都行，
 // 只要还是从这一张表派生。
 
-const GROUPS = ['home', 'hr', 'floor', 'hygiene', 'kitchen', 'me', 'system', 'entry']
+const GROUPS = ['home', 'hr', 'floor', 'hygiene', 'kitchen', 'me', 'tasks', 'system', 'entry']
 const AUDIENCES = ['admin', 'staff', 'both']
 
 /** 每个用例都换一份崭新的 router 模块（它是单例，`createWebHistory` 也只该建一次）。 */
@@ -169,12 +169,19 @@ describe('页面清单（唯一来源）', () => {
       '/workbench/kitchen/prep-items',
       // 损耗分析（从 worktool2 那个小程序搬过来）：后勤组的第三页，同套工作台外壳。
       '/workbench/kitchen/loss',
+      // 员工餐采购（ADR 0135）：后勤组的一页，月历 + 点某天进单（单日是页内状态）。
+      '/workbench/kitchen/staff-meal',
+      // 任务（2026-11-11）：管理端新的一级组，底栏第 5 格；两页同套工作台外壳。
+      '/workbench/tasks',
+      '/workbench/tasks/recurring',
       // 员工三页搬进工作台的「我的」组（票 03）：套工作台外壳，后台导航照样不渲染；
       // 越权落点也是独立一页（一页说明 + 一颗按钮，不套导航）。
       '/workbench/staff/today',
       '/workbench/staff/month',
       // 加班与补钟（票 01）：员工自己提一笔、看自己的记录与月度净时长，同套工作台外壳。
       '/workbench/staff/overtime',
+      // 我的任务（2026-11-11）：员工端「我的」组里的新页（待我做 / 待我验收 / 我发布的）。
+      '/workbench/staff/tasks',
       '/workbench/staff/clean',
       // 损耗登记（从 worktool2 那个小程序搬过来）：「我的」组里那一页 —— 记一笔 + 看自己
       // 最近记的。`audience: both`（店长也登记），外壳与同组那几页一样。

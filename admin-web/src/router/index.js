@@ -182,6 +182,17 @@ const routes = [
   // 没勾的员工手输 URL 落 `/workbench/forbidden`；员工自己登记仍走登记页
   // （`/workbench/staff/loss`），接口那一侧同一批端点按归属分、统计另有一道能力门。
   workbenchKitchenPage('/workbench/kitchen/loss', 'wastage-analysis', () => import('../views/wastage/WastageAnalysisView.vue')),
+  // 员工餐采购（ADR 0135 / 2026-11-11 用户裁定）：后勤组的一页，月历 + 点某天进单。
+  // 页面清单里是 `audience: both` —— 这一域不设能力开关，员工身份直接进；接口侧
+  // `api/staff_meal.py` 再判「是不是本人提交的单」。单日视图是这一页的**页内状态**，不拆子路由
+  // —— 拆了以后「今天」这类入口与页头面包屑都要多认一层。
+  workbenchKitchenPage('/workbench/kitchen/staff-meal', 'staff-meal', () => import('../views/workbench/StaffMealView.vue')),
+  // 工作台「任务」（2026-11-11 起）：管理端新的一级组「任务」，底栏第 5 格。两页都套
+  // 工作台外壳（`WorkbenchLayout`）；页面本身在清单里是 `audience: admin`，员工端走
+  // `/workbench/staff/tasks`（「我的任务」）。票 01 只立页与空态，发布 / 验收 / 定期
+  // 任务的数据在票 02~06 接上。
+  workbenchKitchenPage('/workbench/tasks', 'workbench-tasks', () => import('../views/tasks/TasksBoardView.vue')),
+  workbenchKitchenPage('/workbench/tasks/recurring', 'workbench-tasks-recurring', () => import('../views/tasks/TasksRecurringView.vue')),
   // 子应用根（票 06）：就是「今天」首页 —— 按身份用已有接口聚合今日摘要，只做分流与
   // 摘要、不做业务动作。它套**工作台外壳**（`WorkbenchLayout`：顶栏一条 + 按身份过滤的
   // 导航），跟「我的」那三页同一个壳；月历仍自己占一行（人事组的落点），两行不再指
@@ -208,6 +219,10 @@ const routes = [
   // 原「加班统计」也并进了那一页），店长在手机上的审批面在票 04 —— 这一页现在只认
   // 员工会话（`audience: staff`）。
   workbenchStaffPage('/workbench/staff/overtime', 'me-overtime', () => import('../views/overtime/MeOvertimeView.vue')),
+  // 我的任务（2026-11-11）：员工端「我的」组里的新页 —— 待我做 / 待我验收 / 我发布的。
+  // 勾了「任务管理」的员工还能在这页发布；管理端在电脑上用 `/workbench/tasks`。
+  // 票 01 只立页与空态，接口在票 03（待我做）与票 04（待我验收）接上。
+  workbenchStaffPage('/workbench/staff/tasks', 'me-tasks', () => import('../views/tasks/MyTasksView.vue')),
   // 损耗登记（从 worktool2 那个小程序搬过来）：记一笔（物料 / 数量 / 原因 / 照片），
   // 顺带看自己最近记的几笔。`audience: both` —— 员工用员工会话、店长用管理端会话，
   // **都能登记**（店长也天天在厨房里，让他为了记一笔先去做员工登录不合理）。

@@ -24,6 +24,10 @@
  * 不把它的口径并进这套摘要里（那一块有业务动作，摘要没有）。
  * 401 的处理交给 `staffRequest` 之外的公共路径 —— 这里用的是 `api`（管理端 cookie），
  * 员工那几条走 `staffRequest`，各自与页面自己那次请求同一条链。
+ *
+ * 2026-11-13 员工餐走查后补两处入口（ADR 0135）：员工档一行「员工餐今天的状态」，
+ * 点进单日页；管理端在「下月菜单还没导入」时提醒一句。两处都只读一块、读不到就整行 /
+ * 整条不显示，首页不因为这类的失败改结构。
  */
 import { computed, onMounted, ref, watch } from 'vue'
 import { api } from '../../api/client'
@@ -37,6 +41,7 @@ import { dayLabel } from '../../utils/todayShift'
 import { WORKBENCH_TITLE, workbenchDocumentTitle } from '../../utils/workbenchCopy'
 import { HOME_LINKS, MANAGER_TODO_LIMIT, countHygieneRejected, countHygieneReview, workbenchHomeSummary } from '../../utils/workbenchHome'
 import { PREP_PLAN_PATH } from '../../utils/prepPlanPaths.js'
+import { STAFF_MEAL_PATH } from '../../utils/staffMealPaths.js'
 import { useStationsStore } from '../../stores/stations'
 
 const identityStore = useWorkbenchIdentityStore()
@@ -61,6 +66,10 @@ const fix = ref(null)
 const reminders = ref(null)
 // 备货计划：今天各档口还差几项（ADR 0117 把入口从「后勤」组提到首页这张卡片上）
 const prep = ref(null)
+// 任务（票 07）：管理端读任务板的 counts，员工读「我的任务」的 counts —— 两边都只
+// 拿数字，不把任务列表搬进首页。读不到时 `tasks` 为 null，页面画「—」。
+const tasksBoard = ref(null)
+const tasksMine = ref(null)
 const stationsStore = useStationsStore()
 const deep = ref(null)
 const daily = ref(null)
@@ -90,7 +99,19 @@ const summary = computed(() => workbenchHomeSummary({
   deep: deep.value,
   daily: daily.value,
   me: me.value,
+  tasks: identity.value === IDENTITY_ADMIN ? tasksBoard.value : tasksMine.value,
 }))
+
+// 员工端「任务」卡：待做数 + （有任务管理能力时）待我验收数；读不到画「—」。
+const canManageTasks = computed(() => identityStore.staffCaps.includes('task'))
+const taskTodoCount = computed(() => (summary.value.tasks ? summary.value.tasks.todo : null))
+const taskReviewCount = computed(() => (summary.value.tasks ? summary.value.tasks.review : null))
+const taskCardHint = computed(() => {
+  if (canManageTasks.value && typeof taskReviewCount.value === 'number') {
+    return `任务 · 待我验收 ${numberText(taskReviewCount.value)} 项 ›`
+  }
+  return '任务 ›'
+})
 
 /** 店长首页「店里的事」那一条：读不到的那格给 `null`（显示 —），别把没读到说成 0。
  *  待批只数请假、且**不含自己提的**：店长自己的假是超管批的，他点进去也批不了。 */
@@ -151,6 +172,7 @@ function shiftState(tone) {
 const QUICK_LINKS = [
   { label: '排班月历', to: '/workbench/hr/calendar' },
   { label: '备货计划', to: '/workbench/kitchen/prep-plan' },
+  { label: '员工餐采购', to: STAFF_MEAL_PATH },
   { label: '配方管理', to: '/workbench/kitchen/recipe/manage' },
   { label: '损耗分析', to: '/workbench/kitchen/loss' },
   { label: '花名册', to: '/workbench/hr/roster' },
@@ -182,6 +204,123 @@ async function safe(promise, sink, pick = (data) => data) {
   }
 }
 
+// ── 员工餐（ADR 0135 / 2026-11-13 走查补的两处入口）─────────────────────────
+// 员工档：今天那张单的状态；`null` = 没读到（断网 / 401 / 5xx），这一行整行不出现。
+// 404 是业务状态（今天还没有菜单），要显示 —— 两者不能混成一句「没有菜单」。
+const staffMeal = ref(null)
+// 管理端：下月菜单的响应；`null` = 没读到 / 形状不对 → 不提醒，首页不改结构。
+const mealNext = ref(null)
+const mealNextMonth = ref('')
+
+/**
+ * 北京时自然日（`YYYY-MM-DD`）。
+ *
+ * 员工餐「使用日」按**自然日 00:00 北京时切**（ADR 0125 / 0135），不是首页 `businessDate`
+ * 那个 06:00 切的营业日 —— 凌晨 0–6 点拿营业日去问，问到的会是前一天的单。
+ * 手机上的今天不可信（时区可能不在东八区，见 `loadManager` 里「不能拿手机上的今天去问
+ * 排班」那条注释），所以先把时刻平移到 +08:00 再取 UTC 年月日：北京时没有夏令时，
+ * 这个平移是精确的。页面里没有现成的自然日工具（`utils/dateRange.js` 是设备本地时区
+ * 口径），就近放这里。
+ */
+function beijingToday(now = new Date()) {
+  const shifted = new Date(now.getTime() + 8 * 60 * 60 * 1000)
+  const year = shifted.getUTCFullYear()
+  const month = String(shifted.getUTCMonth() + 1).padStart(2, '0')
+  const day = String(shifted.getUTCDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
+/** `YYYY-MM-DD` 的下个月（`YYYY-MM`）；12 月回绕到下一年。 */
+function nextMonthOf(dateText) {
+  const [year, month] = dateText.split('-').map(Number)
+  return month === 12 ? `${year + 1}-01` : `${year}-${String(month + 1).padStart(2, '0')}`
+}
+
+/**
+ * 今天这张员工餐单的状态：今天没有菜单 / 未填 / 草稿 / 已提交 / 推送失败。
+ *
+ * 判据跟月历、单日页同一套（`StaffMealView` 的 `cellClass`）：已提交看 `push_status`，
+ * 草稿看有没有填过内容 —— `summary` 是汇总行，空数组就是还没动过。失败原因
+ * （`push_error`）直接摊在这一行上：首页不显示的话，员工得点进单日页才知道推送没发出去。
+ */
+function staffMealRow(data) {
+  const order = (data && data.order) || null
+  if (!order) {
+    return data && data.menu_day
+      ? { text: '未填', led: 'warn' }
+      : { text: '今天没有员工餐菜单', led: 'off' }
+  }
+  if (order.status === 'submitted') {
+    if (order.push_status === 'failed') {
+      return { text: '推送失败', led: 'bad', detail: order.push_error || '' }
+    }
+    return { text: '已提交', led: 'ok' }
+  }
+  const filled = Array.isArray(data.summary) ? data.summary.length : 0
+  return filled > 0 ? { text: '草稿', led: 'warn' } : { text: '未填', led: 'warn' }
+}
+
+/**
+ * 员工档读今天那张单。失败降级成「不显示这一行」：首页不能因为一块读不出来改结构，
+ * 也不该让员工以为「今天没有菜单」（那是 404，是另一回事）。
+ */
+async function loadStaffMeal() {
+  const date = beijingToday()
+  try {
+    const data = await staffRequest(`/api/staff-meal/days/${date}`)
+    staffMeal.value = { date, ...staffMealRow(data) }
+  } catch (err) {
+    staffMeal.value = err && err.status === 404
+      ? { date, text: '今天没有员工餐菜单', led: 'off' }
+      : null
+  }
+}
+
+/** 员工餐单日入口：带上自然日，页面按 `?date=` 打开那一天（不带「今天」以外的口径）。 */
+const staffMealLink = computed(() => ({
+  path: STAFF_MEAL_PATH,
+  query: { date: (staffMeal.value && staffMeal.value.date) || beijingToday() },
+}))
+
+/**
+ * 管理端读下月菜单：`days` 为空 = 整月还没导入（跨月提前报单就报不了 1 号）。
+ * 读失败 / 形状不对就不提醒 —— 这是首页的一条提示，不是待办清单。
+ */
+async function loadNextMonthMeal() {
+  mealNextMonth.value = nextMonthOf(beijingToday())
+  mealNext.value = null
+  try {
+    const data = await api.get(`/api/staff-meal/months/${mealNextMonth.value}`)
+    mealNext.value = data && Array.isArray(data.days) ? data : null
+  } catch {
+    mealNext.value = null
+  }
+}
+
+/** 下月还没导入才提醒；`mealNext === null`（没读到）不提醒。 */
+const mealNextMissing = computed(() => Boolean(
+  mealNext.value && Array.isArray(mealNext.value.days) && mealNext.value.days.length === 0,
+))
+
+/**
+ * 人事提醒那一格的副行：平时是这一格的口径（工龄奖 · 生日 · 健康证），有健康证过期时换成
+ * 「健康证过期 N · 生日 M」。
+ *
+ * 为什么换：7 这个数字里混着「生日快乐」与「证件过期」两件事，后者是检查会罚的、而且能
+ * 过期几百天（2026-11-13 副本库实测 3 张全过期，最久 −316 天）。只写一句口径，管理员得
+ * 点进人事提醒页才知道这 7 件里有没有要命的；首页本来就是「今天先看哪件事」的地方。
+ * 没有过期时仍沿用原口径 —— 不为 0 造一条动线（同「0 值不报警」）。
+ */
+const reminderHint = computed(() => {
+  const r = reminders.value
+  if (!r) return '工龄奖 · 生日 · 健康证'
+  const items = r.certs && Array.isArray(r.certs.items) ? r.certs.items : []
+  const expired = items.filter((item) => item && item.state === 'expired').length
+  if (!expired) return '工龄奖 · 生日 · 健康证'
+  const birthday = r.birthdays ? r.birthdays.count : 0
+  return birthday ? `健康证过期 ${expired} · 生日 ${birthday}` : `健康证过期 ${expired}`
+})
+
 async function loadManager() {
   // 备货卡片上的档口名要中文：档口表没拉过就先拉一次（读不到时退回 id，不影响其他块）。
   // 只挂在店长这一档 —— 员工会话调 `/api/stations` 是 401，没必要白打一次。
@@ -197,6 +336,9 @@ async function loadManager() {
     safe(api.get('/api/hygiene/admin/fix'), fix),
     safe(api.get('/api/hygiene/admin/hr-reminders'), reminders),
     safe(api.get('/api/prep-plan/summary'), prep),
+    safe(api.get('/api/tasks/board', { counts_only: 1 }), tasksBoard),
+    // 下月的员工餐菜单导入没有：跨月提前报单是这页唯一的「月底前」动作（S7）。
+    loadNextMonthMeal(),
   ])
   businessDate.value = date
     || (day.value && day.value.business_date)
@@ -243,6 +385,9 @@ async function loadStaff() {
     safe(staffRequest('/api/hygiene/staff/daily-work'), daily),
     safe(staffRequest('/api/hygiene/staff/deep-clean'), deep),
     safe(staffRequest('/api/hygiene/staff/fix'), fix),
+    safe(staffRequest('/api/tasks/mine'), tasksMine),
+    // 今天这张员工餐单的状态（自然日，见 `beijingToday`）。读不到就整行不显示。
+    loadStaffMeal(),
     ...team,
     ...hygiene,
   ])
@@ -271,7 +416,7 @@ watch(identity, () => { void load() })
 // 断线兜底（`useConnectionFallback`）在挂载时就会 pull 一次，不挡的话每次进页面都白跑。
 useNudgePull({
   id: 'workbench-home',
-  topics: ['scheduling', 'hygiene'],
+  topics: ['scheduling', 'hygiene', 'tasks'],
   pull: () => { void load() },
   fallback: { when: () => Boolean(identity.value) },
 })
@@ -313,16 +458,26 @@ useNudgePull({
         <router-link class="wbh-kpi wbh-cell reminders" :to="HOME_LINKS.reminders">
           <div class="wbh-kh"><span>人事提醒</span><i class="wbh-led" :class="toneOn(summary.reminders) ? 'sig' : 'off'"></i></div>
           <b class="wbh-num">{{ numberText(summary.reminders) }}</b>
-          <p class="wbh-kf">工龄奖 · 生日 · 健康证</p>
+          <p class="wbh-kf">{{ reminderHint }}</p>
         </router-link>
       </div>
+
+      <!-- 跨月提前报单（S7）：下月菜单还没导入，员工报不了 1 号的单。只在 `days` 为空时
+           出现；读不到就不提示 —— 这是首页的一句提醒，不是待办清单，别让它变成噪音。 -->
+      <router-link v-if="mealNextMissing" class="wbh-meal-next" :to="STAFF_MEAL_PATH">
+        <i class="wbh-led warn"></i>
+        <span class="wbh-meal-next-text">{{ mealNextMonth }} 员工餐菜单还没导入，月底前导入员工才能提前报 1 号的单</span>
+        <span class="wbh-meal-next-go wbh-go">去导入 ›</span>
+      </router-link>
 
       <div class="wbh-cols">
         <router-link class="wbh-panel wbh-duty" :to="HOME_LINKS.duty">
           <header class="wbh-ph">
             <i class="wbh-led ok"></i><h2>今天谁上班</h2>
             <span class="wbh-hint">{{ summary.duty ? summary.duty.total : '—' }} 人上班</span>
-            <router-link class="wbh-more" :to="HOME_LINKS.duty">月历 ›</router-link>
+            <!-- 整块已经是链接，这里用 span：`<a>` 里再套 `<a>` 是非法 HTML（读屏会念成两个
+                 同目标的链接）。点这一格任何地方都进月历，文字只是「点哪去」的提示。 -->
+            <span class="wbh-more">月历 ›</span>
           </header>
           <p v-if="!day" class="wbh-empty">今天的排班读不出来，点进月历看</p>
           <template v-else-if="!summary.duty.groups.length && !summary.duty.off.length">
@@ -346,7 +501,11 @@ useNudgePull({
           <section class="wbh-panel">
             <header class="wbh-ph">
               <i class="wbh-led sig"></i><h2>备货计划</h2>
-              <span v-if="prep" class="wbh-hint">还差 {{ prep.remaining }} 项</span>
+              <!-- 分母不是装饰：「还差 70」在 70/70 与 58/70 两种处境下读起来一样，
+                   而一个说明谁都没动、一个说明快收尾了。 -->
+              <span v-if="prep" class="wbh-hint">
+                还差 {{ prep.remaining }}<template v-if="prep.total">/{{ prep.total }}</template> 项
+              </span>
               <router-link class="wbh-more" :to="PREP_PLAN_PATH">去备货 ›</router-link>
             </header>
             <ul v-if="prep && prep.stations && prep.stations.length" class="wbh-prep">
@@ -377,7 +536,12 @@ useNudgePull({
             <p v-if="summary.todos && summary.todos.length > MANAGER_TODO_LIMIT" class="wbh-more-line">
               还有 {{ summary.todos.length - MANAGER_TODO_LIMIT }} 件：去对应页面看全部
             </p>
-            <p v-if="!summary.todos || !summary.todos.length" class="wbh-empty wbh-todo-empty">没有等你处理的事。</p>
+            <!-- 空态只说这四类（整改 / 验收 / 任务 / 请假）都清了，不写「没有等你处理的事」：
+                 页面上面还挂着人事提醒与备货两笔数，一句全局否定会让管理员以为今天真没事。 -->
+            <p v-if="!summary.todos || !summary.todos.length" class="wbh-empty wbh-todo-empty">
+              验收、整改、任务、请假都没有等你处理的。
+              <template v-if="toneOn(summary.reminders)">人事提醒 {{ numberText(summary.reminders) }} 件在上面的格子里。</template>
+            </p>
           </section>
           <section class="wbh-panel">
             <header class="wbh-ph"><i class="wbh-led sig"></i><h2>常用</h2></header>
@@ -423,7 +587,7 @@ useNudgePull({
             <span class="wbh-team-lab">人今天上班 ›</span>
           </router-link>
           <router-link class="wbh-team-cell" :class="{ 'is-warn': toneOn(teamSummary.remaining) }" to="/workbench/kitchen/prep-plan">
-            <b class="wbh-num" :class="{ 'is-warn': toneOn(teamSummary.remaining) }">{{ numberText(teamSummary.remaining) }}</b>
+            <b class="wbh-num" :class="{ 'is-warn': toneOn(teamSummary.remaining) }">{{ numberText(teamSummary.remaining) }}<small v-if="teamPrep && teamPrep.total" class="wbh-den">/{{ teamPrep.total }}</small></b>
             <span class="wbh-team-lab">项备货还差 ›</span>
           </router-link>
         </div>
@@ -466,7 +630,35 @@ useNudgePull({
         </div>
       </section>
 
+      <!-- 今天要交（卫生）排在员工餐前面：它是这一屏唯一带钟点的事（日常 18:00 / 夜班
+           23:30，见 `StaffHygieneCard` 的「前交」），员工餐单没有系统截止（ADR 0135 不做
+           催办），往后放一屏不误事。 -->
       <StaffHygieneCard />
+
+      <!-- 员工餐（S2）：今天这张单的状态，点进单日页填 / 改。日期必须取**自然日**
+           （`beijingToday`），不能用上面那个 06:00 切的营业日 `businessDate`。 -->
+      <router-link
+        v-if="staffMeal"
+        class="wbh-meal"
+        :class="'is-' + staffMeal.led"
+        :to="staffMealLink"
+      >
+        <i class="wbh-led" :class="staffMeal.led"></i>
+        <span class="wbh-meal-lab">员工餐</span>
+        <b class="wbh-meal-state">{{ staffMeal.text }}</b>
+        <span v-if="staffMeal.detail" class="wbh-meal-detail wbh-kf">{{ staffMeal.detail }}</span>
+        <span class="wbh-meal-go wbh-go">›</span>
+      </router-link>
+
+      <!-- 任务（票 07）：独立一张卡，不并进「我的待办」—— 卫生那三块与工作任务
+           是两条动线（一个在卫生页、一个在任务页），混在一个数字里没人知道点去哪。 -->
+      <div class="wbh-cells wbh-cells-task">
+        <router-link class="wbh-cell myTasks" :class="{ 'is-warn': toneOn(taskTodoCount) }" :to="HOME_LINKS.myTasks">
+          <div class="wbh-kh"><span>任务</span><i class="wbh-led" :class="toneOn(taskTodoCount) ? 'warn' : 'off'"></i></div>
+          <b class="wbh-num" :class="{ 'is-warn': toneOn(taskTodoCount) }">{{ numberText(taskTodoCount) }}</b>
+          <p class="wbh-kf">{{ taskCardHint }}</p>
+        </router-link>
+      </div>
 
       <div class="wbh-cells">
         <router-link class="wbh-cell myItems" :class="{ 'is-warn': toneOn(summary.work.pending) }" :to="HOME_LINKS.myItems">
@@ -551,6 +743,9 @@ useNudgePull({
 .wbh-num { font: 500 30px/1 var(--font-mono); letter-spacing: -.03em; color: var(--ink); }
 .wbh-num.is-warn { color: var(--warn); }
 .wbh-num.is-bad { color: var(--danger-bright); }
+/* 备货的分子/分母（2026-11-13 走查）：「还差 70」在 70/70 与 58/70 下读起来一样，分母才
+   说得清是没人动还是快收尾。字号压小一档，不跟主数字抢。 */
+.wbh-den { margin-left: 1px; font-size: 13px; font-weight: 500; letter-spacing: 0; color: var(--ink-faint); }
 .wbh-gauge { display: flex; gap: 2px; }
 .wbh-gauge i { flex: 1; height: 3px; border-radius: 1px; background: var(--line); }
 .wbh-gauge i.on { background: var(--action); }
@@ -688,6 +883,8 @@ useNudgePull({
 .wbh-next { margin: 0; padding-top: 10px; border-top: 1px solid var(--wb-ink-a08); display: flex; flex-wrap: wrap; gap: 12px; font-size: 10.5px; color: var(--ink-dim); }
 
 .wbh-cells { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+/* 任务卡单独一行：它是另一条动线，不跟卫生那两块挤两列。 */
+.wbh-cells-task { grid-template-columns: 1fr; }
 .wbh-cell {
   display: flex; flex-direction: column; gap: 8px;
   padding: 12px 14px;
@@ -736,11 +933,45 @@ useNudgePull({
 .wbh-team-row-sep { color: var(--ink-faint); }
 .wbh-team-go { margin-left: auto; font-size: 10px; color: var(--action); white-space: nowrap; }
 
+/* 员工档「员工餐」一行（2026-11-13 走查 S2）：今天这张单的状态 + 直达单日页。
+   独立一条而不是塞进「我的班」卡片：卡片本体整块是链接，链接不能套链接。 */
+.wbh-meal {
+  display: flex; align-items: center; gap: 8px;
+  min-height: 44px; padding: 0 14px;
+  background: var(--surface-1);
+  border: 1px solid var(--line);
+  border-radius: var(--r-2);
+  text-decoration: none;
+}
+.wbh-meal:hover { background: var(--surface-2); }
+.wbh-meal-lab { font-size: 11px; color: var(--ink-dim); white-space: nowrap; }
+.wbh-meal-state { font-size: 12px; font-weight: 600; color: var(--ink); white-space: nowrap; }
+.wbh-meal.is-warn .wbh-meal-state { color: var(--warn); }
+.wbh-meal.is-bad .wbh-meal-state { color: var(--danger-bright); }
+.wbh-meal-detail { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wbh-meal-go { margin-left: auto; font-size: 13px; color: var(--action); white-space: nowrap; }
+
+/* 管理端「下月员工餐菜单还没导入」（S7）：左侧黄条一行提醒，点进员工餐页导入。 */
+.wbh-meal-next {
+  display: flex; align-items: center; gap: 8px;
+  min-height: 44px; padding: 10px 14px;
+  background: var(--surface-1);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--warn);
+  border-radius: var(--r-2);
+  text-decoration: none;
+}
+.wbh-meal-next:hover { background: var(--surface-2); }
+.wbh-meal-next-text { font-size: 11px; line-height: 1.55; color: var(--ink-dim); }
+.wbh-meal-next-go { margin-left: auto; font-size: 10.5px; color: var(--action); white-space: nowrap; }
+
 @media (max-width: 900px) {
-  .wbh-kpis { grid-template-columns: repeat(2, 1fr); }
   .wbh-cols { grid-template-columns: 1fr; }
 }
+/* 四个读数在 720 以上保持一行：834（iPad 竖屏）是门店常见的看板尺寸，压成两列会让四个
+   大卡各占半屏、一个数字孤零零地摆在中间。 */
 @media (max-width: 720px) {
+  .wbh-kpis { grid-template-columns: repeat(2, 1fr); }
   .wbh-head { align-items: flex-start; flex-direction: column; gap: 10px; }
   .wbh-pills { margin-left: 0; }
   .wbh-title { font-size: 22px; }

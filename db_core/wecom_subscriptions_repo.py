@@ -519,6 +519,35 @@ class _WecomSubscriptionsRepoMixin:
             logger.error(f"❌ 获取出站记录失败: {e}")
             return None
 
+    async def wecom_outbox_for_business_reference(
+        self, topic_id: str, business_reference: str
+    ) -> List[Dict]:
+        """按「内容类型 + 业务引用」查出站行（幂等键的前两段）。
+
+        员工餐采购单的**推送状态**靠它现读：单据表只存 `push_status`，出站表才是投递
+        事实的唯一来源（ADR 0095）。查询不写回任何东西 —— 读页面不该改业务行。
+
+        幂等键 = ``{topic}:{business_reference}:{channel}``：业务引用本身允许带冒号
+        （员工餐是 ``staff_meal_purchase:{使用日}:{push_seq}``），所以按前缀 LIKE 匹配，
+        尾部那个冒号保证不会误中 ``…:10`` 与 ``…:1`` 这种前缀关系。
+        """
+        try:
+            prefix = f"{str(topic_id)}:{str(business_reference)}:"
+            tdb = self._connection.table("wecom_push_outbox")
+            async with tdb.conn.cursor() as cursor:
+                await cursor.execute(
+                    """SELECT id, topic_id, status, attempts, last_error, finished_at
+                       FROM wecom_push_outbox
+                       WHERE topic_id = ? AND idempotency_key LIKE ?
+                       ORDER BY id""",
+                    (str(topic_id), f"{prefix}%"),
+                )
+                rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+        except Exception as e:
+            logger.error(f"❌ 按业务引用获取出站记录失败: {e}")
+            return []
+
     async def wecom_outbox_pending(self, limit: int = 20, now: Optional[str] = None) -> List[Dict]:
         """按先进先出取**已到点**的待发（调度循环每轮捞一批）。
 

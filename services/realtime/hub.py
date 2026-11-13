@@ -16,9 +16,9 @@ seq / 跳号重订阅 / snapshot 缓存——客户端收到 nudge 后自行复�
 选主，开 `--workers > 1` 仍会重复采集 / 重复推送（见 deploy/README.md）。
 
 **员工连接按归属隔离**（`auth == "staff"`，身份在建连鉴权时确定，见
-`api/security.py` 的 `identify_ws`）：只订 `hygiene`，且只收 scope 里没有
-employee_id 的全店级事件 + scope 里 employee_id 是自己的那条；subscribe 消息里
-客户端自报的 filters 一律作废。管理端连接不受这两条限制。
+`api/security.py` 的 `identify_ws`）：只订卫生、排班、加班与任务四个主题，且只收
+scope 里没有 employee_id 的全店级事件 + scope 里 employee_id 是自己的那条；
+subscribe 消息里客户端自报的 filters 一律作废。管理端连接不受这两条限制。
 """
 
 import asyncio
@@ -41,21 +41,25 @@ VALID_TOPICS = {
     "hygiene",
     "scheduling",
     "overtime",
+    "tasks",
 }
 
 _VALID_ACTIONS = {"subscribe", "unsubscribe", "ping"}
 
-# 员工（staff）会话只允许订阅卫生、排班与加班三个主题。nudge 不带数据，但 orders/tables/logs/admin
+# 员工（staff）会话只允许订阅卫生、排班、加班与任务四个主题。nudge 不带数据，但 orders/tables/logs/admin
 # 的**时序**本身就是门店经营信息（几点来了几单、什么时候在改档口），而员工端没有任何页面
 # 需要它们。管理员会话不受限制。
 #
-# 光限主题还不够：员工订得到 hygiene / scheduling / overtime，就得保证**推给他的那条不是
+# 光限主题还不够：员工订得到 hygiene / scheduling / overtime / tasks，就得保证**推给他的那条不是
 # 别人的事** —— 那由 `_staff_owns_scope` 与订阅时的 filters 覆盖一起兜（见 `_dispatch_local`
 # 与 `handle_message`）：scope 里带了别人 employee_id 的一律不推。
 #
 # `overtime` 是员工自己那一页要的（票 01 的「加班与补钟」页）：他的登记被批了 / 被驳了，
 # 页面上那张状态要跟着变。这一条 nudge 的 scope 恒带 employee_id，所以同事收不到。
-STAFF_ALLOWED_TOPICS = frozenset({"hygiene", "scheduling", "overtime"})
+# `tasks` 是工作台任务的 nudge：发布 / 提交 / 验收 / 改派都发。带 employee_id 的
+# 只推给当事人，全店级（不带 id）的推给所有员工 —— ADR 0131 已裁定这层可接受
+# （任务本身不加密，员工端页面本来也只渲染跟自己有关的那些）。
+STAFF_ALLOWED_TOPICS = frozenset({"hygiene", "scheduling", "overtime", "tasks"})
 
 
 def allowed_topics(auth: str):

@@ -69,6 +69,29 @@ class StaffTopicScopeTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("orders", allowed_topics("session"))
         self.assertNotIn("orders", allowed_topics("staff"))
 
+    async def test_staff_may_subscribe_to_tasks_and_nudge_carries_no_data(self):
+        ws = _FakeWebSocket()
+        await self.hub.register(ws, "staff")
+
+        await _subscribe(self.hub, ws, "sub-1", ["tasks"])
+
+        self.assertEqual(ws.sent[-1], {"type": "subscribed", "id": "sub-1"})
+        await self.hub.broadcast_nudge("tasks", {"reason": "published"})
+        nudges = [m for m in ws.sent if m.get("type") == "nudge"]
+        self.assertEqual(
+            nudges,
+            [{"type": "nudge", "topic": "tasks", "scope": {"reason": "published"}}],
+        )
+        self.assertEqual(set(nudges[0]), {"type", "topic", "scope"})
+
+    async def test_admin_session_may_subscribe_to_tasks(self):
+        ws = _FakeWebSocket()
+        await self.hub.register(ws, "session")
+
+        await _subscribe(self.hub, ws, "sub-1", ["tasks"])
+
+        self.assertEqual(ws.sent[-1], {"type": "subscribed", "id": "sub-1"})
+
     async def test_staff_ping_still_works(self):
         """分级只影响 subscribe，不能顺手把心跳也挡了。"""
         ws = _FakeWebSocket()

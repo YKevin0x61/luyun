@@ -25,10 +25,10 @@
  * 所以页面不用再判断该信哪一个。
  */
 
-/** 十四项能力：`key` 是契约键名，`label` / `note` 只用于界面显示，顺序 = 花名册里的显示顺序。
+/** 十五项能力：`key` 是契约键名，`label` / `note` 只用于界面显示，顺序 = 花名册里的显示顺序。
  *
  *  `staffSide` 标的是**员工端有没有执行点**（后端 `STAFF_SIDE_CAPABILITIES` 的同义字段）：
- *  只有前七项在员工端（手机或电脑上的员工会话）真正生效 —— 三项在「卫生」页，`schedule` 在人事组四页（月历 /
+ *  只有前八项在员工端（手机或电脑上的员工会话）真正生效 —— 三项在「卫生」页，`schedule` 在人事组四页（月历 /
  *  待办 / 班次表 / 考勤表）**以及**「加班与补钟」页（加班审批 2026-11-03 并进了这一项，
  *  原来那项 `overtime` 已删除），`wastage` 在后勤组的损耗分析页 —— 花名册里
  *  **可勾**的也只有它们。
@@ -53,6 +53,7 @@ export const ADMIN_CAP_DEFS = [
   { key: 'wastage', label: '损耗分析', note: '看全店损耗统计与明细，含「谁记的」', staffSide: true },
   { key: 'prep_review', label: '备货复盘', note: '只读看备货复盘：偏差口径、分组对比与多备代价', staffSide: true },
   { key: 'recipe_qr', label: '岗位二维码', note: '只读查看并打印各岗位二维码', staffSide: true },
+  { key: 'task', label: '任务管理', note: '发布、验收与改派工作任务', staffSide: true },
   { key: 'attire', label: '仪容仪表', note: '看与判仪容打卡，维护仪容标准', staffSide: false },
   { key: 'standard', label: '标准图管理', note: '换标准图、改标注、导出整套标准', staffSide: false },
   { key: 'zone', label: '工作区与检查项', note: '加/改/删工作区与检查项', staffSide: false },
@@ -65,7 +66,7 @@ export const ADMIN_CAP_DEFS = [
 /** 键名清单（顺序 = 契约）：`normalizeCaps` 的排序与后端 `dump_caps` 的写法都以它为准。 */
 export const ADMIN_CAPABILITIES = ADMIN_CAP_DEFS.map((item) => item.key)
 
-/** 花名册上**可勾**的七项（员工端有执行点）。 */
+/** 花名册上**可勾**的八项（员工端有执行点）。 */
 export const ADMIN_CAP_STAFF_DEFS = ADMIN_CAP_DEFS.filter((item) => item.staffSide)
 
 /** 花名册上**只读展示**的七项：键保留、员工端暂无入口。 */

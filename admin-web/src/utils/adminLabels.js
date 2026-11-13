@@ -72,6 +72,10 @@ export const TABLE_LABELS = {
   wastage_images: '损耗照片',
   wastage_templates: '损耗常用模板',
   wastage_record_revisions: '损耗更正记录',
+  staff_meal_menu_days: '员工餐菜单（按天）',
+  staff_meal_orders: '员工餐采购单',
+  staff_meal_order_dishes: '采购单菜品',
+  staff_meal_order_items: '采购条目',
   logs: '运行日志',
 }
 
@@ -147,6 +151,10 @@ export const TABLE_ICONS = {
   wastage_images: 'image',
   wastage_templates: 'file-text',
   wastage_record_revisions: 'file-text',
+  staff_meal_menu_days: 'calendar',
+  staff_meal_orders: 'clipboard',
+  staff_meal_order_dishes: 'utensils',
+  staff_meal_order_items: 'package',
   logs: 'file-text',
 }
 
@@ -312,6 +320,28 @@ export const COLUMN_LABELS = {
   steamer_id: '蒸笼ID', port_index: '笼位', stack_order: '叠放顺序',
   loaded_at: '上笼时间', is_hold: '叫起', is_rushed: '催菜', fired_at: '起菜时间',
   in_seat_people: '在座人数', open_tables: '开台数', total_tables: '总桌数',
+  // ── 员工餐采购（ADR 0135）：四张表列名自成体系，精确映射一遍，避免「菜单日」
+  //    这类列名被全局映射借去当别的意思。
+  'staff_meal_menu_days.menu_date': '使用日', 'staff_meal_menu_days.weekday': '星期',
+  'staff_meal_menu_days.lunch_main': '午餐主菜', 'staff_meal_menu_days.lunch_side1': '午餐副菜1',
+  'staff_meal_menu_days.lunch_side2': '午餐副菜2', 'staff_meal_menu_days.dinner_main': '晚餐主菜',
+  'staff_meal_menu_days.dinner_side1': '晚餐副菜1', 'staff_meal_menu_days.dinner_side2': '晚餐副菜2',
+  'staff_meal_menu_days.drink': '饮品/水果', 'staff_meal_menu_days.freeform': '自主发挥日',
+  'staff_meal_menu_days.source': '菜单来源', 'staff_meal_menu_days.created_at': '创建时间',
+  'staff_meal_menu_days.updated_at': '更新时间',
+  'staff_meal_orders.order_date': '使用日', 'staff_meal_orders.status': '单据状态',
+  'staff_meal_orders.remark': '单据备注', 'staff_meal_orders.submitter_employee_id': '提交人员工ID',
+  'staff_meal_orders.submitter_name': '提交人', 'staff_meal_orders.submitted_at': '提交时间',
+  'staff_meal_orders.push_status': '推送状态', 'staff_meal_orders.pushed_at': '推送时间',
+  'staff_meal_orders.push_error': '推送失败原因', 'staff_meal_orders.push_seq': '推送序号',
+  'staff_meal_orders.created_at': '创建时间', 'staff_meal_orders.updated_at': '更新时间',
+  'staff_meal_order_dishes.order_id': '采购单ID', 'staff_meal_order_dishes.dish_name': '菜名',
+  'staff_meal_order_dishes.meal': '餐次', 'staff_meal_order_dishes.role': '菜品位置',
+  'staff_meal_order_dishes.sort_order': '排序', 'staff_meal_order_dishes.created_at': '创建时间',
+  'staff_meal_order_items.order_id': '采购单ID', 'staff_meal_order_items.dish_id': '菜品ID',
+  'staff_meal_order_items.item_name': '食材名称', 'staff_meal_order_items.quantity': '数量',
+  'staff_meal_order_items.unit': '单位', 'staff_meal_order_items.sort_order': '排序',
+  'staff_meal_order_items.created_at': '创建时间', 'staff_meal_order_items.updated_at': '更新时间',
 }
 
 /** 自增/自动维护列：新增记录表单中永不展示；编辑记录表单中始终隐藏（不可篡改）。 */

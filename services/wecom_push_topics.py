@@ -319,6 +319,36 @@ class OvertimeRequestParams(_EventParams):
     )
 
 
+class StaffMealPurchaseParams(_EventParams):
+    """员工餐采购计划：提交 / 改后重推时推给核心群，清单正文在 ``text``。
+
+    正文由 `services/staff_meal/push.py` 渲染（标题 + 每行「食材 数量单位」），
+    与 OpenClaw 时代群里看到的那条格式一致 —— 店长和厨师认的是那个形状。
+    """
+
+    text: str = Field(
+        ...,
+        min_length=1,
+        title="正文",
+        json_schema_extra={"x-ui-control": CONTROL_TEXT},
+    )
+
+
+class WorkTaskParams(_EventParams):
+    """工作任务：发布 / 每期生成时推给群里，标题、截止与指派摘要都在 ``text``。
+
+    正文由 `services/tasks/notify.py` 渲染。只支持事件触发：任务没有固定时间表，
+    由发布或物化当期实例时入队；勾选「同时发企业微信群」才有这一条。
+    """
+
+    text: str = Field(
+        ...,
+        min_length=1,
+        title="正文",
+        json_schema_extra={"x-ui-control": CONTROL_TEXT},
+    )
+
+
 # ── 注册表 ──────────────────────────────────────────────────────────────────
 
 TOPIC_SALES_REPORT = "sales_report"
@@ -332,6 +362,8 @@ TOPIC_RESOURCE_WATERMARK = "resource_watermark"
 TOPIC_WEEKLY_SCHEDULE = "weekly_schedule"
 TOPIC_LEAVE_REQUEST = "leave_request"
 TOPIC_OVERTIME_REQUEST = "overtime_request"
+TOPIC_STAFF_MEAL_PURCHASE = "staff_meal_purchase"
+TOPIC_WORK_TASK = "work_task"
 
 
 def _format_errors(exc: ValidationError) -> str:
@@ -639,4 +671,16 @@ register_topic(PushTopic(
     name="加班/补钟申请",
     triggers=frozenset({PushTrigger.EVENT}),
     event_params_model=OvertimeRequestParams,
+))
+register_topic(PushTopic(
+    id=TOPIC_STAFF_MEAL_PURCHASE,
+    name="员工餐采购计划",
+    triggers=frozenset({PushTrigger.EVENT}),
+    event_params_model=StaffMealPurchaseParams,
+))
+register_topic(PushTopic(
+    id=TOPIC_WORK_TASK,
+    name="工作任务",
+    triggers=frozenset({PushTrigger.EVENT}),
+    event_params_model=WorkTaskParams,
 ))

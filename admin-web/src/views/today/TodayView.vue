@@ -77,8 +77,9 @@ const staffCaps = computed(() => ADMIN_CAP_STAFF_DEFS.map((item) => ({
 })))
 const staffCapCount = computed(() => staffCaps.value.filter((item) => item.granted).length)
 
-// 能力 → 落点（§12 第 1 条裁定：能力卡计 **7 项**，三项在「卫生」页、`schedule` 在人事组，`wastage` 在后勤组；
-// 2026-11-10 新增的 `prep_review` / `recipe_qr` 落到后勤组两个只读页）。
+// 能力 → 落点（§12 第 1 条裁定：能力卡计**员工端有执行点的每一项**，今天八项；三项在「卫生」页、
+// `schedule` 在人事组，`wastage` 在后勤组；2026-11-10 新增的 `prep_review` / `recipe_qr` 落到后勤组
+// 两个只读页；2026-11-11 的任务管理落到「我的任务」）。
 // 加班与补钟审批 2026-11-03 并进了 `schedule`，「加班与补钟」页仍在 `/workbench/staff/overtime`，
 // 但能力卡上不再单独占一项 —— 它的落点跟着人事管理走。
 // 落点写在数据旁边，而不是页尾一句概括句 —— 那种句子在一项能力多出来之后就会变成假话。
@@ -99,6 +100,7 @@ const CAP_ROUTES = {
   wastage: '/workbench/kitchen/loss',
   prep_review: '/workbench/kitchen/prep-review',
   recipe_qr: '/workbench/kitchen/recipe/qr',
+  task: '/workbench/staff/tasks',
 }
 
 // 健康证到期（一行提示，只在临期 / 过期时渲染）：文案里**不带日期** —— 日期在下面

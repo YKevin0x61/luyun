@@ -19,6 +19,8 @@ const ROUTES = [
   { path: '/workbench/floor/fix', component: { template: '<div />' } },
   { path: '/workbench/staff/today', component: { template: '<div />' } },
   { path: '/workbench/staff/clean', component: { template: '<div />' } },
+  { path: '/workbench/tasks', component: { template: '<div />' } },
+  { path: '/workbench/staff/tasks', component: { template: '<div />' } },
   { path: '/login', component: { template: '<div />' } },
 ]
 
@@ -68,6 +70,8 @@ function managerData(overrides = {}) {
       health_cert_due: { count: 0, items: [] },
     },
     '/api/hygiene/admin/fix': { items: [] },
+    // 任务板（2026-11-11 票 07）：首页只读 counts（待验收数）。
+    '/api/tasks/board': { counts: { pending_review: 0 } },
     // 人事提醒：本月该调工龄奖 + 本月生日 + 健康证临期/过期的人数，三块都从这一条来
     // （健康证到期 2026-10-08 从首页单独一格并进来）。
     '/api/hygiene/admin/hr-reminders': {
@@ -99,6 +103,8 @@ function staffData(overrides = {}) {
     '/api/hygiene/staff/attire': {
       attire: { business_date: '2026-10-05', required: true, status: 'todo', has_standard: true },
     },
+    // 任务（2026-11-11 票 07）：员工端只读 counts（待做 / 待我验收）。
+    '/api/tasks/mine': { counts: { todo: 0, review: 0 } },
     ...overrides,
   }
 }
@@ -672,5 +678,162 @@ describe('工作台首页 · 管理员（员工会话 + 卫生复核能力）的
     expect(row.text()).toContain('本周被驳回 0 次')
     expect(row.classes()).not.toContain('is-warn')
     expect(row.get('.wbh-led').classes()).toContain('off')
+  })
+})
+
+describe('任务（2026-11-11 票 07）', () => {
+  it('员工首页独立一张「任务」卡：待做数 + 落「我的任务」', async () => {
+    const table = staffData({ '/api/tasks/mine': { counts: { todo: 3, review: 2 } } })
+    const { wrapper } = await mountHome({ identity: 'staff', table, staffCaps: [] })
+    const card = wrapper.get('.wbh-cell.myTasks')
+    expect(card.attributes('href')).toBe('/workbench/staff/tasks')
+    expect(card.get('.wbh-num').text()).toBe('3')
+    // 没有任务管理能力：卡上不显示待验收数（避免点进去发现没那一段）。
+    expect(card.get('.wbh-kf').text()).toBe('任务 ›')
+  })
+
+  it('有任务管理能力：卡上多一句待我验收数', async () => {
+    const table = staffData({ '/api/tasks/mine': { counts: { todo: 3, review: 2 } } })
+    const { wrapper } = await mountHome({ identity: 'staff', table, staffCaps: ['task'] })
+    expect(wrapper.get('.wbh-cell.myTasks .wbh-kf').text()).toContain('待我验收 2 项')
+  })
+
+  it('任务数读不到画「—」，不是 0', async () => {
+    const table = staffData()
+    delete table['/api/tasks/mine']
+    const { wrapper } = await mountHome({ identity: 'staff', table })
+    expect(wrapper.get('.wbh-cell.myTasks .wbh-num').text()).toBe('—')
+  })
+
+  it('店长「等我处理」多一条待验收任务，点进任务页待验收段', async () => {
+    const table = managerData({ '/api/tasks/board': { counts: { pending_review: 2 } } })
+    const { wrapper } = await mountHome({ identity: 'super', table })
+    const rows = wrapper.findAll('.wbh-todo')
+    const taskRow = rows.find((row) => row.text().includes('待验收任务'))
+    expect(taskRow).toBeTruthy()
+    expect(taskRow.attributes('href')).toBe('/workbench/tasks?seg=pending')
+    expect(taskRow.text()).toContain('2 件')
+  })
+
+  it('没有待验收任务就不占「等我处理」的位置', async () => {
+    const { wrapper } = await mountHome({ identity: 'super', table: managerData() })
+    expect(wrapper.findAll('.wbh-todo').some((row) => row.text().includes('待验收任务'))).toBe(false)
+  })
+})
+
+// 2026-11-13 多角色走查改的三处（管理端空态 / 备货分母 / 员工档顺序）。
+describe('工作台首页 · 2026-11-13 走查', () => {
+  it('「等我处理」空了只交代这四类，不替人事提醒与备货下结论', async () => {
+    const { wrapper } = await mountHome({
+      identity: 'super',
+      table: managerData({
+        '/api/hygiene/admin/hr-reminders': {
+          seniority: { count: 0, items: [] },
+          birthdays: { count: 4, items: [] },
+          certs: { count: 3, items: [] },
+          incomplete: { count: 0, items: [] },
+        },
+      }),
+    })
+
+    const empty = wrapper.get('.wbh-todo-empty')
+    // 旧文案「没有等你处理的事」是一句全局否定：同一屏上面还挂着 7 件人事提醒。
+    expect(empty.text()).not.toContain('没有等你处理的事')
+    expect(empty.text()).toContain('验收、整改、任务、请假都没有等你处理的')
+    expect(empty.text()).toContain('人事提醒 7 件')
+  })
+
+  it('人事提醒是 0 时不多这一句（没有可指的格子）', async () => {
+    const { wrapper } = await mountHome({ identity: 'super', table: managerData() })
+    const empty = wrapper.get('.wbh-todo-empty')
+    expect(empty.text()).toContain('都没有等你处理的')
+    expect(empty.text()).not.toContain('人事提醒')
+  })
+
+  it('管理端备货写分母：70/70 与 58/70 是两种处境', async () => {
+    const { wrapper } = await mountHome({
+      identity: 'super',
+      table: managerData({ '/api/prep-plan/summary': { total: 70, remaining: 58, stations: [] } }),
+    })
+    const hints = wrapper.findAll('.wbh-hint').map((node) => node.text())
+    expect(hints.some((text) => text.includes('还差 58/70 项'))).toBe(true)
+  })
+
+  it('店长「店里的事」的备货格也写分母，且分母只作小字', async () => {
+    const { wrapper } = await mountHome({
+      identity: 'staff',
+      staffCaps: ['schedule'],
+      table: staffData({
+        '/api/scheduling/inbox': { today: '2026-10-05', requests: [] },
+        '/api/scheduling/day': DAY,
+        '/api/prep-plan/summary': { total: 70, remaining: 58, stations: [] },
+      }),
+    })
+
+    const cell = wrapper.findAll('.wbh-team-cell')[2]
+    expect(cell.get('.wbh-num').text()).toBe('58/70')
+    expect(cell.get('.wbh-den').text()).toBe('/70')
+  })
+
+  it('读不到总量时只写分子，不画一个假的分母', async () => {
+    const { wrapper } = await mountHome({
+      identity: 'staff',
+      staffCaps: ['schedule'],
+      table: staffData({
+        '/api/scheduling/inbox': { today: '2026-10-05', requests: [] },
+        '/api/scheduling/day': DAY,
+        '/api/prep-plan/summary': { remaining: 58, stations: [] },
+      }),
+    })
+
+    const cell = wrapper.findAll('.wbh-team-cell')[2]
+    expect(cell.get('.wbh-num').text()).toBe('58')
+    expect(cell.find('.wbh-den').exists()).toBe(false)
+  })
+})
+
+describe('工作台首页 · 人事提醒副行（2026-11-13 走查）', () => {
+  // 7 这个数字里混着生日与证件两件事：过期的证件是检查会罚的，副行必须把它点出来。
+  // 数据形状见 `services/identity/accounts.py::list_hr_reminders` 的 certs（state=expired）。
+  const reminders = (certs) => ({
+    seniority: { count: 0, items: [] },
+    birthdays: { count: 4, items: [] },
+    certs,
+    incomplete: { count: 1, items: [] },
+  })
+
+  it('有健康证过期时，副行写「过期几张 + 生日几人」', async () => {
+    const { wrapper } = await mountHome({
+      identity: 'super',
+      table: managerData({
+        '/api/hygiene/admin/hr-reminders': reminders({
+          count: 3,
+          items: [
+            { name: '甲', state: 'expired', days_left: -316 },
+            { name: '乙', state: 'expired', days_left: -149 },
+            { name: '丙', state: 'expired', days_left: -61 },
+          ],
+        }),
+      }),
+    })
+
+    const hints = wrapper.findAll('.wbh-kf').map((node) => node.text())
+    expect(hints).toContain('健康证过期 3 · 生日 4')
+    expect(wrapper.text()).not.toContain('工龄奖 · 生日 · 健康证')
+  })
+
+  it('没有过期证件时仍是原来那句口径', async () => {
+    const { wrapper } = await mountHome({
+      identity: 'super',
+      table: managerData({
+        '/api/hygiene/admin/hr-reminders': reminders({
+          count: 1,
+          items: [{ name: '甲', state: 'soon', days_left: 12 }],
+        }),
+      }),
+    })
+
+    const hints = wrapper.findAll('.wbh-kf').map((node) => node.text())
+    expect(hints).toContain('工龄奖 · 生日 · 健康证')
   })
 })

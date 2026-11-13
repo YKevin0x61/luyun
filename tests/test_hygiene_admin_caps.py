@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""管理权限开关的契约：前后端十四项键名逐字一致，解析 fail-closed。
+"""管理权限开关的契约：前后端十五项键名逐字一致，解析 fail-closed。
 
 `services/identity/capabilities.py`（后端）与 `admin-web/src/utils/adminCaps.js`（前端）是
 **同一份契约的两半**：线上只走键名。键名一旦对不上，症状都是**静默**的 —— 花名册里勾了、
@@ -143,7 +143,7 @@ def test_every_wired_capability_is_referenced_by_a_judgment():
 
 
 def test_frontend_keys_match_backend_exactly():
-    """十四项键名与顺序逐字相同 —— 这是前后端唯一共享的东西。"""
+    """十五项键名与顺序逐字相同 —— 这是前后端唯一共享的东西。"""
     src = FRONTEND.read_text(encoding="utf-8")
     keys = re.findall(r"key:\s*'([a-z_]+)'", src)
     assert tuple(keys) == CAPABILITIES, (
@@ -284,6 +284,6 @@ def test_frontend_checkbox_group_is_exactly_the_staff_side_caps():
     assert supervisor_only == SUPERVISOR_ONLY_CAPABILITIES, (
         f"前端只读的七项 {supervisor_only} 与后端 {SUPERVISOR_ONLY_CAPABILITIES} 不一致"
     )
-    # 两组刚好把十四项分完，不重不漏。
+    # 两组刚好把十五项分完，不重不漏。
     assert set(staff_side) | set(supervisor_only) == set(CAPABILITIES)
     assert not set(staff_side) & set(supervisor_only)

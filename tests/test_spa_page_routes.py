@@ -62,7 +62,7 @@ PAGE_ROUTES_JSON = REPO_ROOT / "admin-web" / "src" / "router" / "pageRoutes.json
 # 加一页时两边枚举对不上。`hygiene` 是**员工**那一档的卫生组（2026-10-05 起
 # `/workbench/staff/clean` 从 `me` 挪进它自己的组，因为员工底栏给了它一个一级入口；
 # 店长那一档走的是 `floor` 那七页，两组人做同一批活、看到的是各自的面）。
-PAGE_GROUPS = {"home", "hr", "floor", "hygiene", "kitchen", "me", "system", "entry"}
+PAGE_GROUPS = {"home", "hr", "floor", "hygiene", "kitchen", "me", "tasks", "system", "entry"}
 PAGE_AUDIENCES = {"admin", "staff", "both"}
 
 # 免墙表里**不属于任何页面**的壳层条目，逐条写明理由与归属。表里每一条要么对应清单里

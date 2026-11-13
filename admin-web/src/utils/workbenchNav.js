@@ -2,7 +2,7 @@
  *
  *  拆表的原因：原先只有一张按身份过滤的合并表，6 格里混着「页」与「组」，
  *  名字也跟内容对不上 —— `floor` 叫「卫生验收」却只是现场八页那一组、`kitchen` 叫「配方」
- *  却装着备货计划与损耗分析。现在管理端看 `ADMIN_NAV_GROUPS`（今天 / 人事 / 现场 / 后勤），
+ *  却装着备货计划与损耗分析。现在管理端看 `ADMIN_NAV_GROUPS`（今天 / 人事 / 现场 / 后勤 / 任务），
  *  员工端看 `STAFF_NAV_GROUPS`（今天 / 人事 / 卫生 / 后勤 / 我的）。两套表共享同一批组定义，
  *  不复制第二份；**过滤判据仍是 `pageVisibleFor` 一处**，所以拆表前后渲染结果一致
  *  （员工勾了「人事管理」能力时，`hr` 那一格才出现 —— 员工表里留着它、由能力键过滤）。
@@ -27,6 +27,8 @@ import { PREP_ITEMS_PATH } from './prepItemPaths.js'
 import { PREP_PLAN_PATH, PREP_REVIEW_PATH } from './prepPlanPaths.js'
 import { PREP_RULES_PATH } from './prepRulePaths.js'
 import { RECIPE_HOME_PATH, RECIPE_MANAGE_PATH, RECIPE_QR_PATH } from './recipePaths.js'
+import { STAFF_MEAL_PATH } from './staffMealPaths.js'
+import { TASKS_HOME_PATH } from './tasksPaths.js'
 import { WASTAGE_ANALYSIS_PATH } from './wastagePaths.js'
 import { WORKBENCH_FIELD_HOME, WORKBENCH_HOME, WORKBENCH_HR_HOME, WORKBENCH_TITLE } from './workbenchCopy.js'
 import { IDENTITY_ADMIN, IDENTITY_STAFF } from './workbenchIdentity.js'
@@ -70,6 +72,9 @@ const KITCHEN_GROUP = {
     // 原因最多、哪几样最费」，是天天会看的数，不是配置页 —— 所以给它一扇直达的门。
     // 员工那一档看不到它（清单里 `audience: admin`）。
     { to: WASTAGE_ANALYSIS_PATH },
+    // 员工餐采购（ADR 0135）：店长传月菜单、员工逐天填采购单，提交即推核心群。
+    // 清单里是 `both` —— 2026-11-11 用户裁定这一域不设能力开关（全员可用）。
+    { to: STAFF_MEAL_PATH },
   ],
   // 组内**一级入口**（手写）：`workbenchPagesOf` 默认从页面清单派生，而清单里
   // 「配方详情」（要带 `?slug=`）与「配方打印」（A4 预览）是**从列表点进去**的功能页，
@@ -78,6 +83,7 @@ const KITCHEN_GROUP = {
   pages: [
     RECIPE_HOME_PATH, RECIPE_QR_PATH, RECIPE_MANAGE_PATH,
     PREP_PLAN_PATH, PREP_REVIEW_PATH, PREP_RULES_PATH, PREP_ITEMS_PATH, WASTAGE_ANALYSIS_PATH,
+    STAFF_MEAL_PATH,
   ],
 }
 
@@ -90,6 +96,10 @@ export const ADMIN_NAV_GROUPS = [
   // `STAFF_NAV_GROUPS` 里的「卫生」。
   { key: 'floor', label: '现场', to: WORKBENCH_FIELD_HOME },
   KITCHEN_GROUP,
+  // 任务（2026-11-11 用户裁定）：管理端新的一级组、底栏第 5 格。落点是 `/workbench/tasks`
+  // （进行中 / 待验收 / 已结束三段），组里第二页是「定期任务」；员工端的入口不在这里，
+  // 在「我的」组里的「我的任务」（`/workbench/staff/tasks`，员工端没有任务组）。
+  { key: 'tasks', label: '任务', to: TASKS_HOME_PATH },
 ]
 
 /** 员工端一级导航：4 格（今天 / 卫生 / 后勤 / 我的）+ 一格能力键页。

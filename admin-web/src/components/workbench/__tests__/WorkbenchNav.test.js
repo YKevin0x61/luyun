@@ -56,14 +56,15 @@ afterEach(() => {
   vi.resetModules()
 })
 
-describe('工作台级导航（管理端：今天 / 人事 / 现场 / 后勤；员工端：今天 / 卫生 / 后勤 / 我的）', () => {
-  it('店长这一档：五个门都在，「今天」指 /workbench（B2 那条回首页的路）', async () => {
+describe('工作台级导航（管理端：今天 / 人事 / 现场 / 后勤 / 任务；员工端：今天 / 卫生 / 后勤 / 我的）', () => {
+  it('店长这一档：五格都在，「今天」指 /workbench（B2 那条回首页的路）', async () => {
     const wrapper = await mountNav('/workbench/hr/calendar', 'super')
 
     // 后勤那一格是一组多门：配方（选择岗位）/ 备货计划 / 备货复盘 / 换算规则 / 备货品 / 损耗分析 ——
     // 前两条 `both`，其余只给管理端，所以店长这一档全在。
     expect(wrapper.findAll('.wb-nav-item').map((item) => item.text())).toEqual([
       '今天', '人事', '现场', '选择岗位', '备货计划', '备货复盘', '换算规则', '备货品', '损耗分析',
+      '员工餐采购', '任务',
     ])
     expect(wrapper.get('a[href="/workbench"]').text()).toBe('今天')
     // 站在人事组里，「人事」那一格亮。
@@ -78,7 +79,8 @@ describe('工作台级导航（管理端：今天 / 人事 / 现场 / 后勤；�
     const hrefs = wrapper.findAll('.wb-nav-item').map((item) => item.attributes('href'))
     expect(hrefs).toEqual([
       '/workbench', '/workbench/staff/clean', '/workbench/kitchen/recipe',
-      '/workbench/kitchen/prep-plan', '/workbench/staff/today',
+      '/workbench/kitchen/prep-plan', '/workbench/kitchen/staff-meal',
+      '/workbench/staff/today',
     ])
     expect(wrapper.find('a[href="/workbench/floor/daily"]').exists()).toBe(false)
   })
@@ -87,7 +89,7 @@ describe('工作台级导航（管理端：今天 / 人事 / 现场 / 后勤；�
     const wrapper = await mountNav('/workbench/kitchen/prep-plan', 'super')
 
     const cell = wrapper.get('.wb-nav-cell.is-multi')
-    expect(cell.findAll('.wb-nav-item')).toHaveLength(6)
+    expect(cell.findAll('.wb-nav-item')).toHaveLength(7)
     expect(cell.classes()).toContain('is-on')
     expect(wrapper.findAll('.wb-nav-item.is-current').map((item) => item.attributes('href')))
       .toEqual(['/workbench/kitchen/prep-plan'])
@@ -121,7 +123,8 @@ describe('工作台级导航（管理端：今天 / 人事 / 现场 / 后勤；�
     const group = wrapper.get('.wb-nav-group')
     expect(group.text()).toBe('后勤')
     expect(group.attributes('href')).toBe('/workbench/kitchen/recipe')
-    expect(wrapper.get('.wb-nav-cell.is-multi').findAll('.wb-nav-item')).toHaveLength(2)
+    // 员工这一档能见的后勤门：配方 / 备货计划 / 员工餐采购（其余只给管理端）。
+    expect(wrapper.get('.wb-nav-cell.is-multi').findAll('.wb-nav-item')).toHaveLength(3)
   })
 
   // 媒体查询在 jsdom 里不生效，断"1024 档把多门收起来"只能按源码断（仓库先例见

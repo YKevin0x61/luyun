@@ -78,6 +78,11 @@ export const GROUP_CONTENT_INSETS = {
   // `.hy-work-main` 上）、加班与补钟那页的根自己带 `12px 14px 28px`。搬它们等于把页内
   // 别的几块一起推走（今天 / 整月 / 卫生三页的页内结构会当场错位）。
   me: { base: NO_CONTENT_INSET },
+  // 任务三页（2026-11-11，管理端「任务 / 定期任务」+ 员工端「我的任务」）→ 0：三页的根
+  // 都自己在最外层给了 `padding: 20px 16px 40px`（与人事 / 我的那几页同一口径）。壳再给
+  // 一份就等于推两次；以后若改成壳统一留白，删掉这一页自己的 padding、把这个值填成与
+  // 现场组同档即可。
+  tasks: { base: NO_CONTENT_INSET },
   // 后勤六页 → 0：配方那五页的根是裸 `<div>`（内容内边距来自 `recipe.css` 的
   // `.site-header-inner` / `.sop-*`，票面明确不碰 recipe.css）、备货计划的根是 0
   // （内容内边距由 `.card` 自己给）。

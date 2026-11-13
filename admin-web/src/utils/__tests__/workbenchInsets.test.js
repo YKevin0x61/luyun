@@ -151,7 +151,7 @@ describe('contentInsetFor：按组查表给出横向与上内边距', () => {
       PAGE_ROUTES.filter((row) => row.path.startsWith('/workbench') && row.group !== 'entry')
         .map((row) => row.group),
     )
-    expect([...groups].sort()).toEqual(['floor', 'home', 'hr', 'hygiene', 'kitchen', 'me'])
+    expect([...groups].sort()).toEqual(['floor', 'home', 'hr', 'hygiene', 'kitchen', 'me', 'tasks'])
     for (const group of groups) {
       expect(contentInsetFor(group, { wide: false }), `${group} 没有登记`).toBeTruthy()
     }

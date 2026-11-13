@@ -16,6 +16,7 @@ const ROUTES = [
   { path: '/workbench/floor/daily', component: { template: '<div>日常</div>' } },
   { path: '/workbench/kitchen/recipe', component: { template: '<div>配方</div>' } },
   { path: '/workbench/staff/today', component: { template: '<div>我的</div>' } },
+  { path: '/workbench/tasks', component: { template: '<div>任务</div>' } },
 ]
 
 const LEAVE_ROWS = [
@@ -131,6 +132,55 @@ describe('手机底栏的「人事」：有待批就直接是待办入口', () =
     vi.stubGlobal('fetch', fetchMock)
     const wrapper = await mountBar()
     expect(hrLink(wrapper).attributes('href')).toBe('/workbench/hr/calendar')
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+})
+
+/** 「任务」那一格的 href（管理端底栏第五格）。 */
+function taskLink(wrapper) {
+  return wrapper.findAll('a').find((a) => a.text().includes('任务'))
+}
+
+/** 底栏会读的那两份数：人事待批队列 + 任务待验收数。 */
+function stubBadges({ tasks = 0, inbox = [] } = {}) {
+  const fetchMock = vi.fn(async (url) => {
+    const path = String(url).split('?')[0]
+    let data = {}
+    if (path === '/api/scheduling/inbox') data = { requests: inbox, today: '2026-11-02' }
+    if (path === '/api/tasks/board') data = { counts: { pending_review: tasks } }
+    return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => data }
+  })
+  vi.stubGlobal('fetch', fetchMock)
+  return fetchMock
+}
+
+describe('手机底栏的「任务」：管理端待验收角标（2026-11-11 票 07）', () => {
+  it('有待验收：任务格标条数，落点仍是任务页', async () => {
+    stubBadges({ tasks: 2 })
+    const wrapper = await mountBar({ identity: 'super', staffCaps: [] })
+    const link = taskLink(wrapper)
+    expect(link.attributes('href')).toBe('/workbench/tasks')
+    expect(link.find('.wb-tab-badge').text()).toBe('2')
+    expect(link.find('.wb-tab-badge').attributes('aria-label')).toContain('条待验收')
+  })
+
+  it('没有待验收：任务格不出角标', async () => {
+    stubBadges({ tasks: 0 })
+    const wrapper = await mountBar({ identity: 'super', staffCaps: [] })
+    expect(taskLink(wrapper).find('.wb-tab-badge').exists()).toBe(false)
+  })
+
+  it('员工会话不读任务板（那个接口对员工是 403），底栏也没有任务格', async () => {
+    const fetchMock = stubBadges({ tasks: 2 })
+    const wrapper = await mountBar({ staffCaps: ['schedule', 'task'] })
+    expect(taskLink(wrapper)).toBeUndefined()
+    expect(fetchMock.mock.calls.map(([url]) => String(url)).some((url) => url.includes('/api/tasks/board'))).toBe(false)
+  })
+
+  it('桌面档不拉待验收数', async () => {
+    stubPhone(false)
+    const fetchMock = stubBadges({ tasks: 2 })
+    await mountBar({ identity: 'super', staffCaps: [] })
     expect(fetchMock).not.toHaveBeenCalled()
   })
 })

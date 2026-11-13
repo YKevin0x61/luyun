@@ -7,6 +7,8 @@ import {
   countOverdueFixes,
   countPendingItems,
   countPendingLeaves,
+  countStaffTasks,
+  countTaskReviews,
   managerTodoRows,
   MANAGER_TODO_LIMIT,
   offDutyNames,
@@ -320,6 +322,54 @@ describe('数字点进去的地方', () => {
     expect(HOME_LINKS.duty).toBe('/workbench/hr/calendar')
     expect(HOME_LINKS.myItems).toBe('/workbench/staff/clean')
     expect(HOME_LINKS.myRequests).toBe('/workbench/staff/today')
+    // 任务：管理端任务页 / 首页待验收落段 / 员工「我的任务」。
+    expect(HOME_LINKS.tasks).toBe('/workbench/tasks')
+    expect(HOME_LINKS.tasksPending).toBe('/workbench/tasks?seg=pending')
+    expect(HOME_LINKS.myTasks).toBe('/workbench/staff/tasks')
+  })
+})
+
+describe('任务计数（2026-11-11 票 07）', () => {
+  it('店长：只认数字，读不到给 null —— 「没有」与「没读到」不是一回事', () => {
+    expect(countTaskReviews({ counts: { pending_review: 2 } })).toBe(2)
+    expect(countTaskReviews({ counts: { pending_review: 0 } })).toBe(0)
+    expect(countTaskReviews({ counts: {} })).toBeNull()
+    expect(countTaskReviews({ counts: null })).toBeNull()
+    expect(countTaskReviews(null)).toBeNull()
+  })
+
+  it('员工：待做 / 待我验收各取各的，都读不到才给 null', () => {
+    expect(countStaffTasks({ counts: { todo: 2, review: 1 } })).toEqual({ todo: 2, review: 1 })
+    expect(countStaffTasks({ counts: { todo: 0 } })).toEqual({ todo: 0, review: null })
+    expect(countStaffTasks({ counts: {} })).toBeNull()
+    expect(countStaffTasks(null)).toBeNull()
+  })
+
+  it('「等我处理」多一条任务待验收，夹在待验收与请假之间，点进任务页待验收段', () => {
+    const now = Date.parse('2026-10-18T09:00:00+08:00')
+    const queue = { items: [{ item_id: 1, shift: '白班', zone_name: '案板', item_name: '案板桌面', status: '待验收' }] }
+    const inbox = { requests: [{ id: 7, kind: 'leave', employee_name: '张姐', start_date: '2026-10-18', end_date: '2026-10-19', days: [{}, {}] }] }
+    const rows = managerTodoRows({ inbox, queue, fix: null, tasks: { counts: { pending_review: 3 } }, now })
+    expect(rows.map((row) => row.kind)).toEqual(['验收', '任务', '请假'])
+    const row = rows[1]
+    expect(row.title).toBe('待验收任务')
+    expect(row.meta).toContain('3 件')
+    expect(row.to).toBe('/workbench/tasks?seg=pending')
+    expect(row.tone).toBe('warn')
+  })
+
+  it('没有待验收 / 没读到 / 身份未定：都不插任务行', () => {
+    const now = Date.now()
+    expect(managerTodoRows({ tasks: { counts: { pending_review: 0 } }, now })).toEqual([])
+    expect(managerTodoRows({ tasks: null, now })).toEqual([])
+  })
+
+  it('首页汇总把任务数带进两份视角', () => {
+    const admin = workbenchHomeSummary({ identity: 'super', tasks: { counts: { pending_review: 4 } } })
+    expect(admin.tasks).toBe(4)
+    const staff = workbenchHomeSummary({ identity: 'staff', tasks: { counts: { todo: 2, review: 1 } } })
+    expect(staff.tasks).toEqual({ todo: 2, review: 1 })
+    expect(workbenchHomeSummary({ identity: null }).tasks).toBeNull()
   })
 })
 
