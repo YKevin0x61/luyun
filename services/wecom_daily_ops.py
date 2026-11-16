@@ -28,6 +28,7 @@ from PIL import Image, ImageDraw
 
 from db_core.utils import CHINA_TZ
 from services.cjk_font import load_cjk_font
+from services.wastage.store import REASONS as WASTAGE_REASONS
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +95,10 @@ MAX_IMAGE_BYTES = 2 * 1024 * 1024
 
 # 退单/赠单卡：一天几十条明细、原因通常三五类，超过这个数就折成「其他 N 类」。
 MAX_REFUND_REASONS = 6
+
+# 损耗卡一条一行（单位不统一，合计没有意义）。超过这个条数折成「其他 N 笔」。
+MAX_WASTAGE_ROWS = 7
+WASTAGE_ROW_HEIGHT = 32
 REFUND_ROW_HEIGHT = 30
 REFUND_REASON_HEIGHT = 28
 
@@ -445,18 +450,37 @@ async def _collect_traffic(db, business_date: str) -> Optional[Dict[str, Any]]:
 
 
 async def _collect_wastage(db, business_date: str) -> Optional[Dict[str, Any]]:
+    """报损明细：一条一行（品名 · 数量单位 · 原因 · 提交人）。
+
+    不给「合计数量」：单位不统一（g / 份 / 个），加起来没有意义。店长要看的是
+    「今天丢了什么、丢了多少、为什么丢、谁报的」，所以逐条列出，超过上限才折行。
+    """
     rows = await _fetch(
         db,
         "wastage_records",
-        "SELECT COUNT(*) AS n, COALESCE(SUM(quantity), 0) AS qty FROM wastage_records "
-        "WHERE wastage_date = ? AND revoked_at IS NULL",
+        'SELECT "item_name", "quantity", "unit", "reason", "operator_name" '
+        'FROM "wastage_records" '
+        'WHERE "wastage_date" = ? AND "revoked_at" IS NULL '
+        'ORDER BY "reason", "id"',
         [business_date],
     )
-    row = rows[0] if rows else {}
-    count = int(row.get("n") or 0)
-    if count <= 0:
+    entries: List[Dict[str, Any]] = []
+    for row in rows:
+        code = str(row.get("reason") or "").strip()
+        entries.append(
+            {
+                "item": str(row.get("item_name") or "").strip() or "未填品名",
+                "qty": float(row.get("quantity") or 0),
+                "unit": str(row.get("unit") or "").strip(),
+                "reason": WASTAGE_REASONS.get(code, code or "未填原因"),
+                "code": code,
+                # 超管那台共享账号没有员工名，`operator_name` 会是空串 —— 那一行就不画提交人。
+                "by": str(row.get("operator_name") or "").strip(),
+            }
+        )
+    if not entries:
         return None
-    return {"count": count, "qty": round(float(row.get("qty") or 0), 2)}
+    return {"count": len(entries), "entries": entries}
 
 
 async def collect_report(
@@ -591,7 +615,13 @@ def render_text(report: DailyOpsReport) -> str:
         )
     wastage = report.wastage
     if wastage:
-        lines.append(f"损耗：{wastage['count']} 条 · 合计 {wastage['qty']:g}")
+        lines.append(f"损耗：{wastage['count']} 条")
+        for item in wastage.get("entries") or []:
+            unit = f" {item['unit']}" if item.get("unit") else ""
+            by = f" · {item['by']}" if item.get("by") else ""
+            lines.append(
+                f"  {item['item']} {_fmt_qty(item['qty'])}{unit} · {item['reason']}{by}"
+            )
     folded = [module for module in DEFAULT_MODULES if getattr(report, module) is None]
     if folded:
         lines.append("暂无数据：" + "、".join(MODULE_LABELS[module] for module in folded))
@@ -663,7 +693,7 @@ def _measure(report: DailyOpsReport, modules: Sequence[str]) -> _Canvas:
         if getattr(report, module) is None:
             canvas.add("folded", module, 44)
             continue
-        if module in (MODULE_ORDERS, MODULE_HYGIENE, MODULE_OVERTIME, MODULE_TRAFFIC, MODULE_WASTAGE):
+        if module in (MODULE_ORDERS, MODULE_HYGIENE, MODULE_OVERTIME, MODULE_TRAFFIC):
             canvas.add(module, getattr(report, module), _card_height(KPI_BODY))
         elif module == MODULE_HOURLY:
             # 柱图区 150 + 小时标签 30 + 数值上方的 4px
@@ -677,6 +707,12 @@ def _measure(report: DailyOpsReport, modules: Sequence[str]) -> _Canvas:
                 module,
                 report.refunds,
                 _card_height(_refund_body_height(report.refunds or {})),
+            )
+        elif module == MODULE_WASTAGE:
+            canvas.add(
+                module,
+                report.wastage,
+                _card_height(_wastage_body_height(report.wastage or {})),
             )
         elif module == MODULE_DATA_QUALITY:
             canvas.add(module, report.data_quality, _card_height(len(_quality_rows(report.data_quality)) * 34))
@@ -1046,9 +1082,52 @@ def _draw_traffic(draw: ImageDraw.ImageDraw, y: int, height: int, data: Mapping[
     )
 
 
+def _fmt_qty(value: Any) -> str:
+    """数量：整数不带小数，小保留一位（1507 / 2.5）。"""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "—"
+    return f"{int(number):,}" if number == int(number) else f"{number:,.1f}"
+
+
+def _wastage_rows(data: Mapping[str, Any]) -> Tuple[List[Dict[str, Any]], int]:
+    """要画的行 + 被折起来的条数。"""
+    entries = list(data.get("entries") or [])
+    if len(entries) <= MAX_WASTAGE_ROWS:
+        return entries, 0
+    return entries[:MAX_WASTAGE_ROWS], len(entries) - MAX_WASTAGE_ROWS
+
+
+def _wastage_body_height(data: Mapping[str, Any]) -> int:
+    rows, folded = _wastage_rows(data)
+    return (len(rows) + (1 if folded else 0)) * WASTAGE_ROW_HEIGHT
+
+
 def _draw_wastage(draw: ImageDraw.ImageDraw, y: int, height: int, data: Mapping[str, Any], report: DailyOpsReport) -> None:
-    top = _card_title(draw, y, "损耗")
-    _kpi_row(draw, top, [(str(data["count"]), "报损条数", COLOR_INK), (f"{data['qty']:g}", "合计数量", COLOR_INK)])
+    top = _card_title(draw, y, "损耗", f"{data['count']} 笔", COLOR_ACCENT)
+    left = MARGIN + CARD_PAD
+    right = IMAGE_WIDTH - MARGIN - CARD_PAD
+    small = load_cjk_font(FONT_SMALL)
+    tiny = load_cjk_font(FONT_TINY)
+    rows, folded = _wastage_rows(data)
+    cursor = top
+    for item in rows:
+        # 品名 + 提交人：谁报的跟丢的是同一件事，挤在同一行，右侧留给数量与原因。
+        name = _truncate(draw, item["item"], small, 200)
+        draw.text((left, cursor), name, font=small, fill=COLOR_INK)
+        if item.get("by") and tiny is not None:
+            by_x = left + draw.textlength(name, font=small) + 8
+            draw.text((by_x, cursor + 4), f"· {item['by']}", font=tiny, fill=COLOR_INK2)
+        unit = f" {item['unit']}" if item.get("unit") else ""
+        tail = f"{_fmt_qty(item['qty'])}{unit} · {item['reason']}"
+        width = draw.textlength(tail, font=small)
+        color = COLOR_ACCENT if item.get("code") in ("spoiled", "damaged") else COLOR_INK2
+        draw.text((right - width, cursor), tail, font=small, fill=color)
+        cursor += WASTAGE_ROW_HEIGHT
+    if folded:
+        draw.text((left, cursor), f"其他 {folded} 笔", font=small, fill=COLOR_MUTED)
+        cursor += WASTAGE_ROW_HEIGHT
 
 
 # ── 统一出站上的渲染器 ──────────────────────────────────────────────────────

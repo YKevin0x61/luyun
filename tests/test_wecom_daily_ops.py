@@ -21,6 +21,7 @@ from services.wecom_daily_ops import (
     MODULE_HOURLY,
     MODULE_ORDERS,
     MODULE_SCHEDULING,
+    MODULE_WASTAGE,
     DailyOpsReport,
     normalize_modules,
     render_png,
@@ -177,6 +178,57 @@ def test_render_text_covers_every_module_and_lists_folded_ones():
     assert "退单与赠单：退单 4 笔 ¥128.00 · 赠单 2 笔 ¥56.00" in text
     assert "退单·客人误点/多点[退菜] 3 笔 ¥98.00" in text
     assert "赠单·员工餐 2 笔 ¥56.00" in text
+
+
+def _report_with_wastage(count: int) -> DailyOpsReport:
+    report = _sample_report()
+    report.empty_reason.pop("wastage", None)
+    reason = ("过期丢弃", "expired")
+    report.wastage = {
+        "count": count,
+        "entries": [
+            {
+                "item": "河粉" if i == 0 else f"品{i}",
+                "qty": 1076.0 if i == 0 else float(i),
+                "unit": "g" if i == 0 else "份",
+                "reason": reason[0],
+                "code": reason[1],
+                "by": "郑语桐" if i % 2 == 0 else "",
+            }
+            for i in range(count)
+        ],
+    }
+    return report
+
+
+def test_render_text_lists_wastage_entries_line_by_line():
+    """损耗要明细：一条一行，带数量单位与原因（单位不统一，所以不给合计）。"""
+    report = _report_with_wastage(3)
+    report.wastage["entries"][2]["item"] = "蒸饭碗碟"
+    report.wastage["entries"][2]["reason"] = "破损/污染"
+    report.wastage["entries"][2]["code"] = "damaged"
+    text = render_text(report)
+    assert "损耗：3 条" in text
+    assert "河粉 1,076 g · 过期丢弃" in text
+    assert "品1 1 份 · 过期丢弃" in text
+    assert "蒸饭碗碟 2 份 · 破损/污染" in text
+    # 提交人跟在原因后面；没有登记人（超管共享账号）就整段省略。
+    assert "河粉 1,076 g · 过期丢弃 · 郑语桐" in text
+    assert "品1 1 份 · 过期丢弃\n" in text
+    assert "合计" not in text
+
+
+def test_render_png_grows_with_wastage_entries():
+    single = render_png(_report_with_wastage(1), modules=[MODULE_WASTAGE])
+    many = render_png(_report_with_wastage(5), modules=[MODULE_WASTAGE])
+    if single is None or many is None:
+        pytest.skip("本机没有中文字体")
+    from io import BytesIO
+
+    from PIL import Image
+
+    with Image.open(BytesIO(single)) as a, Image.open(BytesIO(many)) as b:
+        assert b.size[1] - a.size[1] == (5 - 1) * 32
 
 
 def test_render_text_handles_an_empty_day():
