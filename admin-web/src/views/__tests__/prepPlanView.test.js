@@ -514,7 +514,7 @@ describe('多段参考值（48 小时以上）', () => {
     expect(caption).toContain('p50 合计')
     // 数字留给下面那行加法，图上不再写一遍
     expect(caption).not.toContain('32')
-    expect(wrapper.get('.pp-basis').text()).toContain('2 段相加：15 + 17 = 32（每段各取 p50）')
+    expect(wrapper.get('.pp-basis').text()).toContain('2 段相加：15 + 17 = 32（每段先按候选日水位折回标准日，各取 p50）')
   })
 
   it('7 天：七段各写一个数，再乘整店水位', async () => {
@@ -524,7 +524,7 @@ describe('多段参考值（48 小时以上）', () => {
     )
     const text = wrapper.get('.pp-basis').text()
     expect(text).toContain('7 段相加：100 + 120 + 140 + 160 + 130 + 150 + 170 = 970')
-    expect(text).toContain('每段各取 p50')
+    expect(text).toContain('每段先按候选日水位折回标准日，各取 p50')
     expect(text).toContain('× 整店水位 1.10')
   })
 

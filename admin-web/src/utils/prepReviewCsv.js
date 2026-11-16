@@ -12,6 +12,7 @@ export const REVIEW_CSV_HEADERS = [
   '实际卖出',
   '偏差',
   '售罄时刻',
+  '售罄判定',
   '窗口后+1h',
   '窗口后+2h',
   '次日',
@@ -23,6 +24,12 @@ export function reviewSoldOutTime(value) {
   if (!value) return null
   const match = String(value).match(/T(\d{2}:\d{2})/)
   return match ? match[1] : null
+}
+
+/** 售罄判定（ADR 0146）：没有售罄事件留空；有事件时只有新判定算「停卖」。 */
+export function reviewSoldOutVerdict(item) {
+  if (!item || !item.sold_out_at) return ''
+  return item.sold_out_reliable ? '停卖' : '存疑'
 }
 
 /**
@@ -72,6 +79,7 @@ export function buildReviewCsv({ items = [] } = {}) {
         item.sold_qty,
         signedText(deviation),
         reviewSoldOutTime(item.sold_out_at),
+        reviewSoldOutVerdict(item),
         reviewAfterWindow(item, 'sold_1h'),
         reviewAfterWindow(item, 'sold_2h'),
         reviewAfterWindow(item, 'sold_next_day'),

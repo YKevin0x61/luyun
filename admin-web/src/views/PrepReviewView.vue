@@ -47,6 +47,9 @@ import {
   PREP_REVIEW_TH_AFTER_1H,
   PREP_REVIEW_TH_AFTER_2H,
   PREP_REVIEW_TH_NEXT_DAY,
+  PREP_REVIEW_SOLD_OUT_HINT,
+  PREP_REVIEW_SOLD_OUT_SUSPECT,
+  PREP_REVIEW_SOLD_OUT_TRUSTED,
   PREP_REVIEW_TH_REFUND,
   PREP_REVIEW_TH_SOLD_OUT,
   PREP_REVIEW_TITLE,
@@ -76,6 +79,7 @@ import {
   prepReviewPendingHint,
   prepReviewPeriodHint,
   prepReviewQualityLine,
+  prepReviewSoldOutLine,
 } from '../utils/prepPlanCopy'
 import { qualityReasons } from '../utils/prepReviewQuality'
 import {
@@ -290,8 +294,9 @@ function stationName(id) {
 }
 
 function tier(item) {
-  if (item.is_major) return 'p70 大品'
-  return item.quantile === null || item.quantile === undefined ? '—' : `p${Math.round(item.quantile * 100)}`
+  if (item.quantile === null || item.quantile === undefined) return '—'
+  const label = `p${Math.round(item.quantile * 100)}`
+  return item.is_major ? `${label} 大品` : label
 }
 
 async function load({ keepClock = false } = {}) {
@@ -547,6 +552,9 @@ onMounted(() => {
         <span v-if="current.summary.drifted" class="pr-warn">
           · {{ current.summary.drifted }} 行的配方在这之后改过，实际销量按现在的配方重算
         </span>
+        <span v-if="current.summary.sold_out" class="pr-dim">
+          · {{ prepReviewSoldOutLine(current.summary.sold_out, current.summary.sold_out_reliable ?? 0) }}
+        </span>
       </p>
 
       <!-- 这个钟点的窗口还没结束（measured = 0）时，三张卡全是「— / 0.0」，白占一屏；
@@ -681,7 +689,7 @@ onMounted(() => {
               <th class="n">实际卖出</th>
               <th class="n">偏差</th>
               <th class="n">判定</th>
-              <th class="n">{{ PREP_REVIEW_TH_SOLD_OUT }}</th>
+              <th class="n" :title="PREP_REVIEW_SOLD_OUT_HINT">{{ PREP_REVIEW_TH_SOLD_OUT }}</th>
               <th class="n">{{ PREP_REVIEW_TH_AFTER_1H }}</th>
               <th class="n">{{ PREP_REVIEW_TH_AFTER_2H }}</th>
               <th class="n">{{ PREP_REVIEW_TH_NEXT_DAY }}</th>
@@ -707,7 +715,17 @@ onMounted(() => {
               <td class="n">
                 <span class="pr-verdict" :class="`is-${verdict(item).kind}`">{{ verdict(item).text }}</span>
               </td>
-              <td class="n">{{ soldOutLabel(item) }}</td>
+              <td class="n">
+                <template v-if="item.sold_out_at">
+                  {{ soldOutLabel(item) }}
+                  <span
+                    class="pr-soldout-tag"
+                    :class="item.sold_out_reliable ? 'is-trusted' : 'is-suspect'"
+                    :title="PREP_REVIEW_SOLD_OUT_HINT"
+                  >{{ item.sold_out_reliable ? PREP_REVIEW_SOLD_OUT_TRUSTED : PREP_REVIEW_SOLD_OUT_SUSPECT }}</span>
+                </template>
+                <span v-else class="pr-dim">—</span>
+              </td>
               <td class="n">{{ afterWindowLabel(item, 'sold_1h') }}</td>
               <td class="n">{{ afterWindowLabel(item, 'sold_2h') }}</td>
               <td class="n">{{ afterWindowLabel(item, 'sold_next_day') }}</td>
@@ -1457,6 +1475,24 @@ onMounted(() => {
 
 .pr-verdict.is-even,
 .pr-verdict.is-pending {
+  color: var(--ink-faint);
+}
+
+.pr-soldout-tag {
+  margin-left: 4px;
+  padding: 0 3px;
+  border: 1px solid currentColor;
+  border-radius: 4px;
+  font-size: var(--fs-11);
+  line-height: 13px;
+  vertical-align: 1px;
+}
+
+.pr-soldout-tag.is-trusted {
+  color: var(--ok);
+}
+
+.pr-soldout-tag.is-suspect {
   color: var(--ink-faint);
 }
 

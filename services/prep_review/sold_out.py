@@ -15,8 +15,12 @@
 三条约定：
 
 - **不猜**：没有 07:00 快照、建议量为空/非正、当天没卖到建议量的品都不写事件。
+- **真停卖**：跨线之后窗口里还剩多少销量。旧口径把「卖到建议量」当售罄，
+  实测约七成样本跨线后仍在卖（中位 18.8%），不是需求删失；现在只有跨线后
+  销量占比 ≤ `STOPPED_SHARE_MAX` 才写，meta 带 `reliable: true`。
 - **幂等**：同 `(plan_day, prep_item_id, kind='sold_out')` 只留最早一条（订单迟
-  到、回填重跑都可能算出更早的时刻），由 `events.record_sold_out` 负责。
+  到、回填重跑都可能算出更早的时刻），由 `events.record_sold_out` 负责；旧判据
+  写下的事件（meta 无 `reliable`）例外，可靠重算即使更晚也覆盖它。
 - **旁路**：单日推算失败只记 warning，不能拖垮每小时回填；全量 90 天扫描按
   本地自然日最多一次（与 `retention.run_daily` 同一门闩姿势）。
 """
@@ -37,6 +41,10 @@ logger = logging.getLogger(__name__)
 
 #: 每小时节拍顺带推算的最近天数（今天 + 昨天）。
 RECENT_DAYS = 2
+#: 「停卖」判据：售罄时刻之后的销量占窗口内总销量的比例不超过这个值，才写事件。
+#: 11-04~11-15 的 557 个可匹配旧事件里只有 169 个（30.3%）满足；其余是
+#: 「卖到建议量后继续卖」，把它们当需求删失会把分位推到近 8 周最大值。
+STOPPED_SHARE_MAX = 0.10
 #: 全量回填覆盖的天数（含今天）。
 FULL_BACKFILL_DAYS = 90
 
@@ -208,7 +216,8 @@ async def infer_sold_out(db, plan_day: str) -> dict:
     """推算单个 `plan_day` 各品的售罄时刻并写事件。
 
     只处理有 07:00 主口径快照的品；没有订单、没卖到建议量的品都不写。事件写入
-    走 `record_sold_out`，同键只留最早，重复调用是幂等的。
+    走 `record_sold_out`，同键只留最早，重复调用是幂等的；旧判据事件会被升级
+    （meta 换成带 `reliable` 的新判定，时刻可能变晚）。
     """
     targets = await _load_targets(db, plan_day)
     if not targets:
@@ -237,10 +246,17 @@ async def infer_sold_out(db, plan_day: str) -> dict:
             if item["start"] <= at <= item["end"]
         ]
         pairs.sort(key=lambda pair: pair[0])
+        total = sum(amount for _, amount in pairs)
         crossing = _infer_at(pairs, item["qty"])
         if crossing is None:
             continue
         at, before, after = crossing
+        # 跨线单之后还有销量 → 只是「卖到了建议量」，不是真售罄。after 含跨线单
+        # 的全量，所以 after_qty 会略微低估「at 之后」的量；判据宁严勿松。
+        after_qty = max(0.0, total - after)
+        after_share = after_qty / total if total > 0 else 0.0
+        if after_share > STOPPED_SHARE_MAX:
+            continue
         if await record_sold_out(
             db,
             at=at.isoformat(),
@@ -252,6 +268,9 @@ async def infer_sold_out(db, plan_day: str) -> dict:
             meta={
                 "suggested_qty": item["qty"],
                 "source": "order_inference",
+                "reliable": True,
+                "after_share": round(after_share, 4),
+                "total_sold": round(total, 2),
             },
         ):
             written += 1

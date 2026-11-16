@@ -146,6 +146,55 @@ class TrajectoryColumnTests(PrepActualsFixture):
         self.assertGreaterEqual(row["sold_next_day"], row["sold_2h"])
 
 
+class CensoredFlagTests(PrepActualsFixture):
+    PLAN_DAY = WINDOW_START.date().isoformat()
+
+    async def _seed_sold_out(self, item_id, *, reliable=True):
+        meta = json.dumps({
+            "suggested_qty": 3,
+            "source": "order_inference",
+            "reliable": reliable,
+        })
+        tdb = self.db.table("prep_plan_events")
+        async with tdb.conn.cursor() as cursor:
+            await cursor.execute(
+                """
+                INSERT INTO prep_plan_events (at, plan_day, prep_item_id, kind, meta_json)
+                VALUES (?, ?, ?, 'sold_out', ?)
+                """,
+                (f"{self.PLAN_DAY}T09:00:00+08:00", self.PLAN_DAY, item_id, meta),
+            )
+        await tdb.commit()
+
+    async def test_reliable_sold_out_marks_actuals_censored(self):
+        """可靠售罄 → is_censored=true，demand_lower 记实际销量（需求下界）。"""
+        item_id = await self._seed_item()
+        await self._seed_rule(prep_item_id=item_id)
+        await self._seed_snapshot()
+        await self._seed_order(flow_id="cens-1", at=_at(1), qty=3)
+        await self._seed_sold_out(item_id)
+
+        await self.service.backfill_actuals(self.db, NOW)
+
+        row = (await self._actuals())[0]
+        self.assertTrue(row["is_censored"])
+        self.assertAlmostEqual(row["demand_lower"], 3)
+
+    async def test_unreliable_event_does_not_mark_censored(self):
+        """旧口径事件（reliable=false）只是「卖到建议量」，不标删失。"""
+        item_id = await self._seed_item()
+        await self._seed_rule(prep_item_id=item_id)
+        await self._seed_snapshot()
+        await self._seed_order(flow_id="cens-2", at=_at(1), qty=3)
+        await self._seed_sold_out(item_id, reliable=False)
+
+        await self.service.backfill_actuals(self.db, NOW)
+
+        row = (await self._actuals())[0]
+        self.assertFalse(row["is_censored"])
+        self.assertAlmostEqual(row["demand_lower"], 3)
+
+
 class AlignmentTests(PrepActualsFixture):
     async def test_sold_qty_is_same_before_and_after_aligning_prep_item_id(self):
         """验收①：规则接上 `prep_item_id` 前后，同一窗口的 sold_qty 必须一致。"""

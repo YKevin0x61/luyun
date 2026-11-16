@@ -13,7 +13,9 @@
   meta_json.window_end)` 先查后插 —— 勾两次、回填
   重跑都不该多出第二条。单 worker 部署下「先查后插」够用，不为它加唯一索引/迁移。
   售罄（`sold_out`）相反：推算出的历史时刻可能因订单迟到而变早，所以同键只留
-  **最早**一条，已有更晚的记录会被更早的覆盖，永远不会被改晚。
+  **最早**一条，已有更晚的记录会被更早的覆盖。唯一例外是「升级」：ADR 0146 之前
+  的旧判据写下的事件 meta 里没有 `reliable`，它记的时刻本身不可信，新判定可靠时
+  即使更晚也会覆盖它 —— 否则历史事件永远升不成「停卖」。
 - **失败隔离**：事件是旁路采集，写失败只 `logger.warning`，绝不能让 PATCH / 回填
   500。写失败时顺手回滚这条连接上的空事务，否则 PostgreSQL 会把后续语句一起毒死。
 - **不编造**（决策 9）：查不到历史动作就留空，回填只补它真处理过的窗口。
@@ -197,6 +199,22 @@ async def record_event(
         return False
 
 
+def is_reliable(meta_json: Any) -> bool:
+    """这条售罄事件的判定是否可信（`meta.reliable` 明确为 true）。
+
+    ADR 0146 之前的判据把「卖到建议量」当售罄，那批事件的 meta 只有
+    `{suggested_qty, source}`；坏 JSON 同样按不可靠处理 —— 猜不出来的东西不能
+    当删失样本用。只认 `is True`，字符串 "true" 不算。
+    """
+    meta = meta_json
+    if isinstance(meta, str):
+        try:
+            meta = json.loads(meta)
+        except ValueError:
+            return False
+    return isinstance(meta, dict) and meta.get("reliable") is True
+
+
 def _parse_event_at(raw: Any) -> Optional[datetime]:
     """事件时刻统一按 `CHINA_TZ` 比较；解析不了就不参与先后判断。"""
     text = (raw or "").strip() if isinstance(raw, str) else raw
@@ -224,7 +242,7 @@ async def _earliest_sold_out(
     async with conn.cursor() as cursor:
         await cursor.execute(
             """
-            SELECT id, at FROM prep_plan_events
+            SELECT id, at, meta_json FROM prep_plan_events
              WHERE plan_day = ? AND prep_item_id = ? AND kind = ?
              ORDER BY id
             """,
@@ -257,8 +275,10 @@ async def record_sold_out(
     """记录一个备货品的售罄时刻；同键只保留**最早**的一条。
 
     与 `record_event` 的「先到先得」不同，售罄是推算出来的历史事实：订单迟到、
-    回填重跑都可能算出更早的跨越时刻，所以已有记录只会被**更早**的 `at` 覆盖，
-    永远不会被改晚。返回是否真的插入或更新了。
+    回填重跑都可能算出更早的跨越时刻，所以已有记录通常只会被**更早**的 `at`
+    覆盖。例外是旧判据写下的事件（meta 里没有 `reliable`）：它记的时刻不可信，
+    新判定可靠时即使更晚也覆盖，否则历史永远停在「存疑」。返回是否真的插入或
+    更新了。
 
     **不抛异常**：与其余事件同一失败隔离姿势，写失败只 warning + 回滚。
     """
@@ -285,7 +305,11 @@ async def record_sold_out(
             return True
         new_at = _parse_event_at(at)
         old_at = _parse_event_at(existing["at"])
-        if new_at is None or old_at is None or new_at >= old_at:
+        if new_at is None or old_at is None:
+            return False
+        # 旧判据事件的时刻不可信（见 docstring），可靠判定可以把它改晚。
+        upgrading = is_reliable(meta) and not is_reliable(existing.get("meta_json"))
+        if new_at >= old_at and not upgrading:
             return False
         conn = _connection(db)
         async with conn.cursor() as cursor:

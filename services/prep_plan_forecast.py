@@ -9,8 +9,9 @@
 
     基准量 = 近 8 周同星期几、在同样钟点窗口内的实际用量分位
     实际用量 = 卖出菜品数量 × 配方系数（semi_finished_rules）
-    分位   = 主力品（占全部配料订单行 ≥ 2%）取 p70，其余取 p50
-    建议量 = 基准量 × 整店水位系数
+    候选值 = 候选日实际用量 ÷ 候选日自己的整店水位（折回标准日，ADR 0147）
+    分位   = 主力品（占全部配料订单行 ≥ 2%）取 p60，其余取 p55
+    建议量 = 基准量 × 今天的整店水位系数
 
 整店水位 = 近 7 天 / 前 21 天的点单量比（限幅，只用 now 之前的数据）。**不加安全
 缓冲、也不扣库存**：24 小时保质下多做出来的就是报废。近 7 天卖出过的品保底 1 个
@@ -40,9 +41,21 @@ HISTORY_DAYS = 8
 # 4.2%——缺货是多出的 4.8 倍，已经从「多做 76.7%」弹到另一头。改成分品分档：
 #   · 主力品（占全部配料订单行 ≥ 2%）取 p70：缺货 13.5% / 多出 9.1%（实测反事实）
 #   · 其余取 p50：p50 整体缺货 16.4% / 多出 6.0%
-# 两个分位都仍低于「均量」口径的多出水平，所以没有回到多做的那一头。
-FORECAST_QUANTILE = 0.50          # 非主力品：需求分位
-FORECAST_QUANTILE_MAJOR = 0.70    # 主力品：需求分位
+# 2026-11-16 用 62 天回放（9/15–11/15、3572 品-天、07:00）复核：小品从 p50 抬到
+# p55 后缺货 10.03% → 9.30%、多出 25.78% → 26.87%；多出里约 86% 次日卖掉，缺货
+# 的代价更高，所以这次只动小品、主力品保持 p70。再往上抬（p75/p80）缺货能到
+# 8.3%/7.4%，但多出涨到 29–33%，超出这一档的收益，先不做。
+#
+# 2026-11-16 晚（ADR 0147）：候选日用量先按「候选日自己的整店水位」折回标准日，
+# 再取分位。原算法把旺季日的大用量、淡季日的小用量直接当成品需求，分位后再乘一次
+# 今天的水位，等于水位被算了两次——10 月回落期尤其明显（候选日高水位 + 今天低水位
+# 双重打折，缺货偏高）。归一化后 p70/p55 在 62 天回放上缺货 9.30% → 7.30%，
+# 多出 26.87% → 31.24%；把主力品从 p70 降到 p60 后多出回到 27.85%、缺货 8.10%，
+# 3:1 代价口径下 loss 14023 → 13352，验证段（11/01–11/15）2336 → 2049。
+# 主力品仍比小品保守一档，但不再用 p70：归一化已经把候选日的水位差修掉，p70 的
+# 高分位只剩「多备」的副作用。
+FORECAST_QUANTILE = 0.55          # 非主力品：需求分位
+FORECAST_QUANTILE_MAJOR = 0.60    # 主力品：需求分位（归一化后从 p70 下调）
 MAJOR_ITEM_LINE_SHARE = 0.02      # 主力品判据：占全部配料订单行 ≥ 2%
 FORECAST_WINDOW_WEEKS = 8         # 同星期几取近 8 周（分位在 4 个样本上估不稳）
 STORE_FACTOR_SHORT_DAYS = 7    # 整店水位：近 7 天 …
@@ -110,7 +123,8 @@ def forecast_config(raw: Optional[dict]) -> dict:
 def _quantile(values: List[float], q: float) -> float:
     """经验分位（线性插值）。
 
-    ADR 0128 起按品分档取分位（主力品 p70 / 其余 p50），不加任何安全缓冲。
+    ADR 0128 起按品分档取分位（主力品 p60 / 其余 p55；主力档 2026-11-16 从 p70
+    下调，见 ADR 0147），不加任何安全缓冲。
     24 小时保质下多做出来的就是报废，缓冲的代价是真金白银。
     """
     if not values:
@@ -425,6 +439,19 @@ def compute_reference(
         return factor
 
     factor = day_factor(today)
+
+    def normalized_bucket_qty(day, keys):
+        """候选日用量折回「标准日」：除以候选日自己的整店水位（ADR 0147）。
+
+        候选日的原始用量里混着那天的整店高低（旺季日天然多、淡季日天然少）。
+        直接取分位会把「日子好坏」当成品需求，再乘今天水位就等于算了两次；
+        10 月回落期是双重打折（缺货偏高），旺季则是双重放大（多出偏高）。
+        水位只用 day 之前的数据算，不泄漏；算不出来时按 1.0（不修正）。
+        """
+        raw = bucket_qty(day, keys)
+        f = day_factor(day)
+        return raw / f if f > 0 else raw
+
     # 规则侧身份键（ADR 0141）：有 prep_item_id 按 id，没接上主数据才回落
     # (semi_name, unit)。备货品侧用 keys_for 同时查两种桶。
     rule_index = {
@@ -480,7 +507,7 @@ def compute_reference(
                     for day in active_candidates
                     if (day + shift) in days_with_orders
                 ]
-                values_k = [bucket_qty(day, item_keys) for day in active_k]
+                values_k = [normalized_bucket_qty(day, item_keys) for day in active_k]
                 base_k = _quantile(values_k, quantile_used) if values_k else 0.0
                 if base_k <= 0:
                     # 该段候选日全撞在淡日/采集断档上，但近两周这一段有量：退回均值，不给 0
@@ -488,7 +515,7 @@ def compute_reference(
                     usable = [
                         q
                         for q in (
-                            bucket_qty(day_k - timedelta(days=i), item_keys)
+                            normalized_bucket_qty(day_k - timedelta(days=i), item_keys)
                             for i in range(1, STALE_FALLBACK_DAYS + 1)
                         )
                         if q > 0
@@ -532,16 +559,26 @@ def compute_reference(
                 "basis": {
                     "status": status,
                     "weekdays": [
-                        {"day": day.isoformat(), "qty": round(value, 1)}
+                        {
+                            "day": day.isoformat(),
+                            "qty": round(value, 1),
+                            # 同一根柱折回标准日后的量（ADR 0147）：柱子画它，
+                            # 虚线（quantile_qty）与它同刻度；qty 仍保留原始用量供核对。
+                            "normalized_qty": round(value / day_factor(day), 1),
+                            "candidate_factor": round(day_factor(day), 3),
+                        }
                         for day, value in zip(active_candidates, values)
                     ],
                     "active_days": len(active_candidates),
                     "store_factor": round(factor, 3),
-                    # 这一品实际用的分位（主力品 p70 / 其余 p50），页面按它显示档位
+                    # 候选日用量是否已按候选日自己的水位折回标准日（ADR 0147）
+                    "candidate_factor_applied": True,
+                    # 这一品实际用的分位（主力品 p60 / 其余 p55），页面按它显示档位
                     "quantile": quantile_used,
                     "is_major": line_share >= cfg["major_share"],
                     "line_share": round(line_share, 4),
-                    # 分位落点（未乘整店水位、未取整），柱形图虚线的位置
+                    # 分位落点（标准日口径、未乘今天的水位、未取整），
+                    # 柱形图虚线画在 normalized_qty 那一列上
                     "quantile_qty": base_qty,
                     # 逐 24 小时的分段落点：48 小时两段、7 天七段，加起来就是 quantile_qty
                     "slices": [
@@ -599,5 +636,7 @@ def compute_reference(
             "major_share": cfg["major_share"],
             "window_weeks": cfg["window_weeks"],
             "store_factor": round(factor, 3),
+            # ADR 0147：候选日先按当天整店水位折回标准日，再取分位
+            "candidate_factor_applied": True,
         },
     }

@@ -117,12 +117,14 @@ function barPoints(entry) {
     .reverse()
 }
 
-/** 同星期几的候选日用量：后端按「最近往前」给，画图从早到晚。 */
+/** 同星期几的候选日用量：后端按「最近往前」给，画图从早到晚。
+ *  柱子画 normalized_qty（候选日先按当天整店水位折回标准日，ADR 0147），
+ *  虚线的 quantile_qty 也是标准日口径，两者同刻度；qty 只留在 tooltip/核对里。 */
 function basisPoints(entry) {
   const rows = Array.isArray(entry.basis?.weekdays) ? entry.basis.weekdays : []
   return rows
     .map((row) => ({
-      value: Number(row.qty || 0),
+      value: Number(row.normalized_qty ?? row.qty ?? 0),
       label: String(row.day || '').slice(5),
       weekday: weekdayOf(row.day),
     }))
@@ -160,7 +162,7 @@ function isMultiSlice(basis) {
   return Array.isArray(basis?.slices) && basis.slices.length > 1
 }
 
-/** 这一品用的档位标签（p50 / p70），柱形图虚线与说明共用。 */
+/** 这一品用的档位标签（p55 / p60），柱形图虚线与说明共用。 */
 function quantileTag(entry) {
   const pct = Math.round(Number(entry.basis?.quantile ?? 0.5) * 100)
   return `p${pct}`
@@ -230,8 +232,8 @@ function cancelEdit() {
 }
 
 /**
- * 展开后的公式说明：分位档 → 整店水位，几段都写出来。
- * ADR 0128 起分位按品分档（大品 p70 / 其余 p50），basis.quantile 存的是这一品实际用的档。
+ * 展开后的公式说明：候选日归一化 → 分位档 → 整店水位，几段都写出来。
+ * ADR 0128 起分位按品分档（大品 p60 / 其余 p55，ADR 0147 起），basis.quantile 存的是这一品实际用的档。
  */
 function basisFormula(entry) {
   const basis = entry.basis || {}
@@ -245,11 +247,11 @@ function basisFormula(entry) {
     // 多段：把「每天各多少、加起来多少」写出来，用户要的就是这个加法
     const each = slices.map((part) => statText(part.quantile_qty)).join(' + ')
     parts.push(
-      `${slices.length} 段相加：${each} = ${statText(basis.quantile_qty)}（每段各取 ${tier}）`,
+      `${slices.length} 段相加：${each} = ${statText(basis.quantile_qty)}（每段先按候选日水位折回标准日，各取 ${tier}）`,
     )
   } else {
-    // 单段：落点数字在上面那张图的 caption 里（「· p50 16」），这句只说规则
-    parts.push(`这 ${days} 天同样钟点里偏保守的那档（${tier}）`)
+    // 单段：落点数字在上面那张图的 caption 里（「· p55 18.5」），这句只说规则
+    parts.push(`这 ${days} 天先按各自当天的整店水位折回标准日，再取同样钟点里偏保守的那档（${tier}）`)
   }
   if (basis.fallback_applied) parts.push(STALE_FALLBACK_TEXT)
   if (Math.abs(factor - 1) >= 0.05) parts.push(`× 整店水位 ${factor.toFixed(2)}`)
@@ -766,7 +768,7 @@ watch(activeStation, () => {
   color: var(--warn);
 }
 
-/* 大品标记：只标「这一档取的是 p70」，不参与排版权重 —— 它解释数字为什么偏高，
+/* 大品标记：只标「这一档取的是 p60」，不参与排版权重 —— 它解释数字为什么偏高，
    让人不用点开就知道哪几项是重点。 */
 .pp-major {
   flex: 0 0 auto;

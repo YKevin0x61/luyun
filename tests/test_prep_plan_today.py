@@ -239,7 +239,7 @@ class SnapshotTests(PrepPlanRebuildFixture):
         self.assertEqual(later["covered"], 1.0)
         item = next(g for g in day["snapshots"] if g["clock"] == "08:00")["items"][0]
         self.assertTrue(item["is_major"])
-        self.assertAlmostEqual(item["quantile"], 0.70)
+        self.assertAlmostEqual(item["quantile"], 0.60)
 
     async def test_window_still_open_shows_up_as_pending_not_zero(self):
         """窗口没结束就没有实际销量，不能当成「实际卖 0」把够卖率刷成 100%。"""

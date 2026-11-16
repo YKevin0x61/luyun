@@ -188,6 +188,8 @@ export const COLUMN_LABELS = {
   'prep_plan_actuals.sold_next_day': '次日同钟点销量', 'prep_plan_actuals.dine_in_qty': '堂食销量',
   'prep_plan_actuals.delivery_qty': '外卖销量', 'prep_plan_actuals.refund_qty': '退菜数量',
   'prep_plan_actuals.hourly_json': '逐小时销量',
+  'prep_plan_actuals.is_censored': '是否售罄（需求删失）',
+  'prep_plan_actuals.demand_lower': '需求下界',
   'prep_plan_context.tenant_id': '租户ID', 'prep_plan_context.plan_day': '营业日',
   'prep_plan_context.holiday_name': '节假日', 'prep_plan_context.weather_json': '天气',
   'prep_plan_context.staff_json': '在岗人数',

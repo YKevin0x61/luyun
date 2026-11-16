@@ -58,7 +58,7 @@ export const BASIS_HINT = basisHint(DEFAULT_HORIZON_HOURS)
 export const LOADING_TEXT = loadingText(DEFAULT_HORIZON_HOURS)
 
 export const FORMULA_HINT =
-  '大品取 p70、其余取 p50，都不加安全量——24 小时保质，多做出来就是报废。'
+  '候选日先按各自当天水位折回标准日，大品取 p60、其余取 p55，都不加安全量——24 小时保质，多做出来就是报废。'
 export const MAJOR_TAG = '大品'
 export const MISSING_RULE_TEXT = '没有配方系数，算不出建议量'
 // 配方条目还在、菜也还在卖，但一条明细量都算不出来（系数被存成 0 / 明细被清空）。
@@ -158,6 +158,15 @@ export function prepReviewContextStaff(total) {
 export const PREP_REVIEW_DETAIL_HINT =
   '窗口后 = 累计轨迹 − 窗口内实际卖出，只算关闭后新增；退菜是近似值'
 export const PREP_REVIEW_TH_SOLD_OUT = '售罄'
+/** 售罄可靠性的两态（ADR 0146）：停卖 = 卖完就没再卖；存疑 = 旧判定。 */
+export const PREP_REVIEW_SOLD_OUT_TRUSTED = '停卖'
+export const PREP_REVIEW_SOLD_OUT_SUSPECT = '存疑'
+export const PREP_REVIEW_SOLD_OUT_HINT =
+  '停卖 = 卖完后当天没再卖，实际卖出是下界；存疑 = 旧判定，卖到参考值后还在卖，时刻不能当删失用'
+
+export function prepReviewSoldOutLine(total, reliable) {
+  return `售罄 ${total} 个，其中停卖 ${reliable} 个（停卖的行实际卖出只是下界）`
+}
 export const PREP_REVIEW_TH_AFTER_1H = '窗口后 +1h'
 export const PREP_REVIEW_TH_AFTER_2H = '窗口后 +2h'
 export const PREP_REVIEW_TH_NEXT_DAY = '次日'

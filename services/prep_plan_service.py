@@ -10,8 +10,9 @@
 
     基准量 = 近 8 周同星期几、在同样钟点区间内的实际用量分位
     实际用量 = 卖出菜品数量 × 配方系数（semi_finished_rules）
-    分位   = 主力品（占全部配料订单行 ≥ 2%）取 p70，其余取 p50
-    建议量 = 基准量 × 整店水位系数
+    候选值 = 候选日实际用量 ÷ 候选日自己的整店水位（折回标准日，ADR 0147）
+    分位   = 主力品（占全部配料订单行 ≥ 2%）取 p60，其余取 p55
+    建议量 = 基准量 × 今天的整店水位系数
 
 整店水位系数 = 近 7 天 / 前 21 天的点单量比（限幅 0.75~1.30，只用当天之前的数据）。
 **不加安全缓冲、也不扣库存**：24 小时保质下多做出来就是报废；库存由师傅现场看，
@@ -905,6 +906,34 @@ class PrepPlanService:
             )
         return {"success": True, "snapshot_at": stamp.isoformat(), "rows": written}
 
+    async def _sold_out_items(self, db, plan_day: str) -> set:
+        """该 `plan_day` 里「真停卖」的品集合（需求删失标记）。
+
+        只认 `meta_json.reliable = true` 的新口径事件：旧事件是「卖到建议量」，
+        跨线之后往往还在卖（11-04~11-15 实测中位 18.8%），不能当需求下界。
+        查询失败按空集处理 —— 标记缺失比让实际量回填整趟失败更轻。
+        """
+        try:
+            tdb = db.table("prep_plan_events")
+            async with tdb.conn.cursor() as cursor:
+                await cursor.execute(
+                    """
+                    SELECT DISTINCT prep_item_id
+                      FROM prep_plan_events
+                     WHERE kind = 'sold_out' AND plan_day = ?
+                       AND prep_item_id IS NOT NULL
+                       AND meta_json::jsonb ->> 'reliable' = 'true'
+                    """,
+                    (plan_day,),
+                )
+                rows = await cursor.fetchall()
+        except Exception:
+            logger.warning(
+                "读取售罄删失标记失败 plan_day=%s", plan_day, exc_info=True
+            )
+            return set()
+        return {int(row["prep_item_id"]) for row in rows}
+
     async def backfill_actuals(self, db, now: Optional[datetime] = None) -> dict:
         """回填已结束窗口的实际量；最近 `ACTUALS_REFRESH_DAYS` 天的窗口允许重算。
 
@@ -926,6 +955,11 @@ class PrepPlanService:
         **累计**量、堂食 / 外卖拆分、退菜近似量与逐小时曲线。轨迹列只在观测点真正
         到齐时写（窗口刚结束时 1h/2h/24h 还没发生），没到齐不写 —— 写 0 会被误读成
         「之后没人买」。刷新时同理：只覆盖已经到点的列，不把已有值抹回 NULL。
+
+        需求侧删失标记（ADR 0146）：`is_censored` 表示该品-天命中「真停卖」的
+        售罄事件（`meta_json.reliable = true`），`demand_lower` 记窗口内实际销量。
+        售罄样本的 `sold_qty` 只是需求下界，不能当精确销量拿去拟合；预测暂不
+        读取这两列，先积累 2-3 周可靠标记再上删失分位。
         """
         now = now or datetime.now(CHINA_TZ)
         refresh_cutoff = (now - timedelta(days=ACTUALS_REFRESH_DAYS)).isoformat()
@@ -953,7 +987,12 @@ class PrepPlanService:
         written = 0
         refreshed = 0
         adb = db.table("prep_plan_actuals")
+        # 售罄删失标记按 plan_day 查一次、整趟复用；同一窗口里的品共用一份集合。
+        censored_by_day: Dict[str, set] = {}
         for row in pending:
+            plan_day = row["plan_day"] or ""
+            if plan_day not in censored_by_day:
+                censored_by_day[plan_day] = await self._sold_out_items(db, plan_day)
             start = datetime.fromisoformat(row["window_start"])
             end = datetime.fromisoformat(row["window_end"])
             stats = await self._sold_stats(db, start, end)
@@ -985,8 +1024,9 @@ class PrepPlanService:
                             window_start, window_end, prep_item_id, item_name, unit,
                             station, sold_qty, rules_fingerprint, computed_at,
                             sold_1h, sold_2h, sold_next_day,
-                            dine_in_qty, delivery_qty, refund_qty, hourly_json
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            dine_in_qty, delivery_qty, refund_qty, hourly_json,
+                            is_censored, demand_lower
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         ON CONFLICT (tenant_id, window_start, window_end, prep_item_id)
                         DO NOTHING
                         """,
@@ -1007,6 +1047,8 @@ class PrepPlanService:
                             delivery,
                             refund,
                             hourly,
+                            item["prep_item_id"] in censored_by_day[plan_day],
+                            sold_qty,
                         ),
                     )
                     written += 1
@@ -1019,11 +1061,13 @@ class PrepPlanService:
                     columns = [
                         "sold_qty = ?", "rules_fingerprint = ?", "computed_at = ?",
                         "dine_in_qty = ?", "delivery_qty = ?", "refund_qty = ?",
-                        "hourly_json = ?",
+                        "hourly_json = ?", "is_censored = ?", "demand_lower = ?",
                     ]
                     values: List[Any] = [
                         sold_qty, fingerprint, computed_at,
                         dine_in, delivery, refund, hourly,
+                        item["prep_item_id"] in censored_by_day[plan_day],
+                        sold_qty,
                     ]
                     if one_hour_ready:
                         columns.append("sold_1h = ?")
@@ -1202,21 +1246,30 @@ class PrepPlanService:
 
         # 当天首次售罄时刻（票 05 的 `sold_out` 事件）。直接读表、不依赖采集模块：
         # 事件是旁路写入的，复盘要能读出「几点卖完」；没有事件就是 null，不能编。
+        # meta 里的 reliable 决定这行算不算**真停卖**（ADR 0146）：旧判定把「卖到
+        # 建议量」当售罄，那批事件没有这个字段，页面只能显示成「存疑」——存疑≠没
+        # 售罄，只表示这个时刻与删失都不足以为信。
         sold_out_at: Dict[int, str] = {}
+        sold_out_reliable: Dict[int, bool] = {}
         edb = db.table("prep_plan_events")
         async with edb.conn.cursor() as cursor:
             await cursor.execute(
                 """
-                SELECT prep_item_id, MIN(at) AS sold_out_at
+                SELECT DISTINCT ON (prep_item_id) prep_item_id, at, meta_json
                 FROM prep_plan_events
                 WHERE plan_day = ? AND kind = 'sold_out'
-                GROUP BY prep_item_id
+                ORDER BY prep_item_id, at
                 """,
                 (day,),
             )
             for event in await cursor.fetchall():
-                if event["prep_item_id"] is not None:
-                    sold_out_at[int(event["prep_item_id"])] = event["sold_out_at"]
+                if event["prep_item_id"] is None:
+                    continue
+                item_id = int(event["prep_item_id"])
+                sold_out_at[item_id] = event["at"]
+                sold_out_reliable[item_id] = prep_review_events.is_reliable(
+                    event["meta_json"]
+                )
 
         # ADR 0141：按备货品身份聚合（有 id 按 id，没 id 才回落名字键）。同一 id 当天
         # 改过名会并成一行；显示名 / 单位取当天最新一条快照的名字。
@@ -1232,6 +1285,7 @@ class PrepPlanService:
                     "station": row["station"] or "",
                     "prep_item_id": row["prep_item_id"],
                     "sold_out_at": None,
+                    "sold_out_reliable": None,
                     "hours": [],
                 },
             )
@@ -1257,14 +1311,16 @@ class PrepPlanService:
             )
         for bucket in by_item.values():
             prep_item_id = bucket.get("prep_item_id")
-            bucket["sold_out_at"] = (
-                sold_out_at.get(int(prep_item_id)) if prep_item_id is not None else None
-            )
+            if prep_item_id is None:
+                continue
+            item_id = int(prep_item_id)
+            bucket["sold_out_at"] = sold_out_at.get(item_id)
+            bucket["sold_out_reliable"] = sold_out_reliable.get(item_id)
             # 同一 id 当天改过名时，快照行按名字分组进同一个桶，追加顺序不再等于
             # snapshot_at；页面按快照钟点画曲线，这里显式按时间排好。
             bucket["hours"].sort(key=lambda hour: hour["snapshot_at"] or "")
         items = sorted(by_item.values(), key=lambda b: (-len(b["hours"]), b["item_name"]))
-        snapshots = self._snapshot_groups(rows, sold_out_at)
+        snapshots = self._snapshot_groups(rows, sold_out_at, sold_out_reliable)
         return {
             "success": True,
             "day": day,
@@ -1277,7 +1333,11 @@ class PrepPlanService:
         }
 
     @staticmethod
-    def _snapshot_groups(rows, sold_out_at: Optional[Dict[int, str]] = None) -> List[dict]:
+    def _snapshot_groups(
+        rows,
+        sold_out_at: Optional[Dict[int, str]] = None,
+        sold_out_reliable: Optional[Dict[int, bool]] = None,
+    ) -> List[dict]:
         """把一天的快照按「快照钟点」分组，并给每组算一份可判读的指标。
 
         一条快照 = 一个 24 小时窗口的一次预测，只能跟**它自己那个窗口**的实际销量比。
@@ -1306,6 +1366,9 @@ class PrepPlanService:
                     "sold_next_day": _optional_float(row["sold_next_day"]),
                     "refund_qty": _optional_float(row["refund_qty"]),
                     "sold_out_at": (sold_out_at or {}).get(int(prep_item_id))
+                    if prep_item_id is not None
+                    else None,
+                    "sold_out_reliable": (sold_out_reliable or {}).get(int(prep_item_id))
                     if prep_item_id is not None
                     else None,
                     "store_factor": float(row["store_factor"] or 1),
@@ -1337,11 +1400,18 @@ def _summarise_snapshot(items: List[dict]) -> dict:
     usable = [i for i in items if i["sold_qty"] is not None]
     pending = sum(1 for i in items if i["sold_qty"] is None)
     drifted = sum(1 for i in usable if not i["same_rules"])
+    # 售罄跟窗口结不结束无关：卖完是已经发生的事，窗口没结束也照样算。
+    # 两个数必须一起给：只看「售罄 5 个」会把旧判定（卖到建议量后还在卖）
+    # 也当成删失，复盘页会误以为实际卖出全是下界。
+    sold_out = sum(1 for i in items if i.get("sold_out_at"))
+    sold_out_reliable = sum(1 for i in items if i.get("sold_out_reliable"))
     if not usable:
         return {
             "measured": 0,
             "pending": pending,
             "drifted": drifted,
+            "sold_out": sold_out,
+            "sold_out_reliable": sold_out_reliable,
             "covered": None,
             "sold_total": 0.0,
             "suggested_total": 0.0,
@@ -1363,6 +1433,8 @@ def _summarise_snapshot(items: List[dict]) -> dict:
         "measured": len(usable),
         "pending": pending,
         "drifted": drifted,
+        "sold_out": sold_out,
+        "sold_out_reliable": sold_out_reliable,
         "covered": covered / len(usable),
         "sold_total": round(sold_total, 1),
         "suggested_total": round(sugg_total, 1),

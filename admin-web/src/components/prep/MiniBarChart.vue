@@ -8,7 +8,7 @@ import { computed } from 'vue'
  *  柱宽与容器对齐（CSS 100%），所以手机铺满内容区、桌面到 520px 为止。
  *
  *  虚线默认是这几天的均值（「均 15」）；给了 line 就用它，标签换成 lineLabel
- *  （同星期几那张图传分位落点 + 「p50」，让人看到这一档选中的是哪一天的量）。
+ *  （同星期几那张图传分位落点 + 「p55」，让人看到这一档选中的是哪一天的量）。
  */
 const props = defineProps({
   // 元素可以是数字，也可以是 { value, label, weekday }

@@ -66,21 +66,19 @@ def _thursday_orders(dish, quantities):
 
 
 def _pad_volume(orders, *, constant=10000.0):
-    """把 -1..-28 天每天的整店点单量补成常数，让整店水位系数正好是 1.0。
+    """把 -1..-84 天每天的整店点单量补成常数，让整店水位系数正好是 1.0。
 
     补的是「无关菜」的订单行：它没有配方，只参与整店水位，不影响任何备货品。
+    要覆盖到 -84 天：候选日最近到 -56 天，它的 21 天水位窗口最远看到 -77 天，
+    再留一周余量。不补到这儿，候选日自己的 factor ≠ 1（ADR 0147 归一化后
+    会改变分位落点，测试就不再只测「今天的水位」这一件事）。
     """
     totals = defaultdict(float)
     for row in orders:
         totals[datetime.fromisoformat(row["order_time"]).date()] += row["quantity"]
-    for offset in range(1, 61):
+    for offset in range(1, 85):
         day = NOW - timedelta(days=offset)
-        if offset <= 28:
-            # 水位只回看 28 天：把这 28 天补成等量，系数才正好是 1.0
-            need = constant - totals[day.date()]
-        else:
-            # 更早的日子只用来让同星期几的候选日「有营业」
-            need = 1.0 if totals[day.date()] == 0 else 0.0
+        need = constant - totals[day.date()]
         if need > 0:
             orders.append(_order(_clock(day, 9), "无关菜", need))
     return orders
@@ -118,8 +116,8 @@ def _entry(payload, name):
 class ForecastConfigTests(unittest.TestCase):
     def test_defaults(self):
         cfg = forecast_config(None)
-        self.assertEqual(cfg["quantile"], 0.50)
-        self.assertEqual(cfg["quantile_major"], 0.70)
+        self.assertEqual(cfg["quantile"], 0.55)
+        self.assertEqual(cfg["quantile_major"], 0.60)
         self.assertEqual(cfg["major_share"], 0.02)
         self.assertEqual(cfg["window_weeks"], 8)
         # 8 周 = 56 天，水位要 7 + 21 = 28 天，取大者再加 1 天余量
@@ -157,7 +155,7 @@ class ForecastConfigTests(unittest.TestCase):
 
     def test_zero_weeks_falls_back_and_non_dict_is_default(self):
         self.assertEqual(forecast_config({"window_weeks": 0})["window_weeks"], 8)
-        self.assertEqual(forecast_config([1, 2])["quantile"], 0.50)
+        self.assertEqual(forecast_config([1, 2])["quantile"], 0.55)
 
     def test_factor_bounds_pass_through(self):
         cfg = forecast_config({"factor_min": 0.9, "factor_max": 1.1})
@@ -210,7 +208,7 @@ class HorizonResolverTests(unittest.TestCase):
 
 
 class MajorQuantileTests(unittest.TestCase):
-    def test_major_item_uses_p70_and_minor_uses_p50(self):
+    def test_major_item_uses_p60_and_minor_uses_p55(self):
         # 8 个周四：前 4 周 10 份、后 4 周 20 份；另有一条「烧卖」的订单行把
         # 总配料订单行数抬到 9，主力判据（≥ 2%）只让虾饺馅算主力。
         orders = _thursday_orders("虾饺皇", [10, 10, 10, 10, 20, 20, 20, 20])
@@ -226,8 +224,8 @@ class MajorQuantileTests(unittest.TestCase):
         minor = _entry(payload, "烧卖馅")
 
         self.assertTrue(major["basis"]["is_major"])
-        self.assertEqual(major["basis"]["quantile"], 0.70)
-        # p70：pos = 0.7 * 7 = 4.9 → 落在两个 20 之间
+        self.assertEqual(major["basis"]["quantile"], 0.60)
+        # p60：pos = 0.6 * 7 = 4.2 → 落在两个 20 之间
         self.assertEqual(major["basis"]["quantile_qty"], 20.0)
         self.assertEqual(major["basis"]["demand_qty"], 20.0)
         self.assertEqual(
@@ -237,15 +235,15 @@ class MajorQuantileTests(unittest.TestCase):
         self.assertEqual(major["basis"]["active_days"], 8)
 
         self.assertFalse(minor["basis"]["is_major"])
-        self.assertEqual(minor["basis"]["quantile"], 0.50)
-        # 8 个候选值 [5, 0, 0, 0, 0, 0, 0, 0] 的 p50 = 0 → 近两周有 5 份，退回均值
+        self.assertEqual(minor["basis"]["quantile"], 0.55)
+        # 8 个候选值 [5, 0, 0, 0, 0, 0, 0, 0] 的 p55 也落在 0 区 → 近两周有 5 份，退回均值
         self.assertTrue(minor["basis"]["fallback_applied"])
         self.assertFalse(minor["basis"]["floor_applied"])
         self.assertEqual(minor["basis"]["quantile_qty"], 5.0)
         self.assertEqual(minor["basis"]["demand_qty"], 5.0)
 
-        self.assertEqual(payload["forecast"]["quantile"], 0.50)
-        self.assertEqual(payload["forecast"]["quantile_major"], 0.70)
+        self.assertEqual(payload["forecast"]["quantile"], 0.55)
+        self.assertEqual(payload["forecast"]["quantile_major"], 0.60)
         self.assertEqual(payload["forecast"]["major_share"], 0.5)
         self.assertEqual(payload["forecast"]["window_weeks"], 8)
         self.assertEqual(payload["forecast"]["store_factor"], 1.0)
@@ -268,10 +266,37 @@ class MajorQuantileTests(unittest.TestCase):
         )
         entry = _entry(payload, "虾饺馅")
         self.assertFalse(entry["basis"]["is_major"])
-        self.assertEqual(entry["basis"]["quantile"], 0.50)
-        # p50：pos = 0.5 * 7 = 3.5 → 10 + (20 - 10) * 0.5
-        self.assertEqual(entry["basis"]["quantile_qty"], 15.0)
-        self.assertEqual(entry["basis"]["demand_qty"], 15.0)
+        self.assertEqual(entry["basis"]["quantile"], 0.55)
+        # p55：pos = 0.55 * 7 = 3.85 → 10 + (20 - 10) * 0.85
+        self.assertEqual(entry["basis"]["quantile_qty"], 18.5)
+        self.assertEqual(entry["basis"]["demand_qty"], 19.0)
+
+
+class NormalizationTests(unittest.TestCase):
+    def test_candidate_day_volume_is_divided_by_its_own_store_factor(self):
+        """候选日的 10 份发生在半水位日，折回标准日后应是 20 份（ADR 0147）。"""
+        day = CANDIDATES[0]
+        orders = [
+            _order(_clock(day, 9), "虾饺皇", 10),
+            # 当天整店 10000，但水位只看之前：前 7 天 5000/天、前 8–28 天 10000/天
+            _order(_clock(day, 9), "无关菜", 9990),
+        ]
+        for offset in range(8, 15):
+            orders.append(_order(_clock(NOW - timedelta(days=offset), 9), "无关菜", 5000))
+        for offset in range(15, 36):
+            orders.append(_order(_clock(NOW - timedelta(days=offset), 9), "无关菜", 10000))
+
+        payload = _reference(orders, [_item("虾饺馅")], {"虾饺皇": [_rule("虾饺馅")]})
+        row = next(
+            r
+            for r in _entry(payload, "虾饺馅")["basis"]["weekdays"]
+            if r["day"] == day.date().isoformat()
+        )
+        self.assertEqual(row["qty"], 10.0)
+        # 原始比 0.5 被水位下限夹到 0.75：归一化只修「候选日水位差」，
+        # 不绕开 0.75–1.30 的限幅，否则淡季会把基准量放大到不可控。
+        self.assertAlmostEqual(row["candidate_factor"], 0.75, places=3)
+        self.assertEqual(row["normalized_qty"], 13.3)
 
 
 class StoreFactorTests(unittest.TestCase):
@@ -282,12 +307,11 @@ class StoreFactorTests(unittest.TestCase):
         ]
         orders += [
             _order(_clock(NOW - timedelta(days=offset), 9), "虾饺皇", long_)
-            for offset in range(8, 29)
+            for offset in range(8, 85)
         ]
-        # 分位选哪一档与水位正交：陪衬只占 28/29≈96.6% 这条线之外的 3.4%，
-        # 主力占比仍 ≥ 0.95，走 p70；本数据 p50=p70，手算基准量不受分档影响。
-        # 陪衬订单下在 -35 天，落在 28 天水位窗口之外，不会扰动系数。
-        orders.append(_order(_clock(NOW - timedelta(days=35), 9), "陪衬菜", 1))
+        # 分位选哪一档与水位正交：陪衬只占这条线之外的零头，主力占比仍 ≥ 0.95。
+        # 陪衬订单下在 -90 天，落在 84 天水位窗口之外，不会扰动任何候选日的 factor。
+        orders.append(_order(_clock(NOW - timedelta(days=90), 9), "陪衬菜", 1))
         cfg = forecast_config({"major_share": 0.95})
         payload = _reference(
             orders,

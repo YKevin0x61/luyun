@@ -101,6 +101,7 @@ const ITEM = {
   sold_next_day: 90,
   refund_qty: 2,
   sold_out_at: '2026-11-06T13:07:00+08:00',
+  sold_out_reliable: true,
   quantile: 0.7,
   is_major: true,
   status: 'ok',
@@ -119,6 +120,7 @@ const PENDING_ITEM = {
   sold_next_day: null,
   refund_qty: null,
   sold_out_at: null,
+  sold_out_reliable: null,
   quantile: 0.5,
   is_major: false,
   status: 'ok',
@@ -129,6 +131,8 @@ const GROUP_SUMMARY = {
   measured: 1,
   pending: 1,
   drifted: 0,
+  sold_out: 1,
+  sold_out_reliable: 1,
   covered: 0.6,
   shortfall: 20,
   shortfall_ratio: 0.25,
@@ -388,11 +392,39 @@ describe('明细表新列', () => {
 
     const table = wrapper.findAll('.pr-table')[0]
     const cells = table.findAll('tbody tr')[0].findAll('td')
-    expect(cells[7].text()).toBe('13:07')
+    expect(cells[7].text()).toContain('13:07')
     expect(cells[8].text()).toBe('6.0')
     expect(cells[9].text()).toBe('10.0')
     expect(cells[10].text()).toBe('30.0')
     expect(cells[11].text()).toBe('2.0')
+  })
+
+  it('售罄时刻带可靠性角标：真停卖与旧判定分开', async () => {
+    vi.stubGlobal('fetch', probeFetch())
+    const wrapper = await mountView()
+
+    const rows = wrapper.findAll('.pr-table')[0].findAll('tbody tr')
+    const trusted = rows[0].find('.pr-soldout-tag')
+    expect(trusted.text()).toBe('停卖')
+    expect(trusted.classes()).toContain('is-trusted')
+
+    expect(rows[1].findAll('td')[7].text()).toBe('—')
+
+    // 旧事件（没有 reliable 字段）只能标「存疑」，不能当成删失。
+    const legacy = dayPayload()
+    legacy.snapshots[0].items = [{ ...ITEM, sold_out_reliable: false }]
+    vi.stubGlobal('fetch', probeFetch({ day: legacy }))
+    const wrapper2 = await mountView()
+    const tag = wrapper2.findAll('.pr-table')[0].find('.pr-soldout-tag')
+    expect(tag.text()).toBe('存疑')
+    expect(tag.classes()).toContain('is-suspect')
+  })
+
+  it('钟点行提示售罄总数与其中停卖数', async () => {
+    vi.stubGlobal('fetch', probeFetch())
+    const wrapper = await mountView()
+
+    expect(wrapper.find('.pr-line').text()).toContain('售罄 1 个，其中停卖 1 个')
   })
 
   it('未结束 / 缺数据的行一律「—」，不显示 0', async () => {
@@ -412,14 +444,14 @@ describe('导出 CSV（纯函数）', () => {
     expect(csv.charCodeAt(0)).toBe(0xfeff)
 
     const lines = csv.slice(1).split('\n')
-    expect(lines[0]).toBe('品名,单位,参考值,实际卖出,偏差,售罄时刻,窗口后+1h,窗口后+2h,次日,退菜')
-    expect(lines[1]).toBe('虾饺馅,份,80,60,-20,13:07,6,10,30,2')
+    expect(lines[0]).toBe('品名,单位,参考值,实际卖出,偏差,售罄时刻,售罄判定,窗口后+1h,窗口后+2h,次日,退菜')
+    expect(lines[1]).toBe('虾饺馅,份,80,60,-20,13:07,停卖,6,10,30,2')
 
     const pending = lines[2].split(',')
-    expect(pending).toHaveLength(10)
+    expect(pending).toHaveLength(11)
     expect(pending[0]).toBe('河粉')
     expect(pending[2]).toBe('20')
-    for (const index of [3, 4, 5, 6, 7, 8, 9]) expect(pending[index]).toBe('')
+    for (const index of [3, 4, 5, 6, 7, 8, 9, 10]) expect(pending[index]).toBe('')
   })
 
   it('double 的浮点尾差收成两位小数', () => {
@@ -427,7 +459,7 @@ describe('导出 CSV（纯函数）', () => {
       items: [{ ...ITEM, suggested_qty: 200.6, sold_qty: 180, sold_1h: 194.4, sold_2h: 198, sold_next_day: 210 }],
     })
     const row = csv.slice(1).split('\n')[1]
-    expect(row).toBe('虾饺馅,份,200.6,180,-20.6,13:07,14.4,18,30,2')
+    expect(row).toBe('虾饺馅,份,200.6,180,-20.6,13:07,停卖,14.4,18,30,2')
   })
 
   it('文件名带日期与钟点', () => {

@@ -204,15 +204,28 @@ class ReviewFixture(unittest.IsolatedAsyncioTestCase):
         }])
         self.assertEqual(result["inserted_count"], 1)
 
-    async def _seed_event(self, day, item_id, at, kind="sold_out"):
+    async def _seed_event(self, day, item_id, at, kind="sold_out", meta=None):
         tdb = self.db.table("prep_plan_events")
         async with tdb.conn.cursor() as cursor:
             await cursor.execute(
                 """
-                INSERT INTO prep_plan_events (at, plan_day, prep_item_id, kind)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO prep_plan_events (at, plan_day, prep_item_id, kind, meta_json)
+                VALUES (?, ?, ?, ?, ?)
                 """,
-                (at, day, item_id, kind),
+                (at, day, item_id, kind, _json(meta or {})),
+            )
+        await tdb.commit()
+
+    async def _seed_event_raw_meta(self, day, item_id, at, meta_text, kind="sold_out"):
+        """绕过 JSON 序列化直接塞一段坏 meta，验证页面不会被一条脏事件拖垮。"""
+        tdb = self.db.table("prep_plan_events")
+        async with tdb.conn.cursor() as cursor:
+            await cursor.execute(
+                """
+                INSERT INTO prep_plan_events (at, plan_day, prep_item_id, kind, meta_json)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (at, day, item_id, kind, meta_text),
             )
         await tdb.commit()
 
@@ -498,6 +511,40 @@ class SnapshotDayTests(ReviewFixture):
         self.assertIsNone(group_items["叉烧馅"]["sold_out_at"])
         self.assertAlmostEqual(group_items[ITEM_NAME]["sold_1h"], 85)
         self.assertIsNone(group_items["叉烧馅"]["sold_next_day"])
+
+    async def test_snapshot_day_separates_real_sellout_from_legacy_event(self):
+        """ADR 0146：只有新判定（meta.reliable）算停卖；旧事件标存疑，不能当删失。"""
+        item_id = await self._seed_item()
+        legacy_id = await self._seed_item(item_name="叉烧馅")
+        day = "2026-10-22"
+        await self._seed_snapshot(day, item_id, 100)
+        await self._seed_snapshot(day, legacy_id, 20, item_name="叉烧馅")
+        await self._seed_event(
+            day, item_id, f"{day}T09:00:00+08:00", meta={"reliable": True}
+        )
+        # 旧事件：卖到建议量就写，跨线后还在卖，meta 里没有 reliable
+        await self._seed_event(day, legacy_id, f"{day}T10:00:00+08:00")
+
+        payload = await self.service.get_snapshot_day(self.db, day)
+        by_name = {row["item_name"]: row for row in payload["items"]}
+        self.assertIs(by_name[ITEM_NAME]["sold_out_reliable"], True)
+        self.assertIs(by_name["叉烧馅"]["sold_out_reliable"], False)
+
+        summary = payload["snapshots"][0]["summary"]
+        self.assertEqual(summary["sold_out"], 2)
+        self.assertEqual(summary["sold_out_reliable"], 1)
+
+    async def test_snapshot_day_treats_broken_meta_as_unreliable(self):
+        """一条坏 meta 不能让整天的复盘页 500，也不能冒充可靠。"""
+        item_id = await self._seed_item()
+        day = "2026-10-22"
+        await self._seed_snapshot(day, item_id, 100)
+        await self._seed_event_raw_meta(day, item_id, f"{day}T09:00:00+08:00", "{not json")
+
+        payload = await self.service.get_snapshot_day(self.db, day)
+        row = payload["items"][0]
+        self.assertEqual(row["sold_out_at"], f"{day}T09:00:00+08:00")
+        self.assertIs(row["sold_out_reliable"], False)
 
 
 # --------------------------------------------------------------------- 接口

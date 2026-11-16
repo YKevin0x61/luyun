@@ -6,11 +6,14 @@
 
 - 跨线发生在两条订单之间时，按累计量线性插值到分钟，且不晚于跨线那一单；
 - 没卖到建议量、没有 07:00 快照的品都不写事件（不猜）；
-- 同键只留最早一条，重复执行不新增、也不把已有时间改晚。
+- 卖到建议量后还在卖只是「卖够了」，跨线后销量占比 > 10% 不写（真停卖）；
+- 同键只留最早一条，重复执行不新增、也不把已有时间改晚；唯一的例外是把
+  旧判据（meta 里没有 reliable）写下的事件升级 —— 它的时刻本身就不可信。
 
 事件表的列就是复盘页的读取契约，所以这里直接查 `prep_plan_events`。
 """
 
+import json
 import unittest
 from datetime import datetime, timedelta
 
@@ -131,6 +134,19 @@ class SoldOutFixture(unittest.IsolatedAsyncioTestCase):
                 ),
             )
         await snapshots.commit()
+
+    async def _seed_legacy_event(self, plan_day, item_id, at, meta):
+        """直接插入一条旧判据写下的事件（不经 record_sold_out，形状同线上存量行）。"""
+        tdb = self.db.table("prep_plan_events")
+        async with tdb.conn.cursor() as cursor:
+            await cursor.execute(
+                """
+                INSERT INTO prep_plan_events (at, plan_day, prep_item_id, kind, meta_json)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (at.isoformat(), plan_day, item_id, prep_review_events.SOLD_OUT, json.dumps(meta)),
+            )
+        await tdb.commit()
 
     async def _events(self, *, kind=None):
         tdb = self.db.table("prep_plan_events")
@@ -268,13 +284,45 @@ class InferenceTests(SoldOutFixture):
         await self._seed_snapshot(PLAN_DAY, item_id, suggested=10, final_qty=2)
         await self._seed_order("final-1", _at(PLAN_DAY, 9, 0), 1, dish_name=dish_name)
         await self._seed_order("final-2", _at(PLAN_DAY, 10, 0), 1, dish_name=dish_name)
-        await self._seed_order("final-3", _at(PLAN_DAY, 11, 0), 5, dish_name=dish_name)
+        # 售罄之后不再下单：再卖就是「卖到建议量」，不是真停卖（见 STOPPED_SHARE_MAX）。
 
         await sold_out.infer_sold_out(self.db, PLAN_DAY)
 
         events = await self._events(kind=prep_review_events.SOLD_OUT)
         self.assertEqual(len(events), 1, events)
         self.assertEqual(datetime.fromisoformat(events[0]["at"]), _at(PLAN_DAY, 10, 0))
+
+    async def test_continued_sales_after_crossing_is_not_sold_out(self):
+        """卖到建议量后还在卖 → 只是「卖够了」，不是真停卖，不写事件。"""
+        item_id = await self._seed_item()
+        dish_name = await self._seed_rule(item_id)
+        await self._seed_snapshot(PLAN_DAY, item_id, suggested=5)
+        await self._seed_order("cont-1", _at(PLAN_DAY, 9, 0), 3, dish_name=dish_name)
+        await self._seed_order("cont-2", _at(PLAN_DAY, 10, 0), 3, dish_name=dish_name)
+        await self._seed_order("cont-3", _at(PLAN_DAY, 11, 0), 4, dish_name=dish_name)
+
+        await sold_out.infer_sold_out(self.db, PLAN_DAY)
+
+        events = await self._events(kind=prep_review_events.SOLD_OUT)
+        self.assertEqual(events, [])
+
+    async def test_reliable_event_carries_share_in_meta(self):
+        """新口径事件带 reliable / after_share / total_sold，下游据此判断删失。"""
+        item_id = await self._seed_item()
+        dish_name = await self._seed_rule(item_id)
+        await self._seed_snapshot(PLAN_DAY, item_id, suggested=2)
+        await self._seed_order("meta-1", _at(PLAN_DAY, 9, 0), 2, dish_name=dish_name)
+
+        await sold_out.infer_sold_out(self.db, PLAN_DAY)
+
+        events = await self._events(kind=prep_review_events.SOLD_OUT)
+        self.assertEqual(len(events), 1, events)
+        meta = events[0]["meta_json"]
+        self.assertIsInstance(meta, str)
+        payload = json.loads(meta)
+        self.assertTrue(payload["reliable"])
+        self.assertAlmostEqual(payload["after_share"], 0.0)
+        self.assertAlmostEqual(payload["total_sold"], 2.0)
 
     async def test_repeat_run_is_idempotent(self):
         """重复执行不产生第二条，at 也不变。"""
@@ -295,17 +343,18 @@ class InferenceTests(SoldOutFixture):
         self.assertEqual(datetime.fromisoformat(second[0]["at"]), _at(PLAN_DAY, 11, 10))
 
     async def test_existing_earlier_event_is_not_moved_later(self):
-        """已有更早的记录（例如现场真的点过售罄）→ 推算结果不把它改晚。"""
+        """已有更早且**可信**的记录（例如现场真的点过售罄）→ 推算不把它改晚。"""
         item_id = await self._seed_item()
         dish_name = await self._seed_rule(item_id)
-        await self._seed_snapshot(PLAN_DAY, item_id, suggested=1)
-        await self._seed_order("earlier-1", _at(PLAN_DAY, 11, 0), 5, dish_name=dish_name)
+        await self._seed_snapshot(PLAN_DAY, item_id, suggested=4)
+        await self._seed_order("earlier-1", _at(PLAN_DAY, 11, 0), 4, dish_name=dish_name)
         await prep_review_events.record_sold_out(
             self.db,
             at=_at(PLAN_DAY, 8, 0).isoformat(),
             plan_day=PLAN_DAY,
             prep_item_id=item_id,
             station=STATION,
+            meta={"reliable": True, "source": "manual"},
         )
 
         await sold_out.infer_sold_out(self.db, PLAN_DAY)
@@ -334,6 +383,44 @@ class InferenceTests(SoldOutFixture):
         events = await self._events(kind=prep_review_events.SOLD_OUT)
         self.assertEqual(len(events), 1, events)
         self.assertEqual(datetime.fromisoformat(events[0]["at"]), _at(PLAN_DAY, 11, 10))
+
+    async def test_legacy_event_is_upgraded_even_when_later(self):
+        """旧判据的事件（无 reliable）时刻不可信 → 可靠判定即使更晚也覆盖它。
+
+        不覆盖的话线上 585 条历史事件永远停在「存疑」，重算等于白跑。
+        """
+        item_id = await self._seed_item()
+        dish_name = await self._seed_rule(item_id)
+        await self._seed_snapshot(PLAN_DAY, item_id, suggested=4)
+        await self._seed_order("legacy-1", _at(PLAN_DAY, 12, 0), 4, dish_name=dish_name)
+        # 旧判据写的记录：只有 suggested/source，没有 reliable。
+        await self._seed_legacy_event(
+            PLAN_DAY, item_id, _at(PLAN_DAY, 9, 0), {"suggested_qty": 1, "source": "order_inference"}
+        )
+
+        await sold_out.infer_sold_out(self.db, PLAN_DAY)
+
+        events = await self._events(kind=prep_review_events.SOLD_OUT)
+        self.assertEqual(len(events), 1, events)
+        self.assertEqual(datetime.fromisoformat(events[0]["at"]), _at(PLAN_DAY, 12, 0))
+        meta = json.loads(events[0]["meta_json"])
+        self.assertIs(meta.get("reliable"), True)
+
+
+class IsReliableTests(unittest.TestCase):
+    """`is_reliable` 是页面「停卖 / 存疑」的唯一判据，坏数据不能当可信。"""
+
+    def test_only_explicit_true_counts(self):
+        self.assertTrue(prep_review_events.is_reliable('{"reliable": true}'))
+        self.assertTrue(prep_review_events.is_reliable({"reliable": True}))
+
+    def test_legacy_broken_and_string_true_are_unreliable(self):
+        self.assertFalse(prep_review_events.is_reliable(None))
+        self.assertFalse(prep_review_events.is_reliable(""))
+        self.assertFalse(prep_review_events.is_reliable('{"suggested_qty": 5}'))
+        self.assertFalse(prep_review_events.is_reliable('{"reliable": false}'))
+        self.assertFalse(prep_review_events.is_reliable('{"reliable": "true"}'))
+        self.assertFalse(prep_review_events.is_reliable("{not json"))
 
 
 class BackfillTests(SoldOutFixture):
