@@ -354,6 +354,23 @@ describe('useBackupCenter', () => {
     expect(exportJob.value).toBe(null)
   })
 
+  it('按备份点下载导出包，不再依赖 30 分钟过期的导出任务', () => {
+    const showAlert = vi.fn()
+    const { downloadPoint } = useBackupCenter({ showAlert, clearAlert: vi.fn() })
+    const point = pointsPayload().points[1]
+
+    expect(downloadPoint(point)).toBe(true)
+    expect(downloadUrl).toHaveBeenCalledWith(
+      '/api/backup/points/export%3Aluyun_backup_20260901_090000.luyunbak/download',
+      'luyun_backup_20260901_090000.luyunbak',
+    )
+    expect(showAlert).toHaveBeenCalledWith('success', expect.stringContaining('已开始下载'))
+
+    downloadUrl.mockClear()
+    expect(downloadPoint(pointsPayload().points[0])).toBe(false)
+    expect(downloadUrl).not.toHaveBeenCalled()
+  })
+
   it('shows server-reported export progress while the job is still packing', async () => {
     let polls = 0
     apiPost.mockResolvedValue({ job_id: 'job-1' })
@@ -846,6 +863,9 @@ describe('useBackupCenter', () => {
       photos_restored: { standard: 0, other: 0 },
       snapshot_ts: '20260901_130000',
       session_invalidated: true,
+      warnings: [
+        '采集状态已回滚，但运行中的采集器没有重读成功（boom）：请重启应用，否则回滚后到重启前的订单可能漏采',
+      ],
     })
     const showAlert = vi.fn()
     const {
@@ -890,7 +910,11 @@ describe('useBackupCenter', () => {
     )
     expect(confirmState.open).toBe(false)
     expect(rollingBackTs.value).toBe('')
-    expect(showAlert).toHaveBeenCalledWith('success', expect.stringContaining('数据回滚成功'))
+    // 恢复成功但采集器没重读：必须按错误提示，且把「请重启应用」说到操作人眼前。
+    expect(showAlert).toHaveBeenCalledWith('error', expect.stringContaining('数据回滚成功'))
+    const [, rollbackMessage] = showAlert.mock.calls.at(-1)
+    expect(rollbackMessage).toContain('请重启应用')
+    expect(rollbackMessage).toContain('采集器没有重读成功')
   })
 
   it('PG 快照的回滚确认说明业务数据不在范围内', async () => {
@@ -969,7 +993,7 @@ describe('useBackupCenter', () => {
       },
       cold: { keep: 3, protected: [], delete: [], kept: [] },
     }
-    apiPost.mockResolvedValueOnce({ success: true, preview })
+    apiPost.mockResolvedValueOnce({ success: true, preview, plan_token: 'tok-1' })
     const showAlert = vi.fn()
     const {
       retentionForm,
@@ -1023,8 +1047,8 @@ describe('useBackupCenter', () => {
     expect(confirmState.open).toBe(true)
     expect(confirmState.details.join(' ')).toContain('本机回滚快照 1 份')
 
-    expect(confirmReady.value).toBe(false)
-    confirmChecked.cleanup = true
+    // 保存不再删东西：无需勾选不可逆确认，直接可以保存
+    expect(confirmState.checkboxes).toEqual([])
     expect(confirmReady.value).toBe(true)
     await onConfirmClick()
 
@@ -1054,13 +1078,19 @@ describe('useBackupCenter', () => {
       },
     }
     apiGet.mockResolvedValue({ success: true, config: { snapshot_keep: 5, cold_keep: 14 }, limits: {}, preview })
-    apiPost.mockResolvedValueOnce({ success: true, preview, deleted: [{ id: 'cold:20260701_080000', size_bytes: 64 }], freed_bytes: 64 })
+    apiPost.mockImplementation(async (url) => {
+      if (url === '/api/backup/cleanup/preview') return { success: true, preview, plan_token: 'tok-1' }
+      if (url === '/api/backup/cleanup') {
+        return { success: true, plan_token: 'tok-1', preview, deleted: [{ id: 'cold:20260701_080000', size_bytes: 64 }], freed_bytes: 64 }
+      }
+      throw new Error('没用到的 POST：' + url)
+    })
     const showAlert = vi.fn()
     const { loadRetention, runCleanup, confirmState, confirmChecked, confirmReady, onConfirmClick, cleaningUp } =
       useBackupCenter({ showAlert, clearAlert: vi.fn() })
 
     await loadRetention()
-    runCleanup()
+    await runCleanup()
 
     expect(confirmState.open).toBe(true)
     expect(confirmState.danger).toBe(true)
@@ -1069,7 +1099,7 @@ describe('useBackupCenter', () => {
     confirmChecked.cleanup = true
     await onConfirmClick()
 
-    expect(apiPost).toHaveBeenLastCalledWith('/api/backup/cleanup', {})
+    expect(apiPost).toHaveBeenLastCalledWith('/api/backup/cleanup', { plan_token: 'tok-1' })
     expect(cleaningUp.value).toBe(false)
     expect(showAlert).toHaveBeenCalledWith('success', expect.stringContaining('已清理 1 个备份点'))
   })

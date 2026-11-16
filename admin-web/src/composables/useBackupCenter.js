@@ -351,6 +351,27 @@ export function useBackupCenter({ showAlert, clearAlert, router, onAfterRollback
     }
   }
 
+  /** 按备份点下载导出包：不依赖 30 分钟后过期的导出任务记录。 */
+  function downloadPoint(point) {
+    const name = point?.detail?.name
+    if (point?.medium !== 'export_backup' || !name) {
+      showAlert('error', '这份备份没有可下载的导出文件')
+      return false
+    }
+    clearAlert()
+    try {
+      api.downloadUrl(
+        `/api/backup/points/${encodeURIComponent(point.id)}/download`,
+        name,
+      )
+      showAlert('success', `已开始下载：${name}`)
+      return true
+    } catch (err) {
+      showAlert('error', '下载失败：' + err.message)
+      return false
+    }
+  }
+
   async function validatePoint(id) {
     if (!id) return null
     validatingId.value = id
@@ -662,6 +683,15 @@ export function useBackupCenter({ showAlert, clearAlert, router, onAfterRollback
         + '标准图清单会缺这些项；请重新上传这些标准图，或用含照片的冷备归档补齐。'
     }
     if (data?.session_invalidated) msg += '当前登录会话已失效，请点击确认后重新登录。'
+    // 恢复成功了，但运行期还差一步（例如采集器没有重读状态、必须重启）。
+    // 后端已经把这些从「只写日志」改成随响应返回，界面必须说到操作人眼前。
+    const restoreWarnings = Array.isArray(data?.warnings) ? data.warnings : []
+    if (restoreWarnings.length) {
+      const text = restoreWarnings
+        .map((item) => String(item).replace(/[。；]+$/, ''))
+        .join('；')
+      msg += `⚠️ ${text}。`
+    }
     // 合并模式可能有个别行写不进去（约束冲突 / 类型不匹配 / 磁盘错误）：
     // 后端会带回逐表报告，这里如实说明，不能只说「恢复成功」。
     const failedRows = Number(data?.merge_failed_rows) || 0
@@ -832,8 +862,11 @@ export function useBackupCenter({ showAlert, clearAlert, router, onAfterRollback
         {},
         photoFlags,
       )
+      const hasWarnings = Array.isArray(data?.warnings) && data.warnings.length > 0
       showAlert(
-        data?.photo_consistency && data.photo_consistency.ok === false ? 'error' : 'success',
+        hasWarnings || (data?.photo_consistency && data.photo_consistency.ok === false)
+          ? 'error'
+          : 'success',
         importSuccessMessage(data, '数据回滚'),
       )
       if (typeof onAfterRollback === 'function') await onAfterRollback()
@@ -942,6 +975,9 @@ export function useBackupCenter({ showAlert, clearAlert, router, onAfterRollback
   const cleanupPreview = ref(null)
   const cleanupPreviewLoading = ref(false)
   const cleaningUp = ref(false)
+  // 「立即清理」的二次确认令牌：由最近一次预览/保存返回，服务端据此校验
+  // 「删的还是不是这一批」。计划一变（多/少了备份点）令牌就对不上，接口回 409。
+  const cleanupPlanToken = ref(null)
 
   function applyRetention(data) {
     if (data?.config) {
@@ -952,6 +988,7 @@ export function useBackupCenter({ showAlert, clearAlert, router, onAfterRollback
     }
     if (data?.limits) retentionLimits.value = data.limits
     if (data?.preview) cleanupPreview.value = data.preview
+    cleanupPlanToken.value = data?.plan_token || null
   }
 
   async function loadRetention() {
@@ -966,15 +1003,20 @@ export function useBackupCenter({ showAlert, clearAlert, router, onAfterRollback
     }
   }
 
+  /** 预览清理计划。传 `null` = 按**已保存**的配置预览（服务端自己读配置）。 */
   async function previewCleanup(config) {
     cleanupPreviewLoading.value = true
     try {
-      const data = await api.post('/api/backup/cleanup/preview', {
-        snapshot_keep: Number(config?.snapshot_keep ?? retentionForm.snapshot_keep),
-        export_keep: Number(config?.export_keep ?? retentionForm.export_keep),
-        cold_keep: Number(config?.cold_keep ?? retentionForm.cold_keep),
-      })
+      const body = config
+        ? {
+          snapshot_keep: Number(config.snapshot_keep ?? retentionForm.snapshot_keep),
+          export_keep: Number(config.export_keep ?? retentionForm.export_keep),
+          cold_keep: Number(config.cold_keep ?? retentionForm.cold_keep),
+        }
+        : null
+      const data = await api.post('/api/backup/cleanup/preview', body)
       if (data?.preview) cleanupPreview.value = data.preview
+      cleanupPlanToken.value = data?.plan_token || null
       return data?.preview || null
     } catch (err) {
       showAlert('error', '预览清理失败：' + err.message)
@@ -987,7 +1029,10 @@ export function useBackupCenter({ showAlert, clearAlert, router, onAfterRollback
   const retentionPreviewSummary = computed(() =>
     cleanupDeleteSummary(cleanupPreview.value))
 
-  /** 保存保留配置前必须先展示「将删除哪些备份点」，再写入。 */
+  /**
+   * 保存保留配置。**保存不删除**（P1-1）：这里只把「按新配置会清掉哪些」提前说清楚，
+   * 删除要用户另外点「立即清理」并再确认一次。
+   */
   async function saveRetention() {
     if (retentionSaving.value) return
     clearAlert()
@@ -1010,19 +1055,19 @@ export function useBackupCenter({ showAlert, clearAlert, router, onAfterRollback
       {
         title: '确认保存保留配置',
         message:
-          `保存后将按新配置立即清理：本机回滚快照保留 ${snapshotKeep} 份、`
+          `保存只更新保留份数，不会删除任何备份点：本机回滚快照保留 ${snapshotKeep} 份、`
           + `导出备份保留 ${exportKeep} 份、冷备保留 ${coldKeep} 份。`,
-        details: [
-          `将删除本机回滚快照 ${summary.snapshotDelete} 份`,
-          `将删除导出备份 ${summary.exportDelete} 份`,
-          `将删除冷备 ${summary.coldDelete} 份`,
-          `受保护、不会自动清理的条目：${summary.protected} 份`,
-        ],
-        danger: totalDelete > 0,
-        confirmLabel: '确认保存并清理',
-        checkboxes: totalDelete > 0
-          ? [{ key: 'cleanup', label: '我已知晓将删除上述备份点', required: true }]
-          : [],
+        details: totalDelete > 0
+          ? [
+            `按新配置有 ${totalDelete} 个备份点超出份数，点「立即清理」后才会删除：`,
+            `· 本机回滚快照 ${summary.snapshotDelete} 份`,
+            `· 导出备份 ${summary.exportDelete} 份`,
+            `· 冷备 ${summary.coldDelete} 份`,
+            `受保护、不会自动清理的条目：${summary.protected} 份`,
+          ]
+          : [`按新配置没有超出份数的备份点（受保护条目 ${summary.protected} 份）`],
+        danger: false,
+        confirmLabel: '保存配置',
       },
       saveRetentionNow,
     )
@@ -1037,9 +1082,14 @@ export function useBackupCenter({ showAlert, clearAlert, router, onAfterRollback
         cold_keep: Number(retentionForm.cold_keep),
       })
       applyRetention(data)
-      const freed = formatBytes(data?.cleanup?.freed_bytes)
-      const deleted = (data?.cleanup?.deleted || []).length
-      showAlert('success', `保留配置已保存，已清理 ${deleted} 个备份点（释放 ${freed}）`)
+      const summary = cleanupDeleteSummary(data?.preview)
+      const pending = summary.snapshotDelete + summary.exportDelete + summary.coldDelete
+      showAlert(
+        'success',
+        pending > 0
+          ? `保留配置已保存；有 ${pending} 个备份点超出份数，点「立即清理」后才会删除`
+          : '保留配置已保存，没有超出份数的备份点',
+      )
       await Promise.all([loadPoints(), loadHealth()])
     } catch (err) {
       showAlert('error', '保存保留配置失败：' + err.message)
@@ -1052,23 +1102,35 @@ export function useBackupCenter({ showAlert, clearAlert, router, onAfterRollback
     cleaningUp.value = true
     clearAlert()
     try {
-      const data = await api.post('/api/backup/cleanup', {})
+      const data = await api.post('/api/backup/cleanup', { plan_token: cleanupPlanToken.value })
       if (data?.preview) cleanupPreview.value = data.preview
+      cleanupPlanToken.value = data?.plan_token || null
       const freed = formatBytes(data?.freed_bytes)
       const deleted = (data?.deleted || []).length
       showAlert('success', `已清理 ${deleted} 个备份点（释放 ${freed}）`)
       await Promise.all([loadPoints(), loadHealth()])
     } catch (err) {
-      showAlert('error', '清理失败：' + err.message)
+      if (err.status === 409) {
+        // 确认前后计划变了（另一处清理过 / 刚生成了新备份点）：令牌作废，重新预览
+        showAlert('info', err.message)
+        await previewCleanup(null)
+      } else {
+        showAlert('error', '清理失败：' + err.message)
+      }
     } finally {
       cleaningUp.value = false
     }
   }
 
   /** 清理是不可逆动作，走两步确认并展示预览里的删除集合。 */
-  function runCleanup() {
+  async function runCleanup() {
     if (cleaningUp.value) return
-    const summary = cleanupDeleteSummary(cleanupPreview.value)
+    clearAlert()
+    // 按**已保存的配置**现算一次：确认弹窗里的份数、要删的条目和 plan_token
+    // 必须来自同一次服务端计算，不能拿页面上可能已经过期的缓存。
+    const preview = await previewCleanup(null)
+    if (!preview) return
+    const summary = cleanupDeleteSummary(preview)
     const totalDelete = summary.snapshotDelete + summary.exportDelete + summary.coldDelete
     const details = [
       `本机回滚快照：删除 ${summary.snapshotDelete} 份`,
@@ -1135,6 +1197,7 @@ export function useBackupCenter({ showAlert, clearAlert, router, onAfterRollback
     validatingId,
     validateResults,
     validatePoint,
+    downloadPoint,
     pointDisplay,
     // 两步确认
     confirmState,
@@ -1194,6 +1257,7 @@ export function useBackupCenter({ showAlert, clearAlert, router, onAfterRollback
     cleanupPreview,
     cleanupPreviewLoading,
     cleaningUp,
+    cleanupPlanToken,
     retentionPreviewSummary,
     loadRetention,
     previewCleanup,

@@ -662,6 +662,28 @@ def cleanup_preview(
     }
 
 
+def cleanup_plan_token(preview: dict) -> str:
+    """把「这次预览承诺删除的集合」压成一个令牌。
+
+    预览与真删是两个请求：中间备份点可能被新增、被下载、被另一台机器的冷备
+    同步改写，操作人确认过的那份名单已经过期。令牌由**配置 + 待删除 id 的排序
+    集合**决定，删除前在服务端重算一次，不匹配就拒绝 —— 这是清理这一不可逆动作
+    的第二次确认，不依赖前端把话说圆。
+    """
+    ids = sorted(
+        entry["id"]
+        for section in ("snapshot", "export", "cold")
+        for entry in (preview.get(section) or {}).get("delete") or []
+    )
+    payload = json.dumps(
+        {"config": preview.get("config") or {}, "ids": ids},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]
+
+
 def apply_cleanup(
     config: Optional[backup_retention.RetentionConfig] = None,
 ) -> dict:

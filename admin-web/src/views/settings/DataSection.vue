@@ -161,6 +161,7 @@ const {
   validatingId,
   validateResults,
   validatePoint,
+  downloadPoint,
   // 两步确认（备份恢复 / 数据回滚 / 清理 / 以及本页的危险动作共用同一弹窗）
   confirmState,
   confirmChecked,
@@ -280,6 +281,10 @@ function onRollbackPoint(point) {
   return runSpotted('backup', () => onRollbackSnapshot(point))
 }
 
+function onDownloadPoint(point) {
+  return runSpotted('backup', () => downloadPoint(point))
+}
+
 // ===== 三个弹窗注册给壳：状态与文案留在这里，壳只渲染「框」并接 Esc =====
 modalHost?.register('confirm', {
   isOpen: () => confirmState.open,
@@ -366,111 +371,9 @@ watch(
       :not-backed-up="notBackedUp"
       @validate="onValidatePoint"
       @rollback="onRollbackPoint"
+      @download="onDownloadPoint"
       @refresh="loadPoints"
     />
-
-    <!-- ===== 导出备份：口令 → 勾选项 → 生成下载；反馈与进度都贴在这颗按钮下面 ===== -->
-    <fieldset>
-      <legend>导出备份</legend>
-      <div class="grid">
-        <div>
-          <label for="exportPass">加密口令</label>
-          <input class="input" id="exportPass" v-model="exportForm.passphrase" type="password" autocomplete="new-password" placeholder="至少 6 位">
-        </div>
-        <div>
-          <label for="exportPass2">确认口令</label>
-          <input class="input" id="exportPass2" v-model="exportForm.passphrase2" type="password" autocomplete="new-password" placeholder="再次输入">
-        </div>
-        <div class="full">
-          <label class="luyun-check-row">
-            <LuyunCheckbox v-model="exportForm.include_runtime" />
-            <span>同时打包运行配置（营业时段 / 轮询间隔等）</span>
-          </label>
-        </div>
-        <div class="full">
-          <label class="luyun-check-row">
-            <LuyunCheckbox v-model="exportForm.include_app_db" :disabled="!exportAppDbSupported" />
-            <span>同时打包业务数据库（订单、档口映射等）</span>
-          </label>
-        </div>
-        <div class="full">
-          <label class="luyun-check-row">
-            <LuyunCheckbox v-model="exportForm.include_recipes" />
-            <span>同时打包配方数据</span>
-          </label>
-        </div>
-        <div class="full">
-          <label class="luyun-check-row">
-            <LuyunCheckbox v-model="exportForm.include_standard_photos" />
-            <span>同时打包标准图（含全部历史版本）</span>
-          </label>
-        </div>
-        <div class="full">
-          <label class="luyun-check-row">
-            <LuyunCheckbox v-model="exportForm.include_other_photos" />
-            <span>同时打包其它照片（日常实拍、专项、整改回拍、教材）</span>
-          </label>
-        </div>
-        <div class="full">
-          <label class="luyun-check-row">
-            <LuyunCheckbox v-model="exportForm.include_wastage_photos" />
-            <span>同时打包损耗登记照片</span>
-          </label>
-        </div>
-        <div class="full">
-          <label class="luyun-check-row">
-            <LuyunCheckbox v-model="exportForm.include_scraper_state" />
-            <span>同时打包采集状态（恢复后不会漏采当天订单）</span>
-          </label>
-        </div>
-      </div>
-      <!-- 风险提示：口令遗失不可解密，是本节唯一一处 .luyunbak 口令说明 -->
-      <p class="hint is-warn">导出的 <code>.luyunbak</code> 由口令加密，口令遗失将无法解密恢复，请牢记。</p>
-      <p v-if="exportHasLargePayload" class="hint">已勾选业务数据或配方，备份文件可能较大，导出耗时会更长。</p>
-      <div class="actions is-start">
-        <button type="button" class="btn btn-primary" :disabled="exporting" @click="runSpotted('export', onExportBackup)">{{ exportBtnLabel }}</button>
-      </div>
-      <div v-if="exportAlert.show" class="alert show" :class="exportAlert.type">{{ exportAlert.message }}</div>
-      <!-- 导出是服务端后台任务：按 stage 显示阶段文案，照片阶段还有 done/total -->
-      <div v-if="exporting" class="upload-progress">
-        <div class="upload-progress__track">
-          <div
-            class="upload-progress__bar"
-            :class="{ indeterminate: exportIndeterminate }"
-            :style="{ width: exportPercent + '%' }"
-          ></div>
-        </div>
-        <span class="upload-progress__label">{{ exportStageText }}</span>
-      </div>
-      <!-- 机制解释：包里装了什么、业务数据是什么形态 —— 默认折叠 -->
-      <details class="more">
-        <summary>
-          <SvgIcon name="chevron-right" :size="14" class="more__icon" />
-          <span>这个包里装了什么</span>
-        </summary>
-        <p v-if="appDbExportFormat !== 'pgdump'" class="hint">
-          可打包 POS 凭据、运行配置、业务数据与两类卫生照片。
-        </p>
-        <p v-else class="hint">
-          可打包 POS 凭据、运行配置、业务数据（PostgreSQL 整库快照）、配方数据与两类卫生照片。
-        </p>
-        <p v-if="appDbExportFormat === 'pgdump'" class="hint">
-          PostgreSQL 门店的业务数据以整库快照（<code>pg_dump</code>）打包；宿主机冷备命令见 <code>deploy/README.md</code> 第 10.4 节。恢复时的行为见下面「恢复」一节。
-        </p>
-        <!-- 整库快照覆盖的每一张表：分组与表名都来自后端，页面不自己维护 -->
-        <p v-if="backupTableTotal" class="hint">
-          整库快照含全部 {{ backupTablePresentCount }} 张数据表（按用途分组，随快照一起恢复）<template v-if="backupTablePending.length">；另有 {{ backupTablePending.length }} 张结构已声明但迁移未应用，标为「未应用」</template>：
-        </p>
-        <ul v-if="backupTableGroups.length" class="bullet-list">
-          <li v-for="group in backupTableGroups" :key="group.key">
-            <strong>{{ group.label }}</strong>：
-            <template v-for="(table, index) in group.tables" :key="table.name">
-              <code>{{ table.name }}{{ table.present ? '' : '（未应用）' }}</code><span v-if="index < group.tables.length - 1">、</span>
-            </template>
-          </li>
-        </ul>
-      </details>
-    </fieldset>
 
     <!-- ===== 恢复：先预览核对，再确认恢复（预览结果与两颗按钮的反馈都在本面板内） ===== -->
     <fieldset>
@@ -612,7 +515,110 @@ watch(
         <span class="upload-progress__label">{{ progressLabel(importProgress) }}</span>
       </div>
       <!-- 本机回滚快照的入口在备份点列表里（它的分组提示已经写明回滚前会自动再建一份，这里不重复） -->
-      <p class="hint">本机回滚快照请在页面顶部的「备份点」分组里回滚。</p>
+      <p class="hint">本机回滚快照请在上方「备份点」分组里回滚。</p>
+    </fieldset>
+
+    <!-- ===== 导出备份：口令 → 勾选项 → 生成下载；反馈与进度都贴在这颗按钮下面 ===== -->
+    <fieldset>
+      <legend>导出备份</legend>
+      <div class="grid">
+        <div>
+          <label for="exportPass">加密口令</label>
+          <input class="input" id="exportPass" v-model="exportForm.passphrase" type="password" autocomplete="new-password" placeholder="至少 6 位">
+        </div>
+        <div>
+          <label for="exportPass2">确认口令</label>
+          <input class="input" id="exportPass2" v-model="exportForm.passphrase2" type="password" autocomplete="new-password" placeholder="再次输入">
+        </div>
+        <div class="full">
+          <label class="luyun-check-row">
+            <LuyunCheckbox v-model="exportForm.include_runtime" />
+            <span>同时打包运行配置（营业时段 / 轮询间隔等）</span>
+          </label>
+        </div>
+        <div class="full">
+          <label class="luyun-check-row">
+            <LuyunCheckbox v-model="exportForm.include_app_db" :disabled="!exportAppDbSupported" />
+            <span>同时打包业务数据库（订单、档口映射等）</span>
+          </label>
+        </div>
+        <div class="full">
+          <label class="luyun-check-row">
+            <LuyunCheckbox v-model="exportForm.include_recipes" />
+            <span>同时打包配方数据</span>
+          </label>
+        </div>
+        <div class="full">
+          <label class="luyun-check-row">
+            <LuyunCheckbox v-model="exportForm.include_standard_photos" />
+            <span>同时打包标准图（含全部历史版本）</span>
+          </label>
+        </div>
+        <div class="full">
+          <label class="luyun-check-row">
+            <LuyunCheckbox v-model="exportForm.include_other_photos" />
+            <span>同时打包其它照片（日常实拍、专项、整改回拍、教材）</span>
+          </label>
+        </div>
+        <div class="full">
+          <label class="luyun-check-row">
+            <LuyunCheckbox v-model="exportForm.include_wastage_photos" />
+            <span>同时打包损耗登记照片</span>
+          </label>
+        </div>
+        <div class="full">
+          <label class="luyun-check-row">
+            <LuyunCheckbox v-model="exportForm.include_scraper_state" />
+            <span>同时打包采集状态（恢复后不会漏采当天订单）</span>
+          </label>
+        </div>
+      </div>
+      <!-- 风险提示：口令遗失不可解密，是本节唯一一处 .luyunbak 口令说明 -->
+      <p class="hint is-warn">导出的 <code>.luyunbak</code> 由口令加密，口令遗失将无法解密恢复，请牢记。</p>
+      <p v-if="exportHasLargePayload" class="hint">已勾选业务数据或配方，备份文件可能较大，导出耗时会更长。</p>
+      <div class="actions is-start">
+        <button type="button" class="btn btn-primary" :disabled="exporting" @click="runSpotted('export', onExportBackup)">{{ exportBtnLabel }}</button>
+      </div>
+      <div v-if="exportAlert.show" class="alert show" :class="exportAlert.type">{{ exportAlert.message }}</div>
+      <!-- 导出是服务端后台任务：按 stage 显示阶段文案，照片阶段还有 done/total -->
+      <div v-if="exporting" class="upload-progress">
+        <div class="upload-progress__track">
+          <div
+            class="upload-progress__bar"
+            :class="{ indeterminate: exportIndeterminate }"
+            :style="{ width: exportPercent + '%' }"
+          ></div>
+        </div>
+        <span class="upload-progress__label">{{ exportStageText }}</span>
+      </div>
+      <!-- 机制解释：包里装了什么、业务数据是什么形态 —— 默认折叠 -->
+      <details class="more">
+        <summary>
+          <SvgIcon name="chevron-right" :size="14" class="more__icon" />
+          <span>这个包里装了什么</span>
+        </summary>
+        <p v-if="appDbExportFormat !== 'pgdump'" class="hint">
+          可打包 POS 凭据、运行配置、业务数据与两类卫生照片。
+        </p>
+        <p v-else class="hint">
+          可打包 POS 凭据、运行配置、业务数据（PostgreSQL 整库快照）、配方数据与两类卫生照片。
+        </p>
+        <p v-if="appDbExportFormat === 'pgdump'" class="hint">
+          PostgreSQL 门店的业务数据以整库快照（<code>pg_dump</code>）打包；宿主机冷备命令见 <code>deploy/README.md</code> 第 10.4 节。恢复时的行为见上面「恢复」一节。
+        </p>
+        <!-- 整库快照覆盖的每一张表：分组与表名都来自后端，页面不自己维护 -->
+        <p v-if="backupTableTotal" class="hint">
+          整库快照含全部 {{ backupTablePresentCount }} 张数据表（按用途分组，随快照一起恢复）<template v-if="backupTablePending.length">；另有 {{ backupTablePending.length }} 张结构已声明但迁移未应用，标为「未应用」</template>：
+        </p>
+        <ul v-if="backupTableGroups.length" class="bullet-list">
+          <li v-for="group in backupTableGroups" :key="group.key">
+            <strong>{{ group.label }}</strong>：
+            <template v-for="(table, index) in group.tables" :key="table.name">
+              <code>{{ table.name }}{{ table.present ? '' : '（未应用）' }}</code><span v-if="index < group.tables.length - 1">、</span>
+            </template>
+          </li>
+        </ul>
+      </details>
     </fieldset>
 
     <!-- ===== 保留与清理：按钮在上、预览在下（点完新长出来的清单不会把按钮顶走） ===== -->
@@ -649,7 +655,7 @@ watch(
             />
           </div>
         </div>
-        <p class="hint is-warn">保存后立即清理，超出份数的备份点会被删除。</p>
+        <p class="hint is-warn">保存只改保留份数，不会删除备份点；超出份数的条目要点「立即清理」并确认后才会删除。</p>
 
         <div class="actions is-start">
           <button type="button" class="btn" :disabled="retentionLoading" @click="runSpotted('retention', loadRetention)">刷新</button>
@@ -711,8 +717,9 @@ watch(
             {{ retentionLimits?.cold_keep_default ?? '—' }} 份。
           </p>
           <p class="hint">
-            更新作业前的本机回滚快照与最近一份永不自动删除；保存保留配置或立即清理前，
-            都会先弹出将删除的份数与条目（与上面的清理预览同一份数据），确认后才执行。
+            更新作业前的本机回滚快照与最近一份永不自动删除；保存保留配置只改份数，
+            立即清理会先按已保存的配置重算「将删除」的份数与条目（与上面的清理预览同一份数据），
+            确认后才执行。
           </p>
         </details>
       </template>

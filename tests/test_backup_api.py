@@ -190,7 +190,8 @@ class BackupApiTest(_ApiTestBase):
         self.assertEqual(response.status_code, 400)
         self.assertIn("不能同时只保留 1 份", response.json()["detail"])
 
-    async def test_save_retention_runs_cleanup(self):
+    async def test_save_retention_does_not_delete(self):
+        """保存只改份数（P1-1）：一个备份点都不删，删要另走带令牌的清理。"""
         for ts in ("20260101_000001", "20260101_000002", "20260101_000003"):
             self._pg_snapshot(ts)
         response = await self.client.put(
@@ -199,13 +200,73 @@ class BackupApiTest(_ApiTestBase):
         self.assertEqual(response.status_code, 200)
         body = response.json()
         self.assertEqual(body["config"]["snapshot_keep"], 2)
-        deleted_ids = [d["id"] for d in body["cleanup"]["deleted"]]
-        self.assertIn("snapshot:20260101_000001", deleted_ids)
+        self.assertNotIn("cleanup", body)
+        deleted_ids = [d["id"] for d in body["preview"]["snapshot"]["delete"]]
+        self.assertEqual(deleted_ids, ["snapshot:20260101_000001"])
+        self.assertTrue(body["plan_token"])
         remaining = {
             p.name
             for p in (Path(settings.DATABASE_DIR) / "restore_snapshots").iterdir()
         }
-        self.assertEqual(remaining, {"20260101_000002", "20260101_000003"})
+        self.assertEqual(
+            remaining,
+            {"20260101_000001", "20260101_000002", "20260101_000003"},
+        )
+
+    async def test_cleanup_requires_matching_plan_token(self):
+        """清理的删除集合必须与确认过的预览一致：没令牌、旧令牌都拒绝。"""
+        for ts in ("20260101_000001", "20260101_000002", "20260101_000003"):
+            self._pg_snapshot(ts)
+        saved = await self.client.put(
+            "/api/backup/retention", json={"snapshot_keep": 2, "cold_keep": 14}
+        )
+        self.assertEqual(saved.status_code, 200)
+        token = saved.json()["plan_token"]
+
+        no_token = await self.client.post("/api/backup/cleanup")
+        self.assertEqual(no_token.status_code, 409)
+        self.assertIn("清理计划已变化", no_token.json()["detail"])
+
+        # 预览之后又多了一份快照：操作人确认过的名单已经过期。
+        self._pg_snapshot("20260101_000004")
+        stale = await self.client.post(
+            "/api/backup/cleanup", json={"plan_token": token}
+        )
+        self.assertEqual(stale.status_code, 409)
+
+        refreshed = await self.client.post("/api/backup/cleanup/preview")
+        self.assertEqual(refreshed.status_code, 200)
+        new_token = refreshed.json()["plan_token"]
+        self.assertNotEqual(new_token, token)
+        self.assertEqual(len(refreshed.json()["preview"]["snapshot"]["delete"]), 2)
+
+        apply = await self.client.post(
+            "/api/backup/cleanup", json={"plan_token": new_token}
+        )
+        self.assertEqual(apply.status_code, 200, apply.text)
+        deleted_ids = [d["id"] for d in apply.json()["deleted"]]
+        self.assertEqual(
+            sorted(deleted_ids),
+            ["snapshot:20260101_000001", "snapshot:20260101_000002"],
+        )
+        remaining = {
+            p.name
+            for p in (Path(settings.DATABASE_DIR) / "restore_snapshots").iterdir()
+        }
+        self.assertEqual(remaining, {"20260101_000003", "20260101_000004"})
+
+    async def test_cleanup_preview_requires_session(self):
+        """预览能拿到「将删除哪些」，所以匿名不能调（P1-1）。"""
+        app = FastAPI()
+        app.include_router(backup_router)
+        app.dependency_overrides[verify_admin_token] = lambda: None
+        app.dependency_overrides[get_db] = lambda: self.db
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.post("/api/backup/cleanup/preview")
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.json()["detail"], "需要登录")
 
     async def test_cleanup_preview_does_not_delete(self):
         for ts in ("20260101_000001", "20260101_000002", "20260101_000003"):
@@ -328,6 +389,59 @@ class PgSnapshotRollbackApiTest(_ApiTestBase):
         restore.assert_called_once()
         # drop/重建过对象，连接必须已重建且可用
         self.assertTrue(self.db.is_connected())
+
+    async def test_pg_snapshot_rollback_restores_run_state(self):
+        """快照里的采集状态要一起回滚，且解析失败不能把整个恢复打成 500（P0-1）。"""
+        self._pg_snapshot("20260101_000001")
+        snap_dir = (
+            Path(settings.DATABASE_DIR) / "restore_snapshots" / "20260101_000001"
+        )
+        (snap_dir / "run_state.json").write_text(
+            json.dumps({"tables": {"1": "2026-01-01T00:00:00"}}), encoding="utf-8"
+        )
+
+        with mock.patch.object(
+            backup_points, "create_pre_restore_snapshot", return_value="20260101_000099"
+        ), mock.patch.object(
+            backup_service, "restore_pg_dump_sync"
+        ), mock.patch.object(
+            backup_service, "restore_run_state", return_value=True
+        ) as restore_state, mock.patch.object(
+            backup_api, "_notify_scraper_state_reload", return_value=None
+        ):
+            response = await self.client.post(
+                "/api/backup/snapshots/20260101_000001/rollback"
+                "?apply_standard_photos=false&apply_other_photos=false"
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertTrue(body["applied"]["scraper_state"])
+        self.assertEqual(body["warnings"], [])
+        restore_state.assert_called_once_with({"tables": {"1": "2026-01-01T00:00:00"}})
+
+    async def test_pg_snapshot_rollback_bad_run_state_is_warning_not_500(self):
+        """采集状态文件坏了：库已经换完，只能给警告，不能半路抛错。"""
+        self._pg_snapshot("20260101_000001")
+        snap_dir = (
+            Path(settings.DATABASE_DIR) / "restore_snapshots" / "20260101_000001"
+        )
+        (snap_dir / "run_state.json").write_text("{not json", encoding="utf-8")
+
+        with mock.patch.object(
+            backup_points, "create_pre_restore_snapshot", return_value="20260101_000099"
+        ), mock.patch.object(backup_service, "restore_pg_dump_sync"):
+            response = await self.client.post(
+                "/api/backup/snapshots/20260101_000001/rollback"
+                "?apply_standard_photos=false&apply_other_photos=false"
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertFalse(body["applied"]["scraper_state"])
+        self.assertTrue(
+            any("采集状态未能回滚" in warning for warning in body["warnings"])
+        )
 
     async def test_pg_restore_failure_returns_500_with_reason(self):
         self._pg_snapshot("20260101_000002")
@@ -669,6 +783,19 @@ class BackupExportBackendCapabilityTest(_ApiTestBase):
                 if p["medium"] == "export_backup"
             ]
             self.assertEqual(len(exported), 1)
+
+            # 任务记录 30 分钟后会过期，备份点下载接口必须仍能取到成品包。
+            point_download = await self.client.get(
+                f"/api/backup/points/{exported[0]['id']}/download"
+            )
+            self.assertEqual(point_download.status_code, 200, point_download.text)
+            self.assertEqual(point_download.content, download.content)
+
+    async def test_export_point_download_rejects_non_export_point(self):
+        response = await self.client.get(
+            "/api/backup/points/snapshot:20260101_000001/download"
+        )
+        self.assertEqual(response.status_code, 404)
 
     async def test_export_job_limits_concurrency_and_surfaces_failure(self):
         def _slow_failure(*args, **kwargs):

@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -115,8 +116,16 @@ _restore_guard = _RestoreGuard()
 
 @contextmanager
 def _restore_exclusive(entry: str) -> Iterator[None]:
+    # 恢复期间员工端/店长可能还开着页面：先挂维护标记（公开探针 /api/system/maintenance
+    # 会读到），结束无论成败都撤掉。标记写失败不影响恢复本身。
+    from services import system_maintenance
+
     with _restore_guard.hold(entry):
-        yield
+        system_maintenance.begin_restore(entry)
+        try:
+            yield
+        finally:
+            system_maintenance.end_restore()
 
 PHOTO_KINDS = (
     (PHOTO_STANDARD, "standard_photos", "标准图"),
@@ -655,21 +664,27 @@ def _staging_http_error(exc: Exception) -> HTTPException:
     return HTTPException(status_code=400, detail=str(exc))
 
 
-async def _notify_scraper_state_reload() -> None:
+async def _notify_scraper_state_reload() -> Optional[str]:
     """让运行中的 scraper 立即重读采集状态文件。
 
     整库恢复后库里是旧数据，采集器内存里的差分基线却还是恢复前的：不重读，
     它会认为恢复后到当前的订单都已采集过，于是永久漏采。
+
+    失败不抛异常（此时库已经换完了，抛出去只会让调用方以为「恢复没生效」），
+    但**不能只写日志**：返回失败原因，由响应体把「必须重启」告诉操作人。
     """
     try:
         from main import restaurant_scraper
 
         state = getattr(restaurant_scraper, "state", None)
-        if state is not None:
-            state.load_table_state()
-            state.collected_delivery_bills = state.load_delivery_bills()
+        if state is None:
+            return "采集器状态对象不存在"
+        state.load_table_state()
+        state.collected_delivery_bills = state.load_delivery_bills()
+        return None
     except Exception as exc:  # noqa: BLE001 —— 进程内通知失败不该让恢复失败
         logger.warning("通知 scraper 重读采集状态失败: %s", exc)
+        return str(exc) or type(exc).__name__
 
 
 async def _after_restore_photo_consistency(
@@ -813,6 +828,9 @@ async def _apply_parsed_backup(
             )
 
     applied: Dict[str, bool] = {content: False for content in CONTENT_LABELS}
+    # 「恢复成功了，但运行期还差一步」的地方都记在这里，随响应回给操作人。
+    # 只写服务端日志等于没说：页面显示成功，漏采却要几天后才被发现。
+    restore_warnings: List[str] = []
 
     if apply_credentials:
         try:
@@ -840,6 +858,9 @@ async def _apply_parsed_backup(
         applied[CONTENT_SCRAPER_STATE] = bool(restored_state)
         if not restored_state:
             logger.warning("采集状态写回失败：备份里没有可用的运行期状态")
+            restore_warnings.append(
+                "采集状态没有可用的内容，本次未写回；采集器仍按当前基线工作"
+            )
 
     if apply_runtime and parsed["runtime"] is not None:
         try:
@@ -930,7 +951,12 @@ async def _apply_parsed_backup(
     if applied[CONTENT_RUNTIME]:
         await _notify_scraper_reload_runtime(db)
     if applied[CONTENT_SCRAPER_STATE]:
-        await _notify_scraper_state_reload()
+        reload_error = await _notify_scraper_state_reload()
+        if reload_error:
+            restore_warnings.append(
+                "采集状态已写回，但运行中的采集器没有重读成功"
+                f"（{reload_error}）：请重启应用，否则恢复后到重启前的订单可能漏采"
+            )
 
     session_invalidated = (
         applied[CONTENT_APP_PG] or applied[CONTENT_CREDENTIALS]
@@ -949,6 +975,7 @@ async def _apply_parsed_backup(
         "photo_consistency": photo_consistency,
         "snapshot_ts": snapshot_ts,
         "session_invalidated": session_invalidated,
+        "warnings": restore_warnings,
         "merge_failed_rows": merge_failed_rows,
         "merge_reports": merge_reports,
     }
@@ -1184,6 +1211,7 @@ async def _rollback_snapshot_locked(
 
     # 采集状态与更新凭据：与库一起回滚，否则恢复后采集器按旧基线漏单、
     # 「系统更新」页还要重新申请 PAT。
+    restore_warnings: List[str] = []
     snap_run_state = snap_dir / "run_state.json"
     if snap_run_state.is_file():
         try:
@@ -1191,8 +1219,17 @@ async def _rollback_snapshot_locked(
             applied[CONTENT_SCRAPER_STATE] = bool(
                 backup_service.restore_run_state(payload)
             )
-        except (OSError, ValueError) as exc:
+            if not applied[CONTENT_SCRAPER_STATE]:
+                restore_warnings.append(
+                    "快照里的采集状态没有可用内容，本次未回滚；"
+                    "采集器仍按回滚前的基线工作，可能漏采"
+                )
+        except Exception as exc:  # noqa: BLE001 —— 已换完库，不能半路抛错
             logger.warning("回滚采集状态失败: %s", exc)
+            restore_warnings.append(
+                f"采集状态未能回滚（{exc}）：采集器仍按回滚前的基线工作，"
+                "请重启应用，否则可能漏采"
+            )
 
     snap_github = snap_dir / "github_release.enc"
     if snap_github.is_file():
@@ -1242,7 +1279,12 @@ async def _rollback_snapshot_locked(
     await _notify_scraper_reload()
     await _notify_scraper_reload_runtime(db)
     if applied[CONTENT_SCRAPER_STATE]:
-        await _notify_scraper_state_reload()
+        reload_error = await _notify_scraper_state_reload()
+        if reload_error:
+            restore_warnings.append(
+                "采集状态已回滚，但运行中的采集器没有重读成功"
+                f"（{reload_error}）：请重启应用，否则回滚后到重启前的订单可能漏采"
+            )
     # 回滚本身会新建一份前置快照备份点：健康结论需要重算。
     backup_points.invalidate_health_cache()
 
@@ -1257,6 +1299,7 @@ async def _rollback_snapshot_locked(
         "session_invalidated": (
             applied[CONTENT_APP_PG] or applied[CONTENT_CREDENTIALS]
         ),
+        "warnings": restore_warnings,
     }
 
 
@@ -1328,6 +1371,34 @@ async def backup_table_inventory(db: DatabaseManager = Depends(get_db)):
     }
 
 
+@router.get("/points/{point_id}/download")
+async def download_point(
+    point_id: str,
+    _session_id: str = Depends(require_session),
+) -> FileResponse:
+    """按备份点下载导出备份包（不依赖 30 分钟的导出任务内存记录）。"""
+    point = backup_points.get_backup_point(point_id)
+    if point is None:
+        raise HTTPException(status_code=404, detail="备份点不存在")
+    if point.get("medium") != backup_points.MEDIUM_EXPORT:
+        raise HTTPException(status_code=404, detail="该备份点不支持下载")
+    location = point.get("location")
+    if not location:
+        raise HTTPException(status_code=410, detail="备份文件已被清理，请重新导出")
+    path = Path(location).resolve()
+    # 备份点清单是唯一入口，这里仍再收一次根目录：即使清单被写坏也不许越界读文件。
+    if not path.is_relative_to(backup_service._export_root().resolve()):
+        raise HTTPException(status_code=404, detail="备份文件路径无效")
+    if not path.is_file():
+        raise HTTPException(status_code=410, detail="备份文件已被清理，请重新导出")
+    filename = (point.get("detail") or {}).get("name") or path.name
+    return FileResponse(
+        path,
+        media_type="application/octet-stream",
+        filename=filename,
+    )
+
+
 @router.post("/points/{point_id}/validate")
 async def validate_point(point_id: str):
     """对单个备份点只读执行基础校验。"""
@@ -1366,57 +1437,98 @@ async def get_retention(db: DatabaseManager = Depends(get_db)):
     }
 
 
+class CleanupIn(BaseModel):
+    """清理的二次确认令牌（来自预览响应，见 services/backup_points.cleanup_plan_token）。"""
+
+    plan_token: Optional[str] = None
+
+
 @router.put("/retention")
 async def put_retention(
     payload: RetentionIn,
     db: DatabaseManager = Depends(get_db),
     session_id: str = Depends(require_session),
 ):
-    """保存保留配置；确认后立即执行清理并刷新列表。"""
+    """保存保留配置——**不删除任何备份点**。
+
+    旧实现把「保存配置」和「立即清理」塞进同一个请求：点一次保存就不可逆地
+    删掉超出份数的备份点，而操作人在弹窗里看到的是「保存保留配置」。配置是
+    配置，删除是删除。保存只写配置并返回按新配置算出的清理预览与令牌；真要
+    删，走 POST /cleanup 并带上这个令牌。
+    """
     try:
         config = backup_retention.validate_retention(payload.model_dump())
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
-    preview = backup_points.cleanup_preview(config)
     try:
         saved = await backup_retention.save_retention_config(db, config)
     except (RuntimeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
-    cleanup = backup_points.apply_cleanup(saved)
+    preview = backup_points.cleanup_preview(saved)
     backup_points.refresh_backup_health()
     return {
         "success": True,
         "config": saved.to_dict(),
         "limits": backup_retention.limits(),
-        "cleanup": cleanup,
         "preview": preview,
+        "plan_token": backup_points.cleanup_plan_token(preview),
     }
 
 
 @router.post("/cleanup/preview")
-async def cleanup_preview(payload: Optional[RetentionIn] = None):
-    """预览「将删除哪些备份点」，不修改任何内容。"""
+async def cleanup_preview(
+    payload: Optional[RetentionIn] = None,
+    session_id: str = Depends(require_session),
+):
+    """预览「将删除哪些备份点」，不修改任何内容。
+
+    预览会告诉操作人「将删掉哪几个」，所以它本身也不能是匿名可调的：拿得到
+    清单就等于确认了删除范围（P1-1）。
+    """
     config = None
     if payload is not None:
         try:
             config = backup_retention.validate_retention(payload.model_dump())
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
+    preview = backup_points.cleanup_preview(config)
     return {
         "success": True,
-        "preview": backup_points.cleanup_preview(config),
+        "preview": preview,
+        "plan_token": backup_points.cleanup_plan_token(preview),
     }
 
 
 @router.post("/cleanup")
 async def run_cleanup(
+    payload: Optional[CleanupIn] = None,
     db: DatabaseManager = Depends(get_db),
     session_id: str = Depends(require_session),
 ):
-    """按当前保留配置执行清理。"""
+    """按当前保留配置执行清理；删除集合必须与预览确认过的一致。
+
+    只给「有东西要删」的情况加令牌门槛：没东西可删时不存在误删对象，让脚本与
+    「立即清理」在空计划下照样返回成功。计划一变（预览之后多了/少了备份点），
+    令牌就对不上，请求以 409 拒绝——刷新预览再确认一次即可。
+    """
     config = await backup_retention.load_retention(db)
+    preview = backup_points.cleanup_preview(config)
+    token = backup_points.cleanup_plan_token(preview)
+    pending = sum(
+        len((preview.get(section) or {}).get("delete") or [])
+        for section in ("snapshot", "export", "cold")
+    )
+    supplied = (payload.plan_token if payload is not None else None) or ""
+    if pending and supplied != token:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "清理计划已变化或尚未确认：请先刷新「将删除」清单，"
+                "再点一次「立即清理」"
+            ),
+        )
     result = backup_points.apply_cleanup(config)
     backup_points.refresh_backup_health()
-    return {"success": True, **result}
+    return {"success": True, "plan_token": token, **result}

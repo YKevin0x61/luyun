@@ -160,6 +160,7 @@ function retentionPayload() {
       cold_keep_default: 14, cold_keep_min: 1, cold_keep_max: 90,
     },
     preview: cleanupPreview(),
+    plan_token: 'tok-retention',
   }
 }
 
@@ -245,9 +246,9 @@ function createServer() {
     rollbackResult: { applied_labels: ['业务数据'], snapshot_ts: '20260901_130000' },
     rollbackError: null,
     cleanupPreview: cleanupPreview(),
-    cleanupResult: { success: true, deleted: [{ id: 'snapshot:20260801_100000' }], freed_bytes: 2048, preview: cleanupPreview() },
+    cleanupResult: { success: true, plan_token: 'tok-preview', deleted: [{ id: 'snapshot:20260801_100000' }], freed_bytes: 2048, preview: cleanupPreview() },
     cleanupError: null,
-    retentionSaveResult: { success: true, cleanup: { deleted: [], freed_bytes: 0 } },
+    retentionSaveResult: { success: true, config: { snapshot_keep: 5, export_keep: 5, cold_keep: 14 }, limits: {}, preview: cleanupPreview(), plan_token: 'tok-preview' },
     retentionSaveError: null,
     dbResetResult: { success: true, user: 'luyun', env_file: '/etc/luyun/env.production', password_length: 32, restart_scheduled: true },
     dbResetError: null,
@@ -274,7 +275,7 @@ function installApi() {
       return server.exportStart
     }
     if (url === '/api/backup/health/refresh') return server.health
-    if (url === '/api/backup/cleanup/preview') return { success: true, preview: server.cleanupPreview }
+    if (url === '/api/backup/cleanup/preview') return { success: true, preview: server.cleanupPreview, plan_token: 'tok-preview' }
     if (url === '/api/backup/cleanup') {
       if (server.cleanupError) throw server.cleanupError
       return server.cleanupResult
@@ -461,6 +462,14 @@ async function confirmThroughShell(host) {
 // ============================================================================
 
 describe('默认态：只留操作必需与风险/后果提示', () => {
+  it('恢复入口排在导出之前', async () => {
+    const { wrapper } = await mountSection()
+    const legends = wrapper.findAll('fieldset').map((f) => f.find('legend').text())
+    expect(legends.indexOf('恢复')).toBeGreaterThan(-1)
+    expect(legends.indexOf('恢复')).toBeLessThan(legends.indexOf('导出备份'))
+    wrapper.unmount()
+  })
+
   it('默认态可见的说明性文字 ≤ 200 字', async () => {
     const { wrapper } = await mountSection()
     const hints = explainTexts(wrapper)
@@ -517,7 +526,7 @@ describe('默认态：只留操作必需与风险/后果提示', () => {
     // 口令遗失无法解密（导出面板）
     expect(visible).toContain('口令遗失将无法解密恢复，请牢记')
     // 清理的后果（保留与清理面板）
-    expect(visible).toContain('保存后立即清理，超出份数的备份点会被删除')
+    expect(visible).toContain('保存只改保留份数，不会删除备份点')
     // 重置密码的后果
     expect(visible).toContain('重置后新密码只写入 env 文件，页面不显示明文')
 
@@ -633,6 +642,45 @@ describe('已知重复：各处只留一处', () => {
     for (const label of ['刷新', '保存保留配置', '立即清理']) {
       expect(isAfter(findButton(retention, label).element, preview.element), `「${label}」应当在清理预览之前`).toBe(true)
     }
+  })
+})
+
+describe('保留与清理：保存不删除、删除要令牌（P1-1）', () => {
+  it('保存保留配置只改份数：弹窗说明「不会删除」，确认后不调用清理接口', async () => {
+    const { wrapper, host } = await mountSection()
+    const retention = panelByLegend(wrapper, '保留与清理')
+
+    await findButton(retention, '保存保留配置').trigger('click')
+    await settle()
+
+    const confirm = host.controllers.confirm
+    expect(confirm.state.open).toBe(true)
+    expect(confirm.state.message).toContain('不会删除任何备份点')
+    // 保存本身不可逆性为零：不需要勾选确认
+    expect(confirm.state.checkboxes).toEqual([])
+
+    await confirmThroughShell(host)
+
+    expect(apiPut).toHaveBeenCalledWith('/api/backup/retention', expect.any(Object))
+    expect(retention.find('.alert').text()).toContain('保留配置已保存')
+    expect(server.calls.some(([method, url]) => method === 'POST' && url === '/api/backup/cleanup')).toBe(false)
+  })
+
+  it('清理令牌过期（409）→ 就地提示计划已变并重新预览，不谎报成功', async () => {
+    const { wrapper, host } = await mountSection()
+    const retention = panelByLegend(wrapper, '保留与清理')
+    server.cleanupError = apiError('清理计划已变化或尚未确认：请先刷新「将删除」清单，再点一次「立即清理」', { status: 409 })
+
+    await findButton(retention, '立即清理').trigger('click')
+    await settle()
+    await confirmThroughShell(host)
+
+    const alert = retention.find('.alert')
+    expect(alert.text()).toContain('清理计划已变化')
+    expect(alert.text()).not.toContain('已清理')
+    // 令牌作废后要重新算一份预览（「将删除」清单与下一次令牌）
+    const previewCalls = server.calls.filter(([method, url]) => method === 'POST' && url === '/api/backup/cleanup/preview')
+    expect(previewCalls.length).toBeGreaterThanOrEqual(2)
   })
 })
 

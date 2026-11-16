@@ -116,7 +116,7 @@ describe('数据节（DataSection）备份中心接线契约', () => {
 
   it('恢复面板不再重复列表里的快照表', () => {
     const src = compact(dataSection)
-    expect(src).toContain('本机回滚快照请在页面顶部')
+    expect(src).toContain('本机回滚快照请在上方')
     // 旧快照表用的列头已从这里消失，回滚入口只剩备份点列表一处
     expect(src).not.toContain('<th>时间戳</th>')
   })

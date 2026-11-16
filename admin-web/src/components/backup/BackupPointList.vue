@@ -26,7 +26,7 @@ const props = defineProps({
   notBackedUp: { type: Array, default: () => [] },
 })
 
-defineEmits(['validate', 'rollback', 'refresh'])
+defineEmits(['validate', 'rollback', 'download', 'refresh'])
 
 const GROUP_META = [
   {
@@ -38,7 +38,7 @@ const GROUP_META = [
   {
     key: 'exports',
     title: '导出备份',
-    hint: '口令加密的 .luyunbak，可下载到浏览器外保存，也可在本页直接恢复。',
+    hint: '口令加密的 .luyunbak，可下载留存；要恢复请用本页「恢复」选择这个文件。',
     readonly: false,
   },
   {
@@ -192,6 +192,12 @@ function photoText(row) {
               <p v-if="row.checkAt" class="point__line is-dim">校验于 {{ formatTs(row.checkAt) }}</p>
             </div>
             <div class="point__actions">
+              <button
+                v-if="point.medium === 'export_backup'"
+                type="button"
+                class="btn btn-sm"
+                @click="$emit('download', point)"
+              >下载</button>
               <button
                 v-if="!g.readonly"
                 type="button"
