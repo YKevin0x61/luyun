@@ -15,6 +15,10 @@ export function createPwaUpdateController({
   swUrl = '/sw.js',
   scope = '/',
   reload = () => globalThis.location?.reload(),
+  // 「立即更新」会 reload 整个页面：正在填的表单、没提交的弹窗都会丢。先问一句，
+  // 让用户可以点「稍后」把手上的活交掉再更新。默认走浏览器原生 confirm；测试可注入。
+  confirmApply = (message) =>
+    typeof globalThis.confirm === 'function' ? globalThis.confirm(message) : true,
   controllerChangeTimeoutMs = 3000,
   setTimer = setTimeout,
   clearTimer = clearTimeout,
@@ -128,6 +132,12 @@ export function createPwaUpdateController({
 
   async function apply() {
     if (!visible.value || applying.value) return false
+    if (confirmApply) {
+      const accepted = confirmApply(
+        '更新会重新加载当前页面：已经填好但还没提交的内容会丢失。确定现在更新吗？',
+      )
+      if (accepted === false) return false
+    }
     applying.value = true
     error.value = ''
     try {

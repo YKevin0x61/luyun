@@ -88,6 +88,33 @@ describe('usePwaUpdate', () => {
     expect(reload).toHaveBeenCalledTimes(1)
   })
 
+
+  it('asks before reloading and keeps the prompt when the user declines', async () => {
+    const serviceWorker = new FakeServiceWorkerContainer()
+    serviceWorker.controller = {}
+    const waitingWorker = { postMessage: vi.fn() }
+    serviceWorker.register.mockResolvedValue(
+      new FakeRegistration({ waiting: waitingWorker }),
+    )
+    const reload = vi.fn()
+    const confirmApply = vi.fn(() => false)
+    const controller = createPwaUpdateController({
+      serviceWorker,
+      locationRef: { protocol: 'https:', hostname: 'shop.example' },
+      enabled: true,
+      reload,
+      confirmApply,
+    })
+
+    await controller.initialize()
+    expect(await controller.apply()).toBe(false)
+    expect(confirmApply).toHaveBeenCalledTimes(1)
+    expect(confirmApply.mock.calls[0][0]).toContain('还没提交的内容会丢失')
+    expect(waitingWorker.postMessage).not.toHaveBeenCalled()
+    expect(reload).not.toHaveBeenCalled()
+    expect(controller.visible.value).toBe(true)
+  })
+
   it('surfaces apply failures without hiding the prompt', async () => {
     const serviceWorker = new FakeServiceWorkerContainer()
     serviceWorker.controller = {}
