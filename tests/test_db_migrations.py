@@ -299,6 +299,7 @@ def test_0049_prep_review_signals_is_shipped_and_applied():
     assert {
         "sold_1h", "sold_2h", "sold_next_day", "dine_in_qty",
         "delivery_qty", "refund_qty", "hourly_json",
+        "is_censored", "demand_lower",
     } <= set(pg_probe.table_columns("prep_plan_actuals"))
     assert {"prep_item_id", "window_start", "window_end"} <= set(
         pg_probe.table_columns("wastage_records")

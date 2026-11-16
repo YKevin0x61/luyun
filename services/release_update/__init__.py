@@ -495,6 +495,19 @@ class ReleaseUpdate:
         except Exception:
             pass
 
+    def peak_hours_active(self) -> Optional[bool]:
+        """Whether Apply would currently be blocked by business peak hours.
+
+        None means the adapter is unavailable, not "off-peak": callers must
+        keep the backend's authoritative 409 as the final gate.
+        """
+        if self._peak_hours is None:
+            return None
+        try:
+            return bool(self._peak_hours.is_peak())
+        except Exception:
+            return None
+
     def version_check(self) -> VersionCheckResult:
         """Compare local Release Manifest identity to the formal GitHub catalogue.
 

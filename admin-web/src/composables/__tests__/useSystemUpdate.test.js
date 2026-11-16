@@ -243,6 +243,84 @@ describe('useSystemUpdate', () => {
     expect(needsPeakOverride.value).toBe(false)
   })
 
+  it('版本检测预先给出高峰状态，覆盖项不必等 409', async () => {
+    apiGet.mockResolvedValue({
+      success: true,
+      installed_tag: 'v0.1.0',
+      latest_tag: 'v0.2.0',
+      update_available: true,
+      releases: [],
+      peak_hours: { active: true, known: true },
+    })
+
+    const {
+      loadVersionCheck,
+      peakHoursActive,
+      showPeakOverride,
+      peakBlocked,
+      peakOverride,
+    } = useSystemUpdate({ showAlert: vi.fn(), clearAlert: vi.fn() })
+
+    await loadVersionCheck()
+    expect(peakHoursActive.value).toBe(true)
+    expect(showPeakOverride.value).toBe(true)
+    expect(peakBlocked.value).toBe(true)
+
+    peakOverride.value = true
+    expect(peakBlocked.value).toBe(false)
+  })
+
+  it('健康确认成功后重新拉版本检测，版本卡不再停在旧版本', async () => {
+    apiGet.mockImplementation(async (path) => {
+      if (path === '/api/release-update/version-check') {
+        return {
+          success: true,
+          installed_tag: 'v0.2.0',
+          latest_tag: 'v0.2.0',
+          update_available: false,
+          releases: [],
+        }
+      }
+      return {
+        success: true,
+        job: {
+          stage: 'restarting',
+          target_tag: 'v0.2.0',
+          previous_tag: 'v0.1.0',
+          log_path: 'data/update_job.log',
+        },
+      }
+    })
+    apiPost.mockResolvedValue({
+      success: true,
+      job: {
+        stage: 'succeeded',
+        target_tag: 'v0.2.0',
+        previous_tag: 'v0.1.0',
+        log_path: 'data/update_job.log',
+      },
+    })
+
+    const { loadJobStatus, recheckHealth, versionCheck, stopAutoRecheck } = useSystemUpdate({
+      showAlert: vi.fn(),
+      clearAlert: vi.fn(),
+    })
+    await loadJobStatus()
+    await recheckHealth()
+    await Promise.resolve()
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(apiGet).toHaveBeenCalledWith(
+      '/api/release-update/version-check',
+      null,
+      null,
+      'no-store',
+    )
+    expect(versionCheck.value.installed_tag).toBe('v0.2.0')
+    stopAutoRecheck()
+  })
+
   it('disables Apply when preflight forbids healthy runtime', async () => {
     apiGet.mockResolvedValue({
       success: true,

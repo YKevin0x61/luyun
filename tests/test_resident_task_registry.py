@@ -43,7 +43,7 @@ class ResidentTaskAccountingTest(unittest.TestCase):
             main_module.RESIDENT_TASK_TOTAL,
             main_module.BUSINESS_LOOP_TASK_COUNT + main_module.AUXILIARY_RESIDENT_TASK_COUNT,
         )
-        self.assertEqual(main_module.RESIDENT_TASK_TOTAL, 13)
+        self.assertEqual(main_module.RESIDENT_TASK_TOTAL, 14)
         # 断言**内容集合**而不只是数量：标签是注册与关闭共用的键，少一个/写错一个字
         # 都会让某个常驻 task 在关闭时被当成业务循环 cancel，或反过来漏登记。
         self.assertEqual(
@@ -94,7 +94,7 @@ class ResidentTaskAccountingTest(unittest.TestCase):
         self.assertIn("asyncio.create_task(coro)", registry)
 
     def test_business_loops_are_all_registered_by_label(self):
-        """8 个业务循环的标签都在 lifespan 里出现过（登记就会带上标签）。"""
+        """9 个业务常驻 task 的标签都在 lifespan 里出现过（登记就会带上标签）。"""
         source = (REPO_ROOT / "main.py").read_text(encoding="utf-8")
         for label in (
             "卫生逾期调度",
@@ -105,6 +105,7 @@ class ResidentTaskAccountingTest(unittest.TestCase):
             "日终对账调度",
             "未映射菜品巡检",
             "任务实例物化",
+            "更新健康确认",
         ):
             self.assertIn(f'"{label}"', source, f"业务循环 {label} 没走登记入口")
 

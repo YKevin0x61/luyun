@@ -6,6 +6,7 @@
 
 import asyncio
 import logging
+import time
 import uvicorn
 from contextlib import asynccontextmanager
 from collections import deque
@@ -182,12 +183,14 @@ hygiene_archive = None
 # 常驻后台 task 的显式清单（PERF-06）
 # ---------------------------------------------------------------------------
 # 「必须单 worker」这条硬约束的论据是"这些循环没有分布式选主"，所以数目必须能被核对，
-# 而不是文档里各写各的。数量 = 本清单里的 8 个业务循环 + 5 个辅助 task，两处都在下面
+# 而不是文档里各写各的。数量 = 本清单里的 9 个业务常驻 task（8 个循环 + 1 个一次性
+# 更新健康确认）+ 5 个辅助 task，两处都在下面
 # 列明白；`_register_resident_task()` 是唯一入口，启动日志按清单长度输出。
 #
 # 业务循环（**有副作用，多 worker 会重复采集/重复推送**）：
 #   1 卫生逾期调度  2 卫生图片补全  3 卫生图片维护  4 企微推送调度
 #   5 餐厅爬虫      6 日终对账调度  7 未映射菜品巡检  8 任务实例物化
+#   9 更新健康确认（启动后一次性的协程，最长 15 分钟；写更新作业状态，见 P0-3）
 # 辅助 task（幂等或本身可多实例，但仍是常驻协程）：
 #   9 内存监控  10 内存清理  11 磁盘守护  12 realtime Redis 订阅  13 日志落库消费者
 #   —— 这份名单（含标签）的唯一来源是下面的 `_AUXILIARY_RESIDENT_TASKS`，
@@ -197,7 +200,7 @@ hygiene_archive = None
 # `disk_guard.start()`、`log_storage.start()`），11 由 `realtime_hub.start_bus()` 起；
 # 它们都登记进 `_resident_tasks` 供计数，句柄由各组件自己管（见
 # `_register_auxiliary_resident_tasks`）。
-BUSINESS_LOOP_TASK_COUNT = 8
+BUSINESS_LOOP_TASK_COUNT = 9
 AUXILIARY_RESIDENT_TASK_COUNT = 5
 RESIDENT_TASK_TOTAL = BUSINESS_LOOP_TASK_COUNT + AUXILIARY_RESIDENT_TASK_COUNT
 
@@ -289,6 +292,71 @@ def _sweep_stale_restore_dumps_at_startup() -> None:
         return
     if removed:
         logger.info(f"🧹 启动期清理了 {len(removed)} 份上次残留的临时 dump")
+
+
+UPDATE_HEALTH_CONFIRM_POLL_SECONDS = 3.0
+UPDATE_HEALTH_CONFIRM_TIMEOUT_SECONDS = 900.0
+
+
+async def run_update_health_confirm() -> None:
+    """启动后自证「这次重启有没有把更新带起来」。
+
+    更新作业写出 restarting 之后就退出了，健康的最终结论原来只在
+    GET /api/release-update/job 的轮询里推进——操作人确认更新后一关页面，
+    作业就永远停在「重启中」：既挡住下一次应用更新（busy），也让回滚入口
+    一直不可点。这里把推进搬到服务端：启动后自己确认，就绪即转 succeeded，
+    超过宽限期仍不健康即转 succeeded_but_unhealthy，不需要谁盯着页面。
+
+    不是新作业、不改版、不回滚，只把「已经在文件中写下的中间态」推到终态。
+    """
+    from services.release_update import STAGE_RESTARTING
+    from services.release_update.factory import build_release_update
+
+    try:
+        release_update = build_release_update()
+        state = release_update.job_status()
+    except Exception as exc:  # noqa: BLE001 —— 确认失败不该影响启动
+        logger.warning(f"⚠️ 更新健康确认未启动（读取作业状态失败）: {exc}")
+        return
+
+    if state.stage != STAGE_RESTARTING:
+        return
+
+    deadline = time.monotonic() + UPDATE_HEALTH_CONFIRM_TIMEOUT_SECONDS
+    while True:
+        try:
+            state = await release_update.confirm_health()
+        except Exception as exc:  # noqa: BLE001 —— 下一轮继续试
+            logger.warning(f"⚠️ 更新健康确认失败（稍后重试）: {exc}")
+            state = None
+        if state is not None and state.stage != STAGE_RESTARTING:
+            logger.info(
+                f"✅ 更新健康结论已落定：{state.stage}"
+                f"（{state.message or ''}；{state.health_detail or ''}）"
+            )
+            return
+        if time.monotonic() >= deadline:
+            # 宽限期已用完：最后一次带 force 落终态。否则作业停在「重启中」，
+            # 下一次应用更新（busy）与回滚入口会被永远锁住，等于把 P0-3 挪了个位置。
+            # force 只写更新作业状态，不改版、不回滚。
+            try:
+                state = await release_update.confirm_health(force=True)
+            except Exception as exc:  # noqa: BLE001 —— 已到最后一步，不再重试
+                logger.warning(f"⚠️ 更新健康确认（强制）失败: {exc}")
+                state = None
+            if state is not None and state.stage != STAGE_RESTARTING:
+                logger.info(
+                    f"✅ 更新健康结论已落定：{state.stage}"
+                    f"（{state.message or ''}；{state.health_detail or ''}）"
+                )
+            else:
+                logger.warning(
+                    "⚠️ 更新健康确认超过 %.0f 分钟仍未落定，"
+                    "可在「系统更新」页手动确认健康",
+                    UPDATE_HEALTH_CONFIRM_TIMEOUT_SECONDS / 60,
+                )
+            return
+        await asyncio.sleep(UPDATE_HEALTH_CONFIRM_POLL_SECONDS)
 
 
 @asynccontextmanager
@@ -547,13 +615,19 @@ async def lifespan(app: FastAPI):
                 logger.warning(f"⚠️ 迁移状态判定失败（就绪按未完成处理）: {exc}")
         runtime_readiness.mark_started(migrations_complete=migrations_ok)
 
+        # 更新健康确认必须排在 mark_started 之后：它要判断「当前进程晚于重启
+        # 请求」，启动标识还没写下去就确认，只会把作业误判成未恢复健康。
+        # 文件里没停在 restarting 时它立即返回，不产生任何写入。
+        if background_enabled:
+            _start_resident_task("更新健康确认", run_update_health_confirm())
+
         # 常驻 task 清单收口后再计数：下面的数字必须能被 `_resident_tasks` 逐条核对
         # （PERF-06）。业务循环由本文件起、辅助 task 由各组件内部起，两类都登记。
         _register_auxiliary_resident_tasks()
         _registered = len(_resident_tasks)
         if _registered:
             logger.info(
-                "🧵 常驻后台 task：业务循环 %d 个 + 辅助 %d 个 = 实际注册 %d 个"
+                "🧵 常驻后台 task：业务常驻 %d 个（含一次性健康确认）+ 辅助 %d 个 = 实际注册 %d 个"
                 "（清单见 main.py 顶部 RESIDENT_TASK 说明）；"
                 "「必须单 worker」的原因就是它们没有分布式选主",
                 BUSINESS_LOOP_TASK_COUNT,
@@ -1097,6 +1171,8 @@ PUBLIC_API_SURFACE: tuple[tuple[str, str], ...] = (
     # 就绪探针：KDS 设置页「测试连接」在还没配 Token 时就要能打（换地址先探活），
     # 更新作业与部署验收清单也 curl 它
     ("GET", "/api/system/health"),
+    # 维护态探针：更新切包 / 整库恢复期间，员工端与店长也要能读；只回阶段文案
+    ("GET", "/api/system/maintenance"),
     # SEC-01 的决定：只读的采集状态供运维探针，保持开放
     ("GET", "/api/scraper/status"),
     # 登录墙自己的入口：不开放就没人能登录 / 初始化
@@ -1523,6 +1599,18 @@ async def health_check():
         "version": settings.APP_VERSION,
         "timestamp": datetime.now(CHINA_TZ),
     }
+
+
+@app.get("/api/system/maintenance")
+async def system_maintenance():
+    """维护态探针：更新切包 / 整库恢复期间给员工端与店长一个「等一等」的依据。
+
+    免鉴权（见 PUBLIC_API_SURFACE）：只回阶段文案，不含业务数据；页面在服务短暂
+    不可达时也要能拿它做判断。数据来源见 services/system_maintenance.py。
+    """
+    from services.system_maintenance import read_maintenance
+
+    return read_maintenance()
 
 
 @app.get("/api/system/scraper-health", dependencies=[Depends(verify_admin_token)])

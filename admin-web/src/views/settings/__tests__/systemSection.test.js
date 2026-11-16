@@ -256,7 +256,9 @@ describe('默认态：说明性文字 ≤ 200 字，机制解释全在折叠里'
 
 describe('必须保留可见原文：更新后果 / 营业高峰风险 / 未健康三条出路', () => {
   it('确认应用更新里把更新后果写在明面上', async () => {
-    const wrapper = await mountSection()
+    const wrapper = await mountSection({
+      versionCheck: { ...VERSION_CHECK, peak_hours: { active: true, known: true } },
+    })
     await wrapper.get('.release-list tbody tr .btn-primary').trigger('click')
     const confirm = fieldsetByLegend(wrapper, '确认应用更新')
     expect(confirm).toBeTruthy()
@@ -264,8 +266,18 @@ describe('必须保留可见原文：更新后果 / 营业高峰风险 / 未健�
     expect(isFolded(lead.element)).toBe(false)
     expect(lead.text()).toContain('将把运行实例切换到')
     expect(lead.text()).toContain('作业会先强制备份，再下载发行包、切换应用目录、按需同步依赖并重启主服务。')
-    // 两份勾选说明都还在（勾选框 + 各自的说明句）。
+    // 高峰时覆盖项提前出现，不必等 409 才看见。
+    expect(confirm.text()).toContain('当前处于营业高峰时段；确认更新前需勾选下方覆盖项。')
     expect(confirm.text()).toContain('我已知晓营业高峰风险，仍然执行更新')
+    wrapper.unmount()
+  })
+
+  it('非营业高峰不摆覆盖勾选项，也不多一段风险提示', async () => {
+    const wrapper = await mountSection()
+    await wrapper.get('.release-list tbody tr .btn-primary').trigger('click')
+    const confirm = fieldsetByLegend(wrapper, '确认应用更新')
+    expect(confirm.text()).not.toContain('我已知晓营业高峰风险')
+    expect(confirm.text()).not.toContain('当前处于营业高峰时段')
     wrapper.unmount()
   })
 
@@ -314,6 +326,8 @@ describe('必须保留可见原文：更新后果 / 营业高峰风险 / 未健�
     for (const step of steps) expect(isFolded(step.element)).toBe(false)
     // 三条出路里的宿主机命令是给"页面打不开"预备的，别被折起来。
     expect(health.text()).toContain('sudo systemctl reset-failed luyun.service')
+    // 作业日志是 data/update_job.log，链接要直接落到作业日志接口。
+    expect(health.get('a.btn').attributes('href')).toBe('/api/release-update/job/log')
     wrapper.unmount()
   })
 })

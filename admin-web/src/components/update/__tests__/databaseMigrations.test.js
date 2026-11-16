@@ -92,7 +92,9 @@ describe('版本检测顺带提示待应用迁移', () => {
   it('shows the hint right in the version status card', () => {
     expect(overview).toMatch(/data-role="pending-migrations"/)
     expect(overview).toMatch(/条迁移待应用/)
-    expect(overview).toMatch(/应用待执行迁移/)
+    // 更新作业会自动应用迁移，别再让人「升级后再点一次」
+    expect(overview).toMatch(/更新作业会在切换发行包后自动应用/)
+    expect(overview).not.toMatch(/升级后请在下方「数据库迁移」里点一次/)
   })
 
   it('turns the status pill yellow so it is not missed', () => {

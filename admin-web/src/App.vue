@@ -5,7 +5,9 @@ import IcpFooter from './components/IcpFooter.vue'
 import ImageUploadQueuePanel from './components/ImageUploadQueuePanel.vue'
 import NavBar from './components/NavBar.vue'
 import PwaUpdateBanner from './components/PwaUpdateBanner.vue'
+import SystemMaintenanceBanner from './components/SystemMaintenanceBanner.vue'
 import { useRealtime } from './composables/useRealtime'
+import { useMaintenanceNotice } from './composables/useMaintenanceNotice'
 import { usePwaUpdate } from './composables/usePwaUpdate'
 import { useStationsStore } from './stores/stations'
 import { applyPwaManifest, selectPwaManifest } from './utils/pwaManifest'
@@ -19,6 +21,9 @@ const pwaApp = computed(() => selectPwaManifest(route.path))
 // （`usePwaUpdate` 自己盯这条判据）—— 否则从管理面走进工作台会一直挂在根 worker 上，
 // 根 worker 的导航回退就把工作台的导航吃掉了。
 const pwaUpdate = usePwaUpdate(pwaApp)
+// 升级切包 / 整库恢复期间所有角色（含员工端）都能看到「在维护」，不再只靠
+// 提交失败去猜。探针免鉴权，登录页也能用。
+const maintenance = useMaintenanceNotice()
 // 登录 / 配置页是独立全屏页，不显示主导航壳（见 router meta.standalone）。
 const isStandalone = computed(() => !!route.meta.standalone)
 const realtimeEnabled = computed(() => route.meta.realtime === true || !route.meta.public)
@@ -78,6 +83,10 @@ watch(
          在 LoginView 的卡片下方）。工作台那几页是 standalone 外壳、手机上自带底栏，
          这里不渲染（`isStandalone` 与 App.vue 隐藏导航是同一条判据）。 -->
     <IcpFooter v-if="!isStandalone" />
+    <SystemMaintenanceBanner
+      v-if="maintenance.visible.value"
+      :message="maintenance.message.value"
+    />
     <PwaUpdateBanner
       :visible="pwaUpdate.visible.value"
       :busy="pwaUpdate.applying.value"

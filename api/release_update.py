@@ -10,6 +10,7 @@ from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 
 from api.security import require_session, verify_admin_token
@@ -77,6 +78,8 @@ def _preflight_payload(preflight: UpdatePreflight) -> dict[str, Any]:
 def _version_check_payload(
     result: VersionCheckResult,
     migrations: Optional[dict[str, Any]] = None,
+    *,
+    peak_hours_active: Optional[bool] = None,
 ) -> dict[str, Any]:
     from services.release_update.deploy_mode import public_deploy_status
 
@@ -95,6 +98,12 @@ def _version_check_payload(
         # 的硬门槛，把迁移塞进去会把「忘了点迁移」升级成「不能发版」，更难解。
         "pending_migrations": migrations
         or {"supported": False, "count": 0, "versions": [], "filenames": [], "note": ""},
+        # 只在营业高峰时把「覆盖勾选」提前显示出来，省得操作者提交后才被 409 教一次；
+        # 后端 apply 仍是权威闸门，active=False 不代表一定放行。
+        "peak_hours": {
+            "active": bool(peak_hours_active),
+            "known": peak_hours_active is not None,
+        },
         **public_deploy_status(),
     }
 
@@ -174,7 +183,11 @@ async def version_check(
     except Exception as exc:
         logger.error("Version Check failed: %s", exc)
         raise HTTPException(status_code=500, detail="版本检测失败") from exc
-    return _version_check_payload(result, await _migration_hint(db))
+    return _version_check_payload(
+        result,
+        await _migration_hint(db),
+        peak_hours_active=release_update.peak_hours_active(),
+    )
 
 
 @router.get("/job")
@@ -194,6 +207,18 @@ async def job_status(
         "job": _job_payload(job),
         "log_tail": read_log_tail(job.log_path),
     }
+
+
+@router.get("/job/log")
+async def job_log(
+    release_update: ReleaseUpdate = Depends(get_release_update),
+) -> PlainTextResponse:
+    """查看 Update Job 的完整日志（末尾 2000 行），不在应用日志表里。"""
+    job = release_update.job_status()
+    text = read_log_tail(job.log_path, max_lines=2000)
+    if not text:
+        raise HTTPException(status_code=404, detail="更新作业日志为空或尚未生成")
+    return PlainTextResponse(text)
 
 
 @router.post("/job/health-check")

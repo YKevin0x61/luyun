@@ -101,6 +101,7 @@ class ReleaseUpdateApiTest(unittest.TestCase):
     def test_version_check_returns_payload_without_starting_job(self):
         fake = mock.Mock(spec=ReleaseUpdate)
         fake.version_check.return_value = _sample_result()
+        fake.peak_hours_active.return_value = True
         self.app.dependency_overrides[get_release_update] = lambda: fake
 
         with TestClient(self.app) as client:
@@ -122,6 +123,7 @@ class ReleaseUpdateApiTest(unittest.TestCase):
         self.assertTrue(pf["apply_allowed"])
         self.assertFalse(pf["dirty_tree"])
         self.assertFalse(pf["discard_local_changes_allowed"])
+        self.assertEqual(body["peak_hours"], {"active": True, "known": True})
         self.assertEqual(
             [c["code"] for c in pf["checks"]],
             ["restart", "credentials", "job_idle", "tree_clean"],
@@ -331,6 +333,37 @@ class ReleaseUpdateApiTest(unittest.TestCase):
 
         self.assertEqual(resp.status_code, 200)
         self.assertIn("Collecting foo", resp.json()["log_tail"])
+
+    def test_job_log_endpoint_returns_plain_text(self):
+        log_file = Path(settings.DATABASE_DIR) / "update_job.log"
+        log_file.write_text("step one\nstep two\n", encoding="utf-8")
+        fake = mock.Mock(spec=ReleaseUpdate)
+        fake.job_status.return_value = UpdateJobState(
+            stage="failed",
+            target_tag="v0.2.0",
+            log_path=str(log_file),
+        )
+        self.app.dependency_overrides[get_release_update] = lambda: fake
+
+        with TestClient(self.app) as client:
+            resp = client.get("/api/release-update/job/log")
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("text/plain", resp.headers["content-type"])
+        self.assertIn("step two", resp.text)
+
+    def test_job_log_endpoint_404_when_missing(self):
+        fake = mock.Mock(spec=ReleaseUpdate)
+        fake.job_status.return_value = UpdateJobState(
+            stage="idle",
+            log_path=str(Path(settings.DATABASE_DIR) / "missing.log"),
+        )
+        self.app.dependency_overrides[get_release_update] = lambda: fake
+
+        with TestClient(self.app) as client:
+            resp = client.get("/api/release-update/job/log")
+
+        self.assertEqual(resp.status_code, 404)
 
     def test_cancel_job_requires_session_and_returns_forced_state(self):
         fake = mock.Mock(spec=ReleaseUpdate)

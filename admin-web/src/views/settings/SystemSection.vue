@@ -25,7 +25,7 @@
 //
 // 内容归属：本节只搬自原 SetupView.vue 的 update 一节。
 // ============================================================================
-import { computed, reactive, watch } from 'vue'
+import { computed, nextTick, reactive, ref, watch } from 'vue'
 import SvgIcon from '../../components/SvgIcon.vue'
 import LuyunCheckbox from '../../components/ui/LuyunCheckbox.vue'
 import StatusPill from '../../components/ui/StatusPill.vue'
@@ -120,6 +120,9 @@ const {
   confirmOpen,
   peakOverride,
   needsPeakOverride,
+  peakHoursActive,
+  showPeakOverride,
+  peakBlocked,
   discardLocalChanges,
   discardLocalChangesAllowed,
   preflightChecks,
@@ -160,6 +163,53 @@ const {
   lastSuccessEntry,
   failureCount,
 } = useSystemUpdate({ showAlert, clearAlert })
+
+// 确认框 / 作业进度 / 健康结论都在长页面里，操作后把对应面板带到视野内。
+const confirmPanel = ref(null)
+const progressPanel = ref(null)
+const healthPanel = ref(null)
+
+function reveal(panel) {
+  const el = panel?.value
+  if (!el) return
+  if (typeof el.scrollIntoView === 'function') {
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  }
+}
+
+async function handleOpenApplyConfirm(tag) {
+  openApplyConfirm(tag)
+  await nextTick()
+  reveal(confirmPanel)
+}
+
+async function handleRollbackToPrevious() {
+  rollbackToPrevious()
+  await nextTick()
+  reveal(confirmPanel)
+}
+
+async function handleConfirmApply() {
+  await confirmApply()
+  // 只有提交成功、确认框已关时才跳进度；被 409 拦下时留在框里改勾选。
+  if (!confirmOpen.value) {
+    await nextTick()
+    reveal(progressPanel)
+  }
+}
+
+watch(jobInProgress, (now, was) => {
+  if (now && !was) nextTick(() => reveal(progressPanel))
+})
+
+watch(unhealthy, (now, was) => {
+  if (now && !was) nextTick(() => reveal(healthPanel))
+})
+
+/** 作业日志是 data/update_job.log，不在 /api/logs 里；有路径时直接提供全文入口。 */
+const jobLogHref = computed(
+  () => (job.value?.log_path ? '/api/release-update/job/log' : '/logs'),
+)
 
 /** 作业阶段胶囊：失败与已切换但未健康是错误态，成功是 ok，其余（含进行中）用提醒色。 */
 const jobPillTone = computed(() => {
@@ -308,7 +358,7 @@ watch(
               :degraded="!!versionCheck.degraded"
               :can-apply="canShowApply"
               :busy="applying || jobInProgress"
-              @apply="openApplyConfirm"
+              @apply="handleOpenApplyConfirm"
             />
           </tbody>
         </table>
@@ -340,7 +390,7 @@ watch(
                 :degraded="!!versionCheck.degraded"
                 :can-apply="canShowApply"
                 :busy="applying || jobInProgress"
-                @apply="openApplyConfirm"
+                @apply="handleOpenApplyConfirm"
               />
             </tbody>
           </table>
@@ -355,7 +405,7 @@ watch(
       </details>
     </fieldset>
 
-    <fieldset v-if="confirmOpen">
+    <fieldset v-if="confirmOpen" ref="confirmPanel">
       <legend>确认应用更新</legend>
       <p class="hint section-lead">
         将把运行实例切换到 <span class="mono">{{ selectedTag }}</span>。
@@ -371,7 +421,10 @@ watch(
       <div v-if="needsPeakOverride" class="alert show import-block">
         当前处于营业高峰时段。若仍要继续，请勾选下方覆盖项后再次确认。
       </div>
-      <label class="luyun-check-row import-block">
+      <p v-else-if="peakHoursActive" class="hint is-warn import-block">
+        当前处于营业高峰时段；确认更新前需勾选下方覆盖项。
+      </p>
+      <label v-if="showPeakOverride" class="luyun-check-row import-block">
         <LuyunCheckbox v-model="peakOverride" />
         <span>我已知晓营业高峰风险，仍然执行更新</span>
       </label>
@@ -385,14 +438,14 @@ watch(
         <button
           type="button"
           class="btn btn-primary"
-          :disabled="!applyEnabled || (needsPeakOverride && !peakOverride)"
-          @click="confirmApply"
+          :disabled="!applyEnabled || peakBlocked"
+          @click="handleConfirmApply"
         >{{ applying ? '提交中…' : '确认开始更新' }}</button>
         <button type="button" class="btn" :disabled="applying" @click="cancelApplyConfirm">取消</button>
       </div>
     </fieldset>
 
-    <fieldset>
+    <fieldset ref="progressPanel">
       <legend>更新作业进度</legend>
       <p v-if="jobPolling || (healthPending && autoRecheckEnabled)" class="hint section-lead">
         <span v-if="jobPolling">正在轮询…</span>
@@ -425,7 +478,10 @@ watch(
           </div>
           <div>
             <span class="k">日志</span>
-            <span class="v mono">{{ job.log_path || '—' }}</span>
+            <span class="v mono">
+              <a v-if="job.log_path" :href="jobLogHref" target="_blank" rel="noopener" :title="job.log_path">查看作业日志</a>
+              <template v-else>—</template>
+            </span>
           </div>
           <div v-if="job.restart_requested_at">
             <span class="k">已请求重启</span>
@@ -454,7 +510,7 @@ watch(
             type="button"
             class="btn btn-danger"
             :disabled="applying"
-            @click="rollbackToPrevious"
+            @click="handleRollbackToPrevious"
           >回到上一版本（{{ previousTag }}）</button>
         </div>
         <div v-if="jobLogTail" class="job-log">
@@ -475,7 +531,7 @@ watch(
     </fieldset>
 
     <!-- 健康确认结果：succeeded_but_unhealthy 明确显示 + 三条出路 -->
-    <fieldset v-if="unhealthy || (healthPending && job && job.stage !== 'idle')">
+    <fieldset v-if="unhealthy || (healthPending && job && job.stage !== 'idle')" ref="healthPanel">
       <legend>健康确认结果</legend>
       <div v-if="unhealthy" class="alert error show import-block">
         已切换到 <span class="mono">{{ healthDetailView?.targetTag || '—' }}</span>，但重启后健康确认未通过。
@@ -522,12 +578,12 @@ watch(
           type="button"
           class="btn btn-danger"
           :disabled="applying"
-          @click="rollbackToPrevious"
+          @click="handleRollbackToPrevious"
         >回到上一版本（{{ previousTag }}）</button>
         <a
           v-if="healthDetailView?.logPath"
           class="btn"
-          href="/logs"
+          :href="jobLogHref"
           target="_blank"
           rel="noopener"
         >查看日志（{{ healthDetailView.logPath }}）</a>

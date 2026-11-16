@@ -85,7 +85,8 @@ const deployModeText = computed(() => {
       data-role="pending-migrations"
     >
       数据库有 {{ pendingMigrationCount }} 条迁移待应用（{{ pendingMigrationVersions }}）。
-      升级后请在下方「数据库迁移」里点一次「应用待执行迁移」——漏了通常不报错，
+      应用更新时，更新作业会在切换发行包后自动应用它们，不需要手动点；只有更新失败、
+      被取消，或你暂时不升级时，才到下方「数据库迁移」里手动补一次。漏了通常不报错，
       只会变慢或某个功能悄悄降级。
     </div>
 

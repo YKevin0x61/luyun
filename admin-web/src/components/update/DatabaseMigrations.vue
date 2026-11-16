@@ -4,9 +4,10 @@ import { api } from '../../api/client'
 import ConfirmDialog from '../admin/ConfirmDialog.vue'
 import SvgIcon from '../SvgIcon.vue'
 
-// 数据库迁移面板：PG 部署的 schema 变更要靠人应用（migrations/pg/000N_*.sql），
-// 而更新作业按设计只管换代码。这里把「有哪些待应用、点一下应用」搬到界面上，
-// 免得升级后靠人记得敲 psql——漏了的后果通常不报错，只是一直慢或某个功能悄悄降级。
+// 数据库迁移面板：PG 部署的 schema 变更来自 migrations/pg/000N_*.sql。正常发版由
+// 「系统更新」作业在切换发行包后自动应用（ADR 0096），这里留的是补做入口：更新失败/
+// 被取消、或只想单独补迁移时，把「有哪些待应用、点一下应用」搬到界面上，免得靠人记得
+// 敲 psql——漏了的后果通常不报错，只是一直慢或某个功能悄悄降级。
 //
 // SQLite 部署不需要它：schema 由应用启动时自愈，接口会明确说明。
 
@@ -80,8 +81,9 @@ onMounted(load)
 
       <template v-else>
         <p class="hint section-lead">
-          本机是 PostgreSQL 后端：schema 变更不会随重启自动应用，需要在升级后点一次「应用待执行迁移」。
-          已应用的记录写在本库里，随时能看出当前到哪一版。
+          本机是 PostgreSQL 后端：schema 变更不会随重启自动应用。正常发版由「系统更新」作业在切换发行包后
+          自动应用；这里是补做入口（更新失败/取消，或只想单独补迁移）。已应用的记录写在本库里，
+          随时能看出当前到哪一版。
         </p>
 
         <p v-if="errorText" class="hint is-warn" role="alert">{{ errorText }}</p>

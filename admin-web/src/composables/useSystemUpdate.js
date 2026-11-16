@@ -247,6 +247,16 @@ export function useSystemUpdate({
     return !!pf.discard_local_changes_allowed && !!discardLocalChanges.value
   })
 
+  /** 营业高峰：后端在版本检测里预先告知，勾选项据此提前出现。 */
+  const peakHoursActive = computed(() => !!versionCheck.value?.peak_hours?.active)
+  /** 高峰时先展示覆盖项；被 409 拦下后仍要保留它，别让勾选瞬间消失。 */
+  const showPeakOverride = computed(
+    () => peakHoursActive.value || needsPeakOverride.value,
+  )
+  const peakBlocked = computed(
+    () => showPeakOverride.value && !peakOverride.value,
+  )
+
   const statusSummary = computed(() => {
     const vc = versionCheck.value
     if (!vc) return ''
@@ -337,6 +347,8 @@ export function useSystemUpdate({
         stopPolling()
         stopAutoRecheck()
         showAlert('success', `应用更新成功：${job.value.target_tag || ''}`)
+        // 已切到新版本：版本卡不应还显示旧 installed_tag。
+        void loadVersionCheck()
         return 'succeeded'
       }
       if (stage === 'succeeded_but_unhealthy') {
@@ -378,6 +390,8 @@ export function useSystemUpdate({
         stopPolling()
         stopAutoRecheck()
         showAlert('success', `应用更新成功：${job.value.target_tag || ''}`)
+        // 已切到新版本：版本卡不应还显示旧 installed_tag。
+        void loadVersionCheck()
         return true
       }
       if (stage === 'succeeded_but_unhealthy') {
@@ -630,6 +644,9 @@ export function useSystemUpdate({
     confirmOpen,
     peakOverride,
     needsPeakOverride,
+    peakHoursActive,
+    showPeakOverride,
+    peakBlocked,
     discardLocalChanges,
     discardLocalChangesAllowed,
     preflight,
