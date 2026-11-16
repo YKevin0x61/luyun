@@ -60,7 +60,7 @@
     <!-- 🆕 断连告警：WS 实时连接断开/重连中时展示醒目红色横条 -->
     <view v-if="showDisconnectBanner" class="disconnect-banner">
       <SvgIcon name="alert-triangle" :size="18" color="#fff" />
-      <text class="disconnect-banner-text">实时连接已断开，正在重连…</text>
+      <text class="disconnect-banner-text">{{ disconnectBannerText }}</text>
     </view>
 
     <!-- 🆕 打印失败提示条：出餐已成功，仅小票打印失败时展示，可手动补打 -->
@@ -846,6 +846,13 @@ export default {
     })
     
     // WebSocket连接状态
+    // 令牌失效和普通断网必须说清是两回事：前者重连不会自愈，要管理员换令牌。
+    const disconnectBannerText = computed(() =>
+      realtimeStore.connectionStatus === 'auth_failed'
+        ? '设备访问令牌已失效，实时刷新已停用（订单仍可手动刷新）。请联系管理员在「系统设置 → API Token」重新发放令牌后重启本应用。'
+        : '实时连接已断开，正在重连…'
+    )
+
     const connectionStatusClass = computed(() => {
       return realtimeStore.connectionStatus === 'connected' ? 'connected' : 'disconnected'
     })
@@ -1227,6 +1234,7 @@ export default {
       currentStationInfo,
       currentStationMergedDishes,
       connectionStatusClass,
+      disconnectBannerText,
       showDisconnectBanner,
       totalSelectedCount,
       selectedDishes,

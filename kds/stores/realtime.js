@@ -45,14 +45,19 @@ function dispatch(topic, scope) {
 
 export const useRealtimeStore = defineStore('realtime', {
   state: () => ({
-    connectionStatus: 'disconnected', // connected | disconnected | reconnecting
+    connectionStatus: 'disconnected', // connected | disconnected | reconnecting | auth_failed
     lastUpdateTime: null, // 最近一次收到任意 WS 消息的时间
     lastNudgeAt: null // 最近一次收到 nudge 的时间
   }),
 
   getters: {
     connectionStatusText: (state) => {
-      const statusMap = { connected: '已连接', disconnected: '已断开', reconnecting: '重连中' }
+      const statusMap = {
+        connected: '已连接',
+        disconnected: '已断开',
+        reconnecting: '重连中',
+        auth_failed: '令牌失效'
+      }
       return statusMap[state.connectionStatus] || '未知'
     },
     isOnline: (state) => state.connectionStatus === 'connected'

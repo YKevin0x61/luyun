@@ -11,11 +11,15 @@ import { ApiAuthManager, ApiSettingsManager } from './storage.js'
 
 const RECONNECT_DELAY_MS = 3000
 const PING_INTERVAL_MS = 30000
+// 后端 /ws/realtime 先 accept 再校验身份，校验失败用 4401 关闭而不是 HTTP 403
+// （main.py 的 identify_ws 分支）。令牌失效/被撤销时重连多少次都是同一个结果，
+// 必须停止 3s 无限重连，否则平板会一直闪断连横条、永远不会自愈。
+export const AUTH_FAILED_CLOSE_CODE = 4401
 
 export class RealtimeConnection {
   constructor() {
     this.socket = null
-    this.status = 'disconnected' // connected | disconnected | reconnecting
+    this.status = 'disconnected' // connected | disconnected | reconnecting | auth_failed
     this.lastMessageAt = null
     this.closedByCaller = false
     this.pingTimer = null
@@ -57,9 +61,15 @@ export class RealtimeConnection {
       for (const handler of this.listeners) handler(data)
     })
 
-    this.socket.onClose(() => {
-      this.status = 'disconnected'
+    this.socket.onClose((res) => {
       this._stopPing()
+      if (res && Number(res.code) === AUTH_FAILED_CLOSE_CODE) {
+        // 令牌无效或已被撤销：这不是网络抖动，重连不会恢复。保留连接对象与订阅，
+        // 管理员换好令牌后调用 connect() 即可重新建连（onOpen 会把状态改回 connected）。
+        this.status = 'auth_failed'
+        return
+      }
+      this.status = 'disconnected'
       if (!this.closedByCaller) this._scheduleReconnect()
     })
 
