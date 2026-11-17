@@ -30,10 +30,14 @@ class Settings(BaseSettings):
     SESSION_COOKIE_NAME: str = "luyun_session"
     STAFF_SESSION_COOKIE_NAME: str = "luyun_staff_session"
     SESSION_TTL_HOURS: int = 8
-    SESSION_REMEMBER_DAYS: int = 30
-    # 卫生端员工的闲置上限：last_seen_at 超过这个时长就作废会话（0 = 不启用）。
-    # 勾了「记住密码」的会话有效期 30 天，这条把「手机一直挂着没人用」的窗口收窄；
-    # 在用的会话每个请求都会刷新 last_seen_at，正常排班碰不到这条线。
+    # 勾了「记住密码，自动登录」的会话：0 = 永久（不再有绝对期限），>0 = 该天数。
+    # 永久会话的 cookie 按浏览器上限下发（Chrome 约 400 天），并在会话探针里续回
+    # 这个窗口，所以只要还在用就一直有效（Safari 对持久 cookie 另有更短的策略）。
+    SESSION_REMEMBER_DAYS: int = 0
+    # 员工的闲置上限：last_seen_at 超过这个时长就作废会话（0 = 不启用）。
+    # 勾了「记住密码」的会话不再有绝对期限，这条是把「手机一直挂着没人用」的窗口
+    # 收窄：闲置超过它就掉线；在用的会话每个请求都会刷新 last_seen_at，正常排班
+    # 碰不到这条线。管理端会话共用这一项（判定口径见 services/auth_service.py）。
     SESSION_IDLE_HOURS: int = 336
     # 会话 cookie 是否带 Secure。留空 = 跟随 DEBUG（开发机跑明文 http 时不带，
     # 否则浏览器不回传 cookie、登录表现为"登不进"）。内网明文 http 部署要显式

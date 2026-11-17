@@ -63,6 +63,32 @@ _SESSION_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 # 5 分钟的粒度对「闲置多久算失效」完全够用，也把写放大压回可忽略。
 LAST_SEEN_REFRESH_SECONDS = 300
 
+# 「永久」会话的 expires_at 哨兵：判定只做「now >= expires_at」比较，9999 年等价于
+# 永不到期，于是判定代码一个字都不用改。**别对它做 timedelta 运算**（会溢出）。
+FOREVER_EXPIRES_AT = "9999-12-31T23:59:59+08:00"
+_FOREVER_EXPIRES_AT_DT = datetime(9999, 12, 31, 23, 59, 59, tzinfo=CHINA_TZ)
+
+# 永久会话的 cookie Max-Age：Chrome 对单个持久 cookie 的上限约 400 天，写更长会被
+# 截断。会话探针每次访问都把它续回这个窗口，所以只要还在用就不会因为 cookie 到期
+# 掉线；Safari 对持久 cookie 另有更短的策略，那部分由浏览器决定。
+PERSISTENT_SESSION_COOKIE_SECONDS = 400 * 86400
+
+
+def remember_session_forever() -> bool:
+    """勾了「记住密码」的会话是不是永久档（SESSION_REMEMBER_DAYS <= 0）。"""
+    days = int(getattr(settings, "SESSION_REMEMBER_DAYS", 0) or 0)
+    return days <= 0
+
+
+def is_forever_expiry(value: Any) -> bool:
+    """这个 expires_at 是不是永久哨兵。
+
+    老的 30 天会话仍然按自己的日期判过期（本次改动不回溯改写存量行），所以「永久」
+    是**逐会话**的事实，不是读当前配置猜出来的。
+    """
+    stamp = _parse_stamp(value)
+    return stamp is not None and stamp >= _FOREVER_EXPIRES_AT_DT
+
 
 def hash_session_id(session_id: str) -> str:
     """cookie 原文 → 入库值。
@@ -472,17 +498,25 @@ class EmployeeAccounts:
                 )
         session_id = secrets.token_urlsafe(32)
         now_dt = self._now_dt()
-        # 勾了「记住密码，自动登录」的会话活 SESSION_REMEMBER_DAYS 天，否则维持班次级。
-        if remember:
-            expires_dt = now_dt + timedelta(days=settings.SESSION_REMEMBER_DAYS)
+        # 勾了「记住密码，自动登录」的会话是永久档（SESSION_REMEMBER_DAYS=0），否则
+        # 维持班次级 8 小时。永久档写远期哨兵——列是 NOT NULL，而且判定只比大小，
+        # 不存 NULL 就不用动 schema；存量 30 天会话仍按自己的日期过期。
+        if remember and remember_session_forever():
+            expires_iso = FOREVER_EXPIRES_AT
+        elif remember:
+            expires_iso = (
+                now_dt + timedelta(days=int(settings.SESSION_REMEMBER_DAYS))
+            ).isoformat()
         else:
-            expires_dt = now_dt + timedelta(hours=settings.SESSION_TTL_HOURS)
+            expires_iso = (
+                now_dt + timedelta(hours=int(settings.SESSION_TTL_HOURS))
+            ).isoformat()
         now = now_dt.isoformat()
         await self._conn.execute(
             """INSERT INTO hygiene_staff_sessions
                (session_id, employee_id, expires_at, created_at, last_seen_at)
                VALUES (?, ?, ?, ?, ?)""",
-            (hash_session_id(session_id), mapping["id"], expires_dt.isoformat(), now, now),
+            (hash_session_id(session_id), mapping["id"], expires_iso, now, now),
         )
         await self._conn.commit()
         employee = self._employee_from_row(mapping)
@@ -1123,7 +1157,17 @@ class EmployeeAccounts:
         )
         await self._conn.commit()
 
-    async def get_staff_session(self, session_id: Optional[str]) -> Optional[dict]:
+    async def get_staff_session(
+        self, session_id: Optional[str], session_meta: Optional[dict] = None
+    ) -> Optional[dict]:
+        """按 cookie 原文取会话；无效（过期 / 闲置 / 离职 / 未批）返回 None。
+
+        传了 session_meta（dict）时**只在会话有效时**回填三件事：原文 session_id、
+        persistent（这个会话是不是永久档）、refreshed（这次调用是否刚刷新过
+        last_seen_at）。会话探针据此把永久档的 cookie Max-Age 续回 400 天窗口——
+        续期发生在**用**的时候，所以持续使用不会因为 cookie 到期掉线，闲置超过
+        SESSION_IDLE_HOURS 仍然会掉。
+        """
         if not session_id:
             return None
         # 库里存的是 sha256，cookie 是原文：哈希后再查。
@@ -1146,11 +1190,13 @@ class EmployeeAccounts:
             return None
         mapping = dict(row)
         now_dt = self._now_dt()
+        persistent = is_forever_expiry(mapping["expires_at"])
+        refreshed = False
         expires_at = _parse_stamp(mapping["expires_at"]) or now_dt
         if now_dt >= expires_at:
             await self.logout(session_id)
             return None
-        # 闲置上限：勾了「记住密码」的会话有效期 30 天，这条把「手机一直挂着没人
+        # 闲置上限：勾了「记住密码」的会话不再有绝对期限，这条把「手机一直挂着没人
         # 用」的窗口收窄。在用的会话每次请求都会刷新 last_seen_at，正常使用碰不到。
         idle_hours = int(getattr(settings, "SESSION_IDLE_HOURS", 0) or 0)
         last_seen = _parse_stamp(mapping.get("last_seen_at")) or now_dt
@@ -1164,6 +1210,7 @@ class EmployeeAccounts:
             return None
         if (now_dt - last_seen).total_seconds() >= LAST_SEEN_REFRESH_SECONDS:
             await self._touch_staff_session(hash_session_id(session_id), now_dt.isoformat())
+            refreshed = True
         # 离职（2026-10-29）：提前登记「干到月底」的人在那天之前照常持有会话，
         # 到离职日**次日**起这里开始返回 None，会话自然失效（不用定点踢人）。
         if not _as_bool(mapping["approved"]) or resigned_today(
@@ -1172,6 +1219,10 @@ class EmployeeAccounts:
             return None
         employee = self._employee_from_row(mapping)
         employee.update(await self._session_extras(employee))
+        if session_meta is not None:
+            session_meta["session_id"] = session_id
+            session_meta["persistent"] = persistent
+            session_meta["refreshed"] = refreshed
         return employee
 
     async def logout(self, session_id: str) -> None:

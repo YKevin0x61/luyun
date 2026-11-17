@@ -4,7 +4,7 @@
 
 import asyncio
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from unittest.mock import AsyncMock
 
 import pytest
@@ -19,6 +19,12 @@ from database import CHINA_TZ, DatabaseManager
 from services import auth_service
 from services.app_runtime import AppRuntime, set_runtime
 from services.hygiene.accounts import EmployeeAccounts
+from services.identity.accounts import (
+    LAST_SEEN_REFRESH_SECONDS,
+    PERSISTENT_SESSION_COOKIE_SECONDS,
+    hash_session_id,
+    is_forever_expiry,
+)
 from services.hygiene.captures import FakeCaptureStore
 from services.hygiene.work import HygieneWork, SEED_ZONE_NAMES
 from tests.hygiene_duty import assign_duty
@@ -64,6 +70,19 @@ def _cookie_max_age(resp) -> int:
     match = re.search(r"max-age=(\d+)", header, flags=re.IGNORECASE)
     assert match, header
     return int(match.group(1))
+
+
+def _set_staff_last_seen(db, cookie: str, when) -> None:
+    """把员工会话的最后活跃时间挪到过去 —— 探针续期的唯一触发条件。"""
+
+    async def run():
+        await db._conn.execute(
+            "UPDATE hygiene_staff_sessions SET last_seen_at = ? WHERE session_id = ?",
+            (when.isoformat(), hash_session_id(cookie)),
+        )
+        await db._conn.commit()
+
+    _run(run())
 
 
 @pytest.fixture
@@ -123,8 +142,8 @@ def test_unauthenticated_can_register_and_attempt_login_not_roster(hygiene_http)
     ).status_code == 401
 
 
-def test_staff_login_remember_extends_cookie(hygiene_http):
-    """员工勾「记住密码，自动登录」拿到 30 天 cookie；不勾仍是班次级。"""
+def test_staff_login_remember_is_permanent_and_cookie_slides(hygiene_http):
+    """员工勾「记住密码」拿到 400 天 cookie，服务端写永久哨兵；不勾仍是班次级。"""
     client, _db, accounts, _work = hygiene_http
     employee = _run(accounts.register(PHONE, PASSWORD, NAME))
     _run(accounts.approve(employee["id"]))
@@ -134,7 +153,18 @@ def test_staff_login_remember_extends_cookie(hygiene_http):
         json={"phone": PHONE, "password": PASSWORD, "remember": True},
     )
     assert remembered.status_code == 200
-    assert _cookie_max_age(remembered) == settings.SESSION_REMEMBER_DAYS * 86400
+    assert _cookie_max_age(remembered) == PERSISTENT_SESSION_COOKIE_SECONDS
+    # 服务端同样是永久档：cookie 对应的会话 exp 是 9999 哨兵，不是 30 天后。
+    cookie = remembered.cookies.get(settings.STAFF_SESSION_COOKIE_NAME)
+    cur = _run(
+        _db._conn.execute(
+            "SELECT expires_at FROM hygiene_staff_sessions WHERE session_id = ?",
+            (hash_session_id(cookie),),
+        )
+    )
+    row = _run(cur.fetchone())
+    assert row is not None, "员工 session 未落库"
+    assert is_forever_expiry(row["expires_at"])
 
     client.cookies.clear()
     session_only = client.post(
@@ -143,6 +173,31 @@ def test_staff_login_remember_extends_cookie(hygiene_http):
     )
     assert session_only.status_code == 200
     assert _cookie_max_age(session_only) == settings.SESSION_TTL_HOURS * 3600
+
+
+def test_staff_session_probe_slides_the_permanent_cookie(hygiene_http):
+    """永久档员工 cookie 在 /staff/session 探针里滑动续期，窗口内不重复写。"""
+    client, db, accounts, _work = hygiene_http
+    employee = _run(accounts.register(PHONE, PASSWORD, NAME))
+    _run(accounts.approve(employee["id"]))
+    login = client.post(
+        "/api/hygiene/staff/login",
+        json={"phone": PHONE, "password": PASSWORD, "remember": True},
+    )
+    assert login.status_code == 200
+    assert _cookie_max_age(login) == PERSISTENT_SESSION_COOKIE_SECONDS
+
+    # 登录刚写过 last_seen_at，窗口内的探针不该再刷 cookie。
+    assert "set-cookie" not in client.get("/api/hygiene/staff/session").headers
+
+    cookie = client.cookies.get(settings.STAFF_SESSION_COOKIE_NAME)
+    _set_staff_last_seen(
+        db, cookie, FIXED_NOW - timedelta(seconds=LAST_SEEN_REFRESH_SECONDS + 60)
+    )
+    probe = client.get("/api/hygiene/staff/session")
+    assert probe.status_code == 200
+    assert probe.json()["authenticated"] is True
+    assert _cookie_max_age(probe) == PERSISTENT_SESSION_COOKIE_SECONDS
 
 
 def test_staff_session_can_me_not_admin_roster_writes(hygiene_http):

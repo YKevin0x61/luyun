@@ -14,7 +14,12 @@ from config import settings
 from database import CHINA_TZ, DatabaseManager
 # 节流窗口与员工端共用同一个值：两套会话的闲置口径必须逐条一致（票 10），
 # 而这个值只该有一份（`services/identity/accounts.py` 是它的定义处）。
-from services.identity.accounts import LAST_SEEN_REFRESH_SECONDS
+from services.identity.accounts import (
+    FOREVER_EXPIRES_AT,
+    LAST_SEEN_REFRESH_SECONDS,
+    is_forever_expiry,
+    remember_session_forever,
+)
 from services.password_hash import hash_password_async as _hash_password
 from services.password_hash import needs_rehash as _needs_rehash
 from services.password_hash import validate_password as _validate_password
@@ -158,12 +163,19 @@ async def get_admin_username() -> Optional[str]:
 async def create_session(remember: bool = False) -> Tuple[str, str]:
     session_id = secrets.token_urlsafe(32)
     now_dt = datetime.now(CHINA_TZ)
-    if remember:
-        expires_dt = now_dt + timedelta(days=settings.SESSION_REMEMBER_DAYS)
+    # 勾了「记住我」是永久档（SESSION_REMEMBER_DAYS=0）→ 写远期哨兵，否则 8 小时。
+    # 与员工端 `EmployeeAccounts.login` 同一口径，且共用同一组配置。
+    if remember and remember_session_forever():
+        expires_at = FOREVER_EXPIRES_AT
+    elif remember:
+        expires_at = (
+            now_dt + timedelta(days=int(settings.SESSION_REMEMBER_DAYS))
+        ).isoformat()
     else:
-        expires_dt = now_dt + timedelta(hours=settings.SESSION_TTL_HOURS)
+        expires_at = (
+            now_dt + timedelta(hours=int(settings.SESSION_TTL_HOURS))
+        ).isoformat()
     now = now_dt.isoformat()
-    expires_at = expires_dt.isoformat()
     async with _conn().cursor() as cursor:
         await cursor.execute(
             """INSERT INTO sessions (session_id, expires_at, created_at, last_seen_at)
@@ -191,7 +203,16 @@ async def _touch_session(session_id: str, now_iso: str) -> None:
         await _conn().commit()
 
 
-async def validate_session_id(session_id: Optional[str]) -> bool:
+async def validate_session_id(
+    session_id: Optional[str], session_meta: Optional[Dict[str, Any]] = None
+) -> bool:
+    """会话是否仍然有效。
+
+    传了 session_meta（dict）时**只在有效会话上**回填 persistent / refreshed，
+    与员工端 `get_staff_session` 同名同义：`/api/auth/status` 探针据此把永久档的
+    cookie Max-Age 续回 400 天窗口。这里不改 expires_at（永久档本来就是哨兵），
+    只滑动 cookie；闲置上限照常生效。
+    """
     if not session_id:
         return False
     async with _conn().cursor() as cursor:
@@ -204,14 +225,16 @@ async def validate_session_id(session_id: Optional[str]) -> bool:
         return False
     now_dt = datetime.now(CHINA_TZ)
     # 判定顺序与员工端逐条一致：先绝对有效期，再闲置上限，最后才谈刷新。
+    persistent = is_forever_expiry(row["expires_at"])
+    refreshed = False
     expires_at = _parse_stamp(row["expires_at"]) or now_dt
     if now_dt >= expires_at:
         await delete_session(session_id)
         return False
-    # 闲置上限（票 10）：勾了「记住我」的会话有效期 30 天，这条把「机器一直挂着没人用」
-    # 的窗口收窄 —— 与员工端共用 `SESSION_IDLE_HOURS`（默认 336 = 14 天，0 = 关闭）。
-    # 在用的会话按下面的节流刷新 last_seen_at，所以闲置窗口跟着活动滑动；但这条**绝不
-    # 延长 expires_at**：那两档（记住我 30 天 / 否则 8 小时）一个字都不改。
+    # 闲置上限（票 10）：勾了「记住我」的会话不再有绝对期限，这条把「机器一直挂着
+    # 没人用」的窗口收窄 —— 与员工端共用 `SESSION_IDLE_HOURS`（默认 336 = 14 天，
+    # 0 = 关闭）。在用的会话按下面的节流刷新 last_seen_at，所以闲置窗口跟着活动滑动；
+    # 它只决定「多久没人用就作废」，不延长 expires_at（永久档是哨兵，8 小时档不动）。
     idle_hours = int(getattr(settings, "SESSION_IDLE_HOURS", 0) or 0)
     last_seen = _parse_stamp(row["last_seen_at"]) or now_dt
     if idle_hours > 0 and now_dt - last_seen >= timedelta(hours=idle_hours):
@@ -222,6 +245,11 @@ async def validate_session_id(session_id: Optional[str]) -> bool:
     # 对「闲置多久算失效」完全够用（员工端同一套写法、同一个值）。
     if (now_dt - last_seen).total_seconds() >= LAST_SEEN_REFRESH_SECONDS:
         await _touch_session(session_id, now_dt.isoformat())
+        refreshed = True
+    if session_meta is not None:
+        session_meta["session_id"] = session_id
+        session_meta["persistent"] = persistent
+        session_meta["refreshed"] = refreshed
     return True
 
 

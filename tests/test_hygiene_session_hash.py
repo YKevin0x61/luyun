@@ -164,7 +164,7 @@ def test_last_seen_refreshes_only_after_throttle_window(accounts_env):
 def test_idle_session_is_revoked_even_within_ttl(accounts_env):
     db, accounts, clock = accounts_env
     settings.SESSION_IDLE_HOURS = 12
-    # 勾了「记住密码」：TTL 是 30 天，闲置上限必须先把这条拦掉。
+    # 勾了「记住密码」= 永久档；闲置上限对它同样生效，别把「永久」理解成「永不掉线」。
     cookie = _run(accounts.login(PHONE, PASSWORD, remember=True))["session_id"]
     assert _run(accounts.get_staff_session(cookie)) is not None
 
@@ -179,6 +179,7 @@ def test_idle_limit_disabled_when_zero(accounts_env):
     settings.SESSION_IDLE_HOURS = 0
     cookie = _run(accounts.login(PHONE, PASSWORD, remember=True))["session_id"]
 
+    # 20 天远超旧的 30 天档的「记忆值」，但对永久档只是普通的一天。
     clock.advance(days=20)
 
     assert _run(accounts.get_staff_session(cookie)) is not None

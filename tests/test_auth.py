@@ -48,7 +48,11 @@ from datetime import datetime, timedelta
 from services import auth_service
 from services.app_runtime import AppRuntime, set_runtime
 # 节流窗口与员工端同一个值（`services/identity/accounts.py`）—— 票 10 的对齐要求之一。
-from services.identity.accounts import LAST_SEEN_REFRESH_SECONDS
+from services.identity.accounts import (
+    LAST_SEEN_REFRESH_SECONDS,
+    PERSISTENT_SESSION_COOKIE_SECONDS,
+    is_forever_expiry,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -232,6 +236,39 @@ class AdminSessionIdleLimitTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await auth_service.validate_session_id(session_id))
         self.assertEqual((await _session_row(self.db, session_id))["expires_at"], expires_at)
 
+    async def test_remember_session_is_permanent_and_meta_reports_it(self):
+        """「记住我」的 expires_at 是远期哨兵；探针要的 meta 从有效会话里回填。"""
+        settings.SESSION_IDLE_HOURS = IDLE_DAYS * 24
+        session_id, expires_at = await auth_service.create_session(remember=True)
+        self.assertTrue(is_forever_expiry(expires_at))
+        self.assertGreater(
+            datetime.fromisoformat(expires_at) - datetime.now(CHINA_TZ),
+            timedelta(days=365 * 100),
+        )
+
+        meta: dict = {}
+        self.assertTrue(
+            await auth_service.validate_session_id(session_id, session_meta=meta)
+        )
+        self.assertEqual(meta["session_id"], session_id)
+        self.assertTrue(meta["persistent"])
+        self.assertFalse(meta["refreshed"], "节流窗口内不该续 cookie")
+
+        stale = datetime.now(CHINA_TZ) - timedelta(seconds=LAST_SEEN_REFRESH_SECONDS + 60)
+        await _set_last_seen(self.db, session_id, stale)
+        meta2: dict = {}
+        self.assertTrue(
+            await auth_service.validate_session_id(session_id, session_meta=meta2)
+        )
+        self.assertTrue(meta2["refreshed"])
+
+        short_id, _ = await auth_service.create_session(remember=False)
+        meta3: dict = {}
+        self.assertTrue(
+            await auth_service.validate_session_id(short_id, session_meta=meta3)
+        )
+        self.assertFalse(meta3["persistent"], "8 小时档不是永久档，探针不该续 cookie")
+
 
 import pytest
 from fastapi import Depends, FastAPI
@@ -310,8 +347,8 @@ def test_auth_login_issue_api_token(auth_client):
     assert body.get("api_token")
 
 
-def test_login_remember_extends_cookie_and_session(auth_client):
-    """「记住密码，自动登录」= 30 天会话 + 同长度 cookie；不勾选仍是班次级 TTL。"""
+def test_login_remember_is_permanent_and_cookie_slides(auth_client):
+    """勾「记住我」= 永久会话（9999 哨兵）+ 400 天 cookie；不勾仍是 8 小时班次级。"""
     client, db = auth_client
     client.post("/api/auth/init", json={
         "username": "admin",
@@ -326,13 +363,14 @@ def test_login_remember_extends_cookie_and_session(auth_client):
         "remember": True,
     })
     assert remembered.status_code == 200
-    assert _cookie_max_age(remembered) == settings.SESSION_REMEMBER_DAYS * 86400
+    # cookie 按浏览器上限下发（400 天），并在 /api/auth/status 探针里续期。
+    assert _cookie_max_age(remembered) == PERSISTENT_SESSION_COOKIE_SECONDS
     remembered_expires = _run(
         _session_expires_at(db, remembered.cookies.get(settings.SESSION_COOKIE_NAME))
     )
-    assert remembered_expires - datetime.now(CHINA_TZ) > timedelta(
-        days=settings.SESSION_REMEMBER_DAYS - 1
-    )
+    # 服务端是永久档：远期哨兵，不是「30 天后到期」。
+    assert is_forever_expiry(remembered_expires)
+    assert remembered_expires - datetime.now(CHINA_TZ) > timedelta(days=365 * 100)
 
     client.cookies.clear()
     session_only = client.post("/api/auth/login", json={
@@ -348,6 +386,39 @@ def test_login_remember_extends_cookie_and_session(auth_client):
     assert session_expires - datetime.now(CHINA_TZ) <= timedelta(
         hours=settings.SESSION_TTL_HOURS
     )
+
+
+def test_auth_status_probe_slides_the_permanent_cookie(auth_client):
+    """永久档 cookie 只在过了节流窗口的探针里续期：平时导航不写 Set-Cookie。"""
+    client, db = auth_client
+    client.post("/api/auth/init", json={
+        "username": "admin",
+        "password": "password123",
+        "confirm_password": "password123",
+    })
+    client.cookies.clear()
+    login = client.post("/api/auth/login", json={
+        "username": "admin",
+        "password": "password123",
+        "remember": True,
+    })
+    assert login.status_code == 200
+    assert _cookie_max_age(login) == PERSISTENT_SESSION_COOKIE_SECONDS
+
+    # 登录刚写过 last_seen_at，窗口内的探针不该再刷 cookie。
+    assert "set-cookie" not in client.get("/api/auth/status").headers
+
+    session_id = client.cookies.get(settings.SESSION_COOKIE_NAME)
+    _run(
+        _set_last_seen(
+            db,
+            session_id,
+            datetime.now(CHINA_TZ) - timedelta(seconds=LAST_SEEN_REFRESH_SECONDS + 60),
+        )
+    )
+    probe = client.get("/api/auth/status")
+    assert probe.json()["logged_in"] is True
+    assert _cookie_max_age(probe) == PERSISTENT_SESSION_COOKIE_SECONDS
 
 
 def test_idle_admin_session_is_rejected_on_a_protected_endpoint(auth_client):

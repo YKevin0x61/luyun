@@ -43,11 +43,13 @@ class EmployeeAccountsTest(unittest.IsolatedAsyncioTestCase):
         result = await self.accounts.login(PHONE, PASSWORD)
         self.assertIsNone(result)
 
-    async def test_remember_login_session_outlives_shift_ttl(self):
-        """勾了「记住密码，自动登录」的员工会话活 30 天；不勾仍是 8 小时班次级。"""
+    async def test_remember_login_is_permanent_but_still_idle_capped(self):
+        """勾「记住密码」= 没有绝对期限；闲置上限仍然生效，不是「永不掉线」。"""
         employee = await self.accounts.register(PHONE, PASSWORD, NAME)
         await self.accounts.approve(employee["id"])
         remembered = await self.accounts.login(PHONE, PASSWORD, remember=True)
+        # 第二个永久会话专供「关掉闲置上限」那一段：前一个会被闲置判定整行删掉。
+        remembered_long = await self.accounts.login(PHONE, PASSWORD, remember=True)
         session_only = await self.accounts.login(PHONE, PASSWORD)
 
         after_shift = EmployeeAccounts(
@@ -57,11 +59,26 @@ class EmployeeAccountsTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(await after_shift.get_staff_session(remembered["session_id"]))
         self.assertIsNone(await after_shift.get_staff_session(session_only["session_id"]))
 
+        # 默认闲置上限 336h = 14 天：31 天不碰它照样掉，掉的原因是闲置而不是过期。
         after_month = EmployeeAccounts(
             self.db,
-            now=lambda: self.fixed_now + timedelta(days=settings.SESSION_REMEMBER_DAYS + 1),
+            now=lambda: self.fixed_now + timedelta(days=31),
         )
         self.assertIsNone(await after_month.get_staff_session(remembered["session_id"]))
+
+        # 关掉闲置上限（0）才看得到「永久」本身：31 天后会话仍然有效。
+        old_idle = settings.SESSION_IDLE_HOURS
+        settings.SESSION_IDLE_HOURS = 0
+        try:
+            always_on = EmployeeAccounts(
+                self.db,
+                now=lambda: self.fixed_now + timedelta(days=31),
+            )
+            self.assertIsNotNone(
+                await always_on.get_staff_session(remembered_long["session_id"])
+            )
+        finally:
+            settings.SESSION_IDLE_HOURS = old_idle
 
     async def test_login_succeeds_after_super_approves(self):
         employee = await self.accounts.register(PHONE, PASSWORD, NAME)

@@ -496,7 +496,7 @@ onMounted(() => {
         </div>
         <label class="remember-row">
           <LuyunCheckbox v-model="adminForm.remember" />
-          <span>记住密码，自动登录（30 天）</span>
+          <span>记住密码，自动登录（长期有效）</span>
         </label>
         <p class="hint remember-hint">密码由浏览器保存并自动填充，本系统不存储明文密码。</p>
         <button type="submit" class="btn btn-primary btn-block" :disabled="adminSubmitting">登录</button>
@@ -533,7 +533,7 @@ onMounted(() => {
         </div>
         <label class="remember-row">
           <input v-model="staffForm.remember" type="checkbox">
-          <span>记住密码，自动登录（30 天）</span>
+          <span>记住密码，自动登录（长期有效）</span>
         </label>
         <p class="hint remember-hint">密码由浏览器保存并自动填充，本系统不存储明文密码。</p>
         <button type="submit" class="btn btn-primary btn-block" :disabled="staffSubmitting">登录</button>

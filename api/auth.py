@@ -15,6 +15,7 @@ from pydantic import BaseModel, field_validator, model_validator
 from api.security import require_session, verify_admin_token
 from config import settings
 from services import auth_service
+from services.identity.accounts import PERSISTENT_SESSION_COOKIE_SECONDS
 
 logger = logging.getLogger(__name__)
 
@@ -99,11 +100,17 @@ def _clear_failures(ip: str) -> None:
     _fail_attempts.pop(ip, None)
 
 
-def _set_session_cookie(response: Response, session_id: str, remember: bool) -> None:
+def _set_session_cookie(response: Response, session_id: str, persistent: bool) -> None:
+    """写管理端会话 cookie。
+
+    persistent=True 是永久档：Max-Age 取浏览器上限（400 天），`/api/auth/status`
+    探针每次访问再把它续回这个窗口，所以只要还在用就不会因为 cookie 到期掉线；
+    False 沿用班次级 8 小时。闲置上限由会话校验负责，与 cookie 时长无关。
+    """
     max_age = (
-        settings.SESSION_REMEMBER_DAYS * 86400
-        if remember
-        else settings.SESSION_TTL_HOURS * 3600
+        PERSISTENT_SESSION_COOKIE_SECONDS
+        if persistent
+        else int(settings.SESSION_TTL_HOURS) * 3600
     )
     response.set_cookie(
         key=settings.SESSION_COOKIE_NAME,
@@ -121,9 +128,16 @@ def _clear_session_cookie(response: Response) -> None:
 
 
 @router.get("/status")
-async def auth_status(request: Request) -> Dict[str, Any]:
+async def auth_status(request: Request, response: Response) -> Dict[str, Any]:
     session_id = request.cookies.get(settings.SESSION_COOKIE_NAME)
-    logged_in = await auth_service.validate_session_id(session_id)
+    session_meta: Dict[str, Any] = {}
+    logged_in = await auth_service.validate_session_id(
+        session_id, session_meta=session_meta
+    )
+    # 永久档的 cookie 滑动续期：前端路由守卫每次导航都会打这个探针，续期发生在
+    # 「用」的时候，所以不新增请求、也不需要在每个鉴权依赖里塞 Response。
+    if logged_in and session_meta.get("refreshed") and session_meta.get("persistent"):
+        _set_session_cookie(response, session_id, persistent=True)
     username = await auth_service.get_admin_username() if logged_in else None
     return {
         "initialized": await auth_service.is_initialized(),
@@ -158,7 +172,7 @@ async def auth_init(body: InitIn, request: Request, response: Response) -> Dict[
         ) from exc
 
     session_id, _expires_at = await auth_service.create_session(remember=False)
-    _set_session_cookie(response, session_id, remember=False)
+    _set_session_cookie(response, session_id, persistent=False)
     _clear_failures(ip)
     logger.info("Auth initialized via API from ip=%s user=%s", ip, body.username.strip())
     return {"success": True}
@@ -176,7 +190,7 @@ async def auth_login(body: LoginIn, request: Request, response: Response) -> Dic
         raise HTTPException(status_code=401, detail="用户名或密码错误")
 
     session_id, _expires_at = await auth_service.create_session(remember=body.remember)
-    _set_session_cookie(response, session_id, remember=body.remember)
+    _set_session_cookie(response, session_id, persistent=body.remember)
     _clear_failures(ip)
     logger.info("Login success from ip=%s user=%s", ip, user["username"])
 

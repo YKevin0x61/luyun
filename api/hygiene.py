@@ -33,6 +33,7 @@ from services.hygiene.accounts import (
     EmployeeAccountsError,
     normalize_phone,
 )
+from services.identity.accounts import PERSISTENT_SESSION_COOKIE_SECONDS
 from services.identity.capabilities import CAPABILITY_LABELS, STAFF_SIDE_CAPABILITIES
 from services.identity.profile import (
     HEALTH_CERT_VALID_MONTHS,
@@ -314,13 +315,17 @@ async def _delete_or_conflict(coro, detail: str):
         raise HTTPException(status_code=409, detail=detail) from exc
 
 
-def _set_staff_cookie(response: Response, session_id: str, remember: bool = False) -> None:
-    # 勾了「记住密码，自动登录」就把 cookie 延到 30 天，与服务端会话有效期保持一致；
-    # 否则维持班次级（SESSION_TTL_HOURS）会话。
+def _set_staff_cookie(response: Response, session_id: str, persistent: bool = False) -> None:
+    """写员工会话 cookie。
+
+    persistent=True 是永久档：Max-Age 取浏览器上限（400 天），`/staff/session` 探针
+    每次访问再把它续回这个窗口，持续使用就不会因为 cookie 到期掉线；False 维持
+    班次级（SESSION_TTL_HOURS）会话。闲置上限由 get_staff_session 负责。
+    """
     max_age = (
-        settings.SESSION_REMEMBER_DAYS * 86400
-        if remember
-        else settings.SESSION_TTL_HOURS * 3600
+        PERSISTENT_SESSION_COOKIE_SECONDS
+        if persistent
+        else int(settings.SESSION_TTL_HOURS) * 3600
     )
     response.set_cookie(
         key=settings.STAFF_SESSION_COOKIE_NAME,
@@ -340,14 +345,17 @@ def _clear_staff_cookie(response: Response) -> None:
 async def _staff_from_cookie(
     request: Request,
     accounts: EmployeeAccounts,
+    session_meta: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
     """从员工会话 cookie 解出员工；没有 cookie、查不到、已过期 / 被清一律 None。
 
     判据只有这一处：`require_staff_session`（401 那一版）与 `/staff/session` 探针
-    必须对「这个 cookie 算不算数」给出同一个答案。
+    必须对「这个 cookie 算不算数」给出同一个答案。传 session_meta 时透传给
+    `get_staff_session`，探针据此判断要不要给永久档续 cookie。
     """
     return await accounts.get_staff_session(
-        request.cookies.get(settings.STAFF_SESSION_COOKIE_NAME)
+        request.cookies.get(settings.STAFF_SESSION_COOKIE_NAME),
+        session_meta=session_meta,
     )
 
 
@@ -919,13 +927,14 @@ async def staff_login(
         _record_staff_login_failure(keys)
         raise HTTPException(status_code=401, detail="手机号或密码错误，或账号未批准、已离职")
     _clear_staff_login_failures(keys)
-    _set_staff_cookie(response, result["session_id"], remember=body.remember)
+    _set_staff_cookie(response, result["session_id"], persistent=body.remember)
     return {"success": True, "employee": result["employee"]}
 
 
 @router.get("/staff/session")
 async def staff_session(
     request: Request,
+    response: Response,
     accounts: EmployeeAccounts = Depends(_get_accounts),
 ) -> Dict[str, Any]:
     """员工会话探针：**总是 200**，有没有会话都由 body 说。
@@ -940,8 +949,16 @@ async def staff_session(
     `{"authenticated": false, "employee": null}`；有会话时 `employee` 就是 `/staff/me`
     那一份投影（同一个 `_staff_from_cookie`），前端在探针里就能拿到姓名与能力档，
     不必为一个名字再打一次业务接口。免鉴权路由必须在 `main.PUBLIC_API_SURFACE` 登记。
+
+    永久档（勾了「记住密码」）的 cookie 在这里滑动续期：前端每次导航都打这个探针，
+    续期只发生在「用」的时候，所以不新增请求、也不用改 50 处鉴权依赖的签名。
     """
-    employee = await _staff_from_cookie(request, accounts)
+    session_meta: Dict[str, Any] = {}
+    employee = await _staff_from_cookie(request, accounts, session_meta=session_meta)
+    if employee is not None and session_meta.get("refreshed") and session_meta.get("persistent"):
+        _set_staff_cookie(
+            response, session_meta["session_id"], persistent=True
+        )
     return {"authenticated": employee is not None, "employee": employee}
 
 
