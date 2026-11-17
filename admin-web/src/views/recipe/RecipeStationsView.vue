@@ -73,7 +73,8 @@ function applyTheme(t) {
 
 onMounted(() => {
   applyTheme(RC.readPref(window.localStorage, 'sop.theme', 'auto'))
-  document.title = recipeDocumentTitle('选择岗位')
+  // 这一页的名字本身就是「配方」：再拼一次品牌名会变成「配方 · 配方」（2026-11-17 走查发现）。
+  document.title = recipeDocumentTitle(null)
   document.addEventListener('pointerdown', onDocumentPointerDown)
   load()
 })
@@ -222,7 +223,7 @@ function onDocumentPointerDown(evt) {
         <header class="station-head">
           <div class="station-head-copy">
             <p class="station-kicker">配方 · 岗位</p>
-            <h1 class="page-title">选择岗位</h1>
+            <h1 class="page-title">配方</h1>
             <p class="page-lead">点一张岗位卡，查看这个岗位的配方。</p>
             <div class="station-search" ref="searchRoot">
               <input
@@ -283,6 +284,10 @@ function onDocumentPointerDown(evt) {
               <i class="station-led sig" aria-hidden="true"></i>{{ stations.length }} 个岗位
             </span>
             <button type="button" class="sop-chip station-chip" :aria-pressed="batchMode" @click="toggleBatch">批量打印</button>
+            <!-- 2026-11-17：配方首页套进工作台外壳之后，原 `site-header` 里那颗「配方管理」
+                 被壳隐藏了（`.wb-main :deep(.sop-site-header){display:none}`）。管理端仍需要
+                 一个入口，就放在页头动作区；员工看不到。 -->
+            <router-link v-if="isAdmin" class="sop-chip station-chip" :to="RECIPE_MANAGE_PATH">配方管理</router-link>
             <button v-if="batchMode && selectedCount" type="button" class="btn btn-primary btn-sm" @click="printSelected">
               打印所选 ({{ selectedCount }})
             </button>

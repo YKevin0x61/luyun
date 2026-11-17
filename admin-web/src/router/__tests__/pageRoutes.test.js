@@ -109,7 +109,7 @@ describe('页面清单（唯一来源）', () => {
       ['/workbench/hr/overtime-review', 'schedule'],
       ['/workbench/hr/attendance', 'schedule'],
       ['/workbench/kitchen/recipe/qr', 'recipe_qr'],
-      ['/workbench/kitchen/prep-review', 'prep_review'],
+      ['/workbench/kitchen/prep-plan/review', 'prep_review'],
       ['/workbench/kitchen/loss', 'wastage'],
     ])
     for (const row of withCap) expect(row.audience, row.path).toBe('admin')
@@ -163,10 +163,10 @@ describe('页面清单（唯一来源）', () => {
       // 票 08：备货计划从管理后台的 `/prep-plan` 搬进后勤组 —— 套的是工作台外壳
       // （顶栏那条窄栏 + 按身份过滤的导航），后台那条导航不再渲染它。
       '/workbench/kitchen/prep-plan',
-      '/workbench/kitchen/prep-review',
-      // 备货品换算规则（2026-10-26）：从销售报表的 tab 搬进后勤组，同套工作台外壳。
-      '/workbench/kitchen/prep-rules',
-      '/workbench/kitchen/prep-items',
+      '/workbench/kitchen/prep-plan/items',
+      '/workbench/kitchen/prep-plan/rules',
+      '/workbench/kitchen/prep-plan/review',
+      // 2026-11-17：备货品 / 换算规则 / 复盘收进备货计划的模块 tab（父路由同一个外壳）。
       // 损耗分析（从 worktool2 那个小程序搬过来）：后勤组的第三页，同套工作台外壳。
       '/workbench/kitchen/loss',
       // 员工餐采购（ADR 0135）：后勤组的一页，月历 + 点某天进单（单日是页内状态）。
@@ -275,7 +275,7 @@ describe('401 兜底豁免也从清单派生（票 10）', () => {
     expect(skipsAdminLoginRedirect('/workbench/hr/shifts')).toBe(true)
     expect(skipsAdminLoginRedirect('/workbench/kitchen/loss')).toBe(true)
     // 2026-11-10 用户裁定：备货复盘与岗位二维码开只读给勾了对应能力的管理员。
-    expect(skipsAdminLoginRedirect('/workbench/kitchen/prep-review')).toBe(true)
+    expect(skipsAdminLoginRedirect('/workbench/kitchen/prep-plan/review')).toBe(true)
     expect(skipsAdminLoginRedirect('/workbench/kitchen/recipe/qr')).toBe(true)
     // 花名册没有 staffCap（身份证明细与底薪不下发员工端）：仍按管理端那一档跳登录。
     expect(skipsAdminLoginRedirect('/workbench/hr/roster')).toBe(false)

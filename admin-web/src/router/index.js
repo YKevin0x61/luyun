@@ -11,6 +11,7 @@ const HygieneAdminLayout = () => import('../views/hygiene/HygieneAdminLayout.vue
 const HygieneStaffAuthLayout = () => import('../views/hygiene/HygieneStaffAuthLayout.vue')
 const SchedulingLayout = () => import('../views/scheduling/SchedulingLayout.vue')
 const WorkbenchLayout = () => import('../views/workbench/WorkbenchLayout.vue')
+const PrepPlanShell = () => import('../views/prep/PrepPlanShell.vue')
 
 // 页面清单（`./pageRoutes.json`）是唯一来源（票 01）：每条路由的「独立外壳 / 免登录」
 // 标记与页面标题都从它派生。加一页先改那张表 —— 后端的页面路由清单与两张页面豁免表
@@ -153,28 +154,40 @@ const routes = [
   workbenchKitchenPage('/workbench/kitchen/recipe/detail', 'recipe-detail', () => import('../views/recipe/RecipeDetailView.vue')),
   workbenchKitchenPage('/workbench/kitchen/recipe/print', 'recipe-print', () => import('../views/recipe/RecipePrintView.vue')),
   workbenchKitchenPage('/workbench/kitchen/recipe/qr', 'recipe-qr', () => import('../views/recipe/RecipeQrView.vue')),
-  // 备货计划（票 08）：从管理后台的 `/prep-plan` 搬进「后勤」组，**与配方列表同一个形态**
-  // ——套工作台外壳（顶栏那条窄栏 + 按身份过滤的导航），跟随组里的落点常量走（`links` 里
-  // 那一条，页面清单只负责把这一页登记成 `kitchen` / `both`）。它进工作台只是换位置与统一
-  // 导航，**不扩权**：读接口走「任一身份」门、写接口仍只认管理端，员工这一档页面只读
-  // （`composables/usePrepPlanAdmin.js`）。旧 `/prep-plan` 从路由里删干净（自然 404，
-  // 不给别名、不做重定向；`?next=` 里的老地址由 `utils/loginNext.js` 换成新地址）。
-  workbenchKitchenPage('/workbench/kitchen/prep-plan', 'prep-plan', () => import('../views/PrepPlanView.vue')),
-  // 备货复盘（ADR 0123）：每小时快照 vs 实际销量，只有管理端看得到。
-  workbenchKitchenPage('/workbench/kitchen/prep-review', 'prep-review', () =>
-    import('../views/PrepReviewView.vue'),
-  ),
-  // 备货品换算规则（2026-10-26）：从销售报表的「换算规则」tab 搬进后勤组。
-  // 它答的是「一道菜用多少备货品」，是备货建议量的唯一来源，属于维护面而不是报表面；
-  // 报表页那边保留同一组件的只读模式。只给管理端（spec §2 决策 5）。
-  workbenchKitchenPage('/workbench/kitchen/prep-rules', 'prep-rules', () =>
-    import('../views/prep/PrepRulesView.vue'),
-  ),
-  // 备货品主数据（2026-10-27）：清单 + 编辑。备货计划按「备货品」出清单、换算规则按它算
-  // 系数，这一页是那份主数据的维护面（之前只能在数据管理那张裸表里改）。
-  workbenchKitchenPage('/workbench/kitchen/prep-items', 'prep-items', () =>
-    import('../views/prep/PrepItemsView.vue'),
-  ),
+  // 备货计划（2026-11-17 用户裁定）：计划 / 备货品 / 换算规则 / 复盘 收成同一页的模块
+  // tab，四个子页面共用 «工作台外壳 + 模块 tab»。父路由挂 `PrepPlanShell`（它自己再套
+  // `WorkbenchLayout`），子路由用绝对路径登记，页面清单与后端 `SPA_PAGE_ROUTES` 保持
+  // 一一对应；旧的三条独立地址（prep-review / prep-rules / prep-items）已删除 ——
+  // 自然 404，不给别名、不做重定向。
+  {
+    path: '/workbench/kitchen/prep-plan',
+    component: PrepPlanShell,
+    meta: pageMeta('/workbench/kitchen/prep-plan'),
+    children: [
+      { path: '', name: 'prep-plan', component: () => import('../views/PrepPlanView.vue') },
+      {
+        path: '/workbench/kitchen/prep-plan/items',
+        name: 'prep-plan-items',
+        component: () => import('../views/prep/PrepItemsView.vue'),
+        // 子路由必须自己带 meta：父路由的 `audience: both` 会合并下来，而这三页
+        // 在清单里是 `admin`（复盘还带 `staffCap`）。少了这一行，路由守卫会拿
+        // 「计划」那一档的 both 放员工进备货品 / 换算规则。
+        meta: pageMeta('/workbench/kitchen/prep-plan/items'),
+      },
+      {
+        path: '/workbench/kitchen/prep-plan/rules',
+        name: 'prep-plan-rules',
+        component: () => import('../views/prep/PrepRulesView.vue'),
+        meta: pageMeta('/workbench/kitchen/prep-plan/rules'),
+      },
+      {
+        path: '/workbench/kitchen/prep-plan/review',
+        name: 'prep-plan-review',
+        component: () => import('../views/PrepReviewView.vue'),
+        meta: pageMeta('/workbench/kitchen/prep-plan/review'),
+      },
+    ],
+  },
   // 损耗分析（从 worktool2 那个小程序搬过来）：后勤组的第三页 —— 店长按月看损耗的
   // 总数 / 原因分布 / 高损耗物料 / 逐日趋势，下半页是按条件翻的明细。清单里是
   // `audience: admin` + `staffCap: wastage`（2026-10-14 用户裁定）：管理端会话直接进，

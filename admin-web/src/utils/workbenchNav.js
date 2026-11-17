@@ -23,10 +23,8 @@
  */
 import { PAGE_ROUTES, pageMeta, pageRow } from '../router/pageRoutes.js'
 import { hasCap } from './adminCaps.js'
-import { PREP_ITEMS_PATH } from './prepItemPaths.js'
-import { PREP_PLAN_PATH, PREP_REVIEW_PATH } from './prepPlanPaths.js'
-import { PREP_RULES_PATH } from './prepRulePaths.js'
-import { RECIPE_HOME_PATH, RECIPE_MANAGE_PATH, RECIPE_QR_PATH } from './recipePaths.js'
+import { PREP_PLAN_PATH } from './prepPlanPaths.js'
+import { RECIPE_HOME_PATH } from './recipePaths.js'
 import { STAFF_MEAL_PATH } from './staffMealPaths.js'
 import { TASKS_HOME_PATH } from './tasksPaths.js'
 import { WASTAGE_ANALYSIS_PATH } from './wastagePaths.js'
@@ -49,45 +47,38 @@ const HR_GROUP = {
 }
 
 const KITCHEN_GROUP = {
-  // 后勤：配方（票 07）+ 备货计划（票 08）+ 损耗分析 —— **一组一格、一格多门**。几条落点
-  // 都是清单里的一页；`to` 仍是这一格的主落点（也是别的壳做跨组门时用的那一个），`links`
-  // 是这一格要渲染的全部条目。落点常量住在 `utils/recipePaths.js` / `prepPlanPaths.js` /
-  // `wastagePaths.js`，与页面里的 router-link 同一份。
+  // 后勤（2026-11-17 用户裁定）：顶栏只留一扇「后勤」门，点开是一张 4 项的下拉单
+  // （配方 / 备货计划 / 员工餐采购 / 损耗分析）。备货复盘 / 备货品 / 换算规则不再是
+  // 后勤的门 —— 它们收进「备货计划」的模块 tab（`views/prep/PrepPlanShell.vue`）。
+  //
+  // 为什么是下拉而不是继续平铺：七扇门并排时，用户的原话是「入口太杂」；收成四扇
+  // 仍有四个并列的下划线 tab，在 1024 宽的平板上会把「今天 / 人事 / 现场」挤没。
+  // `dropdown: true` 是给 `WorkbenchNav` 的强制标记；其他组只要组内有多页也会自动收下拉。
   key: 'kitchen',
   label: '后勤',
   to: RECIPE_HOME_PATH,
+  dropdown: true,
   links: [
+    // 配方（2026-11-17 合并）：原来的「选择岗位」与「配方管理」两扇门收成一扇。
+    // 管理端仍从配方首页顶栏进「配方管理」（`recipe/manage`），不再占后勤的一格。
     { to: RECIPE_HOME_PATH },
     { to: PREP_PLAN_PATH },
-    // 备货复盘（ADR 0123）：每小时参考值快照 vs 实际销量，改公式前先看它。
-    // 员工那一档看不到它（清单里 `audience: admin`）。
-    { to: PREP_REVIEW_PATH },
-    // 备货品换算规则（2026-10-26）：系数错了就在这一页改 —— 之前只能跳到数据管理
-    // 那张裸表里找行改。
-    { to: PREP_RULES_PATH },
-    // 备货品主数据（2026-10-27）：名称 / 单位 / 岗位 / 半成品·原料的维护面。
-    // 换算规则与备货计划都读这一份，之前只能去数据管理那张裸表里改。
-    { to: PREP_ITEMS_PATH },
+    // 员工餐采购（ADR 0135）：店长传月菜单、员工逐天填采购单，提交即推核心群。
+    // 清单里是 `both` —— 2026-11-11 用户裁定这一域不设能力开关（全员可用）。
+    { to: STAFF_MEAL_PATH },
     // 损耗分析（从 worktool2 那个小程序搬过来）：店长按月看「这个月损耗了多少、什么
     // 原因最多、哪几样最费」，是天天会看的数，不是配置页 —— 所以给它一扇直达的门。
     // 员工那一档看不到它（清单里 `audience: admin`）。
     { to: WASTAGE_ANALYSIS_PATH },
-    // 员工餐采购（ADR 0135）：店长传月菜单、员工逐天填采购单，提交即推核心群。
-    // 清单里是 `both` —— 2026-11-11 用户裁定这一域不设能力开关（全员可用）。
-    { to: STAFF_MEAL_PATH },
   ],
   // 组内**一级入口**（手写）：`workbenchPagesOf` 默认从页面清单派生，而清单里
   // 「配方详情」（要带 `?slug=`）与「配方打印」（A4 预览）是**从列表点进去**的功能页，
   // 不是能当入口的页 —— 放进页头那个下拉就是两扇点不通的死门（2026-10-08 实测，
   // 派生出来是六项）。名单里只写路径，标题仍从清单取。
-  pages: [
-    RECIPE_HOME_PATH, RECIPE_QR_PATH, RECIPE_MANAGE_PATH,
-    PREP_PLAN_PATH, PREP_REVIEW_PATH, PREP_RULES_PATH, PREP_ITEMS_PATH, WASTAGE_ANALYSIS_PATH,
-    STAFF_MEAL_PATH,
-  ],
+  pages: [RECIPE_HOME_PATH, PREP_PLAN_PATH, STAFF_MEAL_PATH, WASTAGE_ANALYSIS_PATH],
 }
 
-/** 管理端一级导航：4 组（今天 / 人事 / 现场 / 后勤）。 */
+/** 管理端一级导航：5 组（今天 / 人事 / 现场 / 后勤 / 任务）。 */
 export const ADMIN_NAV_GROUPS = [
   HOME_GROUP,
   HR_GROUP,

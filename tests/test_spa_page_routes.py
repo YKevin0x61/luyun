@@ -300,6 +300,10 @@ class SpaPageRouteContractTest(unittest.TestCase):
             "/workbench/kitchen/recipe/qr",
             "/workbench/kitchen/recipe/manage",
             "/workbench/kitchen/prep-plan",
+            # 2026-11-17：备货品 / 换算规则 / 复盘收进备货计划的模块 tab。
+            "/workbench/kitchen/prep-plan/items",
+            "/workbench/kitchen/prep-plan/rules",
+            "/workbench/kitchen/prep-plan/review",
         }
         old_paths = {
             "/scheduling",
@@ -338,6 +342,10 @@ class SpaPageRouteContractTest(unittest.TestCase):
             # 票 08：备货计划的老地址（管理后台的 `/prep-plan`）—— 搬进「后勤」组之后
             # 从 vue-router 与 `SPA_PAGE_ROUTES` 一起删掉，自然 404、不留别名。
             "/prep-plan",
+            # 2026-11-17：三条独立地址收进 `/prep-plan` 的子路由，旧地址一并删掉。
+            "/workbench/kitchen/prep-review",
+            "/workbench/kitchen/prep-rules",
+            "/workbench/kitchen/prep-items",
         }
         router_paths = _router_page_paths()
         self.assertEqual(sorted(new_paths - router_paths), [], "vue-router 少了工作台页面")

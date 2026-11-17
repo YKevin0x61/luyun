@@ -209,7 +209,7 @@ describe('resolveStaffNext', () => {
     expect(resolveStaffNext('/workbench/hr/shifts')).toBe('/workbench/hr/shifts')
     expect(resolveStaffNext('/workbench/kitchen/loss')).toBe('/workbench/kitchen/loss')
     // 2026-11-10：备货复盘 / 岗位二维码也进了可授权只读页，员工会话 + 那项能力进得去。
-    expect(resolveStaffNext('/workbench/kitchen/prep-review')).toBe('/workbench/kitchen/prep-review')
+    expect(resolveStaffNext('/workbench/kitchen/prep-plan/review')).toBe('/workbench/kitchen/prep-plan/review')
     expect(resolveStaffNext('/workbench/kitchen/recipe/qr')).toBe('/workbench/kitchen/recipe/qr')
     // 花名册没有 staffCap（身份证与底薪不下发员工端）：仍不是员工落点。
     expect(resolveStaffNext('/workbench/hr/roster')).toBe('/workbench')

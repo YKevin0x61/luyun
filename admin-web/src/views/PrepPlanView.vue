@@ -171,8 +171,9 @@ function quantileTag(entry) {
 /** 数量收口：半成品只能整份做（后端也算成整数，这里再兜一层，翻旧单也不会冒出 58.7 份），
  *  原料保留 1 位小数 —— 0.5 斤是真的能称出来的，抹成 0 就没人买了。 */
 function roundQty(value, kind) {
+  // 参考值一律整数（7.1 也进 8）：后端 fit_qty 已收口，这里再兜一层旧快照/旧计划里的小数。
   const number = Number(value) || 0
-  return kind === 'made' ? Math.ceil(number) : Math.round(number * 10) / 10
+  return Math.ceil(number - 1e-9)
 }
 
 /** 这一行显示的数字（手改过的优先）。 */
@@ -222,8 +223,8 @@ async function commitEdit(entry) {
   editingId.value = null
   editingReason.value = ''
   if (String(entry.final_qty) === String(next) || next === '') return
-  // 半成品输入框本来就该按整份收，手打 2.4 也按 3 份算（后端同样向上取整，两边一致）
-  await setQty(entry, entry.kind === 'made' ? Math.ceil(Number(next)) : next, reason)
+  // 参考值一律整数：手打 2.4 也按 3 算（后端 fit_qty 同样向上取整，两边一致）
+  await setQty(entry, Math.ceil(Number(next) - 1e-9), reason)
 }
 
 function cancelEdit() {
@@ -334,7 +335,6 @@ watch(activeStation, () => {
   <div class="pp">
     <header class="pp-head">
       <div class="pp-head-main">
-        <p class="pp-kicker">备货计划 · 参考值</p>
         <h1 class="pp-title">
           {{ horizonTitle(horizonHours) }}参考值
           <template v-if="!needsStationPick"><b>{{ remainingCount }}</b> 项</template>
@@ -604,13 +604,6 @@ watch(activeStation, () => {
   justify-content: space-between;
   gap: var(--sp-3, 12px);
   flex-wrap: wrap;
-}
-
-.pp-kicker {
-  margin: 0 0 2px;
-  font-size: var(--fs-12, 12px);
-  color: var(--ink-dim);
-  letter-spacing: var(--ls-2, 0.08em);
 }
 
 .pp-title {

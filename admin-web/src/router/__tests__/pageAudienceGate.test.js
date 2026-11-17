@@ -275,14 +275,22 @@ describe('管理端专属页不出现在员工可达的面上（票 05 那道门
     const wrapper = await renderRoute('/workbench', IDENTITY_STAFF)
 
     // 导航不是空的（身份认不出时它会一格都不渲染，那样下面那条断言会空过）。
+    // 2026-11-17：后勤只占一颗下拉钮；一级格是今天 / 卫生 / 我的。
     expect(navItemsOf(wrapper)).toEqual([
       '/workbench',
       '/workbench/staff/clean',
+    ])
+    expect(wrapper.findAll('.wb-nav-trigger').map((item) => item.text().replace('▾', '').trim()))
+      .toEqual(['后勤', '我的'])
+    const kitchen = wrapper.findAll('.wb-nav-cell.is-dropdown')
+      .find((cell) => cell.text().includes('后勤'))
+    await kitchen.get('.wb-nav-trigger').trigger('click')
+    // 下拉里的三扇门：配方 / 备货计划 / 员工餐采购（损耗只给管理端）。
+    expect(kitchen.findAll('.wb-nav-menu-item').map((item) => item.attributes('href'))).toEqual([
       '/workbench/kitchen/recipe',
       '/workbench/kitchen/prep-plan',
       // 员工餐采购（ADR 0135）：2026-11-11 起 `both`，员工默认看得见。
       '/workbench/kitchen/staff-meal',
-      '/workbench/staff/today',
     ])
     expect(unreachableEntries(wrapper, IDENTITY_STAFF)).toEqual([])
     wrapper.unmount()
@@ -316,23 +324,21 @@ describe('员工专属页不出现在管理端导航里（同一道门的反向�
   it('店长那一档的工作台导航：渲染出来的每一格，管理员都打得开', async () => {
     const wrapper = await renderRoute('/workbench/hr/calendar', IDENTITY_ADMIN)
 
-    expect(navItemsOf(wrapper)).toEqual([
-      '/workbench',
-      '/workbench/hr/calendar',
-      '/workbench/floor/daily',
+    // 2026-11-17：后勤只占一颗下拉钮；一级格是今天 / 人事 / 现场 / 任务。
+    expect(navItemsOf(wrapper)).toEqual(['/workbench'])
+    expect(wrapper.findAll('.wb-nav-trigger').map((item) => item.text().replace('▾', '').trim()))
+      .toEqual(['人事', '现场', '后勤', '任务'])
+    const kitchen = wrapper.findAll('.wb-nav-cell.is-dropdown')
+      .find((cell) => cell.text().includes('后勤'))
+    await kitchen.get('.wb-nav-trigger').trigger('click')
+    // 后勤下拉里的四扇门：配方 / 备货计划 / 员工餐采购 / 损耗分析。
+    expect(kitchen.findAll('.wb-nav-menu-item').map((item) => item.attributes('href'))).toEqual([
       '/workbench/kitchen/recipe',
       '/workbench/kitchen/prep-plan',
-      // 备货复盘（ADR 0123）：后勤那一格的新门，只给管理端。
-      '/workbench/kitchen/prep-review',
-      // 备货品换算规则（2026-10-26）：只给管理端。
-      '/workbench/kitchen/prep-rules',
-      '/workbench/kitchen/prep-items',
-      // 损耗分析（从 worktool2 那个小程序搬过来）：只给管理端。
-      '/workbench/kitchen/loss',
       // 员工餐采购（ADR 0135）：`both`，管理端也看得见。
       '/workbench/kitchen/staff-meal',
-      // 任务（2026-11-11）：管理端新的一级格，落点是任务板。
-      '/workbench/tasks',
+      // 损耗分析（从 worktool2 那个小程序搬过来）：只给管理端。
+      '/workbench/kitchen/loss',
     ])
     expect(unreachableEntries(wrapper, IDENTITY_ADMIN)).toEqual([])
     wrapper.unmount()

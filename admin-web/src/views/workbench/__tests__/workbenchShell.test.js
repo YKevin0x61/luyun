@@ -193,19 +193,20 @@ describe('工作台外壳的导航', () => {
     const { wrapper } = await mountShell('/workbench/staff/today')
 
     const items = wrapper.findAll('.wb-nav-item')
-    // 票 08：后勤那一格是**一格两门** —— 配方与备货计划各占一半，都在同一格（同一颗
-    // 胶囊）里，员工两项都看得见（spec 故事 8）。一格两门时标题取各自那一页在清单里的
-    // 名字（「选择岗位」/「备货计划」）：同一颗胶囊里写两遍「后勤」看不出哪一半是哪一页。
-    // 2026-10-05 起员工这一档还多一格「卫生」（他们每天要做的活，一级入口）。
-    // 员工那一档：第二格仍是「卫生」（员工端那一格名字没改）。
-    expect(items.map((item) => item.text())).toEqual([
-      '今天', '卫生', '选择岗位', '备货计划', '员工餐采购', '我的',
-    ])
+    // 2026-11-17：多页组都收成下拉钮。员工这一档的一级格：今天 / 卫生（直链），
+    // 后勤（下拉）/ 我的（下拉）。
+    expect(items.map((item) => item.text())).toEqual(['今天', '卫生'])
     expect(items.map((item) => item.attributes('href'))).toEqual([
-      '/workbench', '/workbench/staff/clean', '/workbench/kitchen/recipe', PREP_PLAN_PATH,
-      STAFF_MEAL_PATH, '/workbench/staff/today',
+      '/workbench', '/workbench/staff/clean',
     ])
-    expect(wrapper.findAll('.wb-nav-cell.is-multi')).toHaveLength(1)
+    expect(wrapper.findAll('.wb-nav-trigger').map((item) => item.text().replace('▾', '').trim()))
+      .toEqual(['后勤', '我的'])
+    const kitchen = wrapper.findAll('.wb-nav-cell.is-dropdown')
+      .find((cell) => cell.text().includes('后勤'))
+    await kitchen.get('.wb-nav-trigger').trigger('click')
+    expect(kitchen.findAll('.wb-nav-menu-item').map((item) => item.text())).toEqual([
+      '配方', '备货计划', '员工餐采购',
+    ])
     // 员工点不到店长那几页（它们在清单里是 admin，导航按身份过滤）。
     expect(wrapper.find('a[href="/workbench/floor/daily"]').exists()).toBe(false)
     // 配方管理那一页也不在导航里（admin）。
@@ -216,44 +217,43 @@ describe('工作台外壳的导航', () => {
     vi.stubGlobal('fetch', staffOnlyFetch())
     const { wrapper } = await mountShell(PREP_PLAN_PATH)
 
-    // 整格亮：后勤那一格里两扇门都算"当前这一格"（同一组），`aria-current` 也挂在两半上
-    // —— 与单条目那一格的老口径一致（外壳的高亮判据是页面的 `group`）。
-    const on = wrapper.findAll('.wb-nav-item.is-on')
-    expect(on.map((item) => item.text())).toEqual(['选择岗位', '备货计划', '员工餐采购'])
-    expect(on.map((item) => item.attributes('aria-current'))).toEqual(['page', 'page', 'page'])
+    // 整格亮：下拉那一格按页面的 `group` 算当前，按钮与菜单项都跟着。
+    const cell = wrapper.get('.wb-nav-cell.is-dropdown')
+    expect(cell.classes()).toContain('is-on')
+    expect(cell.get('.wb-nav-trigger').text()).toContain('后勤')
+    expect(cell.get('.wb-nav-trigger').attributes('aria-expanded')).toBe('false')
 
-    // 但只有指到这一页的那半贴着"当前"：另一半不高亮成当前项。
-    const current = wrapper.findAll('.wb-nav-item.is-current')
+    await cell.get('.wb-nav-trigger').trigger('click')
+    expect(cell.get('.wb-nav-trigger').attributes('aria-expanded')).toBe('true')
+    const menu = cell.findAll('.wb-nav-menu-item')
+    expect(menu.map((item) => item.text())).toEqual(['配方', '备货计划', '员工餐采购'])
+    const current = menu.filter((item) => item.classes().includes('is-current'))
     expect(current).toHaveLength(1)
     expect(current[0].text()).toBe('备货计划')
     expect(current[0].attributes('href')).toBe(PREP_PLAN_PATH)
-
-    const cell = wrapper.get('.wb-nav-cell.is-multi')
-    expect(cell.findAll('.wb-nav-item')).toHaveLength(3)
-    expect(cell.classes()).toContain('is-on')
   })
 
   it('整组都亮：站在「整月」上，「我的」那一格仍是当前项（首页那一格不亮）', async () => {
     vi.stubGlobal('fetch', staffOnlyFetch())
     const { wrapper } = await mountShell('/workbench/staff/month')
 
-    const items = wrapper.findAll('.wb-nav-item')
-    const on = items.filter((item) => item.classes().includes('is-on'))
-    expect(on).toHaveLength(1)
-    expect(on[0].text()).toBe('我的')
-    expect(on[0].attributes('aria-current')).toBe('page')
+    const cell = wrapper.get('.wb-nav-cell.is-on')
+    expect(cell.get('.wb-nav-trigger').text()).toContain('我的')
+    expect(cell.get('.wb-nav-trigger').attributes('aria-current')).toBe('page')
   })
 
   it('点一下真的走到那一格（外壳是路由链接，不是摆设）', async () => {
     vi.stubGlobal('fetch', staffOnlyFetch())
     const { wrapper, router } = await mountShell('/workbench/staff/month')
 
-    // 2026-10-05 起员工那一档的顺序是：今天 / 卫生 / 后勤（两门）/ 我的 ——
-    // 第二格是「卫生」，后勤从第二格挪到了第三、四格。
-    await wrapper.findAll('.wb-nav-item')[2].trigger('click')
+    // 2026-11-17 起后勤是一颗下拉钮：点开，再点菜单里的「配方」。
+    await wrapper.get('.wb-nav-trigger').trigger('click')
+    await wrapper.findAll('.wb-nav-menu-item')[0].trigger('click')
     await flushPromises()
 
     expect(router.currentRoute.value.path).toBe('/workbench/kitchen/recipe')
+    // 选中后浮层收起，不留在新页面上。
+    expect(wrapper.find('.wb-nav-menu').exists()).toBe(false)
   })
 
   it('顶栏挂着身份切换器，显示的是**当前**那一档（「超级管理员」不写成「管理员」）', async () => {
@@ -280,14 +280,14 @@ describe('工作台外壳的导航', () => {
     // 不改权限、也不改守卫。票 08 起后勤那一格是多扇门（配方 + 备货计划 + 备货复盘 +
     // 损耗分析）。
     const items = wrapper.findAll('.wb-nav-item')
-    expect(items.map((item) => item.text())).toEqual([
-      '今天', '人事', '现场', '选择岗位', '备货计划', '备货复盘', '换算规则', '备货品', '损耗分析',
-      '员工餐采购', '任务',
-    ])
-    expect(items.map((item) => item.attributes('href'))).toEqual([
-      '/workbench', WORKBENCH_HR_HOME, WORKBENCH_FIELD_HOME,
-      '/workbench/kitchen/recipe', PREP_PLAN_PATH, PREP_REVIEW_PATH, PREP_RULES_PATH, PREP_ITEMS_PATH, WASTAGE_ANALYSIS_PATH,
-      STAFF_MEAL_PATH, TASKS_HOME_PATH,
+    expect(items.map((item) => item.text())).toEqual(['今天'])
+    expect(wrapper.findAll('.wb-nav-trigger').map((item) => item.text().replace('▾', '').trim()))
+      .toEqual(['人事', '现场', '后勤', '任务'])
+    const kitchen = wrapper.findAll('.wb-nav-cell.is-dropdown')
+      .find((cell) => cell.text().includes('后勤'))
+    await kitchen.get('.wb-nav-trigger').trigger('click')
+    expect(kitchen.findAll('.wb-nav-menu-item').map((item) => item.text())).toEqual([
+      '配方', '备货计划', '员工餐采购', '损耗分析',
     ])
   })
 
@@ -304,15 +304,22 @@ describe('工作台外壳的导航', () => {
     expect(store.identity).toBe('staff')
     expect(wrapper.findAll('.wb-nav-item').map((item) => item.text())).toEqual([
       // 员工那一格叫「卫生」；管理端那一格 2026-10-19 起叫「现场」。
-      '今天', '卫生', '选择岗位', '备货计划', '员工餐采购', '我的',
+      '今天', '卫生',
     ])
+    expect(wrapper.findAll('.wb-nav-trigger').map((item) => item.text().replace('▾', '').trim()))
+      .toEqual(['后勤', '我的'])
   })
 
   it('切成员工后仍站在店长的页上：送回员工那一档的第一格（不是停在别人的页上）', async () => {
     // 起点是店长的页（现场组的落点）—— 顶栏这一档与导航面按他算。
     const { wrapper, router, store } = await mountShell('/workbench/floor/daily')
     expect(store.identity).toBe('super')
-    expect(wrapper.find('a[href="/workbench/floor/daily"]').exists()).toBe(true)
+    // 现场组现在是一颗下拉钮；落点「日常验收」在点开的菜单里。
+    const floor = wrapper.findAll('.wb-nav-cell.is-dropdown')
+      .find((cell) => cell.text().includes('现场'))
+    expect(floor).toBeTruthy()
+    await floor.get('.wb-nav-trigger').trigger('click')
+    expect(floor.find('a[href="/workbench/floor/daily"]').exists()).toBe(true)
 
     // 切换器现在**只显示当前身份**（2026-10-05 裁定），另一档收在点开的菜单里：
     // 先点当前这一档，再选菜单里那一项。

@@ -59,6 +59,17 @@ function navKey(path) {
   return parts.length ? parts[parts.length - 1] : ''
 }
 
+/** 组内页的高亮：本级或子路径都算（`/prep-plan` 与 `/prep-plan/items`）。
+ *
+ *  2026-11-17 备货计划收出模块 tab 之后，`/prep-plan/items` 的最后一段是 `items`；
+ *  继续按 `navKey` 比会让下拉里的「备货计划」不亮。整段前缀比较，尾斜杠先归一，
+ *  `/prep-plan-other` 不会被误认成 `/prep-plan`。 */
+function isUnder(path) {
+  const base = String(path || '').replace(/\/+$/, '')
+  const current = String(route.path || '').replace(/\/+$/, '')
+  return current === base || current.startsWith(`${base}/`)
+}
+
 const groupKey = computed(() => workbenchGroupOf(route.path))
 const group = computed(() => workbenchGroup(groupKey.value))
 /** 组名标签：组表里的 `headLabel` 优先（首页那一组用它写「工作台」—— 它的组名与唯一那一页
@@ -184,7 +195,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
         v-for="item in pages"
         :key="item.path"
         class="wmh-item"
-        :class="{ 'is-on': navKey(item.path) === navKey(route.path) }"
+        :class="{ 'is-on': isUnder(item.path) }"
         :to="item.path"
         role="menuitem"
         @click="closeAll"

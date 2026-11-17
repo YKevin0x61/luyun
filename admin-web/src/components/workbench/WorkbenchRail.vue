@@ -10,7 +10,6 @@
 //     —— 长页滚动时组内导航不丢；
 //   · **单页组不渲染 rail**（`v-if="items.length > 1"`），与手机档「单页组不给空下拉」同一判据；
 //   · ≤720px 由外壳那条分叉收起来（手机档走页头下拉 + 底栏，见 `WorkbenchMobileHead` / `WorkbenchTabBar`）。
-import { computed } from 'vue'
 import { useRoute } from 'vue-router'
 import SvgIcon from '../SvgIcon.vue'
 
@@ -23,16 +22,16 @@ defineProps({
 
 const route = useRoute()
 
-/** 认「现在在哪一页」只看路径最后一段：带尾斜杠与不带两种写法都认（与原来两壳同一口径 ——
- *  绑前缀的写法在并存期踩过坑）。 */
-function navKey(path) {
-  const parts = String(path || '').split('/').filter(Boolean)
-  return parts.length ? parts[parts.length - 1] : ''
-}
-
-const currentKey = computed(() => navKey(route.path))
+/** 认「现在在哪一页」：本级或它的子路径都算（`/prep-plan` 与 `/prep-plan/items`）。
+ *
+ *  2026-11-17 之前这里比的是路径最后一段（`navKey`），因为组内没有子路由；备货计划
+ *  收出模块 tab 之后，`/prep-plan/items` 的最后一段是 `items`，按最后一段比会让左 rail
+ *  一页都不亮。改成整段前缀：`/prep-plan-other` 不会被误认成 `/prep-plan`，
+ *  尾斜杠也先归一。 */
 function isCurrent(page) {
-  return navKey(page.path) === currentKey.value
+  const path = String(page.path || '').replace(/\/+$/, '')
+  const current = String(route.path || '').replace(/\/+$/, '')
+  return current === path || current.startsWith(`${path}/`)
 }
 </script>
 

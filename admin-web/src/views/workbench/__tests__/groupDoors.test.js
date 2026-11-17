@@ -8,9 +8,7 @@ import { createMemoryHistory, createRouter } from 'vue-router'
 import { createPinia, setActivePinia } from 'pinia'
 import { WORKBENCH_FIELD_HOME, WORKBENCH_HOME, WORKBENCH_HR_HOME } from '../../../utils/workbenchCopy.js'
 import { HYGIENE_ADMIN_NAV } from '../../../utils/hygieneCopy.js'
-import { PREP_PLAN_PATH, PREP_REVIEW_PATH } from '../../../utils/prepPlanPaths.js'
-import { PREP_ITEMS_PATH } from '../../../utils/prepItemPaths.js'
-import { PREP_RULES_PATH } from '../../../utils/prepRulePaths.js'
+import { PREP_PLAN_PATH } from '../../../utils/prepPlanPaths.js'
 import { RECIPE_HOME_PATH } from '../../../utils/recipePaths.js'
 import { WASTAGE_ANALYSIS_PATH } from '../../../utils/wastagePaths.js'
 import { STAFF_MEAL_PATH } from '../../../utils/staffMealPaths.js'
@@ -143,14 +141,17 @@ describe('人事壳（工作台级导航 + 本组四页）', () => {
     const hrefs = wrapper.findAll('.wb-nav-item').map((item) => item.attributes('href'))
     // 身份过滤照旧按**落点那一页**的 `audience` 走：店长这一档没有「我的」那一格
     // （员工三页是 `staff`），与 `WorkbenchLayout` 里的判定同一份代码。
-    // 后勤那一格四条：配方 / 备货计划（`both`）+ 备货复盘 / 损耗分析（只给管理端）。
-    expect(hrefs).toEqual([
-      WORKBENCH_HOME, WORKBENCH_HR_HOME, WORKBENCH_FIELD_HOME,
-      RECIPE_HOME_PATH, PREP_PLAN_PATH, PREP_REVIEW_PATH, PREP_RULES_PATH, PREP_ITEMS_PATH, WASTAGE_ANALYSIS_PATH,
-      STAFF_MEAL_PATH,
-      TASKS_HOME_PATH,
-    ])
+    // 2026-11-17：人事 / 现场 / 后勤 / 任务 组内都有多页，收成下拉钮；只有「今天」直链。
+    expect(hrefs).toEqual([WORKBENCH_HOME])
     expect(wrapper.find(`.wb-nav-item[href="${WORKBENCH_HOME}"]`).exists()).toBe(true)
+    expect(wrapper.findAll('.wb-nav-trigger').map((item) => item.text().replace('▾', '').trim()))
+      .toEqual(['人事', '现场', '后勤', '任务'])
+    const kitchen = wrapper.findAll('.wb-nav-cell.is-dropdown')
+      .find((cell) => cell.text().includes('后勤'))
+    await kitchen.get('.wb-nav-trigger').trigger('click')
+    expect(kitchen.findAll('.wb-nav-menu-item').map((item) => item.attributes('href'))).toEqual([
+      RECIPE_HOME_PATH, PREP_PLAN_PATH, STAFF_MEAL_PATH, WASTAGE_ANALYSIS_PATH,
+    ])
     // ③-2：组内页挪到左 rail（统一壳一处渲染），它自己的条数 = 本组可见页数。
     expect(wrapper.get('.wb-rail').findAll('.wb-rail-item').length).toBe(workbenchPagesOf('hr').length)
   })
@@ -243,13 +244,16 @@ describe('现场壳（rail 八项 + 内容区顶上的工作台级导航）', ()
     const hrefs = wrapper.findAll('.wb-nav-item').map((item) => item.attributes('href'))
     // 身份过滤照旧按**落点那一页**的 `audience` 走：店长这一档没有「我的」那一格
     // （员工三页是 `staff`），与 `WorkbenchLayout` 里的判定同一份代码。
-    expect(hrefs).toEqual([
-      WORKBENCH_HOME, WORKBENCH_HR_HOME, WORKBENCH_FIELD_HOME,
-      RECIPE_HOME_PATH, PREP_PLAN_PATH, PREP_REVIEW_PATH, PREP_RULES_PATH, PREP_ITEMS_PATH, WASTAGE_ANALYSIS_PATH,
-      STAFF_MEAL_PATH,
-      TASKS_HOME_PATH,
-    ])
+    expect(hrefs).toEqual([WORKBENCH_HOME])
     expect(wrapper.find(`.wb-nav-item[href="${WORKBENCH_HOME}"]`).exists()).toBe(true)
+    expect(wrapper.findAll('.wb-nav-trigger').map((item) => item.text().replace('▾', '').trim()))
+      .toEqual(['人事', '现场', '后勤', '任务'])
+    const kitchen = wrapper.findAll('.wb-nav-cell.is-dropdown')
+      .find((cell) => cell.text().includes('后勤'))
+    await kitchen.get('.wb-nav-trigger').trigger('click')
+    expect(kitchen.findAll('.wb-nav-menu-item').map((item) => item.attributes('href'))).toEqual([
+      RECIPE_HOME_PATH, PREP_PLAN_PATH, STAFF_MEAL_PATH, WASTAGE_ANALYSIS_PATH,
+    ])
     // rail 自己的名字跟着组名走：工作台 · 现场（2026-10-19 信息架构重排第二层：
     // 管理端那一格从「卫生验收」收口成「现场」，与工作台导航里那一格同一个词 ——
     // 名单在 `utils/workbenchNav.js` 的 ADMIN_NAV_GROUPS 一处）。

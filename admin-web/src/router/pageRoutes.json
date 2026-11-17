@@ -244,7 +244,7 @@
     },
     {
       "path": "/workbench/kitchen/recipe",
-      "title": "选择岗位",
+      "title": "配方",
       "group": "kitchen",
       "audience": "both",
       "standalone": true,
@@ -294,16 +294,15 @@
       "public": false
     },
     {
-      "path": "/workbench/kitchen/prep-review",
-      "title": "备货复盘",
+      "path": "/workbench/kitchen/prep-plan/items",
+      "title": "备货品",
       "group": "kitchen",
       "audience": "admin",
-      "staffCap": "prep_review",
       "standalone": true,
       "public": false
     },
     {
-      "path": "/workbench/kitchen/prep-rules",
+      "path": "/workbench/kitchen/prep-plan/rules",
       "title": "换算规则",
       "group": "kitchen",
       "audience": "admin",
@@ -311,10 +310,11 @@
       "public": false
     },
     {
-      "path": "/workbench/kitchen/prep-items",
-      "title": "备货品",
+      "path": "/workbench/kitchen/prep-plan/review",
+      "title": "备货复盘",
       "group": "kitchen",
       "audience": "admin",
+      "staffCap": "prep_review",
       "standalone": true,
       "public": false
     },

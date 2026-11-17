@@ -43,11 +43,18 @@ const FLOOR_PAGES = [
 const KITCHEN_PAGES = [
   ['/workbench/kitchen/recipe', 'RecipeStationsView.vue'],
   ['/workbench/kitchen/recipe/manage', 'RecipeManageView.vue'],
-  // 票 08：备货计划从管理后台的 `/prep-plan` 搬进后勤组，与配方列表同一个形态。
-  ['/workbench/kitchen/prep-plan', 'PrepPlanView.vue'],
   ['/workbench/kitchen/recipe/detail', 'RecipeDetailView.vue'],
   ['/workbench/kitchen/recipe/print', 'RecipePrintView.vue'],
   ['/workbench/kitchen/recipe/qr', 'RecipeQrView.vue'],
+]
+
+// 备货计划（2026-11-17）：一个父路由 + 四个子页。父路由套 `PrepPlanShell`（模块 tab），
+// 子页用绝对路径登记；旧的三条独立地址已删除（自然 404）。
+const PREP_PLAN_CHILDREN = [
+  "import('../views/PrepPlanView.vue')",
+  "import('../views/prep/PrepItemsView.vue')",
+  "import('../views/prep/PrepRulesView.vue')",
+  "import('../views/PrepReviewView.vue')",
 ]
 
 const PAGES = [
@@ -73,19 +80,26 @@ describe('工作台路由（票 05 按分组落位之后）', () => {
       expect(line, `${path} 没注册`).toBeTruthy()
       expect(line).toContain(view)
     }
+    // 备货计划：父路由挂模块壳，四个子页由子路由承载（不再是一行 `workbenchKitchenPage`）。
+    expect(router).toContain('component: PrepPlanShell')
+    for (const view of PREP_PLAN_CHILDREN) {
+      expect(router, `备货计划的子页没注册：${view}`).toContain(view)
+    }
   })
 
-  it('人事四页走人事壳、现场八页走现场壳、产品的六页一律走工作台外壳', () => {
+  it('人事四页走人事壳、现场八页走现场壳、配方五页走工作台外壳、备货计划走模块壳', () => {
     for (const [path] of HR_PAGES) {
       expect(lineFor(path), `${path} 该走人事壳`).toContain('workbenchHrPage')
     }
     for (const [path] of FLOOR_PAGES) {
       expect(lineFor(path), `${path} 该走现场壳`).toContain('hygieneAdminPage')
     }
-    // 产品的六页全走工厂（2026-10-08 起阅读 / 打印 / 印码也套壳）：不再有"直接写的路由对象"。
+    // 配方五页全走工厂（2026-10-08 起阅读 / 打印 / 印码也套壳）：不再有"直接写的路由对象"。
     for (const [path] of KITCHEN_PAGES) {
       expect(lineFor(path), `${path} 该走工作台外壳`).toContain('workbenchKitchenPage')
     }
+    // 备货计划：父路由自己套模块壳（`PrepPlanShell` 内部再套工作台外壳）。
+    expect(router).toContain('component: PrepPlanShell')
   })
 
   it('员工三页套同一个工作台外壳（导航按身份渲染），自己不再是一整页', () => {

@@ -14,9 +14,7 @@ import {
   workbenchNavFor,
   workbenchPagesOf,
 } from '../workbenchNav.js'
-import { PREP_PLAN_PATH, PREP_REVIEW_PATH } from '../prepPlanPaths.js'
-import { PREP_ITEMS_PATH } from '../prepItemPaths.js'
-import { PREP_RULES_PATH } from '../prepRulePaths.js'
+import { PREP_PLAN_PATH } from '../prepPlanPaths.js'
 import { WASTAGE_ANALYSIS_PATH } from '../wastagePaths.js'
 import { STAFF_MEAL_PATH } from '../staffMealPaths.js'
 
@@ -162,11 +160,10 @@ describe('两套一级导航表（2026-10-19 信息架构重排第二层）', ()
       '/workbench/kitchen/recipe/manage',
       // 票 08：备货计划从 `/prep-plan` 搬进这一组 —— 换位置、统一导航，读写门不动。
       '/workbench/kitchen/prep-plan',
-      // 备货复盘（ADR 0123）：每小时快照 vs 实际，只给管理端。
-      '/workbench/kitchen/prep-review',
-      // 备货品换算规则（2026-10-26）：从销售报表搬进后勤组，只给管理端。
-      '/workbench/kitchen/prep-rules',
-      '/workbench/kitchen/prep-items',
+      // 2026-11-17：备货品 / 换算规则 / 复盘收进备货计划的模块 tab。
+      '/workbench/kitchen/prep-plan/items',
+      '/workbench/kitchen/prep-plan/rules',
+      '/workbench/kitchen/prep-plan/review',
       // 损耗分析（从 worktool2 那个小程序搬过来）：只给管理端（`audience: admin`）。
       '/workbench/kitchen/loss',
       // 员工餐采购（ADR 0135）：2026-11-11 起 `audience: both`，员工也直接看得见。
@@ -177,18 +174,13 @@ describe('两套一级导航表（2026-10-19 信息架构重排第二层）', ()
     // 死门（页头那个下拉里实测派生出来是六项，其中两项点了进不去）。
     expect(workbenchPagesOf('kitchen').map((page) => page.path)).toEqual([
       '/workbench/kitchen/recipe',
-      '/workbench/kitchen/recipe/qr',
-      '/workbench/kitchen/recipe/manage',
       '/workbench/kitchen/prep-plan',
-      '/workbench/kitchen/prep-review',
-      '/workbench/kitchen/prep-rules',
-      '/workbench/kitchen/prep-items',
-      '/workbench/kitchen/loss',
       '/workbench/kitchen/staff-meal',
+      '/workbench/kitchen/loss',
     ])
-    // 名单里只写路径，标题仍从清单取（一处定义）。
+    // 名单里只写路径，标题仍从清单取（一处定义）；配方那一页 2026-11-17 起叫「配方」。
     expect(workbenchPagesOf('kitchen').map((page) => page.title)).toEqual([
-      '选择岗位', '岗位二维码', '配方管理', '备货计划', '备货复盘', '换算规则', '备货品', '损耗分析', '员工餐采购',
+      '配方', '备货计划', '员工餐采购', '损耗分析',
     ])
     for (const old of [
       '/recipe', '/recipe/detail', '/recipe/print', '/recipe/qr', '/recipe/manage',
@@ -219,20 +211,16 @@ describe('按身份过滤导航', () => {
     }
   })
 
-  it('后勤那一格是「一组多门」：每条链接各自按落点那一页的 audience 过滤', () => {
-    // 票 08 的形态：组表里 `links` 是**一组多条目**的入口，不是把同一组拆成两格
-    // （拆成两格的话 `workbenchGroupOf` 会让两格同时高亮）。每条链接的可见性仍只看
-    // 它自己落点那一页的身份 —— 不另写一份名单。损耗分析（`admin`）进来之后，这一格
-    // 第一次出现「店长看得见、员工看不见」的那半扇门。
+  it('后勤那一格是下拉四门：每条链接各自按落点那一页的 audience 过滤', () => {
+    // 2026-11-17 的形态：后勤只留一扇门，点开是配方 / 备货计划 / 员工餐采购 / 损耗分析。
+    // 每条链接的可见性仍只看它自己落点那一页的身份 —— 不另写一份名单。
     const kitchen = ADMIN_NAV_GROUPS.find((group) => group.key === 'kitchen')
+    expect(kitchen.dropdown).toBe(true)
     expect(kitchen.links.map((link) => link.to)).toEqual([
       '/workbench/kitchen/recipe',
       PREP_PLAN_PATH,
-      PREP_REVIEW_PATH,
-      PREP_RULES_PATH,
-      PREP_ITEMS_PATH,
-      WASTAGE_ANALYSIS_PATH,
       STAFF_MEAL_PATH,
+      WASTAGE_ANALYSIS_PATH,
     ])
     for (const link of kitchen.links) {
       const row = pageRow(link.to)
@@ -248,8 +236,7 @@ describe('按身份过滤导航', () => {
       .filter((item) => item.key === 'kitchen')
       .map((item) => item.to)
     expect(toOf('super')).toEqual([
-      '/workbench/kitchen/recipe', PREP_PLAN_PATH, PREP_REVIEW_PATH, PREP_RULES_PATH, PREP_ITEMS_PATH, WASTAGE_ANALYSIS_PATH,
-      STAFF_MEAL_PATH,
+      '/workbench/kitchen/recipe', PREP_PLAN_PATH, STAFF_MEAL_PATH, WASTAGE_ANALYSIS_PATH,
     ])
     expect(toOf('staff')).toEqual(['/workbench/kitchen/recipe', PREP_PLAN_PATH, STAFF_MEAL_PATH])
   })
@@ -292,7 +279,7 @@ describe('按身份过滤导航', () => {
       '/workbench/kitchen/recipe', PREP_PLAN_PATH, STAFF_MEAL_PATH,
     ])
     expect(kitchenTo(['wastage'])).toEqual([
-      '/workbench/kitchen/recipe', PREP_PLAN_PATH, WASTAGE_ANALYSIS_PATH, STAFF_MEAL_PATH,
+      '/workbench/kitchen/recipe', PREP_PLAN_PATH, STAFF_MEAL_PATH, WASTAGE_ANALYSIS_PATH,
     ])
     // 管理端不看能力键：四格照旧（排班三页与损耗分析本来就在他那一档里）。
     expect(keysOf('super', [])).toEqual(['home', 'hr', 'floor', 'kitchen', 'tasks'])

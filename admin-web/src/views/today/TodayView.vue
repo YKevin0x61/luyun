@@ -98,7 +98,7 @@ const CAP_ROUTES = {
   fix: '/workbench/staff/clean',
   schedule: '/workbench/hr/calendar',
   wastage: '/workbench/kitchen/loss',
-  prep_review: '/workbench/kitchen/prep-review',
+  prep_review: '/workbench/kitchen/prep-plan/review',
   recipe_qr: '/workbench/kitchen/recipe/qr',
   task: '/workbench/staff/tasks',
 }

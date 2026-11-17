@@ -122,7 +122,9 @@ describe('进页面就出清单', () => {
     vi.stubGlobal('fetch', probeFetch())
     const wrapper = await mountView()
 
-    expect(wrapper.text()).toContain('备货计划')
+    // 2026-11-17：页头那行 kicker「备货计划 · 参考值」删了（模块 tab 已说明这是备货）；
+    // 页面自己的标题仍是「…参考值」。
+    expect(wrapper.text()).toContain('参考值')
     expect(wrapper.text()).toContain('虾饺馅')
     expect(wrapper.text()).toContain('80份')
     // 分两段：半成品 / 原料
@@ -561,13 +563,13 @@ describe('半成品只报整份', () => {
     expect(wrapper.find('.pp-qty b').text()).toBe('59')
   })
 
-  it('原料保留小数', async () => {
+  it('原料也向上取整到整数', async () => {
     vi.stubGlobal(
       'fetch',
       fetchWith([{ ...TODAY.entries[1], suggested_qty: 58.7, final_qty: 58.7 }]),
     )
     const wrapper = await mountView()
-    expect(wrapper.find('.pp-qty b').text()).toBe('58.7')
+    expect(wrapper.find('.pp-qty b').text()).toBe('59')
   })
 })
 
