@@ -82,13 +82,19 @@ describe('员工端「我的时间」三页走查修复（2026-11-09 A 组）', 
     expect(overtime).toMatch(/hoursLabel\(c\.makeup_half_hours\)/)
   })
 
-  it('批准前先确认：店长在这里撤不回，误点一次就落账', () => {
-    expect(overtime).toContain("import ConfirmDialog from '../../components/admin/ConfirmDialog.vue'")
-    expect(overtime).toMatch(/askApprove\('entry', entry\)/)
-    expect(overtime).toMatch(/askApprove\('deduction', item\)/)
-    expect(overtime).toContain('批准这一笔？')
-    expect(overtime).toContain('你自己撤不回')
-    expect(overtime).toContain('confirmApprove')
+  it('审批只在「加班补钟审批」页，登记页不再嵌审批', () => {
+    // 2026-11-17 用户裁定：审批台已经有了审批功能，登记页不再重复。
+    expect(overtime).not.toContain('等着我批的')
+    expect(overtime).not.toContain('confirmApprove')
+    expect(overtime).not.toContain("import ConfirmDialog")
+    expect(overtime).not.toContain('/api/overtime/review/pending')
+    // 代录仍在：登记页保留「替谁记」，只是不再批。
+    expect(overtime).toContain('/api/overtime/review/entries')
+
+    const review = read('../OvertimeReviewView.vue')
+    expect(review).toContain('startApprove')
+    expect(review).toContain('confirmApprove')
+    expect(review).toContain('<ConfirmDialog')
   })
 
   it('提交按钮灰着时写清为什么（事由为空是唯一原因）', () => {

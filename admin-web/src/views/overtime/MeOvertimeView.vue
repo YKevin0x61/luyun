@@ -16,11 +16,14 @@
  *   · 1 格 = 0.5 小时，单笔上限 ±12 小时；
  *   · 提交后是「待审批」，只有「已批准」那一行算数（票 02 才有人点头）。
  *
+ * 审批不在这一页：`/workbench/hr/overtime-review` 是唯一的审批台（2026-11-17 用户
+ * 裁定）。这一页只保留「登记」本身；有「人事管理」能力的店长仍可替别人代录，但
+ * 批准 / 驳回不在这里做。
+ *
  * 反馈走页内一句话（不是 toast），跟「今天」页那张申请卡一个写法。
  */
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import ConfirmDialog from '../../components/admin/ConfirmDialog.vue'
 import LuyunDatePicker from '../../components/ui/LuyunDatePicker.vue'
 import { useNudgePull } from '../../composables/useNudgePull'
 import { loginRedirectTarget } from '../../utils/loginNext'
@@ -30,13 +33,11 @@ import { formatDays } from '../../utils/attendanceSheet'
 import {
   HALF_HOURS_MAX,
   MAX_REASON,
-  MAX_REJECT_REASON,
   entryDayOptions,
   entryStatusText,
   entryStatusTone,
   formatHalfHours,
   stepHalfHours,
-  submittedByText,
 } from '../../utils/overtimeEntry'
 
 const router = useRouter()
@@ -71,40 +72,14 @@ const formError = ref('')
 const note = ref('')
 const cancelBusyId = ref(null)
 
-// 票 04：店长那一面（「人事管理」能力键 `schedule`）。`can_review` 由**服务端**算好带下来，
-// 页面不自己重写一遍 caps 判据 —— 权限判据只有一处，改口径时不会漏掉这一页。
+// 店长（「人事管理」能力键 `schedule`）可以替别人代录；审批不在这页 —— 唯一审批台
+// 是 `/workbench/hr/overtime-review`（2026-11-17 用户裁定）。`can_review` 仍由服务端
+// 算好带下来，页面不自己重写一遍 caps 判据。
 const canReview = ref(false)
-const pending = ref([])
-// 抵扣单跟加班登记同一个待办队列（ADR 0124）：店长一次看完、一次处理完。
-const pendingDeductions = ref([])
-const rejectingDeductionId = ref(null)
 const roster = ref([])
-const reviewError = ref('')
-const reviewBusyId = ref(null)
-const rejectingId = ref(null)
-const rejectReason = ref('')
-const maxRejectReason = ref(MAX_REJECT_REASON)
+const rosterError = ref('')
 // 代录：「替谁记」。空串 = 我自己（走员工那条路），否则是别人的员工号。
 const backfillFor = ref('')
-
-// 批准是这一页唯一「一键就生效」的写操作；店长走员工会话，没有作废入口
-// （作废只在管理端 `/api/overtime/admin/entries/{id}/void`）。误点不可逆，所以先问一句。
-// 驳回本身是两段式（必须先写理由），这里不再重复确认。
-const approveTarget = ref(null) // { kind: 'entry' | 'deduction', item }
-const approveCopy = computed(() => {
-  const target = approveTarget.value
-  if (!target) return { title: '', message: '' }
-  const who = target.item.employee_name ? `${target.item.employee_name} ` : ''
-  return target.kind === 'deduction'
-    ? {
-        title: '批准这张抵扣？',
-        message: `${who}这张抵扣批了就从存假里扣，你自己撤不回；要改只能找超管作废。`,
-      }
-    : {
-        title: '批准这一笔？',
-        message: `${who}这一笔批了就算数，你自己撤不回；要改只能找超管作废。`,
-      }
-})
 
 const dayOptions = computed(() =>
   entryDayOptions({ today: today.value, yesterday: yesterday.value })
@@ -161,13 +136,12 @@ async function load(quiet = false) {
     deductionCapacity.value = data.deduction_capacity || null
     maxReason.value = data.max_reason || MAX_REASON
     maxHalfHours.value = data.max_half_hours || HALF_HOURS_MAX
-    maxRejectReason.value = data.max_reject_reason || MAX_REJECT_REASON
     canReview.value = !!data.can_review
     if (!day.value) day.value = data.today
     state.value = 'ready'
-    // 店长那一面单独拉一次（他自己那份记录上面已经拿到了）：它读失败不该把整页
+    // 代录名单单独拉一次（他自己那份记录上面已经拿到了）：它读失败不该把整页
     // 打回错误态 —— 登记与「我的记录」照旧能用。
-    if (canReview.value) await loadReview()
+    if (canReview.value) await loadRoster()
   } catch (err) {
     if (err.status === 401) {
       // 会话没了：回员工登录，回来还是这一页（跟「今天」页同一个走法）。
@@ -287,51 +261,13 @@ async function cancelDeduction(deduction) {
   }
 }
 
-function startRejectDeduction(deduction) {
-  rejectingDeductionId.value = deduction.id
-  rejectReason.value = ''
-  reviewError.value = ''
-}
+// ── 店长代录：只拉员工名单（审批在「加班补钟审批」页） ────────────────────
 
-/** 店长批 / 驳一张抵扣单（`/review/deductions/{id}/{action}`）。 */
-async function decideDeduction(deduction, action, body = {}) {
-  if (reviewBusyId.value) return
-  reviewBusyId.value = deduction.id
-  reviewError.value = ''
-  note.value = ''
+/** 代录选人名单。只认「人事管理」能力（没给的人调它 403）。 */
+async function loadRoster() {
+  rosterError.value = ''
   try {
-    await staffRequest(`/api/overtime/review/deductions/${deduction.id}/${action}`, {
-      method: 'POST',
-      body,
-    })
-    note.value = action === 'approve' ? '抵扣批了，他手机上就能看到' : '抵扣驳回了，理由会给他看到'
-    rejectingDeductionId.value = null
-    rejectReason.value = ''
-    await load(true)
-  } catch (err) {
-    if (err.status === 401) {
-      const target = loginRedirectTarget(router.currentRoute.value)
-      if (target) router.replace(target)
-      return
-    }
-    reviewError.value = err.message || '没处理成'
-  } finally {
-    reviewBusyId.value = null
-  }
-}
-
-// ── 店长那一面（票 04）：待审批队列、批 / 驳、代录选人 ────────────────────────
-
-/** 拉待审批队列与选人名单。两者都只认「人事管理」能力（没给的人调它 403）。 */
-async function loadReview() {
-  reviewError.value = ''
-  try {
-    const [queue, people] = await Promise.all([
-      staffRequest('/api/overtime/review/pending'),
-      staffRequest('/api/overtime/review/employees'),
-    ])
-    pending.value = queue.entries || []
-    pendingDeductions.value = queue.deductions || []
+    const people = await staffRequest('/api/overtime/review/employees')
     roster.value = people.employees || []
   } catch (err) {
     if (err.status === 401) {
@@ -339,54 +275,8 @@ async function loadReview() {
       if (target) router.replace(target)
       return
     }
-    reviewError.value = err.message || '读不到等着批的登记'
+    rosterError.value = err.message || '读不到员工名单，只能记自己的'
   }
-}
-
-function startReject(entry) {
-  rejectingId.value = entry.id
-  rejectReason.value = ''
-  reviewError.value = ''
-}
-
-/** 批或驳一笔。`body` 只在驳回时带理由 —— 服务端强制它非空。 */
-async function decide(entry, action, body = {}) {
-  if (reviewBusyId.value) return
-  reviewBusyId.value = entry.id
-  reviewError.value = ''
-  note.value = ''
-  try {
-    await staffRequest(`/api/overtime/review/${entry.id}/${action}`, {
-      method: 'POST',
-      body,
-    })
-    note.value = action === 'approve' ? '批了，他手机上就能看到' : '驳回了，理由会给他看到'
-    rejectingId.value = null
-    rejectReason.value = ''
-    await load(true)
-  } catch (err) {
-    if (err.status === 401) {
-      const target = loginRedirectTarget(router.currentRoute.value)
-      if (target) router.replace(target)
-      return
-    }
-    reviewError.value = err.message || '没处理成'
-  } finally {
-    reviewBusyId.value = null
-  }
-}
-
-function askApprove(kind, item) {
-  if (reviewBusyId.value) return
-  approveTarget.value = { kind, item }
-}
-
-async function confirmApprove() {
-  const target = approveTarget.value
-  approveTarget.value = null
-  if (!target) return
-  if (target.kind === 'deduction') await decideDeduction(target.item, 'approve')
-  else await decide(target.item, 'approve')
 }
 
 onMounted(() => {
@@ -440,122 +330,13 @@ useNudgePull({ id: 'me-overtime', topics: ['overtime'], pull: () => load(true) }
         </dl>
       </section>
 
-      <!-- 店长那一面（票 04）：打开页面第一件事是「有什么等着我批」，所以它在登记
-           表单前面。没有这个能力的人根本看不到这一块（服务端 403 兜底）。 -->
-      <section v-if="canReview" class="panel oReview">
-        <div class="panel-hd">
-          <h2>等着我批的</h2>
-          <span class="hint">{{ pending.length }} 笔</span>
-        </div>
-        <p v-if="reviewError" class="oErr">{{ reviewError }}</p>
-        <ul v-if="pending.length" class="oList">
-          <li v-for="entry in pending" :key="entry.id" class="oItem">
-            <div class="oItem-top">
-              <span class="oDate">{{ entry.entry_date }}</span>
-              <span class="oPill wait">{{ entry.employee_name }}</span>
-            </div>
-            <p class="oItem-mid">
-              <b class="oH" :class="{ minus: entry.half_hours < 0 }">
-                {{ formatHalfHours(entry.half_hours) }}<i>小时</i>
-              </b>
-              <span class="oReason">{{ entry.reason }}</span>
-            </p>
-            <p class="oWho">{{ submittedByText(entry) }}</p>
-            <div class="oActs">
-              <button
-                class="btn oAct ok"
-                type="button"
-                :disabled="reviewBusyId === entry.id"
-                @click="askApprove('entry', entry)"
-              >
-                批准
-              </button>
-              <button
-                class="btn oAct bad"
-                type="button"
-                :disabled="reviewBusyId === entry.id"
-                @click="startReject(entry)"
-              >
-                驳回
-              </button>
-            </div>
-            <div v-if="rejectingId === entry.id" class="oReject">
-              <input
-                v-model="rejectReason"
-                class="input"
-                type="text"
-                :maxlength="maxRejectReason"
-                placeholder="为什么不算（必填，员工看得到）"
-              />
-              <button
-                class="btn oAct bad"
-                type="button"
-                :disabled="!rejectReason.trim() || reviewBusyId === entry.id"
-                @click="decide(entry, 'reject', { reason: rejectReason.trim() })"
-              >
-                确认驳回
-              </button>
-            </div>
-          </li>
-        </ul>
-        <ul v-if="pendingDeductions.length" class="oList">
-          <li v-for="item in pendingDeductions" :key="`d-${item.id}`" class="oItem">
-            <div class="oItem-top">
-              <span class="oDate">{{ item.month }}</span>
-              <span class="oPill wait">{{ item.employee_name }} · 抵扣</span>
-            </div>
-            <p class="oItem-mid">
-              <b class="oH">{{ item.days }}<i>天</i></b>
-              <span class="oReason">{{ deductionText(item) }}</span>
-            </p>
-            <div class="oActs">
-              <button
-                class="btn oAct ok"
-                type="button"
-                :disabled="reviewBusyId === item.id"
-                @click="askApprove('deduction', item)"
-              >
-                批准
-              </button>
-              <button
-                class="btn oAct bad"
-                type="button"
-                :disabled="reviewBusyId === item.id"
-                @click="startRejectDeduction(item)"
-              >
-                驳回
-              </button>
-            </div>
-            <div v-if="rejectingDeductionId === item.id" class="oReject">
-              <input
-                v-model="rejectReason"
-                class="input"
-                type="text"
-                :maxlength="maxRejectReason"
-                placeholder="为什么不算（必填，员工看得到）"
-              />
-              <button
-                class="btn oAct bad"
-                type="button"
-                :disabled="!rejectReason.trim() || reviewBusyId === item.id"
-                @click="decideDeduction(item, 'reject', { reason: rejectReason.trim() })"
-              >
-                确认驳回
-              </button>
-            </div>
-          </li>
-        </ul>
-        <p v-if="!pending.length && !pendingDeductions.length" class="mSub oEmpty">
-          没有等着你批的登记。
-        </p>
-      </section>
-
       <form class="panel oForm" @submit.prevent="submit">
         <div class="panel-hd">
           <h2>记一笔</h2>
           <span class="hint">{{ canReview ? '可补录过去' : '今天 · 昨天' }}</span>
         </div>
         <div class="oPad">
+          <p v-if="rosterError" class="oErr">{{ rosterError }}</p>
           <!-- 店长能补录任意过去日期，所以给他一个日期输入；员工只有今天 / 昨天两个
                选项，那两个按钮本身就是「窗口」的可视化。 -->
           <div v-if="canReview" class="row">
@@ -785,16 +566,6 @@ useNudgePull({ id: 'me-overtime', topics: ['overtime'], pull: () => load(true) }
       </section>
     </div>
 
-    <!-- 批准前确认（见 script 里的 approveTarget）：批了之后店长这里撤不回。 -->
-    <ConfirmDialog
-      v-if="approveTarget"
-      :title="approveCopy.title"
-      :message="approveCopy.message"
-      confirm-label="批准"
-      cancel-label="再看看"
-      @confirm="confirmApprove"
-      @cancel="approveTarget = null"
-    />
   </div>
 </template>
 
@@ -1108,7 +879,6 @@ useNudgePull({ id: 'me-overtime', topics: ['overtime'], pull: () => load(true) }
   color: var(--ink-dim);
   overflow-wrap: anywhere;
 }
-.oWho { margin: 4px 0 0; font-size: 10.5px; color: var(--ink-faint); }
 .oCancel {
   margin-top: 9px;
   min-height: 44px;
@@ -1130,32 +900,6 @@ useNudgePull({ id: 'me-overtime', topics: ['overtime'], pull: () => load(true) }
 /* 条目内的说明（驳回后的窗口提示）跟事由左对齐；`.mSub` 那份页级外边距在面板里会多缩进一道。 */
 .oItem .mSub { margin: 6px 0 0; }
 
-/* ── 店长那一面：批 / 驳 ──────────────────────────────────────────────── */
-.oActs { display: flex; gap: 8px; margin-top: 10px; }
-.oAct { flex: 1; }
-.overtime-page.hygiene-staff .oAct.ok {
-  color: var(--ok);
-  border-color: var(--ok);
-  background: transparent;
-}
-.overtime-page.hygiene-staff .oAct.ok:hover:not(:disabled) {
-  color: var(--ok);
-  border-color: var(--ok);
-  background: var(--ok-soft);
-}
-.overtime-page.hygiene-staff .oAct.bad {
-  color: var(--danger-bright);
-  border-color: var(--danger-bright);
-  background: transparent;
-}
-.overtime-page.hygiene-staff .oAct.bad:hover:not(:disabled) {
-  color: var(--danger-bright);
-  border-color: var(--danger-bright);
-  background: var(--danger-soft);
-}
-.oReject { display: flex; gap: 8px; align-items: center; margin-top: 9px; }
-.oReject .input { flex: 1; min-width: 0; }
-.oReject .oAct { flex: none; }
 
 /* 空态 / 加载 / 错误那一句话：原来这页没有 `.mSub` 样式，16px 黑字比标题还抢眼。 */
 .mSub {
