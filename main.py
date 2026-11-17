@@ -69,6 +69,7 @@ from api.security import (
 )
 from api.auth import router as auth_router
 from api.hygiene import router as hygiene_router
+from api.health_cert import router as health_cert_router
 from services import auth_service
 from services import backup_import_staging
 from services import backup_points, backup_retention, backup_service
@@ -1199,6 +1200,7 @@ PUBLIC_API_SURFACE: tuple[tuple[str, str], ...] = (
 # —— 公开面（清单见 PUBLIC_API_SURFACE）——
 app.include_router(auth_router)          # 登录 / 初始化
 app.include_router(hygiene_router)       # 员工端走 require_staff_session，管理端走 require_session
+app.include_router(health_cert_router)   # 健康证官方查询：管理端 require_session
 app.include_router(recipes_reader_router)  # 配方阅读面：任一身份（管理端或员工会话）
 app.include_router(prep_plan.reader_router)  # 备货计划读面：任一身份（票 08）
 # 备货复盘备注：任一身份能进门（员工要拿到 403，而不是 verify_admin_token 的 401），

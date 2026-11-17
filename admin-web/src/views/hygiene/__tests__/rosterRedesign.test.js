@@ -252,9 +252,10 @@ describe('花名册 · 编辑抽屉', () => {
     expect(labels).toEqual([
       // 「登录密码」是 2026-11-02 加的（只有重设入口，没有查看原文）。
       '姓名', '职位', '手机号', '登录密码', '注册时间', '身份证号', '健康证办理日期',
-      '底薪', '入职日期', '工龄奖', '卫生权限',
+      '底薪', '入职日期', '工龄奖', '管理权限',
     ])
-    expect(drawer.text()).toContain('管理权限')
+    // 王强是普通员工：具体权限整块不渲染（开了开关才出现，见 rosterAdminCaps.test.js）。
+    expect(drawer.text()).not.toContain('具体权限')
 
     // 手机号与注册时间是只读文本（不是 input）；中间插了「登录密码」那一格。
     expect(drawer.get('.roster-readonly.is-mono').text()).toBe('13800000003')

@@ -23,10 +23,15 @@ describe('花名册不再碰排班（2026-10 改版）', () => {
     expect(roster).not.toMatch(/loadSchedule|scheduleShifts|scheduleError|dutyToday/)
   })
 
-  it('只读花名册这一条读接口，一次（不再有 RTT 链）', () => {
-    const gets = roster.match(/api\.get\(/g) || []
-    expect(gets).toHaveLength(1)
-    expect(roster).toMatch(/api\.get\('\/api\/hygiene\/admin\/roster'\)/)
+  it('这一页的数据只读花名册这一条接口，一次（不再有 RTT 链）', () => {
+    // 页面数据只来自 roster：不再为了拼"档位 → 工作区"多打第二条业务接口。
+    // 2026-11 的「查官方健康证」打开面板时会读一次查询网址配置
+    // （/api/health-cert/settings）—— 那是面板自带的设置项，不是这一页的数据来源，
+    // 所以下面的白名单只有它；将来再多一条读接口必须显式改这里，别悄悄加。
+    const readPaths = [...roster.matchAll(/api\.get\('([^']+)'/g)].map((match) => match[1])
+    expect(readPaths.filter((path) => path === '/api/hygiene/admin/roster')).toHaveLength(1)
+    expect(readPaths.filter((path) => path !== '/api/hygiene/admin/roster'))
+      .toEqual(['/api/health-cert/settings'])
     // 返回里的 `zones` 不消费：接口保留该键由后端定，这一页不看它。
     expect(roster).not.toMatch(/\bzones\b/)
   })

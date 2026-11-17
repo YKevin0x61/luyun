@@ -13,7 +13,9 @@ import {
  * 三件事在这一组里压死：
  * 1. **可勾的只有员工端真有执行点的八项**；只读那七项**整块不渲染** —— 名字、说明、
  *    连 `title` 都不给（design §3.4）。页面不显示 ≠ 键可以抹掉，见第 4 条。
- * 2. **「卫生权限」不再是下拉**：它只是服务端派生的人话标签，页面也不再 PATCH `permission`。
+ * 2. **「管理权限」是开关**（2026-11-17 用户裁定）：关着时下面八项灰掉不可勾，关掉会
+ *    清空已勾的项；开关只活在草稿里，页面仍不 PATCH `permission`（服务端按 admin_caps 派生
+ *    「管理员 / 普通员工」这个标签）。
  * 3. **勾选不发请求**：点「保存」才发**一次** PATCH，`admin_caps` 是整组（归一化成契约顺序），
  *    并且必须把库里只读七项已有的值原样带回 —— 整组替换少带一个就是静默删权限。
  */
@@ -106,18 +108,54 @@ function saveButton(wrapper) {
 }
 
 describe('花名册 · 管理权限（抽屉）', () => {
-  it('可勾的只有员工端真正生效的八项；「卫生权限」只剩只读标签，没有下拉', async () => {
+  it('可勾的只有员工端真正生效的八项；「管理权限」是开关，普通员工时整块不显示', async () => {
     const wrapper = await mountRoster()
     await openDrawer(wrapper)
 
+    // 抽屉里一个 `<select>` 都没有：上面那个是开关，不是下拉。
+    expect(wrapper.findAll('select')).toHaveLength(0)
+    expect(wrapper.text()).toContain('管理权限')
+    expect(wrapper.text()).toContain('普通员工')
+    // 普通员工（admin_caps 为空）：具体权限整块不渲染（用户裁定：这里不用显示）。
+    expect(wrapper.findAll('.roster-caps')).toHaveLength(0)
+    expect(wrapper.text()).not.toContain('具体权限')
+
+    // 打开开关才轮到勾。
+    await wrapper.get('.roster-cap-toggle-input').setValue(true)
+    await flushPromises()
+    expect(wrapper.text()).toContain('管理员')
     expect(wrapper.findAll('.roster-cap').map((node) => node.text()))
       .toEqual(ADMIN_CAP_STAFF_DEFS.map((item) => item.label))
     expect(capBoxes(wrapper)).toHaveLength(8)
+    expect(capBoxes(wrapper).every((box) => box.element.disabled)).toBe(false)
+    // 只是打开开关、一项没勾：提示出来（这种草稿保存后仍是普通员工）。
+    expect(wrapper.text()).toContain('勾一项才算管理员')
 
-    // 抽屉里一个 `<select>` 都没有：卫生权限是派生标签，由服务端给值。
-    expect(wrapper.findAll('select')).toHaveLength(0)
-    expect(wrapper.text()).toContain('卫生权限')
+    wrapper.unmount()
+  })
+
+  it('关掉开关会把已勾的具体权限一起清空，保存后回到普通员工', async () => {
+    rows = [serverRow({ admin_caps: ['daily_review', 'fix'] })]
+    const wrapper = await mountRoster()
+    await openDrawer(wrapper)
+
+    expect(capBoxes(wrapper).filter((box) => box.element.checked)).toHaveLength(2)
+    expect(wrapper.text()).toContain('管理员')
+
+    await wrapper.get('.roster-cap-toggle-input').setValue(false)
+    await flushPromises()
+
+    // 关掉后具体权限整块消失；再打开回来，之前勾的两项已经清空。
+    expect(wrapper.findAll('.roster-caps')).toHaveLength(0)
     expect(wrapper.text()).toContain('普通员工')
+    await wrapper.get('.roster-cap-toggle-input').setValue(true)
+    await flushPromises()
+    expect(capBoxes(wrapper).filter((box) => box.element.checked)).toHaveLength(0)
+
+    await saveButton(wrapper).trigger('click')
+    await flushPromises()
+    expect(patchCalls).toHaveLength(1)
+    expect(patchCalls[0].body.admin_caps).toEqual([])
 
     wrapper.unmount()
   })
@@ -125,6 +163,9 @@ describe('花名册 · 管理权限（抽屉）', () => {
   it('只读七项整块不渲染：名字、说明、连 title 都不出现', async () => {
     const wrapper = await mountRoster()
     await openDrawer(wrapper)
+    // 普通员工时具体权限整块不显示，先开成管理员再看渲染出来的内容。
+    await wrapper.get('.roster-cap-toggle-input').setValue(true)
+    await flushPromises()
 
     // 只看「管理权限」那一块（整页里「花名册」这四个字到处都是 —— 页面标题、分组名、
     // 页头的落点都是它，拿整页 HTML 判那个名字必然误红）。
@@ -141,6 +182,9 @@ describe('花名册 · 管理权限（抽屉）', () => {
   it('三个勾一次改完只在本地，点「保存」才发一次 PATCH（整组、按契约顺序、不含 permission）', async () => {
     const wrapper = await mountRoster()
     await openDrawer(wrapper)
+    // 普通员工默认勾不动，先把自己开成管理员。
+    await wrapper.get('.roster-cap-toggle-input').setValue(true)
+    await flushPromises()
     const boxes = capBoxes(wrapper)
 
     // 故意与契约顺序反着勾：先「整改单」（第 3 项）再「日常验收」（第 1 项）。
@@ -191,6 +235,8 @@ describe('花名册 · 管理权限（抽屉）', () => {
   it('保存中开关禁用，成功后草稿同步成服务端返回值，并给一次 role="status" 的反馈', async () => {
     const wrapper = await mountRoster()
     await openDrawer(wrapper)
+    await wrapper.get('.roster-cap-toggle-input').setValue(true)
+    await flushPromises()
     await capBoxes(wrapper)[2].setValue(true)
     await flushPromises()
 

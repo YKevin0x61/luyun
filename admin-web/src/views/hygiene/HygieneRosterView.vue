@@ -217,7 +217,13 @@ function onKeydown(event) {
   // 确认框自己处理 Esc（捕获阶段就吞掉了事件）；这里再兜一道：聚焦在确认框上时
   // 抽屉不该被同一次 Esc 关掉（那两个动作是两回事）。
   if (discardOpen.value || resignOpen.value || cancelResignOpen.value) return
-  if (event.key !== 'Escape' || !drawerRow.value) return
+  if (event.key !== 'Escape') return
+  // 查证面板叠在抽屉上面，Esc 先关它 —— 否则同一次按键会把底下还开着的抽屉一起关掉。
+  if (certOpen.value) {
+    closeCertPanel()
+    return
+  }
+  if (!drawerRow.value) return
   requestClose()
 }
 
@@ -254,7 +260,24 @@ function draftFrom(row) {
         ? ''
         : String(row.seniority_bonus),
     admin_caps: normalizeCaps(row.admin_caps),
+    // 「管理权限」开关：库里的 `permission` 由 admin_caps 派生（有任一项即管理员），
+    // 所以开关不是独立字段 —— 开着就等于「至少勾了一项」。它只活在草稿里，保存后由
+    // draftFrom(fresh) 重新算回来；点了保存却一项没勾，等于没开。
+    admin_enabled: normalizeCaps(row.admin_caps).length > 0,
   }
+}
+
+/** 开关打开但一项没勾时的提示：这种草稿保存后仍是普通员工，得先说清。 */
+const adminCapsHint = computed(() => {
+  if (!draft.value || !draft.value.admin_enabled) return ''
+  return normalizeCaps(draft.value.admin_caps).length ? '' : '勾一项才算管理员'
+})
+
+/** 开关：关掉就把已勾的具体权限一起清空 —— 普通员工不该留着管理权限。 */
+function toggleAdminEnabled(on) {
+  if (!draft.value || busy.value) return
+  draft.value.admin_enabled = Boolean(on)
+  if (!on) draft.value.admin_caps = []
 }
 
 function salaryValue(raw) {
@@ -333,6 +356,144 @@ const expiresText = computed(
   () => (drawerRow.value && drawerRow.value.health_cert_expires_on) || '未办理',
 )
 
+// ── 健康证官方查询（2026-11-17）──────────────────────────────────────────────
+// 官方平台（北狐）按「姓名 + 身份证」查真证，返回体检日期与有效期。这里只做三件事：
+// 查询、把结果里的办理日期写进档案（**独立的一次 PATCH**，只发 health_cert_date）、
+// 改查询网址。不并入抽屉的保存：抽屉里可能还有没保存的其它改动，一并提交会超出
+// 这一次动作的范围。
+const certOpen = ref(false)
+const certQuery = ref({ name: '', id_card: '' })
+const certBusy = ref(false)
+const certError = ref('')
+const certResult = ref(null)
+const certSaving = ref('')
+const certWrittenIds = ref([])
+const certSettings = ref({ url: '', default_url: '', is_default: true })
+const certSettingsOpen = ref(false)
+const certSettingsDraft = ref('')
+const certSettingsBusy = ref(false)
+const certSettingsError = ref('')
+
+function openCertPanel() {
+  const row = drawerRow.value
+  if (!row || !draft.value) return
+  certQuery.value = {
+    name: draft.value.name || row.name || '',
+    id_card: draft.value.id_card_no || row.id_card_no || '',
+  }
+  certError.value = ''
+  certResult.value = null
+  certWrittenIds.value = []
+  certOpen.value = true
+  loadCertSettings()
+}
+
+function closeCertPanel() {
+  certOpen.value = false
+  certBusy.value = false
+  certSaving.value = ''
+  certSettingsOpen.value = false
+}
+
+async function loadCertSettings() {
+  try {
+    const data = await api.get('/api/health-cert/settings')
+    certSettings.value = data
+    certSettingsDraft.value = data.url || ''
+  } catch (err) {
+    // 设置读不出来不影响查询（后端用的是库里的值），只在设置区报一句。
+    certSettingsError.value = err.message || '查询网址读取失败'
+  }
+}
+
+/** 官方返回的证 → 页面上的状态徽标（与花名册同一个派生口径，见服务端）。 */
+function certStateChip(item) {
+  if (item.state === 'expired') return { text: '已过期', kind: 'is-danger' }
+  if (item.state === 'soon') return { text: `${item.days_left} 天后到期`, kind: 'is-warn' }
+  if (item.state === 'ok') return { text: `有效 · ${item.days_left} 天后到期`, kind: '' }
+  return { text: '无有效期', kind: '' }
+}
+
+async function runCertLookup() {
+  const name = certQuery.value.name.trim()
+  const idCard = certQuery.value.id_card.trim()
+  if (!name || !idCard) return
+  certBusy.value = true
+  certError.value = ''
+  certResult.value = null
+  certWrittenIds.value = []
+  try {
+    certResult.value = await api.post('/api/health-cert/lookup', { name, id_card: idCard })
+  } catch (err) {
+    certError.value = err.message || '查询失败，请稍后重试'
+  } finally {
+    certBusy.value = false
+  }
+}
+
+async function writeCertToRoster(item) {
+  const row = drawerRow.value
+  if (!row || !draft.value || !item.suggested_cert_date) return
+  certSaving.value = item.cert_id
+  certError.value = ''
+  try {
+    await api.patch(`/api/hygiene/admin/roster/${row.id}`, {
+      health_cert_date: item.suggested_cert_date,
+    })
+    draft.value.health_cert_date = item.suggested_cert_date
+    row.health_cert_date = item.suggested_cert_date
+    if (!certWrittenIds.value.includes(item.cert_id)) certWrittenIds.value.push(item.cert_id)
+    flash(`已写入档案：办理日期 ${item.suggested_cert_date}`)
+    await loadRoster({ quiet: true })
+    syncDrawerDerived()
+  } catch (err) {
+    certError.value = err.message || '写入档案失败'
+  } finally {
+    certSaving.value = ''
+  }
+}
+
+/** 列表重取后把派生字段同步回抽屉里那一行（抽屉拿着的是旧对象）。 */
+function syncDrawerDerived() {
+  const row = drawerRow.value
+  if (!row) return
+  const fresh = employees.value.find((item) => item.id === row.id)
+  if (!fresh) return
+  row.health_cert_date = fresh.health_cert_date
+  row.health_cert_expires_on = fresh.health_cert_expires_on
+  row.health_cert_state = fresh.health_cert_state
+  row.profile_incomplete = fresh.profile_incomplete
+}
+
+function toggleCertSettings() {
+  certSettingsOpen.value = !certSettingsOpen.value
+  certSettingsError.value = ''
+  if (certSettingsOpen.value) certSettingsDraft.value = certSettings.value.url || ''
+}
+
+async function saveCertSettings() {
+  certSettingsBusy.value = true
+  certSettingsError.value = ''
+  try {
+    const saved = await api.put('/api/health-cert/settings', {
+      url: certSettingsDraft.value.trim(),
+    })
+    certSettings.value = { ...certSettings.value, ...saved }
+    certSettingsDraft.value = saved.url
+    certSettingsOpen.value = false
+    flash('查询网址已更新')
+  } catch (err) {
+    certSettingsError.value = err.message || '查询网址保存失败'
+  } finally {
+    certSettingsBusy.value = false
+  }
+}
+
+async function resetCertSettings() {
+  certSettingsDraft.value = certSettings.value.default_url || ''
+  await saveCertSettings()
+}
+
 function openDrawer(row) {
   drawerRow.value = row
   draft.value = draftFrom(row)
@@ -346,6 +507,7 @@ function closeDrawer() {
   drawerError.value = ''
   discardOpen.value = false
   closeResetPassword()
+  closeCertPanel()
 }
 
 function requestClose() {
@@ -873,6 +1035,15 @@ async function copyInvite() {
                 aria-label="健康证办理日期"
               />
               <span class="roster-expiry">有效期至 {{ expiresText }}</span>
+              <!-- 官方平台（北狐）按「姓名 + 身份证」查得到证上的体检日期与有效期
+                   （2026-11-17）。入口只放抽屉里：列表行整行就是一个 button，再嵌一个
+                   按钮既不合规，也会让「点这一行」到底开抽屉还是要查证变得模棱两可。 -->
+              <button
+                type="button"
+                class="btn btn-sm roster-cert-entry"
+                :disabled="busy"
+                @click.prevent.stop="openCertPanel"
+              >查官方健康证</button>
             </label>
 
             <label title="不发给员工端，只在管理端显示">
@@ -928,13 +1099,28 @@ async function copyInvite() {
               </span>
             </label>
 
-            <label title="由管理权限派生，不能直接改">
-              <span class="roster-field-head"><span>卫生权限</span></span>
-              <span class="roster-readonly">{{ hygienePermissionLabel(drawerRow.permission) }}</span>
+            <label title="开了才是管理员；管理员才能勾下面的具体权限，关掉会连同已勾的一起清空">
+              <span class="roster-field-head">
+                <span>管理权限</span>
+                <span v-if="adminCapsHint" class="roster-field-note">{{ adminCapsHint }}</span>
+              </span>
+              <span class="roster-cap-toggle" :class="{ 'is-on': draft.admin_enabled }">
+                <input
+                  type="checkbox"
+                  role="switch"
+                  class="roster-cap-toggle-input"
+                  :aria-checked="draft.admin_enabled ? 'true' : 'false'"
+                  :checked="Boolean(draft.admin_enabled)"
+                  :disabled="busy"
+                  @change="toggleAdminEnabled($event.target.checked)"
+                >
+                <span class="roster-cap-toggle-track" aria-hidden="true"></span>
+                <span class="roster-cap-toggle-text">{{ draft.admin_enabled ? '管理员' : '普通员工' }}</span>
+              </span>
             </label>
 
-            <fieldset class="roster-caps">
-              <legend class="roster-caps-title">管理权限</legend>
+            <fieldset v-if="draft.admin_enabled" class="roster-caps">
+              <legend class="roster-caps-title">具体权限</legend>
               <div class="roster-caps-grid">
                 <label
                   v-for="cap in ADMIN_CAP_STAFF_DEFS"
@@ -996,6 +1182,124 @@ async function copyInvite() {
     </div>
 
     <!-- 邀请店员弹层：二维码搬进这里（页面上不再有独立的入口卡片）。 -->
+    <!-- 查官方健康证（2026-11-17）：官方平台按「姓名 + 身份证」查真证。这里**不自动写库** ——
+         查到先看，点「写入档案」才把办理日期 PATCH 进这一行；写库走独立的一次请求，只发
+         health_cert_date 一个键，不复用抽屉的保存（抽屉里可能还有别的没保存的改动）。 -->
+    <div v-if="certOpen" class="modal-overlay roster-cert-overlay" @click.self="closeCertPanel">
+      <div class="modal-box roster-cert-box" role="dialog" aria-modal="true" aria-labelledby="roster-cert-title">
+        <div class="modal-header">
+          <h3 id="roster-cert-title">查官方健康证</h3>
+          <button type="button" class="btn btn-sm" @click="closeCertPanel">关闭</button>
+        </div>
+
+        <div class="roster-cert-form">
+          <label class="roster-field">
+            <span>姓名</span>
+            <input
+              v-model="certQuery.name"
+              class="input"
+              type="text"
+              maxlength="40"
+              autocomplete="off"
+              placeholder="证件上的姓名"
+              :disabled="certBusy"
+            >
+          </label>
+          <label class="roster-field">
+            <span>身份证号</span>
+            <input
+              v-model="certQuery.id_card"
+              class="input is-mono"
+              type="text"
+              maxlength="18"
+              autocomplete="off"
+              placeholder="18 位身份证号"
+              :disabled="certBusy"
+            >
+          </label>
+          <p class="editor-note">
+            官方平台要求姓名与身份证号同证件完全一致；查不到时平台不区分「没办证」和「号码不对」。
+          </p>
+          <button
+            type="button"
+            class="btn btn-primary roster-cert-query"
+            :disabled="certBusy || !certQuery.name.trim() || !certQuery.id_card.trim()"
+            @click="runCertLookup"
+          >{{ certBusy ? '查询中…' : '查询' }}</button>
+        </div>
+
+        <p v-if="certError" class="roster-error" role="alert">{{ certError }}</p>
+
+        <div v-if="certResult" class="roster-cert-result">
+          <!-- 这句话必须写在一行：模板里的换行会渲染成一个空格，中文里会多出「， 建议」。 -->
+          <p v-if="!certResult.found" class="roster-cert-empty" role="status">官方查无数据。可能还没办证，也可能姓名或身份证号与证件对不上 —— 平台不区分这两种，建议先核对档案里的身份证号。</p>
+          <template v-else>
+            <p class="roster-cert-count">查到 {{ certResult.items.length }} 条</p>
+            <article v-for="item in certResult.items" :key="item.cert_id" class="roster-cert-card">
+              <div class="roster-cert-card-head">
+                <strong>{{ item.name || certQuery.name }}</strong>
+                <span class="roster-chip" :class="certStateChip(item).kind">{{ certStateChip(item).text }}</span>
+              </div>
+              <dl class="roster-cert-facts">
+                <div><dt>体检日期</dt><dd>{{ item.exam_date || '—' }}</dd></div>
+                <div><dt>有效期至</dt><dd>{{ item.expires_on || '—' }}</dd></div>
+                <div v-if="item.exam_unit"><dt>体检单位</dt><dd>{{ item.exam_unit }}</dd></div>
+                <div v-if="item.reg_no"><dt>证号</dt><dd class="is-mono">{{ item.reg_no }}</dd></div>
+              </dl>
+              <p v-if="item.suggested_cert_date" class="roster-cert-hint">按这张证，档案里的办理日期应是 <b>{{ item.suggested_cert_date }}</b><span v-if="item.suggested_source === 'expires_on'">（由有效期反推）</span><span v-else>（证件上的体检日期）</span></p>
+              <div class="roster-cert-actions">
+                <a
+                  v-if="item.cert_url"
+                  class="btn btn-sm"
+                  :href="item.cert_url"
+                  target="_blank"
+                  rel="noopener"
+                >查看电子证</a>
+                <button
+                  type="button"
+                  class="btn btn-sm"
+                  :class="{ 'btn-primary': !certWrittenIds.includes(item.cert_id) }"
+                  :disabled="certSaving === item.cert_id || certWrittenIds.includes(item.cert_id) || !item.suggested_cert_date"
+                  @click="writeCertToRoster(item)"
+                >{{ certWrittenIds.includes(item.cert_id) ? '已写入档案' : (certSaving === item.cert_id ? '写入中…' : '写入档案') }}</button>
+              </div>
+            </article>
+          </template>
+        </div>
+
+        <div class="roster-cert-settings">
+          <button type="button" class="roster-cert-settings-toggle" @click="toggleCertSettings">
+            查询网址{{ certSettings.is_default ? '（默认）' : '' }} · {{ certSettingsOpen ? '收起' : '修改' }}
+          </button>
+          <div v-if="certSettingsOpen" class="roster-cert-settings-body">
+            <input
+              v-model="certSettingsDraft"
+              class="input is-mono"
+              type="url"
+              inputmode="url"
+              placeholder="https://域名/app/机构编号/his/…"
+              :disabled="certSettingsBusy"
+            >
+            <p class="editor-note">
+              平台换链接时改这一条；机构编号从地址里的 /app/…/ 自动识别，不用单独填。
+            </p>
+            <p v-if="certSettingsError" class="roster-error" role="alert">{{ certSettingsError }}</p>
+            <div class="roster-cert-settings-actions">
+              <button type="button" class="btn btn-sm btn-primary" :disabled="certSettingsBusy" @click="saveCertSettings">
+                {{ certSettingsBusy ? '保存中…' : '保存' }}
+              </button>
+              <button
+                type="button"
+                class="btn btn-sm"
+                :disabled="certSettingsBusy || certSettings.is_default"
+                @click="resetCertSettings"
+              >恢复默认</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <div v-if="inviteOpen" class="modal-overlay roster-invite-overlay" @click.self="closeInvite">
       <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="roster-invite-title">
         <div class="modal-header">
@@ -1387,6 +1691,57 @@ async function copyInvite() {
 .roster-page .roster-field-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: .35rem; }
 .roster-page .roster-field-note { color: var(--warn); font-size: .72rem; font-weight: 600; }
 .roster-page .roster-expiry { font-size: .72rem; font-weight: 500; color: var(--ink-faint); }
+/* 「查官方健康证」入口（2026-11-17）。官方平台按姓名 + 身份证查真证，查到后由人点「写入档案」，
+   不自动改库。按钮留在 label 内、自己左对齐 —— 它是这一格的一部分，不是独立字段。 */
+.roster-page .roster-cert-entry { align-self: flex-start; margin-top: .15rem; }
+/* 面板从抽屉里点出来，抽屉还开着 —— 与登记离职/重设密码同一档，不抬就会被抽屉吃掉点击。 */
+.roster-page > .roster-cert-overlay { z-index: calc(var(--z-queue) + 1); }
+.roster-page .roster-cert-form { display: flex; flex-direction: column; gap: .55rem; margin-bottom: .5rem; }
+.roster-page .roster-cert-form .roster-field { margin-bottom: 0; }
+.roster-page .roster-cert-form .editor-note { margin: 0; }
+.roster-page .roster-cert-query { align-self: flex-start; }
+.roster-page .roster-cert-result { display: flex; flex-direction: column; gap: .55rem; margin: .2rem 0 .7rem; }
+.roster-page .roster-cert-count { margin: 0; font-size: .76rem; color: var(--ink-dim); }
+.roster-page .roster-cert-empty {
+  margin: 0; padding: .6rem .7rem;
+  border: 1px dashed var(--line-strong); border-radius: var(--r-1);
+  font-size: .78rem; line-height: 1.6; color: var(--ink-dim);
+}
+.roster-page .roster-cert-card {
+  display: flex; flex-direction: column; gap: .45rem;
+  padding: .6rem .7rem;
+  border: 1px solid var(--line); border-radius: var(--r-1); background: var(--surface-2);
+}
+.roster-page .roster-cert-card-head { display: flex; flex-wrap: wrap; align-items: center; gap: .45rem; font-size: .84rem; }
+.roster-page .roster-cert-facts {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
+  gap: .35rem .8rem; margin: 0;
+}
+.roster-page .roster-cert-facts > div { display: flex; flex-direction: column; gap: .1rem; min-width: 0; }
+.roster-page .roster-cert-facts dt { font-size: .7rem; color: var(--ink-faint); }
+.roster-page .roster-cert-facts dd { margin: 0; font-size: .8rem; color: var(--ink); overflow-wrap: anywhere; }
+.roster-page .roster-cert-hint { margin: 0; font-size: .74rem; line-height: 1.55; color: var(--ink-dim); }
+.roster-page .roster-cert-actions { display: flex; flex-wrap: wrap; gap: .4rem; }
+.roster-page .roster-cert-settings { border-top: 1px solid var(--line); padding-top: .55rem; }
+.roster-page .roster-cert-settings-toggle {
+  padding: 0; border: 0; background: none;
+  font-size: .74rem; color: var(--ink-dim); text-align: left;
+  text-decoration: underline; cursor: pointer;
+}
+.roster-page .roster-cert-settings-body { display: flex; flex-direction: column; gap: .45rem; margin-top: .55rem; }
+.roster-page .roster-cert-settings-body .editor-note { margin: 0; }
+.roster-page .roster-cert-settings-actions { display: flex; flex-wrap: wrap; gap: .4rem; }
+/* 面板里的状态徽标：`.roster-chip` 的样式只写在 `.roster-row` 下面（列表行专用），
+   这里补一条同样的外观，免得面板里的徽标退化成裸文字。 */
+.roster-page .roster-cert-box .roster-chip {
+  display: inline-flex; align-items: center;
+  padding: .15rem .5rem;
+  border: 1px solid var(--line); border-radius: var(--r-full);
+  background: var(--surface-1); color: var(--ink-dim);
+  font-size: .7rem; line-height: 1.5; overflow-wrap: anywhere;
+}
+.roster-page .roster-cert-box .roster-chip.is-warn { background: var(--warn-soft); border-color: var(--wb-warn-a45); color: var(--warn); }
+.roster-page .roster-cert-box .roster-chip.is-danger { background: var(--danger-soft); border-color: var(--wb-danger-a45); color: var(--danger-bright); }
 .roster-page .roster-input-suffix { display: flex; align-items: center; gap: .4rem; }
 .roster-page .roster-input-suffix .input { flex: 1 1 auto; min-width: 0; }
 .roster-page .roster-suffix { flex: 0 0 auto; font-size: .76rem; font-weight: 500; color: var(--ink-dim); }
@@ -1399,6 +1754,20 @@ async function copyInvite() {
 }
 .roster-page .roster-cap input { flex: 0 0 auto; width: 16px; height: 16px; margin: 0; accent-color: var(--action); }
 .roster-page .roster-cap span { min-width: 0; }
+/* 管理权限开关：滑轨 + 圆点。原生 checkbox 透明铺满整条 —— 键盘、读屏、触控都还靠它，
+   44px 的触控下限也由它撑着（designGuard 只拦 min-height < 44 的控件）。 */
+.roster-page .roster-cap-toggle { position: relative; display: inline-flex; align-items: center; gap: .6rem; min-height: 44px; padding: .3rem .8rem .3rem .4rem; border: 1px solid var(--line); border-radius: .5rem; background: var(--surface-2); }
+.roster-page .roster-cap-toggle-input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; }
+.roster-page .roster-cap-toggle-input:disabled { cursor: not-allowed; }
+/* 滑轨与文字不接点击：整条都交给那层透明 input，鼠标、自动化、读屏走同一条路。 */
+.roster-page .roster-cap-toggle-track,
+.roster-page .roster-cap-toggle-text { pointer-events: none; }
+.roster-page .roster-cap-toggle-track { position: relative; flex: 0 0 auto; width: 42px; height: 24px; border-radius: 999px; background: var(--line-strong); transition: background .16s ease; }
+.roster-page .roster-cap-toggle-track::after { content: ''; position: absolute; top: 3px; left: 3px; width: 18px; height: 18px; border-radius: 50%; background: var(--action-ink); box-shadow: 0 1px 2px var(--wb-ink-a45); transition: transform .16s ease; }
+.roster-page .roster-cap-toggle.is-on .roster-cap-toggle-track { background: var(--action); }
+.roster-page .roster-cap-toggle.is-on .roster-cap-toggle-track::after { transform: translateX(18px); }
+.roster-page .roster-cap-toggle-input:focus-visible ~ .roster-cap-toggle-track { outline: 2px solid var(--action); outline-offset: 2px; }
+.roster-page .roster-cap-toggle-text { font-weight: 600; }
 .roster-page .roster-cap input:disabled { cursor: not-allowed; }
 .roster-page .roster-cap:has(input:disabled) { cursor: not-allowed; color: var(--ink-faint); }
 
