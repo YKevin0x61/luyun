@@ -20,15 +20,19 @@ from typing import Optional
 from services.business_day import workbench_date_of
 from services.identity.accounts import (  # noqa: F401  转发给卫生端既有调用方
     ALLOWED_PERMISSIONS,
+    FOREVER_EXPIRES_AT,
     FORBIDDEN_SUPER_PERMISSION,
     LAST_SEEN_REFRESH_SECONDS,
     MAX_NAME_LENGTH,
+    PERSISTENT_SESSION_COOKIE_SECONDS,
     PERMISSION_ADMIN,
     PERMISSION_STAFF,
     EmployeeAccountsError,
     EmployeeAccounts as _EmployeeIdentity,
     hash_session_id,
+    is_forever_expiry,
     normalize_phone,
+    remember_session_forever,
     serialized_write,
 )
 from services.identity.duty import DutyRoster
@@ -241,9 +245,11 @@ EmployeeAccounts = HygieneEmployeeAccounts
 __all__ = [
     "ALLOWED_PERMISSIONS",
     "ALLOWED_SHIFTS",
+    "FOREVER_EXPIRES_AT",
     "FORBIDDEN_SUPER_PERMISSION",
     "LAST_SEEN_REFRESH_SECONDS",
     "MAX_NAME_LENGTH",
+    "PERSISTENT_SESSION_COOKIE_SECONDS",
     "PERMISSION_ADMIN",
     "PERMISSION_STAFF",
     "EmployeeAccounts",
@@ -253,6 +259,8 @@ __all__ = [
     "SHIFT_NIGHT",
     "hash_session_id",
     "hygiene_business_date",
+    "is_forever_expiry",
     "normalize_phone",
+    "remember_session_forever",
     "serialized_write",
 ]
