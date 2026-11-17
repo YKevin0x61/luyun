@@ -372,7 +372,7 @@ class IntegerQtyTests(PrepPlanRebuildFixture):
         self.assertEqual(entry["final_qty"], 34)
         self.assertEqual(entry["suggested_qty"], int(entry["suggested_qty"]))
 
-    async def test_bought_item_keeps_its_decimal(self):
+    async def test_bought_item_gets_a_whole_number(self):
         await self._seed_item(item_name="河粉", unit="斤", kind="bought")
         await self._seed_rule(semi_name="河粉", unit="斤", factor=0.335)
         await self._seed_stationary(morning=100, evening=0)
@@ -380,7 +380,8 @@ class IntegerQtyTests(PrepPlanRebuildFixture):
         payload = await self.service.get_today(self.db, now=TODAY_MORNING)
         entry = self._entry(payload, item_name="河粉")
 
-        self.assertEqual(entry["suggested_qty"], 33.5)
+        self.assertEqual(entry["suggested_qty"], 34)
+        self.assertEqual(entry["suggested_qty"], int(entry["suggested_qty"]))
 
     async def test_manual_qty_is_rounded_up_for_made_items(self):
         await self._seed_item()
@@ -394,7 +395,7 @@ class IntegerQtyTests(PrepPlanRebuildFixture):
         again = await self.service.get_today(self.db, now=TODAY_MORNING)
         self.assertEqual(self._entry(again)["final_qty"], 3)
 
-    async def test_manual_qty_keeps_the_decimal_for_bought_items(self):
+    async def test_manual_qty_is_rounded_up_for_bought_items(self):
         await self._seed_item(item_name="河粉", unit="斤", kind="bought")
         await self._seed_rule(semi_name="河粉", unit="斤")
         await self._seed_stationary()
@@ -404,7 +405,7 @@ class IntegerQtyTests(PrepPlanRebuildFixture):
         await self.service.update_entry(self.db, entry["id"], final_qty=2.4)
 
         again = await self.service.get_today(self.db, now=TODAY_MORNING)
-        self.assertEqual(self._entry(again, item_name="河粉")["final_qty"], 2.4)
+        self.assertEqual(self._entry(again, item_name="河粉")["final_qty"], 3)
 
 
 class IdentityMatchTests(PrepPlanRebuildFixture):

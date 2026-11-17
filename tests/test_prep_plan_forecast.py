@@ -184,14 +184,18 @@ class QuantileTests(unittest.TestCase):
 
 
 class FitQtyTests(unittest.TestCase):
-    def test_made_rounds_up_and_bought_keeps_one_decimal(self):
+    def test_all_kinds_round_up_to_integer(self):
         self.assertEqual(fit_qty(2.0, "made"), 2.0)
         self.assertEqual(fit_qty(2.2, "made"), 3.0)
         # 浮点误差不该把 2.0000000000000004 顶成 3
         self.assertEqual(fit_qty(2.0000000000000004, "made"), 2.0)
         self.assertEqual(fit_qty(0.0, "made"), 0.0)
-        self.assertEqual(fit_qty(1.26, "bought"), 1.3)
-        self.assertEqual(fit_qty(1.234, "bought"), 1.2)
+        # 原料也取整：7.1 与 7.9 都进到 8，7.0 保持 7
+        self.assertEqual(fit_qty(7.1, "bought"), 8.0)
+        self.assertEqual(fit_qty(7.9, "bought"), 8.0)
+        self.assertEqual(fit_qty(7.0, "bought"), 7.0)
+        self.assertEqual(fit_qty(1.26, "bought"), 2.0)
+        self.assertEqual(fit_qty(1.234, "bought"), 2.0)
 
 
 class HorizonResolverTests(unittest.TestCase):
