@@ -140,10 +140,15 @@ describe('判据收敛：两个页面只按开关判，不按 permission 档位'
     expect(src).toMatch(/hasCap\(caps\.value, 'fix'\)/)
   })
 
-  it('花名册只把 permission 当**只读**人话标签显示（2026-10 改版：下拉与 PATCH 都撤了）', () => {
+  it('花名册的「管理权限」是开关，permission 仍不由页面写（2026-11-17 用户裁定）', () => {
     const src = readView('HygieneRosterView')
-    // 标签值仍来自服务端派生，页面只显示、不编辑。
-    expect(src).toMatch(/hygienePermissionLabel\(drawerRow\.permission\)/)
+    // 开关只活在草稿里：开着显示「管理员」、关着显示「普通员工」；真正落库的仍只有 admin_caps，
+    // 服务端据它派生 permission 那个标签。
+    expect(src).toMatch(/draft\.admin_enabled \? '管理员' : '普通员工'/)
+    // 关掉开关会把具体权限一起清空；普通员工时「具体权限」整块不渲染（用户裁定：不用显示）。
+    expect(src).toMatch(/if \(!on\) draft\.value\.admin_caps = \[\]/)
+    expect(src).toMatch(/v-if="draft\.admin_enabled" class="roster-caps"/)
+    expect(src).not.toMatch(/!draft\.admin_enabled"/)
     expect(src).not.toMatch(/v-model="drafts\[row\.id\]\.permission"/)
     expect(src).not.toMatch(/permission: draft\.permission/)
     // 抽屉里没有任何下拉（「卫生权限」原来是唯一一个 `<select>`）。
