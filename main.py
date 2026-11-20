@@ -73,6 +73,7 @@ from api.health_cert import router as health_cert_router
 from services import auth_service
 from services import backup_import_staging
 from services import backup_points, backup_retention, backup_service
+from services.export_jobs import export_jobs
 from scraper.restaurant_scraper import create_restaurant_scraper
 from services import credentials_store
 from services.dish_catalog import DishCatalog
@@ -386,6 +387,12 @@ async def lifespan(app: FastAPI):
         # SEC-08 / T2-V2：上次进程被强杀留下的恢复/导出 dump 在这里清掉（尽力而为，
         # 失败只记日志；放在任何常驻业务循环之前，清完再对外服务）。
         _sweep_stale_restore_dumps_at_startup()
+        # 导出任务产物在 DATABASE_DIR/export-tmp：上次进程被强杀留下的目录按 TTL
+        # 在这里清掉（失败只记日志，不挡住启动；不新增常驻循环）。
+        try:
+            export_jobs.sweep_orphans()
+        except Exception as exc:  # noqa: BLE001 —— 清理失败不该让服务起不来
+            logger.warning("清理导出临时目录失败（不影响启动）: %s", exc)
         app.startup_time = datetime.now(CHINA_TZ)
 
         # 捕获运行中的事件循环引用，供 InMemoryLogHandler.emit()（同步、可能

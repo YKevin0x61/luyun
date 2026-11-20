@@ -26,6 +26,7 @@ from api.security import require_session, verify_admin_token
 from config import settings
 from database import DatabaseManager, get_db
 from services import backup_points, backup_retention, backup_service
+from services.export_jobs import export_jobs
 from tests.backup_fixtures import legacy_sqlite_backup, seed_hygiene_photo_refs
 
 
@@ -92,7 +93,7 @@ class _ApiTestBase(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         await self.client.aclose()
         # 导出任务表是模块级状态：不清掉，下一条用例会被「已有一个导出任务在跑」挡住
-        backup_api._EXPORT_JOBS.clear()
+        export_jobs.reset()
         await self.db.close()
         self._credentials_store._cache = self._saved_creds
         backup_retention.cache_set(self._saved_retention)

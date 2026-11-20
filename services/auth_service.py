@@ -189,7 +189,7 @@ async def create_session(remember: bool = False) -> Tuple[str, str]:
 async def _touch_session(session_id: str, now_iso: str) -> None:
     """刷新 `last_seen_at`（只在节流窗口过后调用）。
 
-    必须落在 `DatabaseManager._write_lock` 里：`validate_session_id` 在**每个**管理端
+    必须落在连接上的全局写锁（`DatabaseManager._write_lock` 兼容位）里：`validate_session_id` 在**每个**管理端
     请求上都会跑，如果在锁外 `commit()`，就会把并发写者（`serialized_write` 里的显式
     事务）刚写了一半的事务顺手提交掉 —— 与员工端
     `EmployeeAccounts._touch_staff_session` 是同一条理由、同一个锁。

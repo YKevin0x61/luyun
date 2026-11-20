@@ -15,8 +15,6 @@ Does not know 日常检查 / 专项卫生 / 整改单，也不知道排班。
 from __future__ import annotations
 
 import logging
-import asyncio
-import functools
 import hashlib
 import re
 import secrets
@@ -25,7 +23,9 @@ from typing import Any, Callable, Optional
 
 from config import settings
 from database import CHINA_TZ
-from db_core.errors import is_integrity_violation
+# 写口只有一份实现；这个名字继续从这里转出（services/identity/__init__.py 与
+# 各域 service 都还按老位置导入）。
+from db_core.write_gate import serialized_write
 from services.identity.capabilities import dump_caps, parse_caps
 from services.identity.profile import (
     HEALTH_CERT_STATE_NONE,
@@ -132,21 +132,6 @@ def normalize_phone(phone: str) -> Optional[str]:
 MAX_NAME_LENGTH = 40
 
 
-def serialized_write(method):
-    @functools.wraps(method)
-    async def wrapper(self, *args, **kwargs):
-        async with self._write_lock:
-            try:
-                return await method(self, *args, **kwargs)
-            except Exception:
-                # 与 HygieneWork.serialized_write 同理：异常不能把半截事务留在
-                # 连接上。无事务时 rollback 是 no-op。
-                await self._conn.rollback()
-                raise
-
-    return wrapper
-
-
 class EmployeeAccountsError(ValueError):
     def __init__(self, code: str, message: str = ""):
         self.code = code
@@ -186,16 +171,6 @@ class EmployeeAccounts:
         self._conn = conn
         self._now = now or (lambda: datetime.now(CHINA_TZ))
         self._write_lock_owner = conn_or_db
-        self._local_write_lock = None
-
-    @property
-    def _write_lock(self):
-        shared = getattr(self._write_lock_owner, "_write_lock", None)
-        if shared is not None:
-            return shared
-        if self._local_write_lock is None:
-            self._local_write_lock = asyncio.Lock()
-        return self._local_write_lock
 
     def _now_dt(self) -> datetime:
         value = self._now()
@@ -465,6 +440,7 @@ class EmployeeAccounts:
         row = await self._fetch_employee(cur.lastrowid)
         return self._employee_from_row(row)
 
+    @serialized_write
     async def login(self, phone: str, password: str, remember: bool = False) -> Optional[dict]:
         try:
             normalized = self._normalize_phone(phone)
@@ -522,6 +498,7 @@ class EmployeeAccounts:
         employee = self._employee_from_row(mapping)
         return {"session_id": session_id, "employee": employee}
 
+    @serialized_write
     async def approve(self, employee_id: int) -> dict:
         row = await self._fetch_employee(employee_id)
         if row is None:
@@ -536,6 +513,7 @@ class EmployeeAccounts:
         row = await self._fetch_employee(employee_id)
         return self._employee_from_row(row)
 
+    @serialized_write
     async def resign(self, employee_id: int, resigned_at: str) -> dict:
         """登记离职（2026-10-29 取代「停用」）：写下离职日期，按需清掉他的员工端会话。
 
@@ -568,6 +546,7 @@ class EmployeeAccounts:
         row = await self._fetch_employee(employee_id)
         return self._employee_from_row(row)
 
+    @serialized_write
     async def cancel_resignation(self, employee_id: int) -> dict:
         """取消离职（回到在职）：清空日期。
 
@@ -836,6 +815,7 @@ class EmployeeAccounts:
             "certs": {"items": cert_items, "count": len(cert_items)},
         }
 
+    @serialized_write
     async def set_job_title(self, employee_id: int, title: str) -> dict:
         row = await self._fetch_employee(employee_id)
         if row is None:
@@ -852,6 +832,7 @@ class EmployeeAccounts:
         row = await self._fetch_employee(employee_id)
         return self._employee_from_row(row)
 
+    @serialized_write
     async def set_name(self, employee_id: int, name: str) -> dict:
         row = await self._fetch_employee(employee_id)
         if row is None:
@@ -911,6 +892,7 @@ class EmployeeAccounts:
         row = await self._fetch_employee(employee_id)
         return self._employee_from_row(row)
 
+    @serialized_write
     async def change_password(
         self,
         employee_id: int,
@@ -978,6 +960,7 @@ class EmployeeAccounts:
         await self._conn.commit()
         logger.info("hygiene employee password reset by admin id=%s", employee_id)
 
+    @serialized_write
     async def set_permission(self, employee_id: int, permission: str) -> dict:
         row = await self._fetch_employee(employee_id)
         if row is None:
@@ -1225,6 +1208,7 @@ class EmployeeAccounts:
             session_meta["refreshed"] = refreshed
         return employee
 
+    @serialized_write
     async def logout(self, session_id: str) -> None:
         await self._conn.execute(
             "DELETE FROM hygiene_staff_sessions WHERE session_id = ?",

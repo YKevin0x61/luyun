@@ -24,7 +24,7 @@
 | `DB_TABLES.md`（仅本机） | **数据库表总览**（65 张表按域分组、写入入口、迁移来源、待应用迁移、备份覆盖对照） |
 | [adr/](./adr/) | 架构决策记录（编号 0001–0090）；发行包只带 0011 / 0012 / 0013 / 0082，其余只在本机——数据库后端现状见 ADR 0089、Redis 只做 nudge 跨进程广播见 ADR 0090；仓库布局规则见 [ADR 0012](./adr/0012-repo-layout.md) |
 | `agents/`（仅本机） | agent 工作流：issue tracker / triage 标签 / domain 文档 |
-| `prompts/`（仅本机） | 可复用提示词：`role-flow-review.md`（多角色流程审查）、`mobile-screenshot-guide.md`（手机截图式操作指引图） |
+| `prompts/`（仅本机） | 可复用提示词：`role-flow-review.md`（多角色流程审查）、`截图式操作指引图.md`（截图式操作指引图，手机 / 电脑双端、生图前先确认版式） |
 | `superpowers/`（仅本机） | 历史实施计划（`plans/`）与设计稿（`specs/`），按日期命名，只读不改 |
 | `archive/`（仅本机） | 一次性报告目录（勿提交真实营业数据；说明见 `archive/README.md`） |
 | `kds-intro.html`（仅本机） | KDS 介绍页（静态 HTML） |

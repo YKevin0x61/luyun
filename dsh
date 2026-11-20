@@ -1,0 +1,797 @@
+#!/usr/bin/env bash
+#
+# dsh — 本地状态行工具（workspace status line + goal 状态）。
+#
+# 设计约束（为什么这么做）：
+#   * 完全离线：不发起任何网络请求，不依赖第三方 CLI（git 可选）。
+#   * 输出确定：状态行只由本地文件/目录状态决定，不含随机值或相对时间，
+#     同一状态重复运行得到逐字节相同的输出。
+#   * 只读优先：status / doctor 不写任何文件；只有 goal / done / note / init
+#     会写状态，且全部落在工作区的 .dsh/ 目录（goal 相关）或显式 init 的配置。
+#   * 兼容 macOS 自带的 bash 3.2：不使用 mapfile、关联数组、${var,,} 等 4.x 语法。
+#
+# 状态文件采用「tab 分隔的单行字段」而非 JSON：bash 里解析 JSON 不可靠，
+# 而 dsh goal 需要输出合法 JSON，所以写入时用 JSON 转义保存字段、读取时
+# 反向还原，输出 JSON 由字段拼装。写文件用临时文件 + mv 原子替换。
+#
+set -u
+
+PROG=dsh
+VERSION=1.0.0
+
+# ---------------------------------------------------------------------------
+# 基础工具
+# ---------------------------------------------------------------------------
+
+err() {
+  printf '%s: %s\n' "$PROG" "$*" >&2
+}
+
+usage() {
+  cat <<'EOF'
+dsh — offline workspace status line
+
+Usage:
+  dsh [command] [options]
+
+Commands:
+  status       Show workspace, run diagnostics, list config, print goal state
+               (this is the default when no command is given)
+  init         Create the workspace config .dsh/config.json (idempotent)
+  goal         Print the current goal as JSON (never modifies anything)
+  goal -       Create a new goal from stdin
+  goal TEXT    Create a new goal from TEXT
+  done         Mark the current goal completed
+  note TEXT    Append an activity note to the current goal
+  doctor       Print local diagnostics only
+  help         Show this help
+
+Options:
+  -C, --workspace DIR   Use DIR as the workspace (default: current directory)
+  -h, --help            Show this help and exit 0
+      --version         Print the version and exit 0
+
+Config:
+  workspace  <workspace>/.dsh/config.json        (override: DSH_CONFIG)
+  global     ~/.config/dsh/config.json           (override: DSH_GLOBAL_CONFIG)
+  goal state <workspace>/.dsh/goal
+
+Examples:
+  dsh
+  dsh status
+  dsh init
+  dsh goal "Ship the report; must keep the scope small"
+  echo "Fix the login bug" | dsh goal -
+  dsh note "started with the parser"
+  dsh done
+  dsh status -C ../another-workspace
+
+Exit codes:
+  0  success, including explicit help requests and help printed without args
+  2  invalid arguments, unknown command, missing workspace, or empty goal text
+
+This tool is fully offline: it makes no network calls. Diagnostics are local and
+read-only; their failures are ignored so a broken check never breaks status.
+EOF
+}
+
+json_escape() {
+  local s=$1
+  s=${s//\\/\\\\}
+  s=${s//\"/\\\"}
+  s=${s//$'\n'/\\n}
+  s=${s//$'\r'/\\r}
+  s=${s//$'\t'/\\t}
+  printf '%s' "$s"
+}
+
+json_unescape() {
+  local s=$1
+  # 先把 "\\" 换成一个不会出现在结果里的占位符，最后再还原成单个反斜杠，
+  # 否则 "\\\\n"（字面反斜杠 + n）会被误当成换行。
+  s=${s//\\\\/$'\001'}
+  s=${s//\\n/$'\n'}
+  s=${s//\\r/$'\r'}
+  s=${s//\\t/$'\t'}
+  s=${s//\\\"/\"}
+  s=${s//$'\001'/\\}
+  printf '%s' "$s"
+}
+
+trim() {
+  local s=$1
+  s=${s#"${s%%[![:space:]]*}"}
+  s=${s%"${s##*[![:space:]]}"}
+  printf '%s' "$s"
+}
+
+# ---------------------------------------------------------------------------
+# 路径与 gitignore 判定
+# ---------------------------------------------------------------------------
+
+WS_ABS=
+WS_CONFIG=
+GLOBAL_CONFIG=
+GOAL_FILE=
+
+resolve_workspace() {
+  local ws=${WS_ARG:-$PWD}
+  if [ ! -d "$ws" ]; then
+    err "workspace not found: $ws"
+    exit 2
+  fi
+  WS_ABS=$(cd "$ws" 2>/dev/null && pwd -P) || {
+    err "cannot enter workspace: $ws"
+    exit 2
+  }
+  case "$WS_CONFIG" in
+    '') WS_CONFIG=${DSH_CONFIG:-$WS_ABS/.dsh/config.json} ;;
+  esac
+  case "$WS_CONFIG" in
+    /*) ;;
+    *) WS_CONFIG=$WS_ABS/$WS_CONFIG ;;
+  esac
+  if [ -n "${DSH_GLOBAL_CONFIG:-}" ]; then
+    GLOBAL_CONFIG=$DSH_GLOBAL_CONFIG
+  else
+    GLOBAL_CONFIG=${XDG_CONFIG_HOME:-$HOME/.config}/dsh/config.json
+  fi
+  GOAL_FILE=$WS_ABS/.dsh/goal
+}
+
+# 判断路径是否被 gitignore 忽略。只读；git 缺失或不在仓库里返回 1。
+git_ignored() {
+  local path=$1 dir top rel
+  command -v git >/dev/null 2>&1 || return 1
+  dir=$(dirname "$path")
+  while [ ! -d "$dir" ] && [ "$dir" != "/" ] && [ "$dir" != "." ]; do
+    dir=$(dirname "$dir")
+  done
+  [ -d "$dir" ] || return 1
+  top=$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null) || return 1
+  [ -n "$top" ] || return 1
+  rel=${path#"$top"/}
+  [ "$rel" != "$path" ] || return 1
+  ( cd "$top" && git check-ignore -q -- "$rel" 2>/dev/null )
+}
+
+# ---------------------------------------------------------------------------
+# 输出：workspace / diagnostics / config
+# ---------------------------------------------------------------------------
+
+print_workspace() {
+  printf 'Workspace: %s\n' "$WS_ABS"
+}
+
+run_diagnostics() {
+  local top
+  printf 'Diagnostics:\n'
+  if [ -d "$WS_ABS" ] && [ -w "$WS_ABS" ]; then
+    printf '  workspace writable: yes\n'
+  else
+    printf '  workspace writable: no\n'
+  fi
+  if [ -f "$WS_CONFIG" ]; then
+    printf '  workspace config: present\n'
+  else
+    printf '  workspace config: missing\n'
+  fi
+  if [ -f "$GLOBAL_CONFIG" ]; then
+    printf '  global config: present\n'
+  else
+    printf '  global config: missing\n'
+  fi
+  if [ -s "$GOAL_FILE" ]; then
+    printf '  goal state: present\n'
+  else
+    printf '  goal state: missing\n'
+  fi
+  if command -v git >/dev/null 2>&1; then
+    top=$(git -C "$WS_ABS" rev-parse --show-toplevel 2>/dev/null) || top=
+    if [ -n "$top" ]; then
+      printf '  git: repository at %s\n' "$top"
+    else
+      printf '  git: not a repository\n'
+    fi
+  else
+    printf '  git: skipped (git not found)\n'
+  fi
+}
+
+print_config_entry() {
+  local label=$1 path=$2 state extra=
+  if [ -f "$path" ]; then
+    state=exists
+  else
+    state=missing
+  fi
+  if git_ignored "$path"; then
+    extra=', gitignored'
+  fi
+  printf '  %-9s  %s  (%s%s)\n' "$label" "$path" "$state" "$extra"
+}
+
+print_config() {
+  printf 'Config:\n'
+  print_config_entry 'workspace' "$WS_CONFIG"
+  print_config_entry 'global' "$GLOBAL_CONFIG"
+}
+
+# ---------------------------------------------------------------------------
+# goal 状态读取（文件格式：每行 "kind<TAB>value..."）
+# ---------------------------------------------------------------------------
+
+goal_exists() {
+  [ -s "$GOAL_FILE" ]
+}
+
+goal_get() {
+  local key=$1 line
+  [ -s "$GOAL_FILE" ] || return 1
+  while IFS= read -r line; do
+    case "$line" in
+      "$key"$'\t'*)
+        printf '%s' "${line#*$'\t'}"
+        return 0
+        ;;
+    esac
+  done < "$GOAL_FILE"
+  return 1
+}
+
+# 输出某类行的剩余字段（去掉 kind 和第一个 tab），每行一条。
+goal_rows() {
+  local kind=$1 line
+  [ -s "$GOAL_FILE" ] || return 0
+  while IFS= read -r line; do
+    case "$line" in
+      "$kind"$'\t'*)
+        printf '%s\n' "${line#*$'\t'}"
+        ;;
+    esac
+  done < "$GOAL_FILE"
+}
+
+print_goal_summary() {
+  local objective status total done_count remaining pct found text a
+  local -a activities
+
+  if ! goal_exists; then
+    printf 'No goal is currently set.\n'
+    return 0
+  fi
+
+  objective=$(goal_get objective || true)
+  status=$(goal_get status || true)
+  [ -n "$status" ] || status=active
+
+  total=0
+  done_count=0
+  while IFS= read -r a; do
+    [ -n "$a" ] || continue
+    total=$((total + 1))
+    case "$a" in
+      1$'\t'*) done_count=$((done_count + 1)) ;;
+    esac
+  done < <(goal_rows task)
+  remaining=$((total - done_count))
+  if [ "$total" -gt 0 ]; then
+    pct=$((done_count * 100 / total))
+  else
+    pct=0
+  fi
+
+  printf 'Goal Summary:\n'
+  printf '  Objective: '
+  printf '%s\n' "$(json_unescape "$objective")" | sed '2,$s/^/             /'
+  printf '  Status: %s\n' "$status"
+
+  printf 'Goal Progress:\n'
+  printf '  Tasks: %d total, %d done, %d remaining\n' "$total" "$done_count" "$remaining"
+  printf '  Progress: %d%%\n' "$pct"
+
+  printf 'Remaining Work:\n'
+  found=0
+  while IFS= read -r a; do
+    [ -n "$a" ] || continue
+    case "$a" in
+      0$'\t'*)
+        text=${a#*$'\t'}
+        printf '  - %s\n' "$(json_unescape "$text")"
+        found=1
+        ;;
+    esac
+  done < <(goal_rows task)
+  if [ "$found" -eq 0 ]; then
+    printf '  (none recorded)\n'
+  fi
+
+  printf 'Important constraints/preferences:\n'
+  found=0
+  while IFS= read -r a; do
+    [ -n "$a" ] || continue
+    printf '  - %s\n' "$(json_unescape "$a")"
+    found=1
+  done < <(goal_rows constraint)
+  if [ "$found" -eq 0 ]; then
+    printf '  (none recorded)\n'
+  fi
+
+  printf 'Recent goal activity:\n'
+  activities=()
+  while IFS= read -r a; do
+    [ -n "$a" ] || continue
+    activities[${#activities[@]}]=$a
+  done < <(goal_rows activity)
+  if [ "${#activities[@]}" -eq 0 ]; then
+    printf '  (none recorded)\n'
+  else
+    # 只保留最近 5 条，按发生顺序（旧 -> 新）打印，去掉时间戳。
+    local start=0
+    if [ "${#activities[@]}" -gt 5 ]; then
+      start=$((${#activities[@]} - 5))
+    fi
+    while [ "$start" -lt "${#activities[@]}" ]; do
+      a=${activities[$start]}
+      case "$a" in
+        *$'\t'*) a=${a#*$'\t'} ;;
+      esac
+      printf '  - %s\n' "$(json_unescape "$a")"
+      start=$((start + 1))
+    done
+  fi
+}
+
+print_goal_json() {
+  local objective status created updated a flag text first d
+  objective=$(goal_get objective || true)
+  status=$(goal_get status || true)
+  created=$(goal_get created || true)
+  updated=$(goal_get updated || true)
+  [ -n "$status" ] || status=active
+  [ -n "$created" ] || created=0
+  [ -n "$updated" ] || updated=0
+
+  printf '{\n'
+  printf '  "objective": "%s",\n' "$objective"
+  printf '  "status": "%s",\n' "$status"
+  printf '  "created_at": %s,\n' "$created"
+  printf '  "updated_at": %s,\n' "$updated"
+
+  printf '  "tasks": ['
+  first=1
+  while IFS= read -r a; do
+    [ -n "$a" ] || continue
+    flag=${a%%$'\t'*}
+    text=${a#*$'\t'}
+    if [ "$first" -eq 1 ]; then
+      printf '\n'
+      first=0
+    else
+      printf ',\n'
+    fi
+    if [ "$flag" = 1 ]; then d=true; else d=false; fi
+    printf '    {"text": "%s", "done": %s}' "$text" "$d"
+  done < <(goal_rows task)
+  if [ "$first" -eq 1 ]; then printf ']'; else printf '\n  ]'; fi
+  printf ',\n'
+
+  printf '  "constraints": ['
+  first=1
+  while IFS= read -r a; do
+    [ -n "$a" ] || continue
+    if [ "$first" -eq 1 ]; then
+      printf '\n'
+      first=0
+    else
+      printf ',\n'
+    fi
+    printf '    "%s"' "$a"
+  done < <(goal_rows constraint)
+  if [ "$first" -eq 1 ]; then printf ']'; else printf '\n  ]'; fi
+  printf ',\n'
+
+  printf '  "activity": ['
+  first=1
+  while IFS= read -r a; do
+    [ -n "$a" ] || continue
+    case "$a" in
+      *$'\t'*) a=${a#*$'\t'} ;;
+    esac
+    if [ "$first" -eq 1 ]; then
+      printf '\n'
+      first=0
+    else
+      printf ',\n'
+    fi
+    printf '    "%s"' "$a"
+  done < <(goal_rows activity)
+  if [ "$first" -eq 1 ]; then printf ']'; else printf '\n  ]'; fi
+  printf '\n}\n'
+}
+
+# ---------------------------------------------------------------------------
+# 写入：goal 创建 / 完成 / 记活动
+# ---------------------------------------------------------------------------
+
+create_goal() {
+  local text=$1 now tmp line task_text flag c seen
+  if goal_exists; then
+    err 'a goal already exists; refusing to overwrite it'
+    return 2
+  fi
+  case "$text" in
+    *[![:space:]]*) ;;
+    *)
+      err 'goal text is empty'
+      return 2
+      ;;
+  esac
+
+  now=$(date +%s)
+  mkdir -p "$(dirname "$GOAL_FILE")" 2>/dev/null || {
+    err "cannot create state directory: $(dirname "$GOAL_FILE")"
+    return 2
+  }
+  tmp=$GOAL_FILE.tmp.$$
+  {
+    printf 'objective\t%s\n' "$(json_escape "$text")"
+    printf 'status\tactive\n'
+    printf 'created\t%s\n' "$now"
+    printf 'updated\t%s\n' "$now"
+  } > "$tmp" 2>/dev/null || {
+    rm -f "$tmp"
+    err "cannot create goal state: $GOAL_FILE"
+    return 2
+  }
+
+  seen=
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    if printf '%s\n' "$line" | grep -Eq '^[[:space:]]*[-*][[:space:]]+\[[ xX]\][[:space:]]+'; then
+      task_text=$(printf '%s\n' "$line" | sed -E 's/^[[:space:]]*[-*][[:space:]]+\[[ xX]\][[:space:]]+//')
+      task_text=$(trim "$task_text")
+      [ -n "$task_text" ] || continue
+      if printf '%s\n' "$line" | grep -Eq '\[[xX]\]'; then
+        flag=1
+      else
+        flag=0
+      fi
+      printf 'task\t%s\t%s\n' "$flag" "$(json_escape "$task_text")" >> "$tmp"
+    elif printf '%s\n' "$line" | grep -Eiq 'must|never|always|do not|do n.t|don.t|should|required|禁止|必须|不要|一律|务必|不得'; then
+      # 一行里可能既有背景句也有约束，按句号/分号切开，只留下含约束词的短句，
+      # 免得「Important constraints/preferences」把整段目标原样抄一遍。
+      while IFS= read -r sentence; do
+        sentence=$(trim "$sentence")
+        [ -n "$sentence" ] || continue
+        if printf '%s\n' "$sentence" | grep -Eiq 'must|never|always|do not|do n.t|don.t|should|required|禁止|必须|不要|一律|务必|不得'; then
+          c=$sentence
+          case $'\037'"$seen"$'\037' in
+            *$'\037'"$c"$'\037'*) ;;
+            *)
+              seen="$seen"$'\037'"$c"
+              printf 'constraint\t%s\n' "$(json_escape "$c")" >> "$tmp"
+              ;;
+          esac
+        fi
+      done < <(printf '%s\n' "$line" | sed 's/\. /.\n/g; s/。/。\n/g; s/；/；\n/g; s/;/;\n/g')
+    fi
+  done < <(printf '%s\n' "$text")
+
+  printf 'activity\t%s\t%s\n' "$now" "$(json_escape 'goal created')" >> "$tmp"
+  mv "$tmp" "$GOAL_FILE" 2>/dev/null || {
+    rm -f "$tmp"
+    err "cannot save goal state: $GOAL_FILE"
+    return 2
+  }
+  return 0
+}
+
+# 重写 goal 文件：原样保留所有行，替换 status/updated，追加一条 activity。
+rewrite_goal_state() {
+  local new_status=$1 activity_text=$2 now tmp line
+  now=$(date +%s)
+  tmp=$GOAL_FILE.tmp.$$
+  while IFS= read -r line; do
+    case "$line" in
+      status$'\t'*)
+        printf 'status\t%s\n' "$new_status"
+        ;;
+      updated$'\t'*)
+        printf 'updated\t%s\n' "$now"
+        ;;
+      *)
+        printf '%s\n' "$line"
+        ;;
+    esac
+  done < "$GOAL_FILE" > "$tmp" 2>/dev/null || {
+    rm -f "$tmp"
+    err "cannot rewrite goal state: $GOAL_FILE"
+    return 2
+  }
+  printf 'activity\t%s\t%s\n' "$now" "$(json_escape "$activity_text")" >> "$tmp"
+  mv "$tmp" "$GOAL_FILE" 2>/dev/null || {
+    rm -f "$tmp"
+    err "cannot save goal state: $GOAL_FILE"
+    return 2
+  }
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# 命令实现
+# ---------------------------------------------------------------------------
+
+status_flow() {
+  print_workspace
+  run_diagnostics
+  print_config
+  print_goal_summary
+}
+
+doctor_flow() {
+  print_workspace
+  run_diagnostics
+}
+
+init_flow() {
+  local now config_dir
+  config_dir=$(dirname "$WS_CONFIG")
+  mkdir -p "$config_dir" 2>/dev/null || {
+    err "cannot create config directory: $config_dir"
+    exit 2
+  }
+  if [ -f "$WS_CONFIG" ]; then
+    printf 'Workspace already initialized: %s\n' "$WS_ABS"
+    printf '  config: %s (exists, left unchanged)\n' "$WS_CONFIG"
+  else
+    now=$(date +%s)
+    if ! {
+      printf '{\n'
+      printf '  "version": 1,\n'
+      printf '  "workspace": "%s",\n' "$(json_escape "$WS_ABS")"
+      printf '  "initialized_at": %s,\n' "$now"
+      printf '  "goal_file": ".dsh/goal"\n'
+      printf '}\n'
+    } > "$WS_CONFIG" 2>/dev/null; then
+      err "cannot write config: $WS_CONFIG"
+      exit 2
+    fi
+    printf 'Initialized workspace: %s\n' "$WS_ABS"
+    printf '  config: %s (created)\n' "$WS_CONFIG"
+  fi
+  if command -v git >/dev/null 2>&1 && ! git_ignored "$WS_ABS/.dsh/config.json"; then
+    printf '  hint: .dsh/ is not ignored by git; consider adding it to .gitignore\n'
+  fi
+}
+
+goal_flow() {
+  local text
+  if [ "${#ARGS[@]}" -eq 0 ]; then
+    # 只读：打印当前 goal，绝不修改，也不把输出当作新指令。
+    if ! goal_exists; then
+      printf 'No goal is currently set.\n'
+      return 0
+    fi
+    print_goal_json
+    return 0
+  fi
+  if [ "${#ARGS[@]}" -eq 1 ] && [ "${ARGS[0]}" = '-' ]; then
+    text=$(cat)
+    if [ -z "$(trim "$text")" ]; then
+      err 'goal text on stdin is empty'
+      return 2
+    fi
+    if goal_exists; then
+      print_goal_json
+      printf '\nA goal already exists; not overwritten.\n'
+      return 0
+    fi
+    create_goal "$text" || return $?
+    printf 'Goal created.\n'
+    printf '  workspace: %s\n' "$WS_ABS"
+    printf '  state: %s\n' "$GOAL_FILE"
+    return 0
+  fi
+  text="${ARGS[*]}"
+  if [ -z "$(trim "$text")" ]; then
+    err 'goal text is empty'
+    return 2
+  fi
+  if goal_exists; then
+    print_goal_json
+    printf '\nA goal already exists; not overwritten.\n'
+    return 0
+  fi
+  create_goal "$text" || return $?
+  printf 'Goal created.\n'
+  printf '  workspace: %s\n' "$WS_ABS"
+  printf '  state: %s\n' "$GOAL_FILE"
+  return 0
+}
+
+done_flow() {
+  local status
+  if ! goal_exists; then
+    printf 'No goal is currently set.\n'
+    return 0
+  fi
+  status=$(goal_get status || true)
+  if [ "$status" = completed ] || [ "$status" = done ]; then
+    printf 'The current goal is already completed.\n'
+    return 0
+  fi
+  rewrite_goal_state completed 'goal marked completed' || return $?
+  printf 'Goal marked completed.\n'
+  return 0
+}
+
+note_flow() {
+  local text
+  text="${ARGS[*]}"
+  text=$(trim "$text")
+  if [ -z "$text" ]; then
+    err 'note text is empty'
+    return 2
+  fi
+  if ! goal_exists; then
+    printf 'No goal is currently set.\n'
+    return 0
+  fi
+  rewrite_goal_state "$(goal_get status || echo active)" "$text" || return $?
+  printf 'Note added to the current goal.\n'
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# 参数解析
+# ---------------------------------------------------------------------------
+
+WS_ARG=
+CMD=
+ARGS=()
+
+add_arg() {
+  ARGS[${#ARGS[@]}]=$1
+}
+
+parse_args() {
+  local positional=()
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      --version)
+        printf '%s %s\n' "$PROG" "$VERSION"
+        exit 0
+        ;;
+      -C|--workspace)
+        if [ "$#" -lt 2 ]; then
+          err "option $1 requires a directory"
+          usage
+          exit 2
+        fi
+        WS_ARG=$2
+        shift 2
+        continue
+        ;;
+      --workspace=*)
+        WS_ARG=${1#--workspace=}
+        shift
+        continue
+        ;;
+      --)
+        shift
+        while [ "$#" -gt 0 ]; do
+          positional[${#positional[@]}]=$1
+          shift
+        done
+        continue
+        ;;
+      -)
+        positional[${#positional[@]}]=$1
+        shift
+        continue
+        ;;
+      -*)
+        err "unknown option: $1"
+        usage
+        exit 2
+        ;;
+      *)
+        positional[${#positional[@]}]=$1
+        shift
+        continue
+        ;;
+    esac
+  done
+
+  if [ "${#positional[@]}" -gt 0 ]; then
+    case "${positional[0]}" in
+      status|init|goal|done|note|doctor|help)
+        CMD=${positional[0]}
+        ;;
+      *)
+        err "unknown command: ${positional[0]}"
+        usage
+        exit 2
+        ;;
+    esac
+    local i=1
+    while [ "$i" -lt "${#positional[@]}" ]; do
+      add_arg "${positional[$i]}"
+      i=$((i + 1))
+    done
+  fi
+}
+
+main() {
+  parse_args "$@"
+
+  if [ -z "$CMD" ]; then
+    if [ "${#ARGS[@]}" -gt 0 ]; then
+      err "unknown command: ${ARGS[0]}"
+      usage
+      exit 2
+    fi
+    if [ -t 0 ]; then
+      CMD=status
+    else
+      usage
+      exit 0
+    fi
+  fi
+
+  if [ "$CMD" = help ]; then
+    if [ "${#ARGS[@]}" -gt 0 ]; then
+      err "too many arguments for help"
+      usage
+      exit 2
+    fi
+    usage
+    exit 0
+  fi
+
+  # note 的文本可能包含空格与目录名，不按位置参数取工作区。
+  case "$CMD" in
+    note)
+      ;;
+    goal)
+      ;;
+    *)
+      if [ "${#ARGS[@]}" -gt 1 ]; then
+        err "too many arguments for $CMD"
+        usage
+        exit 2
+      fi
+      if [ "${#ARGS[@]}" -eq 1 ]; then
+        if [ -n "$WS_ARG" ]; then
+          err "workspace specified twice"
+          exit 2
+        fi
+        WS_ARG=${ARGS[0]}
+      fi
+      ARGS=()
+      ;;
+  esac
+
+  resolve_workspace
+
+  case "$CMD" in
+    status) status_flow ;;
+    doctor) doctor_flow ;;
+    init) init_flow ;;
+    goal) goal_flow ;;
+    done) done_flow ;;
+    note) note_flow ;;
+    *)
+      err "unknown command: $CMD"
+      usage
+      exit 2
+      ;;
+  esac
+}
+
+main "$@"

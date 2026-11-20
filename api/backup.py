@@ -10,8 +10,6 @@ import logging
 import os
 import re
 import tempfile
-import time
-import uuid
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -52,6 +50,19 @@ from services.backup_service import (
     PROVENANCE_PRE_ROLLBACK,
 )
 from services.credentials_store import _mask_phone
+from services.export_jobs import (
+    ExportJobBusy,
+    ExportJobError,
+    ExportJobFailed,
+    ExportJobGone,
+    ExportJobNotFound,
+    ExportJobNotReady,
+    JobHandle,
+    JobResult,
+    KIND_BACKUP,
+    STATE_RUNNING,
+    export_jobs,
+)
 from api.credentials import _notify_scraper_reload, _notify_scraper_reload_runtime
 from api.security import require_session, verify_admin_token
 
@@ -367,33 +378,17 @@ async def _collect_export_payload(
 
 # ==================== 任务式导出（进度可见）====================
 
-_EXPORT_JOBS: Dict[str, Dict[str, Any]] = {}
-_EXPORT_JOB_TTL_SECONDS = 30 * 60
-# 导出是重活（pg_dump、tar、加密都可能跑到分钟级），串行更稳也更好解释
-_EXPORT_MAX_RUNNING = 1
-
-
-def _prune_export_jobs(now: float) -> None:
-    """清掉过期任务记录。**不删成品包**：它是本机导出备份点，归保留配置管。"""
-    for job_id, job in list(_EXPORT_JOBS.items()):
-        if now - job["started_at"] < _EXPORT_JOB_TTL_SECONDS:
-            continue
-        _cleanup_temp_files(job.get("temp_paths") or [])
-        _EXPORT_JOBS.pop(job_id, None)
-
-
-def _job_public_state(job: dict) -> dict:
-    return {
-        "state": job["state"],
-        "stage": job["stage"],
-        "done": job["done"],
-        "total": job["total"],
-        # unit 决定前端怎么读 done/total："count" 是张数（照片），"bytes" 是字节
-        "unit": job.get("unit") or "count",
-        "error": job["error"],
-        "bytes": job.get("bytes") or 0,
-        "name": job.get("name") or "",
-    }
+def _export_job_http_error(exc: ExportJobError) -> HTTPException:
+    """把注册表的类型化错误映射成既有的 HTTP 语义。"""
+    if isinstance(exc, ExportJobBusy):
+        return HTTPException(status_code=429, detail=str(exc))
+    if isinstance(exc, ExportJobNotFound):
+        return HTTPException(status_code=404, detail=str(exc))
+    if isinstance(exc, ExportJobGone):
+        return HTTPException(status_code=410, detail=str(exc))
+    if isinstance(exc, ExportJobNotReady):
+        return HTTPException(status_code=409, detail=str(exc))
+    return HTTPException(status_code=409, detail=str(exc) or "导出失败")
 
 
 async def _register_export_archive(
@@ -418,14 +413,15 @@ async def _register_export_archive(
             pass
 
 
-async def _run_export_job(
-    job_id: str,
+async def _build_backup_export(
+    handle: JobHandle,
     payload: BackupExportIn,
     db: DatabaseManager,
-) -> None:
-    """后台把导出包写进 backup_exports，进度写在任务表里供前端轮询。"""
-    job = _EXPORT_JOBS[job_id]
+) -> JobResult:
+    """把加密包写进 backup_exports；状态、TTL 与失败清理交给注册表。"""
     collected: dict = {}
+    archive_path: Optional[Path] = None
+    last_progress = {"done": 0, "total": 0}
 
     def _progress(
         stage: str,
@@ -433,15 +429,12 @@ async def _run_export_job(
         total: int = 0,
         unit: str = "count",
     ) -> None:
-        job["stage"] = stage
-        job["done"] = done
-        job["total"] = total
-        job["unit"] = unit
+        last_progress["done"] = int(done or 0)
+        last_progress["total"] = int(total or 0)
+        handle.progress(done=done, total=total, stage=stage, unit=unit)
 
-    archive_path: Optional[Path] = None
     try:
         collected = await _collect_export_payload(payload, db, _progress)
-        job["temp_paths"] = collected["temp_paths"]
         photo_info = collected["photo_info"]
         consistency = backup_service.photo_consistency(
             photo_info.get("manifest") or {},
@@ -476,15 +469,13 @@ async def _run_export_job(
             progress=_progress,
         )
         await _register_export_archive(archive_path, meta, db)
+        if not archive_path.is_file():
+            # 登记失败（侧车清单写不进去）时 _register_export_archive 会删掉本机副本，
+            # 别把一条指向空路径的「完成」交给前端。
+            raise ExportJobFailed("导出包登记失败，本机副本已删除")
 
-        job.update(
-            state="done",
-            stage="done",
-            done=job["total"],
-            name=filename,
-            bytes=meta.get("archive_bytes") or 0,
-            path=str(archive_path),
-        )
+        total = last_progress["total"]
+        handle.progress(done=total, total=total, stage="done")
         logger.info(
             "📦 [审计] 导出系统备份（runtime=%s app_db=%s 整库 dump=%s "
             "标准图=%s 其它照片=%s，%.1f MB）",
@@ -497,19 +488,27 @@ async def _run_export_job(
         )
         # 本机新增了一个导出备份点：让健康结论下次读取时重算，别和列表打架。
         backup_points.invalidate_health_cache()
+        return JobResult(
+            artifact=archive_path,
+            filename=filename,
+            # 成品在 backup_exports，是备份点，归保留配置管；注册表只清任务记录。
+            retain=True,
+        )
     except ValueError as exc:
         if archive_path is not None:
             archive_path.unlink(missing_ok=True)
-        job.update(state="failed", error=str(exc))
-    except Exception as exc:  # noqa: BLE001 —— 后台任务必须自己收口，否则永远 running
-        logger.exception("导出系统备份失败 job=%s", job_id)
+        raise ExportJobFailed(str(exc)) from exc
+    except asyncio.CancelledError:
+        # 超时/关停取消：临时成员由 finally 清，半成品包必须在这里删。
         if archive_path is not None:
             archive_path.unlink(missing_ok=True)
-        job.update(state="failed", error=f"导出失败：{exc}")
+        raise
+    except Exception:
+        if archive_path is not None:
+            archive_path.unlink(missing_ok=True)
+        raise
     finally:
         _cleanup_temp_files(collected.get("temp_paths") or [])
-        job["temp_paths"] = []
-
 
 @router.post("/export/jobs")
 async def start_export_backup(
@@ -523,59 +522,51 @@ async def start_export_backup(
     没有任何反馈。这里改成任务：POST 立刻返回，前端按 stage/done/total 显示进度，
     完成后再去下载。
     """
-    now = time.time()
-    _prune_export_jobs(now)
-    running = sum(1 for job in _EXPORT_JOBS.values() if job["state"] == "running")
-    if running >= _EXPORT_MAX_RUNNING:
-        raise HTTPException(status_code=429, detail="已有一个导出任务在跑，请稍候")
 
-    job_id = uuid.uuid4().hex
-    _EXPORT_JOBS[job_id] = {
-        "state": "running",
-        "stage": "collecting",
-        "done": 0,
-        "total": 0,
-        "unit": "count",
-        "error": "",
-        "started_at": now,
-        "path": None,
-        "name": "",
-        "bytes": 0,
-        "temp_paths": [],
-    }
-    asyncio.create_task(_run_export_job(job_id, payload, db))
-    return {"job_id": job_id, "state": "running"}
+    async def build(handle: JobHandle) -> JobResult:
+        return await _build_backup_export(handle, payload, db)
+
+    try:
+        job_id = export_jobs.start(KIND_BACKUP, build, max_running=1)
+    except ExportJobError as exc:
+        raise _export_job_http_error(exc) from exc
+    return {"job_id": job_id, "state": STATE_RUNNING}
 
 
 @router.get("/export/jobs/{job_id}")
 async def read_export_backup(job_id: str) -> Dict[str, Any]:
     """导出任务进度：state + stage + done/total。"""
-    job = _EXPORT_JOBS.get(job_id)
-    if job is None:
-        raise HTTPException(status_code=404, detail="导出任务不存在或已过期")
-    return _job_public_state(job)
+    try:
+        snapshot = export_jobs.state(job_id)
+    except ExportJobError as exc:
+        raise _export_job_http_error(exc) from exc
+    return {
+        "state": snapshot["state"],
+        "stage": snapshot["stage"],
+        "done": snapshot["done"],
+        "total": snapshot["total"],
+        # unit 决定前端怎么读 done/total："count" 是张数（照片），"bytes" 是字节
+        "unit": snapshot.get("unit") or "count",
+        "error": snapshot["error"],
+        "bytes": snapshot.get("bytes") or 0,
+        "name": snapshot.get("filename") or "",
+    }
 
 
 @router.get("/export/jobs/{job_id}/download")
 async def download_export_backup(job_id: str) -> FileResponse:
     """下载已完成的导出包。包同时留在 backup_exports 里作为本机备份点。"""
-    job = _EXPORT_JOBS.get(job_id)
-    if job is None:
-        raise HTTPException(status_code=404, detail="导出任务不存在或已过期")
-    if job["state"] == "failed":
-        raise HTTPException(status_code=409, detail=job["error"] or "导出失败")
-    if job["state"] != "done":
-        raise HTTPException(status_code=409, detail="还在打包，请稍候")
-    path = job.get("path")
-    if not path or not Path(path).is_file():
-        raise HTTPException(status_code=410, detail="导出文件已被清理，请重新导出")
-    filename = job.get("name") or "luyun_backup.luyunbak"
+    try:
+        snapshot = export_jobs.state(job_id)
+        path = export_jobs.path(job_id)
+    except ExportJobError as exc:
+        raise _export_job_http_error(exc) from exc
+    filename = snapshot.get("filename") or "luyun_backup.luyunbak"
     return FileResponse(
         path,
         media_type="application/octet-stream",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
-
 
 @router.post("/export")
 async def export_backup(

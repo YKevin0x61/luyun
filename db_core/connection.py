@@ -13,7 +13,6 @@ SQLite 已在 ADR 0089 退场：这里不再有建表自愈、`PRAGMA` 体检、
 """
 
 import logging
-import asyncio
 from typing import Any, Dict, Optional
 
 from config import settings
@@ -31,10 +30,6 @@ class _ConnectionMixin:
         self.paths: Dict[str, str] = settings.DATABASE_PATHS
         # 连接的所有者：建立 / 替换 / 关闭 / 可用性都在它里面。
         self._connection = DatabaseConnection()
-        # 全局写锁，由 connect() 真正建出来（asyncio.Lock 必须在事件循环里创建）。
-        # HygieneWork / EmployeeAccounts 通过 owner 共享这一把；这里要是 None，它们
-        # 就各自退回一把局部锁，两个 service 的隐式事务会互相穿插、互相 rollback。
-        self._write_lock: Optional[asyncio.Lock] = None
 
         self.stats = {
             'queries_executed': 0,
@@ -49,12 +44,6 @@ class _ConnectionMixin:
         这里直接失败，不做静默回落——老部署需要先迁移再升级（见
         `deploy/enable_postgres.sh` 与 `docs/adr/0089-retire-sqlite-postgres-only.md`）。
         """
-        # 全局写锁在这里建：asyncio.Lock 需要运行中的事件循环，而且必须早于任何
-        # service 取用（service 的 _write_lock property 见到它就共享，见 #2.2）。
-        # **只建一次**：每次 connect() 都重建会让「断开前后」两把锁并存，整库恢复
-        # 窗口里 serialized_write 的互斥契约随之失效（CORR-01 的放大器）。
-        if self._write_lock is None:
-            self._write_lock = asyncio.Lock()
         backend = (getattr(settings, "DATABASE_BACKEND", "") or "").strip().lower()
         if backend != "postgres":
             raise RuntimeError(
@@ -200,6 +189,19 @@ class _ConnectionMixin:
         ``cursor()`` / ``execute()`` / ``commit()`` / ``rollback()``，不必知道驱动是谁。
         """
         return self._connection
+
+    @property
+    def _write_lock(self):
+        """全局写锁（兼容位）：锁的本体已经搬到连接所有者那里。
+
+        ``auth_service`` 与若干测试直接拿着它取锁；它必须**只建一次**、重连不换
+        对象（CORR-01），所以所有权跟着 :class:`DatabaseConnection` 走。
+        """
+        return self._connection.write_lock
+
+    def write(self):
+        """写单元：``async with db.write(): ...``（见 :mod:`db_core.write_gate`）。"""
+        return self._connection.write()
 
     # ── 表访问器 ──
 
