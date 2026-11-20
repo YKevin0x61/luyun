@@ -65,6 +65,7 @@ const density = ref(RC.readPref(window.localStorage, 'sop.density', 'compact') !
 const fontPx = ref(RC.clampFontPx(RC.readPref(window.localStorage, 'sop.fontScale', String(RC.defaultFontPx()))))
 const searchTerm = ref('')
 const searchCount = ref('')
+const emptyFilter = ref(false)
 const onlyNew = ref(false)
 const showInactive = ref(false)
 const qrModalUrl = ref('')
@@ -131,6 +132,10 @@ function incFont(delta) {
 
 function toggleDensity() {
   density.value = !density.value
+  // 密度只改 body 上的 class（样式在 public/recipe.css）：这里必须同步，
+  // 原实现只在 onMounted 设过一次，点了按钮标签变、排版不变。
+  document.body.classList.toggle('sop-density-compact', density.value)
+  document.body.classList.toggle('sop-density-comfortable', !density.value)
   try { window.localStorage.setItem('sop.density', density.value ? 'compact' : 'grid') } catch (e) { /* noop */ }
 }
 
@@ -164,6 +169,7 @@ function afterContentRendered() {
   bindScaleDismiss()
   injectCardActions()
   bindReaderDrag()
+  refreshFilterState()
   nextTick(() => applyFocusFromQuery())
 }
 
@@ -227,7 +233,10 @@ function buildToc() {
           for (const en of entries) {
             if (en.isIntersecting) {
               document.querySelectorAll('a[data-toc]').forEach((a) => {
-                a.classList.toggle('on', a.getAttribute('data-toc') === en.target.id)
+                const active = a.getAttribute('data-toc') === en.target.id
+                a.classList.toggle('on', active)
+                if (active) a.setAttribute('aria-current', 'location')
+                else a.removeAttribute('aria-current')
               })
             }
           }
@@ -683,23 +692,68 @@ function injectScaleControls() {
   })
 }
 
+/** 当前可见的配方卡数量：搜索用行内 display 隐藏，只看新品用 body class 的 CSS 隐藏。 */
+function visibleRecipeCount() {
+  if (!bodyRef.value) return 0
+  return Array.from(bodyRef.value.querySelectorAll('article.recipe-card')).filter((card) => {
+    if (card.style.display === 'none') return false
+    if (onlyNew.value && !card.classList.contains('recipe-card--new')) return false
+    return true
+  }).length
+}
+
+/** 整章都没可见卡时把章节收起来：否则筛选后只剩一排空标题，像「有内容没显示出来」。 */
+function syncEmptySections() {
+  if (!bodyRef.value) return
+  const filtering = Boolean(searchTerm.value.trim()) || onlyNew.value
+  bodyRef.value.querySelectorAll('.sop-section').forEach((sec) => {
+    if (!filtering) {
+      sec.classList.remove('sop-section--empty')
+      return
+    }
+    const visible = Array.from(sec.querySelectorAll('article.recipe-card')).filter(
+      (card) => card.style.display !== 'none' && (!onlyNew.value || card.classList.contains('recipe-card--new')),
+    ).length
+    sec.classList.toggle('sop-section--empty', visible === 0)
+  })
+}
+
+/** 筛选后的统一收尾：计数与空状态。两种筛选（搜索 / 只看新品）共用一套口径。 */
+function refreshFilterState() {
+  const hasFilter = Boolean(searchTerm.value.trim()) || onlyNew.value
+  const visible = visibleRecipeCount()
+  searchCount.value = hasFilter ? `找到 ${visible} 个匹配` : ''
+  emptyFilter.value = hasFilter && visible === 0
+  syncEmptySections()
+}
+
+function clearFilters() {
+  searchTerm.value = ''
+  onlyNew.value = false
+  document.body.classList.remove('sop-only-new')
+  if (bodyRef.value) {
+    bodyRef.value.querySelectorAll('article.recipe-card').forEach((card) => {
+      card.style.display = ''
+    })
+  }
+  refreshFilterState()
+}
+
 function onSearchInput() {
   clearTimeout(searchDebounce)
   searchDebounce = setTimeout(() => {
     if (!bodyRef.value) return
-    let visible = 0
     bodyRef.value.querySelectorAll('article.recipe-card').forEach((card) => {
-      const hit = RC.matchRecipe(card.textContent || '', searchTerm.value)
-      card.style.display = hit ? '' : 'none'
-      if (hit) visible++
+      card.style.display = RC.matchRecipe(card.textContent || '', searchTerm.value) ? '' : 'none'
     })
-    searchCount.value = searchTerm.value.trim() ? `找到 ${visible} 个匹配` : ''
+    refreshFilterState()
   }, 120)
 }
 
 function toggleOnlyNew() {
   onlyNew.value = !onlyNew.value
   document.body.classList.toggle('sop-only-new', onlyNew.value)
+  refreshFilterState()
 }
 
 function toggleShowInactive() {
@@ -899,7 +953,7 @@ onBeforeUnmount(() => {
               <span aria-hidden="true">◐</span><span>{{ RC.themeLabel(theme) }}</span>
             </button>
             <button type="button" class="btn btn-ghost sop-density-toggle" @click="toggleDensity">
-              <span aria-hidden="true">▦</span><span>{{ density ? '网格' : '紧凑' }}</span>
+              <span aria-hidden="true">▦</span><span>{{ density ? '紧凑' : '网格' }}</span>
             </button>
             <button type="button" class="btn btn-ghost sop-density-toggle" @click="openQr">
               <span aria-hidden="true">▣</span>二维码
@@ -937,21 +991,49 @@ onBeforeUnmount(() => {
                 <span class="sop-servings-unit">{{ servingsUnitLabel }}</span>
               </div>
               <button type="button" class="sop-chip" :aria-pressed="onlyNew" @click="toggleOnlyNew"><SvgIcon name="star" :size="12" /> 只看新品</button>
-              <button type="button" class="sop-chip" :aria-pressed="showInactive" @click="toggleShowInactive">显示停用</button>
+              <button type="button" class="sop-chip" :aria-pressed="showInactive" @click="toggleShowInactive"><SvgIcon name="x-circle" :size="12" /> 显示停用</button>
               <span class="sop-search-count" aria-live="polite">{{ searchCount }}</span>
             </div>
           </div>
-          <nav
-            v-if="tocVisible && tocCompact"
-            id="sopToc"
-            class="sop-toc-tabs no-print"
-            aria-label="章节目录"
-            v-html="tocHtml"
-          ></nav>
+          <div class="sop-reader-sticky">
+            <nav
+              v-if="tocVisible && tocCompact"
+              id="sopToc"
+              class="sop-toc-tabs no-print"
+              aria-label="章节目录"
+              v-html="tocHtml"
+            ></nav>
+            <!-- 桌面阅读工具：工作台壳把整条 `.sop-site-header` 隐藏了，搜索/字号/主题/
+                 密度/二维码/打印原本只活在手机底栏里。这里补一份桌面专用的，>901px 才
+                 显示；与章节目录同排，吸顶后也一直在。 -->
+            <span class="reader-desktop-tools" role="group" aria-label="阅读工具">
+              <input
+                type="search"
+                v-model="searchTerm"
+                class="sop-search-input reader-desktop-search"
+                placeholder="搜索配方…"
+                autocomplete="off"
+                aria-label="搜索配方"
+                @input="onSearchInput"
+              >
+              <button type="button" class="btn btn-ghost btn-sm" aria-label="减小字号" title="减小字号" @click="incFont(-1)">A−</button>
+              <button type="button" class="btn btn-ghost btn-sm" aria-label="增大字号" title="增大字号" @click="incFont(1)">A+</button>
+              <button type="button" class="btn btn-ghost btn-sm" :aria-label="'主题：' + RC.themeLabel(theme)" :title="'主题：' + RC.themeLabel(theme)" @click="toggleTheme">◐ {{ RC.themeLabel(theme) }}</button>
+              <button type="button" class="btn btn-ghost btn-sm" :aria-label="'密度：' + (density ? '紧凑' : '网格')" :title="'密度：' + (density ? '紧凑' : '网格')" @click="toggleDensity">▦ {{ density ? '紧凑' : '网格' }}</button>
+              <button type="button" class="btn btn-ghost btn-sm" aria-label="二维码" title="二维码" @click="openQr">▣ 二维码</button>
+              <router-link class="btn btn-ghost btn-sm" :to="`${RECIPE_PRINT_PATH}?slug=${encodeURIComponent(slug)}`" aria-label="打印预览" title="打印预览"><SvgIcon name="printer" :size="14" />打印</router-link>
+            </span>
+          </div>
           <div class="sop-panel">
             <div v-if="loading" class="sop-body markdown-body">加载中…</div>
             <div v-else-if="errorMsg" class="sop-body markdown-body">{{ errorMsg }}</div>
-            <div v-else ref="bodyRef" class="sop-body markdown-body" v-html="contentHtml"></div>
+            <template v-else>
+              <p v-if="emptyFilter" class="sop-empty-filter" role="status">
+                没有符合条件的配方。
+                <button type="button" class="sop-empty-reset" @click="clearFilters">清除筛选</button>
+              </p>
+              <div ref="bodyRef" class="sop-body markdown-body" v-html="contentHtml"></div>
+            </template>
           </div>
         </article>
       </div>
@@ -1062,7 +1144,7 @@ onBeforeUnmount(() => {
                 <span aria-hidden="true">◐</span><span>{{ RC.themeLabel(theme) }}</span>
               </button>
               <button type="button" class="btn btn-ghost" aria-label="切换密度" @click="toggleDensity">
-                <span aria-hidden="true">▦</span><span>{{ density ? '网格' : '紧凑' }}</span>
+                <span aria-hidden="true">▦</span><span>{{ density ? '紧凑' : '网格' }}</span>
               </button>
               <button type="button" class="btn btn-ghost" aria-label="二维码" @click="onMoreQr">
                 <span aria-hidden="true">▣</span>二维码
@@ -1150,9 +1232,9 @@ onBeforeUnmount(() => {
 }
 .reader-kicker {
   margin: 0 0 5px;
-  font: 500 9.5px/1 var(--font-sans);
-  letter-spacing: .26em;
-  color: var(--ink-faint);
+  font: 600 var(--fs-12)/1 var(--font-sans);
+  letter-spacing: .2em;
+  color: var(--ink-dim);
 }
 .reader-title {
   display: inline-block;
@@ -1160,8 +1242,8 @@ onBeforeUnmount(() => {
   border: 0;
   background: transparent;
   color: var(--ink);
-  font: 600 18px/1.2 var(--font-sans);
-  letter-spacing: .01em;
+  font: 700 var(--fs-20)/1.2 var(--font-sans);
+  letter-spacing: 0;
 }
 .reader-toolbar-tools {
   margin-left: auto;
@@ -1191,23 +1273,34 @@ onBeforeUnmount(() => {
   gap: 6px;
   min-height: 44px;
   padding: 0 12px;
-  border: var(--edge-w, 2px) solid var(--edge);
-  box-shadow: var(--paper-shadow-sm);
+  /* 未选中：浅线 + 透明底 + 无阴影；选中才给深墨描边与硬阴影。
+     2026-11-21 审查：原来未选中带 3px 硬阴影、选中反而没有，视觉轻重是倒的。 */
+  border: var(--edge-w, 2px) solid var(--line);
+  box-shadow: none;
   border-radius: var(--r-1);
-  background: var(--surface-1);
-  font-size: 12px;
+  background: transparent;
+  font-size: var(--fs-12);
+  font-weight: 600;
   color: var(--ink-dim);
   text-decoration: none;
+}
+.sop-toc-tabs :deep(a:hover) {
+  border-color: var(--line-strong);
+  color: var(--ink);
 }
 .sop-toc-tabs :deep(a .n) {
   font-family: var(--font-mono);
   color: var(--ink-faint);
 }
 .sop-toc-tabs :deep(a.on) {
-  border-color: var(--line-strong);
-  background: var(--surface-2);
+  border-color: var(--edge);
+  background: var(--surface-1);
   color: var(--ink);
-  box-shadow: inset 2px 0 0 var(--action);
+  font-weight: 700;
+  box-shadow: var(--paper-shadow-sm), inset 3px 0 0 var(--action);
+}
+.sop-toc-tabs :deep(a.on .n) {
+  color: var(--ink);
 }
 .reader-led {
   width: 6px;
@@ -1240,30 +1333,113 @@ onBeforeUnmount(() => {
   .back-link {
     border-radius: var(--r-1);
     color: var(--ink-dim);
-    font-size: 12px;
-    font-weight: 600;
+    font-size: var(--fs-13);
+    font-weight: 700;
   }
+  /* 岗位名是标题，不是按钮：18px 印章 + 2px 描边 + 硬阴影会抢走「返回列表」的层级
+     （审查 P3：不可点的那颗最抢眼）。桌面档去掉 chip 皮，标题回归文字。 */
   .sop-toolbar-chip {
-    border-radius: var(--r-1);
-    border: var(--edge-w, 2px) solid var(--edge);
-  box-shadow: var(--paper-shadow-sm);
-    background: var(--surface-1);
+    border-radius: 0;
+    border: 0;
+    box-shadow: none;
+    background: transparent;
     color: var(--ink);
   }
   .sop-chip {
     border-radius: var(--r-1);
-    font-size: 11px;
+    font-size: var(--fs-12);
     font-weight: 600;
     color: var(--ink-dim);
   }
 
-  /* 阅读正文宽限 880px（v3：卡片网格 280 起跳铺满这个宽度，不再拉满整屏） */
+  /* 阅读正文宽限 880px（v3：卡片网格 280 起跳铺满这个宽度，不再拉满整屏）。
+     `width:100%` 不能省：单列 grid 里 grid item 的 auto margin 会让它按内容收缩成
+     fit-content（实测 1440 只有 543px，`max-width:880px` 根本没触发）。先撑满、再限宽。 */
   .sop-article {
+    width: 100%;
     max-width: 880px;
     margin: 0 auto;
   }
   .sop-layout--with-toc .sop-article {
     margin: 0;
+  }
+
+  /* 桌面阅读工具（>901 才显示）：页头整块被工作台壳隐藏后，搜索/字号/主题/密度/
+     二维码/打印只留在手机底栏里，宽屏用户一个都够不着。这里补一份桌面专用的。 */
+  .reader-desktop-tools {
+    display: none;
+  }
+  .sop-empty-filter {
+    margin: 0;
+    padding: 26px 14px;
+    font-size: var(--fs-13);
+    color: var(--ink-dim);
+    text-align: center;
+  }
+  .sop-empty-reset {
+    margin-left: 6px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: var(--action);
+    font: inherit;
+    font-weight: 700;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+    cursor: pointer;
+  }
+  @media (min-width: 901px) {
+    .reader-desktop-tools {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      flex: 0 0 auto;
+      margin-left: auto;
+    }
+    .reader-desktop-tools .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 7px 8px;
+      font-size: var(--fs-12);
+      font-weight: 600;
+      line-height: 1.1;
+      color: var(--ink-dim);
+      white-space: nowrap;
+    }
+    .reader-desktop-tools .btn:hover {
+      color: var(--ink);
+    }
+    .reader-desktop-search {
+      width: 140px;
+      min-width: 0;
+      max-width: none;
+      padding: 6px 8px;
+      font-size: var(--fs-12);
+    }
+    /* 目录 tab 与桌面工具同排，一起吸顶：tab 负责换章，工具负责搜索/字号/打印，
+       滚到第 2 章之后两件事都还够得着。只吸这一条（不吸整条工具栏），高度可控。
+       52px = 工作台壳固定顶栏高度（WorkbenchShell 的 .wb-topbar min-height），
+       吸顶必须落在它下面，否则这条会被顶栏盖掉一半（2026-11-21 实测）。 */
+    .sop-reader-sticky {
+      position: sticky;
+      top: 52px;
+      z-index: var(--z-shell);
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 10px;
+      row-gap: 4px;
+      background: var(--surface-0);
+      padding-top: 6px;
+      margin-top: -6px;
+      padding-bottom: 2px;
+    }
+    .sop-reader-sticky .sop-toc-tabs {
+      flex: 1 1 auto;
+      min-width: 0;
+      margin-bottom: 2px;
+    }
   }
 
   /* 阅读面板 */
@@ -1308,6 +1484,9 @@ onBeforeUnmount(() => {
   }
   .sop-body :deep(.sop-section) {
     gap: 10px;
+  }
+  .sop-body :deep(.sop-section--empty) {
+    display: none;
   }
   .sop-body :deep(.sop-section-head h2) {
     display: flex;
@@ -1367,8 +1546,8 @@ onBeforeUnmount(() => {
   }
   .sop-body :deep(.recipe-card-head h3) {
     padding: 11px 14px;
-    font: 600 12.5px/1.3 var(--font-sans);
-    letter-spacing: .06em;
+    font: 700 var(--fs-14)/1.3 var(--font-sans);
+    letter-spacing: .04em;
     color: var(--ink);
   }
   /* 用料 / 步骤 / 小贴士：卡内三段，用 border-top 分隔（次级分组）。 */
@@ -1408,10 +1587,14 @@ onBeforeUnmount(() => {
   .sop-body :deep(.recipe-card-body tr:last-child td) {
     border-bottom: 0;
   }
-  /* 步骤：编号仍是圆形小记号，换成动作色。 */
+  /* 步骤编号：原来用 action 橙 on 8% 橙底，实测 2.5:1（11.5px，远低于 AA 的 4.5）。
+     改成深墨字 + 中性底，对比约 15:1，字号提到 12px。 */
   .sop-body :deep(ol.recipe-steps > li.recipe-steps-item::before) {
-    color: var(--action);
-    background: var(--wb-tint-08);
+    width: 1.5rem;
+    height: 1.5rem;
+    font-size: var(--fs-12);
+    color: var(--ink);
+    background: var(--surface-2);
     border-color: var(--line-strong);
   }
   /* 小贴士：提示块用 warn 左条，不做整块高饱和填充。 */
