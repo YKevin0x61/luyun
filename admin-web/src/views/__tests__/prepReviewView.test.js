@@ -35,15 +35,34 @@ const SUMMARY = {
   metrics: {
     measured_days: 42,
     measured_item_days: 380,
-    suggested_total: 1200,
     sold_total: 1000,
-    shortfall_qty: 120,
-    overfill_qty: 320,
-    absolute_deviation: 0.164,
-    direction_deviation: 0.032,
-    coverage_qty: 0.872,
-    covered_items: 300,
-    coverage_items: 0.789,
+    planned_sources: { manual: 40, suggested: 340 },
+    reference: {
+      qty_total: 1200,
+      shortfall_qty: 120,
+      overfill_qty: 320,
+      ratio: 1.2,
+      shortfall_ratio: 0.12,
+      overfill_ratio: 0.32,
+      absolute_deviation: 0.164,
+      direction_deviation: 0.032,
+      coverage_qty: 0.872,
+      covered_items: 300,
+      coverage_items: 0.789,
+    },
+    planned: {
+      qty_total: 1180,
+      shortfall_qty: 100,
+      overfill_qty: 300,
+      ratio: 1.18,
+      shortfall_ratio: 0.1,
+      overfill_ratio: 0.3,
+      absolute_deviation: 0.151,
+      direction_deviation: 0.021,
+      coverage_qty: 0.861,
+      covered_items: 310,
+      coverage_items: 0.815,
+    },
   },
   groups: {
     weekday: [
@@ -89,12 +108,31 @@ const SUMMARY = {
   },
 }
 
+// 分组桶也改成两条基线：夹具里两套先取同一组数，专门的对拍用例另给不同值。
+for (const rows of Object.values(SUMMARY.groups)) {
+  for (const row of rows) {
+    row.baselines = {
+      reference: {
+        direction_deviation: row.direction_deviation,
+        absolute_deviation: row.absolute_deviation,
+      },
+      planned: {
+        direction_deviation: row.direction_deviation,
+        absolute_deviation: row.absolute_deviation,
+      },
+    }
+    delete row.direction_deviation
+    delete row.absolute_deviation
+  }
+}
+
 const ITEM = {
   item_name: '虾饺馅',
   unit: '份',
   station: 'shulong',
-  suggested_qty: 80,
-  final_qty: null,
+  reference_qty: 80,
+  planned_qty: 80,
+  planned_source: 'suggested',
   sold_qty: 60,
   sold_1h: 66,
   sold_2h: 70,
@@ -112,8 +150,9 @@ const PENDING_ITEM = {
   item_name: '河粉',
   unit: '斤',
   station: 'shulong',
-  suggested_qty: 20,
-  final_qty: 20,
+  reference_qty: 20,
+  planned_qty: 20,
+  planned_source: 'manual',
   sold_qty: null,
   sold_1h: null,
   sold_2h: null,
@@ -133,14 +172,33 @@ const GROUP_SUMMARY = {
   drifted: 0,
   sold_out: 1,
   sold_out_reliable: 1,
-  covered: 0.6,
-  shortfall: 20,
-  shortfall_ratio: 0.25,
-  overfill: 0,
-  overfill_ratio: 0,
   sold_total: 80,
-  suggested_total: 100,
-  ref_ratio: 1.25,
+  reference: {
+    qty_total: 100,
+    shortfall_qty: 20,
+    overfill_qty: 0,
+    ratio: 1.25,
+    shortfall_ratio: 0.25,
+    overfill_ratio: 0,
+    absolute_deviation: 0.25,
+    direction_deviation: 0.25,
+    coverage_qty: 0.8,
+    covered_items: 1,
+    coverage_items: 1.0,
+  },
+  planned: {
+    qty_total: 100,
+    shortfall_qty: 20,
+    overfill_qty: 0,
+    ratio: 1.25,
+    shortfall_ratio: 0.25,
+    overfill_ratio: 0,
+    absolute_deviation: 0.25,
+    direction_deviation: 0.25,
+    coverage_qty: 0.8,
+    covered_items: 1,
+    coverage_items: 1.0,
+  },
 }
 
 function dayPayload() {
@@ -218,21 +276,27 @@ afterEach(() => {
   window.localStorage.clear()
 })
 
-describe('90 天口径的新三卡', () => {
-  it('绝对偏差 / 方向偏差 / 数量口径够卖率，按选中日回看 90 天', async () => {
+describe('90 天口径的两套基线', () => {
+  it('绝对偏差 / 方向偏差 / 数量口径够卖率，参考与下达并排', async () => {
     const fetchMock = probeFetch()
     vi.stubGlobal('fetch', fetchMock)
     const wrapper = await mountView()
 
-    const cards = wrapper.findAll('.pr-metric-review')
-    expect(cards).toHaveLength(3)
-    expect(cards[0].text()).toContain('绝对偏差')
-    expect(cards[0].text()).toContain('16.4%')
-    expect(cards[1].text()).toContain('方向偏差')
-    expect(cards[1].text()).toContain('+3.2%')
-    expect(cards[1].text()).toContain('备多了')
-    expect(cards[2].text()).toContain('数量口径够卖率')
-    expect(cards[2].text()).toContain('87.2%')
+    const table = wrapper.find('.pr-compare-review')
+    const rows = table.findAll('tbody tr')
+    expect(rows).toHaveLength(3)
+    expect(rows[0].text()).toContain('绝对偏差')
+    expect(rows[0].text()).toContain('16.4%')
+    expect(rows[0].text()).toContain('15.1%')
+    expect(rows[1].text()).toContain('方向偏差')
+    expect(rows[1].text()).toContain('+3.2%')
+    expect(rows[1].text()).toContain('+2.1%')
+    expect(rows[1].text()).toContain('备多了')
+    expect(rows[2].text()).toContain('数量口径够卖率')
+    expect(rows[2].text()).toContain('87.2%')
+    expect(rows[2].text()).toContain('86.1%')
+    expect(wrapper.text()).toContain('参考合计 1200.0')
+    expect(wrapper.text()).toContain('下达合计 1180.0')
 
     // 口径与期间必须写在页面上，不能只活在代码里
     expect(wrapper.text()).toContain('近 90 天')
@@ -243,36 +307,55 @@ describe('90 天口径的新三卡', () => {
     expect(summaryCall.path).toContain('days=90')
   })
 
+  it('当天两套口径的每个数字都带移动端标签', async () => {
+    vi.stubGlobal('fetch', probeFetch())
+    const wrapper = await mountView()
+
+    const dayTable = wrapper.find('.pr-compare-day')
+    expect(dayTable.findAll('tbody tr')).toHaveLength(2)
+    for (const label of ['合计', '÷ 实卖', '够卖品数', '缺货', '多出']) {
+      expect(dayTable.find(`tbody td[data-label="${label}"]`).exists()).toBe(true)
+    }
+  })
+
   it('分母为 0 的比例是「—」，不是 0', async () => {
+    const nullBaseline = {
+      ...SUMMARY.metrics.reference,
+      absolute_deviation: null,
+      direction_deviation: null,
+      coverage_qty: null,
+    }
     const nullSummary = {
       ...SUMMARY,
       metrics: {
         ...SUMMARY.metrics,
-        absolute_deviation: null,
-        direction_deviation: null,
-        coverage_qty: null,
+        reference: nullBaseline,
+        planned: nullBaseline,
       },
     }
     vi.stubGlobal('fetch', probeFetch({ summary: nullSummary }))
     const wrapper = await mountView()
 
-    const cards = wrapper.findAll('.pr-metric-review')
-    for (const card of cards) {
-      expect(card.find('.pr-metric-v').text()).toBe('—')
+    for (const cell of wrapper.find('.pr-compare-review').findAll('tbody td.n')) {
+      expect(cell.text()).toBe('—')
     }
   })
 
   it('方向为负时说「备少了」', async () => {
     const negative = {
       ...SUMMARY,
-      metrics: { ...SUMMARY.metrics, direction_deviation: -0.021 },
+      metrics: {
+        ...SUMMARY.metrics,
+        reference: { ...SUMMARY.metrics.reference, direction_deviation: -0.021 },
+        planned: { ...SUMMARY.metrics.planned, direction_deviation: -0.021 },
+      },
     }
     vi.stubGlobal('fetch', probeFetch({ summary: negative }))
     const wrapper = await mountView()
 
-    const card = wrapper.findAll('.pr-metric-review')[1]
-    expect(card.text()).toContain('-2.1%')
-    expect(card.text()).toContain('备少了')
+    const row = wrapper.find('.pr-compare-review').findAll('tbody tr')[1]
+    expect(row.text()).toContain('-2.1%')
+    expect(row.text()).toContain('备少了')
   })
 })
 
@@ -390,32 +473,32 @@ describe('明细表新列', () => {
     vi.stubGlobal('fetch', probeFetch())
     const wrapper = await mountView()
 
-    const table = wrapper.findAll('.pr-table')[0]
+    const table = wrapper.find('.pr-table-detail')
     const cells = table.findAll('tbody tr')[0].findAll('td')
-    expect(cells[7].text()).toContain('13:07')
-    expect(cells[8].text()).toBe('6.0')
-    expect(cells[9].text()).toBe('10.0')
-    expect(cells[10].text()).toBe('30.0')
-    expect(cells[11].text()).toBe('2.0')
+    expect(cells[8].text()).toContain('13:07')
+    expect(cells[9].text()).toBe('6.0')
+    expect(cells[10].text()).toBe('10.0')
+    expect(cells[11].text()).toBe('30.0')
+    expect(cells[12].text()).toBe('2.0')
   })
 
   it('售罄时刻带可靠性角标：真停卖与旧判定分开', async () => {
     vi.stubGlobal('fetch', probeFetch())
     const wrapper = await mountView()
 
-    const rows = wrapper.findAll('.pr-table')[0].findAll('tbody tr')
+    const rows = wrapper.find('.pr-table-detail').findAll('tbody tr')
     const trusted = rows[0].find('.pr-soldout-tag')
     expect(trusted.text()).toBe('停卖')
     expect(trusted.classes()).toContain('is-trusted')
 
-    expect(rows[1].findAll('td')[7].text()).toBe('—')
+    expect(rows[1].findAll('td')[8].text()).toBe('—')
 
     // 旧事件（没有 reliable 字段）只能标「存疑」，不能当成删失。
     const legacy = dayPayload()
     legacy.snapshots[0].items = [{ ...ITEM, sold_out_reliable: false }]
     vi.stubGlobal('fetch', probeFetch({ day: legacy }))
     const wrapper2 = await mountView()
-    const tag = wrapper2.findAll('.pr-table')[0].find('.pr-soldout-tag')
+    const tag = wrapper2.find('.pr-table-detail').find('.pr-soldout-tag')
     expect(tag.text()).toBe('存疑')
     expect(tag.classes()).toContain('is-suspect')
   })
@@ -431,10 +514,11 @@ describe('明细表新列', () => {
     vi.stubGlobal('fetch', probeFetch())
     const wrapper = await mountView()
 
-    const cells = wrapper.findAll('.pr-table')[0].findAll('tbody tr')[1].findAll('td')
-    expect(cells[4].text()).toBe('—')
+    const cells = wrapper.find('.pr-table-detail').findAll('tbody tr')[1].findAll('td')
     expect(cells[5].text()).toBe('—')
-    for (const index of [7, 8, 9, 10, 11]) expect(cells[index].text()).toBe('—')
+    expect(cells[6].text()).toBe('—')
+    expect(cells[7].text()).toBe('—')
+    for (const index of [8, 9, 10, 11, 12]) expect(cells[index].text()).toBe('—')
   })
 })
 
@@ -444,22 +528,36 @@ describe('导出 CSV（纯函数）', () => {
     expect(csv.charCodeAt(0)).toBe(0xfeff)
 
     const lines = csv.slice(1).split('\n')
-    expect(lines[0]).toBe('品名,单位,参考值,实际卖出,偏差,售罄时刻,售罄判定,窗口后+1h,窗口后+2h,次日,退菜')
-    expect(lines[1]).toBe('虾饺馅,份,80,60,-20,13:07,停卖,6,10,30,2')
+    expect(lines[0]).toBe(
+      '品名,单位,参考值,下达量,下达来源,实际卖出,对参考,对下达,售罄时刻,售罄判定,窗口后+1h,窗口后+2h,次日,退菜',
+    )
+    expect(lines[1]).toBe('虾饺馅,份,80,80,未手改,60,-20,-20,13:07,停卖,6,10,30,2')
 
     const pending = lines[2].split(',')
-    expect(pending).toHaveLength(11)
+    expect(pending).toHaveLength(14)
     expect(pending[0]).toBe('河粉')
     expect(pending[2]).toBe('20')
-    for (const index of [3, 4, 5, 6, 7, 8, 9, 10]) expect(pending[index]).toBe('')
+    expect(pending[3]).toBe('20')
+    expect(pending[4]).toBe('手改')
+    for (const index of [5, 6, 7, 8, 9, 10, 11, 12, 13]) expect(pending[index]).toBe('')
   })
 
   it('double 的浮点尾差收成两位小数', () => {
     const csv = buildReviewCsv({
-      items: [{ ...ITEM, suggested_qty: 200.6, sold_qty: 180, sold_1h: 194.4, sold_2h: 198, sold_next_day: 210 }],
+      items: [
+        {
+          ...ITEM,
+          reference_qty: 200.6,
+          planned_qty: 210.6,
+          sold_qty: 180,
+          sold_1h: 194.4,
+          sold_2h: 198,
+          sold_next_day: 210,
+        },
+      ],
     })
     const row = csv.slice(1).split('\n')[1]
-    expect(row).toBe('虾饺馅,份,200.6,180,-20.6,13:07,停卖,14.4,18,30,2')
+    expect(row).toBe('虾饺馅,份,200.6,210.6,未手改,180,-20.6,-30.6,13:07,停卖,14.4,18,30,2')
   })
 
   it('文件名带日期与钟点', () => {
@@ -564,7 +662,7 @@ describe('员工会话只读（2026-11-10 用户裁定）', () => {
 
       // 只读内容照常
       expect(wrapper.text()).toContain('备货复盘')
-      expect(wrapper.findAll('.pr-metric-review')).toHaveLength(3)
+      expect(wrapper.findAll('.pr-compare-review')).toHaveLength(1)
       // 档口名来自管理端门的 `/api/stations`（员工会话 401）：员工档不拉它，别挂 401。
       expect(callsTo(fetchMock, '/api/stations')).toHaveLength(0)
 

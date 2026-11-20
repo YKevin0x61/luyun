@@ -93,7 +93,7 @@ async def get_snapshots(
     _actor: WorkbenchActor = Depends(require_action("prep_review")),
     db=Depends(get_db),
 ):
-    """某一天的参考值快照 + 实际销量（ADR 0123）+ 当天环境信号，只读。
+    """某一天的参考值/下达量快照 + 实际销量（ADR 0123）+ 当天环境信号，只读。
 
     管理端直接可读；员工会话要「备货复盘」这一项（只读，2026-11-10 用户裁定）。
     """
@@ -121,8 +121,9 @@ async def get_review_summary(
 
     管理端直接可读；员工会话要「备货复盘」这一项（只读，2026-11-10 用户裁定）。
 
-    口径（07:00 主口径、final_qty 优先、无实际的日子不算）见
-    `services/prep_review/summary.py` 的模块 docstring；这里只做参数与错误映射。
+    口径（07:00 主口径；参考值与下达量两条基线并列，无实际的日子不算）见
+    `services/prep_review/measure.py` 与 `summary.py` 的模块 docstring；这里只做参数
+    与错误映射。
     """
     try:
         return await review_summary(db, end=end, days=days)

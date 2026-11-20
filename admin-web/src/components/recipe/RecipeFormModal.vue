@@ -777,7 +777,7 @@ onBeforeUnmount(() => {
 }
 .drag-handle {
   cursor: grab;
-  border: 1px solid var(--line);
+  border: var(--edge-w, 2px) solid var(--edge);
   background: var(--surface-2);
   color: var(--muted);
   border-radius: 4px;

@@ -640,7 +640,8 @@ watch(activeStation, () => {
 .pp-copy {
   min-height: 44px;
   padding: 0 12px;
-  border: 1px solid var(--line);
+  border: var(--edge-w, 2px) solid var(--edge);
+  box-shadow: var(--paper-shadow-sm);
   border-radius: var(--r-1, 8px);
   background: var(--surface-1);
   color: var(--ink-dim);
@@ -822,8 +823,8 @@ watch(activeStation, () => {
 .pp-edit-ok {
   min-height: var(--tap);
   padding: 0 12px;
-  border: 1px solid var(--line-strong);
-  border-radius: 999px;
+  border: var(--edge-w, 2px) solid var(--edge);
+  border-radius: var(--r-1);
   background: var(--surface-2);
   color: var(--ink-dim);
   font-family: inherit;
@@ -847,7 +848,7 @@ watch(activeStation, () => {
   min-width: 44px;
   min-height: 44px;
   padding: 0;
-  border: 1px solid var(--line-strong);
+  border: var(--edge-w, 2px) solid var(--edge);
   border-radius: var(--r-1, 8px);
   background: var(--surface-2);
   color: var(--ink-dim);
@@ -916,8 +917,8 @@ watch(activeStation, () => {
   align-items: center;
   min-height: 44px;
   padding: 0 14px;
-  border: 1px solid var(--line-strong);
-  border-radius: var(--r-full);
+  border: var(--edge-w, 2px) solid var(--edge);
+  border-radius: var(--r-1);
   background: none;
   color: var(--ink-dim);
   font-size: var(--fs-12, 12px);
@@ -931,7 +932,8 @@ watch(activeStation, () => {
 
 .pp-pick {
   padding: var(--sp-4, 16px);
-  border: 1px solid var(--line);
+  border: var(--edge-w, 2px) solid var(--edge);
+  box-shadow: var(--paper-shadow-sm);
   border-radius: var(--r-2, 12px);
   background: var(--surface-1);
 }
@@ -957,7 +959,7 @@ watch(activeStation, () => {
 .pp-pick-chip {
   min-height: 44px;
   padding: 0 16px;
-  border: 1px solid var(--line-control);
+  border: var(--edge-w, 2px) solid var(--line-control);
   border-radius: var(--r-full, 999px);
   background: var(--surface-2);
   color: var(--ink);
@@ -966,7 +968,8 @@ watch(activeStation, () => {
 
 .pp-empty {
   padding: var(--sp-6, 24px) var(--sp-4, 16px);
-  border: 1px solid var(--line);
+  border: var(--edge-w, 2px) solid var(--edge);
+  box-shadow: var(--paper-shadow-sm);
   border-radius: var(--r-2, 12px);
   background: var(--surface-1);
   color: var(--ink-dim);
@@ -990,7 +993,8 @@ watch(activeStation, () => {
 .pp-staff-switch {
   min-height: 44px;
   padding: 0 12px;
-  border: 1px solid var(--line);
+  border: var(--edge-w, 2px) solid var(--edge);
+  box-shadow: var(--paper-shadow-sm);
   border-radius: var(--r-full);
   background: var(--surface-1);
   color: var(--ink-dim);
@@ -1005,8 +1009,8 @@ watch(activeStation, () => {
   min-width: 0;
   max-width: 100%;
   padding: 3px;
-  border: 1px solid var(--line);
-  border-radius: var(--r-full);
+  border: var(--edge-w, 2px) solid var(--edge);
+  border-radius: var(--r-1);
   background: var(--surface-2);
   align-self: flex-start;
   overflow-x: auto;
@@ -1023,7 +1027,7 @@ watch(activeStation, () => {
   min-height: 44px;
   padding: 0 14px;
   border: 1px solid transparent;
-  border-radius: var(--r-full);
+  border-radius: var(--r-1);
   background: none;
   color: var(--ink-dim);
   font-size: var(--fs-13, 13px);
@@ -1046,8 +1050,8 @@ watch(activeStation, () => {
   min-width: 0;
   max-width: 100%;
   padding: 3px;
-  border: 1px solid var(--line);
-  border-radius: var(--r-full);
+  border: var(--edge-w, 2px) solid var(--edge);
+  border-radius: var(--r-1);
   background: var(--surface-2);
   align-self: flex-start;
   overflow-x: auto;
@@ -1067,7 +1071,7 @@ watch(activeStation, () => {
   min-height: 44px;
   padding: 0 14px;
   border: 1px solid transparent;
-  border-radius: var(--r-full);
+  border-radius: var(--r-1);
   background: none;
   color: var(--ink-dim);
   font-size: var(--fs-13, 13px);

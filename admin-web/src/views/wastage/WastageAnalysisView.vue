@@ -808,7 +808,7 @@ onBeforeUnmount(() => {
 .loss-error-bar {
   display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
   padding: 8px 10px; margin-bottom: 14px;
-  border: 1px solid var(--danger-soft); border-radius: 8px;
+  border: var(--edge-w, 2px) solid var(--danger-soft); border-radius: 8px;
   background: var(--danger-soft);
 }
 .loss-error-title { font-size: 12.5px; font-weight: 600; color: var(--danger-bright); }
@@ -819,7 +819,7 @@ onBeforeUnmount(() => {
 
 /* A5：本月没有记录时的空态。 */
 .loss-empty {
-  border: 1px solid var(--line); border-radius: 10px;
+  border: var(--edge-w, 2px) solid var(--edge); border-radius: 10px;
   padding: 22px 14px; margin-bottom: 14px; text-align: center;
   background: var(--surface-2);
 }
@@ -850,7 +850,8 @@ onBeforeUnmount(() => {
   .loss-cards { grid-template-columns: repeat(auto-fit, minmax(150px, 240px)); }
 }
 .loss-stat {
-  border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px;
+  background: var(--surface-1); box-shadow: var(--paper-shadow-sm);
+  border: var(--edge-w, 2px) solid var(--edge); border-radius: var(--r-1); padding: 10px 12px;
   display: flex; flex-direction: column; gap: 4px;
 }
 .loss-stat-label { font-size: 11.5px; color: var(--ink-dim); }
@@ -858,7 +859,8 @@ onBeforeUnmount(() => {
 .loss-stat-value em { font-style: normal; font-size: 12px; color: var(--ink-dim); margin-left: 3px; }
 .loss-stat-empty { color: var(--ink-faint); }
 .loss-block {
-  border: 1px solid var(--line); border-radius: 10px;
+  background: var(--surface-1); box-shadow: var(--paper-shadow-sm);
+  border: var(--edge-w, 2px) solid var(--edge); border-radius: var(--r-2);
   padding: 12px 14px; margin-bottom: 14px;
 }
 .loss-block-hd {
@@ -879,7 +881,7 @@ onBeforeUnmount(() => {
 .loss-rank-no {
   width: 20px; height: 20px; flex: none; border-radius: 50%; font-size: 11px;
   display: inline-flex; align-items: center; justify-content: center;
-  border: 1px solid var(--line); color: var(--ink-dim);
+  border: var(--edge-w, 2px) solid var(--edge); color: var(--ink-dim);
 }
 .loss-rank-no.top { border-color: var(--action); color: var(--action); }
 .loss-rank-name { font-size: 13.5px; flex: 1 1 auto; }
@@ -906,7 +908,7 @@ onBeforeUnmount(() => {
 .loss-mode {
   padding: 4px 11px; font-size: 12px; font-family: inherit; cursor: pointer;
   color: var(--ink); background: transparent;
-  border: 1px solid var(--line); border-radius: 999px;
+  border: var(--edge-w, 2px) solid var(--edge); border-radius: 999px;
 }
 .loss-mode.on { border-color: var(--action); color: var(--action); }
 .loss-filter-row { display: flex; gap: 8px; align-items: center; }
@@ -914,7 +916,7 @@ onBeforeUnmount(() => {
 .loss-input {
   width: 100%; padding: 7px 10px; font-size: 13px; font-family: inherit;
   color: var(--ink); background: var(--surface-2);
-  border: 1px solid var(--line); border-radius: 8px;
+  border: var(--edge-w, 2px) solid var(--edge); border-radius: 8px;
 }
 .loss-detail-meta { display: flex; align-items: baseline; justify-content: flex-end; gap: 10px; flex-wrap: wrap; }
 .loss-amend { font-size: 11px; letter-spacing: 0; color: var(--warn); }
@@ -929,19 +931,19 @@ onBeforeUnmount(() => {
 .loss-qty { font-size: 13px; color: var(--action); font-variant-numeric: tabular-nums; }
 .loss-reason-tag {
   font-size: 11px; padding: 1px 8px; border-radius: 999px;
-  border: 1px solid var(--line); color: var(--ink-dim);
+  border: var(--edge-w, 2px) solid var(--edge); color: var(--ink-dim);
 }
 /* A4：改过的角标 —— 只在真改过时出现，title 里说次数。 */
 .loss-edit-flag {
   font-size: 10.5px; line-height: 1; padding: 2px 5px;
-  border: 1px solid var(--line-strong); border-radius: 999px;
+  border: var(--edge-w, 2px) solid var(--edge); border-radius: 999px;
   color: var(--ink-dim);
 }
 .loss-who { font-size: 11.5px; color: var(--ink-dim); margin-left: auto; }
 .loss-remark { margin: 4px 0 0; font-size: 12px; color: var(--ink-dim); }
 .loss-thumbs { display: flex; gap: 6px; margin-top: 6px; }
 .loss-thumb {
-  padding: 0; border: 1px solid var(--line); border-radius: 6px;
+  padding: 0; border: var(--edge-w, 2px) solid var(--edge); border-radius: 6px;
   background: transparent; cursor: pointer; overflow: hidden; display: block;
   line-height: 0;
 }

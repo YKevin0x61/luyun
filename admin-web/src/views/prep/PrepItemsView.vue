@@ -358,7 +358,8 @@ onMounted(load)
 .pi-refresh {
   min-height: 44px;
   padding: 0 14px;
-  border: 1px solid var(--line);
+  border: var(--edge-w, 2px) solid var(--edge);
+  box-shadow: var(--paper-shadow-sm);
   border-radius: var(--r-1, 8px);
   background: var(--surface-1);
   color: var(--ink-dim);
@@ -376,7 +377,7 @@ onMounted(load)
   min-width: 0;
   min-height: 44px;
   padding: 0 12px;
-  border: 1px solid var(--line-strong);
+  border: var(--edge-w, 2px) solid var(--edge);
   border-radius: var(--r-1, 8px);
   background: var(--surface-2);
   color: var(--ink);
@@ -386,7 +387,7 @@ onMounted(load)
 .pi-filter {
   min-height: 44px;
   padding: 0 10px;
-  border: 1px solid var(--line-strong);
+  border: var(--edge-w, 2px) solid var(--edge);
   border-radius: var(--r-1, 8px);
   background: var(--surface-2);
   color: var(--ink-dim);
@@ -463,13 +464,13 @@ onMounted(load)
 
 .pi-status.is-off {
   background: none;
-  border: 1px solid var(--line);
+  border: var(--edge-w, 2px) solid var(--edge);
   color: var(--ink-faint);
 }
 
 .pi-edit {
   min-height: 44px;
-  border: 1px solid var(--line-strong);
+  border: var(--edge-w, 2px) solid var(--edge);
   border-radius: var(--r-1, 8px);
   background: var(--surface-2);
   color: var(--ink-dim);
@@ -482,7 +483,8 @@ onMounted(load)
 
 .pi-empty {
   padding: var(--sp-6, 24px) var(--sp-4, 16px);
-  border: 1px solid var(--line);
+  border: var(--edge-w, 2px) solid var(--edge);
+  box-shadow: var(--paper-shadow-sm);
   border-radius: var(--r-2, 12px);
   background: var(--surface-1);
   color: var(--ink-dim);
@@ -518,7 +520,7 @@ onMounted(load)
   max-height: 92vh;
   overflow-y: auto;
   padding: var(--sp-4, 16px);
-  border: 1px solid var(--line);
+  border: var(--edge-w, 2px) solid var(--edge);
   border-radius: var(--r-2, 12px) var(--r-2, 12px) 0 0;
   background: var(--surface-0);
 }
@@ -581,7 +583,7 @@ onMounted(load)
 .pi-input {
   min-height: 44px;
   padding: 0 10px;
-  border: 1px solid var(--line-strong);
+  border: var(--edge-w, 2px) solid var(--edge);
   border-radius: var(--r-1, 8px);
   background: var(--surface-2);
   color: var(--ink);
@@ -630,7 +632,7 @@ onMounted(load)
 }
 
 .pi-cancel {
-  border: 1px solid var(--line-strong);
+  border: var(--edge-w, 2px) solid var(--edge);
   background: none;
   color: var(--ink-dim);
 }

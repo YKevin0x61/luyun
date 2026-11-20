@@ -11,8 +11,10 @@
 - **样本**：`period` 含 `end` 当天，`start = end − (days − 1)`。只取
   `snapshot_at` 钟点为 `07:00` 的快照（主口径）；08:00 / 19:00 那些窗口不参与，
   否则同日重叠窗口会把误差平均成假象。一天有几个品就有几条品-天样本。
-- **建议量**：优先 `final_qty`（店长手改后的最终建议），为空才用 `suggested_qty`。
-  手改是现场真实下达的量，复盘要评的是「最终建议准不准」。
+- **两条基线**：**参考值** `suggested_qty`（机器算的）与**下达量** `final_qty`
+  （店长当天最终执行；未手改时回落参考值）。复盘同时评这两件事，谁都不冒充谁：
+  手改过的品在「对参考」与「对下达」上本来就可以得出相反结论。基线选择只在
+  `services/prep_review/measure.py` 发生，汇总、分组、当天摘要与售罄阈值共用它。
 - **实际量**：`prep_plan_actuals.sold_qty`，按 `(window_start, window_end, prep_item_id)`
   与快照一一配对（快照本身就是按窗口落的）。`sold_qty IS NULL` 表示窗口还没结束，
   **不参与任何指标、也不计入分组的天数**——把未结束窗口当 0 会把偏差算成灾难。
@@ -62,7 +64,7 @@ from services.business_day import REVIEW_CLOCK
 from services.dish_normalize import normalize_dish_name
 from services.prep_item_identity import id_of, item_key, rule_key
 from services.prep_plan_service import LOUMIAN_STATION, prep_plan_service
-from services.prep_review import retention
+from services.prep_review import measure, retention
 from services.wastage.store import WastageStore
 
 logger = logging.getLogger(__name__)
@@ -176,7 +178,7 @@ async def _load_rows(db, start_day: date, end_day: date) -> List[Dict[str, Any]]
         await cursor.execute(
             """
             SELECT s.plan_day, s.snapshot_at, s.prep_item_id, s.item_name, s.unit,
-                   s.suggested_qty, s.final_qty,
+                   s.suggested_qty, s.final_qty, s.qty_source,
                    a.sold_qty, a.sold_next_day
             FROM prep_plan_snapshots s
             LEFT JOIN prep_plan_actuals a
@@ -193,8 +195,6 @@ async def _load_rows(db, start_day: date, end_day: date) -> List[Dict[str, Any]]
 
     rows: List[Dict[str, Any]] = []
     for row in raw:
-        final_qty = row["final_qty"]
-        suggested = final_qty if final_qty is not None else row["suggested_qty"]
         sold = row["sold_qty"]
         next_day = row["sold_next_day"]
         rows.append(
@@ -203,7 +203,7 @@ async def _load_rows(db, start_day: date, end_day: date) -> List[Dict[str, Any]]
                 "key": item_key(row["prep_item_id"], row["item_name"], row["unit"]),
                 "item_name": row["item_name"] or "",
                 "unit": row["unit"] or "",
-                "suggested": float(suggested or 0.0),
+                **measure.basis(row),
                 "sold": None if sold is None else float(sold),
                 "sold_next_day": None if next_day is None else float(next_day),
             }
@@ -308,32 +308,7 @@ async def _load_unit_prices(
 
 
 def _metrics(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
-    usable = [row for row in rows if row["sold"] is not None]
-    days = {row["day"] for row in usable}
-    suggested_total = sum(row["suggested"] for row in usable)
-    sold_total = sum(row["sold"] for row in usable)
-    diffs = [row["suggested"] - row["sold"] for row in usable]
-    shortfall = sum(max(0.0, -diff) for diff in diffs)
-    overfill = sum(max(0.0, diff) for diff in diffs)
-    covered = sum(1 for diff in diffs if diff <= 0)
-    denom = sold_total if sold_total > 0 else None
-    return {
-        "measured_days": len(days),
-        "measured_item_days": len(usable),
-        "suggested_total": round(suggested_total, 2),
-        "sold_total": round(sold_total, 2),
-        "shortfall_qty": round(shortfall, 2),
-        "overfill_qty": round(overfill, 2),
-        "absolute_deviation": None
-        if denom is None
-        else sum(abs(diff) for diff in diffs) / denom,
-        "direction_deviation": None if denom is None else sum(diffs) / denom,
-        "coverage_qty": None
-        if denom is None
-        else sum(min(row["suggested"], row["sold"]) for row in usable) / denom,
-        "covered_items": covered,
-        "coverage_items": (covered / len(usable)) if usable else None,
-    }
+    return measure.metrics(rows)
 
 
 def _groups(
@@ -346,23 +321,32 @@ def _groups(
         for key, label in _GROUP_BUCKETS[dimension]:
             days = [day for day in day_aggs if day_keys[day][dimension] == key]
             n = len(days)
-            direction = sum(day_aggs[day]["direction"] for day in days)
-            absolute = sum(day_aggs[day]["absolute"] for day in days)
             sold = sum(day_aggs[day]["sold"] for day in days)
             insufficient = n < MIN_GROUP_DAYS
             ratio_denom = sold if sold > 0 else None
-            buckets.append(
-                {
-                    "key": key,
-                    "label": label,
-                    "n": n,
+            baselines = {}
+            for baseline in (measure.REFERENCE, measure.PLANNED):
+                direction = sum(
+                    day_aggs[day][f"{baseline}_direction"] for day in days
+                )
+                absolute = sum(
+                    day_aggs[day][f"{baseline}_absolute"] for day in days
+                )
+                baselines[baseline] = {
                     "direction_deviation": None
                     if insufficient or ratio_denom is None
                     else direction / ratio_denom,
                     "absolute_deviation": None
                     if insufficient or ratio_denom is None
                     else absolute / ratio_denom,
+                }
+            buckets.append(
+                {
+                    "key": key,
+                    "label": label,
+                    "n": n,
                     "insufficient": insufficient,
+                    "baselines": baselines,
                 }
             )
         out[dimension] = buckets
@@ -385,7 +369,7 @@ def _cost(
     for row in rows:
         if row["sold"] is None:
             continue
-        overfill = max(0.0, row["suggested"] - row["sold"])
+        overfill = max(0.0, row["planned_qty"] - row["sold"])
         if overfill <= 0:
             continue
         overfill_total += overfill
@@ -417,6 +401,7 @@ def _cost(
         amount_total += overfill * (price or 0.0)
 
     return {
+        "basis": measure.PLANNED,
         "overfill_qty": round(overfill_total, 2),
         "next_day_sold": round(next_day_total, 2),
         "wastage": round(wastage_total, 2),
@@ -446,19 +431,7 @@ async def review_summary(
     )
     prices = await _load_unit_prices(db, start_day, end_day)
 
-    day_aggs: Dict[str, Dict[str, float]] = {}
-    for row in rows:
-        if row["sold"] is None:
-            continue
-        agg = day_aggs.setdefault(
-            row["day"], {"direction": 0.0, "absolute": 0.0, "sold": 0.0, "items": 0}
-        )
-        diff = row["suggested"] - row["sold"]
-        agg["direction"] += diff
-        agg["absolute"] += abs(diff)
-        agg["sold"] += row["sold"]
-        agg["items"] += 1
-
+    day_aggs = measure.day_totals(rows)
     day_keys = {
         day: _day_group_keys(day, contexts.get(day)) for day in day_aggs
     }

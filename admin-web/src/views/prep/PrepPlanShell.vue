@@ -89,8 +89,10 @@ const isActive = (tab) => route.path === tab.to
   padding: 4px;
   box-sizing: border-box;
   background: var(--surface-2);
-  border: 1px solid var(--line);
-  border-radius: var(--r-2);
+  border: var(--edge-w, 2px) solid var(--edge);
+  /* 2px 描边 + 4px 内边距下，20px 圆角在 44px 高的条上等于胶囊 —— 与贴纸格调不合。
+     压到 12px，选中项用 2px 内描边示意"这一格是按下的"。 */
+  border-radius: var(--r-1);
   overflow-x: auto;
   scrollbar-width: none;
 }
@@ -116,10 +118,10 @@ const isActive = (tab) => route.path === tab.to
 }
 
 .pp-tab.is-on {
-  color: var(--action);
+  color: var(--ink);
   background: var(--surface-1);
-  font-weight: 600;
-  box-shadow: inset 0 0 0 1px var(--line);
+  font-weight: 700;
+  box-shadow: inset 0 0 0 2px var(--edge);
 }
 
 @media (max-width: 720px) {

@@ -1523,9 +1523,12 @@ onUnmounted(() => {
   font-size: 12.5px; color: var(--ink);
 }
 .loss-draft { margin: 0 0 10px; }
+/* 卡要有底：只有 2px 边、底色透明时，卡与暖纸底混成一片，看着像三条分隔线。 */
 .loss-block {
-  border: 1px solid var(--line);
-  border-radius: 10px;
+  background: var(--surface-1);
+  border: var(--edge-w, 2px) solid var(--edge);
+  border-radius: var(--r-2);
+  box-shadow: var(--paper-shadow-sm);
   padding: 12px 14px;
   margin-bottom: 14px;
 }
@@ -1542,7 +1545,7 @@ onUnmounted(() => {
 .loss-input {
   width: 100%; padding: 9px 10px; font-size: 14px; font-family: inherit;
   color: var(--ink); background: var(--surface-2);
-  border: 1px solid var(--line); border-radius: 8px;
+  border: var(--edge-w, 2px) solid var(--edge); border-radius: 8px;
 }
 /* 必填那三项的输入框大一号：手机上点开就填，字号 16 也不会触发 iOS 缩放。 */
 .loss-input-lg { padding: 11px 12px; font-size: 16px; }
@@ -1556,7 +1559,7 @@ onUnmounted(() => {
   min-height: var(--tap); padding: 0 12px;
   font-size: 13px; font-family: inherit;
   color: var(--ink); background: transparent;
-  border: 1px solid var(--line); border-radius: 999px; cursor: pointer;
+  border: var(--edge-w, 2px) solid var(--edge); border-radius: var(--r-1); cursor: pointer;
 }
 .loss-unit-chip.on {
   border-color: var(--action); color: var(--action);
@@ -1568,7 +1571,7 @@ onUnmounted(() => {
 .loss-reason {
   padding: 9px 8px; font-size: 13px; font-family: inherit; text-align: center;
   color: var(--ink); background: transparent;
-  border: 1px solid var(--line); border-radius: 8px; cursor: pointer;
+  border: var(--edge-w, 2px) solid var(--edge); border-radius: 8px; cursor: pointer;
 }
 .loss-reason.on { border-color: var(--action); color: var(--action); font-weight: 600; }
 /* 选填三项收成一行小按钮（spec 4.1.5）：虚线 = 还没展开，实线 --action = 已展开。 */
@@ -1588,7 +1591,7 @@ onUnmounted(() => {
   min-height: var(--tap); padding: 0 12px;
   font-size: 12.5px; font-family: inherit;
   color: var(--ink-dim); background: transparent;
-  border: 1px dashed var(--line-strong); border-radius: 999px; cursor: pointer;
+  border: 1px dashed var(--line-strong); border-radius: var(--r-1); cursor: pointer;
 }
 .loss-more-btn.on { border-style: solid; border-color: var(--action); color: var(--action); }
 .loss-more-btn.is-static { border-style: solid; cursor: default; }
@@ -1604,7 +1607,7 @@ onUnmounted(() => {
 }
 .loss-chips::-webkit-scrollbar { display: none; }
 .loss-chips > * { flex: 0 0 auto; scroll-snap-align: start; }
-.loss-chip { display: inline-flex; align-items: stretch; border: 1px solid var(--line); border-radius: 999px; overflow: hidden; }
+.loss-chip { display: inline-flex; align-items: stretch; border: var(--edge-w, 2px) solid var(--edge); border-radius: var(--r-1); overflow: hidden; }
 .loss-chip-main {
   display: flex; flex-direction: column; align-items: flex-start; gap: 1px;
   padding: 5px 12px; background: transparent; border: 0; color: var(--ink);
@@ -1635,7 +1638,7 @@ onUnmounted(() => {
 .loss-quick-chip {
   padding: 5px 9px; font-size: 12.5px; font-family: inherit;
   color: var(--ink); background: transparent;
-  border: 1px solid var(--line); border-radius: 999px; cursor: pointer;
+  border: var(--edge-w, 2px) solid var(--edge); border-radius: var(--r-1); cursor: pointer;
 }
 .loss-quick-chip:active { border-color: var(--action); color: var(--action); }
 /* 「最近记过」chip 上的单位（2026-11-07）：名字是主角，单位灰一档 —— 点一下两件一起填。 */
@@ -1683,7 +1686,7 @@ onUnmounted(() => {
 .loss-day {
   min-height: var(--tap); padding: 0 14px; font-size: 13px; font-family: inherit;
   color: var(--ink-dim); background: transparent;
-  border: 1px solid var(--line); border-radius: 999px; cursor: pointer;
+  border: var(--edge-w, 2px) solid var(--edge); border-radius: 999px; cursor: pointer;
 }
 .loss-day.on { border-color: var(--action); color: var(--action); font-weight: 600; }
 .loss-day:active { background: var(--action-soft); }
@@ -1734,7 +1737,8 @@ onUnmounted(() => {
 .loss-cam-sub { margin: 2px 0 0; font-size: 12px; line-height: 1.4; color: var(--ink-dim); }
 .loss-cam-close {
   flex: 0 0 auto; min-height: var(--tap); padding: 0 18px;
-  border: 1px solid var(--line-strong); border-radius: 999px;
+  border: var(--edge-w, 2px) solid var(--edge);
+  box-shadow: var(--paper-shadow-sm); border-radius: 999px;
   background: var(--surface-1); color: var(--ink);
   font-family: inherit; font-size: 14px; font-weight: 600; cursor: pointer;
 }
@@ -1776,18 +1780,15 @@ onUnmounted(() => {
   bottom: calc(8px + var(--safe-b, 0px));
   z-index: var(--z-shell);
   display: flex; flex-direction: column; gap: 8px;
-  padding: 10px 0 4px;
-  background: var(--surface-0);
-  border-top: 1px solid var(--line);
+  padding: 10px 12px 8px;
+  /* 吸底条是卡片里的一块小面板，不是一条贴边的色带：白卡里嵌一条暖纸底 +
+     1px 细线，远看像没画完。给它自己的描边、圆角和硬阴影，与「小贴纸」一致。 */
+  background: var(--surface-2);
+  border: var(--edge-w, 2px) solid var(--edge);
+  border-radius: var(--r-1);
+  box-shadow: var(--paper-shadow-sm);
 }
 .loss-feedback { margin: 0; }
-/* 吸底条上方淡出：首屏里它正好切在「现场照片 / 备注 / 日期」那行上沿，硬切会露出一条
-   半截按钮（实测 390×844）。渐变把这截内容柔化掉，同时暗示「下面还有东西」。 */
-.loss-actions::before {
-  content: ''; position: absolute; left: 0; right: 0; top: -14px; height: 14px;
-  background: linear-gradient(to bottom, transparent, var(--surface-0));
-  pointer-events: none;
-}
 .loss-actions-row { display: flex; gap: 10px; }
 /* 触控下限走令牌（--tap = 44px）：手机上登记是常做的事，按钮不该小于一指宽。 */
 .loss-actions .btn { min-height: var(--tap); }
@@ -1812,7 +1813,7 @@ onUnmounted(() => {
 .loss-qty { font-size: 13px; color: var(--action); font-variant-numeric: tabular-nums; }
 .loss-reason-tag {
   font-size: 11px; padding: 1px 8px; border-radius: 999px;
-  border: 1px solid var(--line); color: var(--ink-dim);
+  border: var(--edge-w, 2px) solid var(--edge); color: var(--ink-dim);
 }
 /* 更正入口：小按钮、放在标题行下面一行（390px 宽度下挤进标题行会换行打结）。 */
 .loss-item-acts { display: flex; gap: 6px; margin-top: 6px; }
@@ -1820,7 +1821,7 @@ onUnmounted(() => {
   min-height: var(--tap); padding: 0 12px;
   font-size: 12px; font-family: inherit;
   color: var(--ink-dim); background: transparent;
-  border: 1px solid var(--line); border-radius: 999px; cursor: pointer;
+  border: var(--edge-w, 2px) solid var(--edge); border-radius: var(--r-1); cursor: pointer;
 }
 .loss-item-btn.is-danger { border-color: var(--danger-bright); color: var(--danger-bright); font-weight: 600; }
 .loss-item-btn:disabled { opacity: .5; }

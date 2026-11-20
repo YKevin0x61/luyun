@@ -225,18 +225,18 @@ class SnapshotTests(PrepPlanRebuildFixture):
         self.assertEqual(first["pending"], 0)
         # 稳定序列：8 个同星期几都是 80 → 参考值 80
         self.assertEqual(
-            next(g for g in day["snapshots"] if g["clock"] == "08:00")["items"][0]["suggested_qty"], 80
+            next(g for g in day["snapshots"] if g["clock"] == "08:00")["items"][0]["reference_qty"], 80
         )
         # 08:00 那条窗口里有 08:30 的 100 个 → 缺 20；09:00 那条吃不到，实际 0
         self.assertAlmostEqual(first["sold_total"], 100)
-        self.assertAlmostEqual(first["shortfall"], 20)
-        self.assertEqual(first["covered"], 0.0)
-        self.assertAlmostEqual(first["ref_ratio"], 0.8)
+        self.assertAlmostEqual(first["reference"]["shortfall_qty"], 20)
+        self.assertEqual(first["reference"]["coverage_items"], 0.0)
+        self.assertAlmostEqual(first["reference"]["ratio"], 0.8)
         self.assertAlmostEqual(later["sold_total"], 0)
-        self.assertAlmostEqual(later["overfill"], 80)
+        self.assertAlmostEqual(later["planned"]["overfill_qty"], 80)
         # 实际为 0 时比例没有分母 → None，不是 0 也不是无穷
-        self.assertIsNone(later["ref_ratio"])
-        self.assertEqual(later["covered"], 1.0)
+        self.assertIsNone(later["reference"]["ratio"])
+        self.assertEqual(later["reference"]["coverage_items"], 1.0)
         item = next(g for g in day["snapshots"] if g["clock"] == "08:00")["items"][0]
         self.assertTrue(item["is_major"])
         self.assertAlmostEqual(item["quantile"], 0.60)
@@ -252,8 +252,9 @@ class SnapshotTests(PrepPlanRebuildFixture):
         summary = day["snapshots"][0]["summary"]
         self.assertEqual(summary["measured"], 0)
         self.assertEqual(summary["pending"], 1)
-        self.assertIsNone(summary["covered"])
-        self.assertIsNone(summary["ref_ratio"])
+        self.assertIsNone(summary["reference"]["coverage_items"])
+        self.assertIsNone(summary["reference"]["ratio"])
+        self.assertIsNone(summary["planned"]["coverage_items"])
 
 
 class PlanPersistenceTests(PrepPlanRebuildFixture):

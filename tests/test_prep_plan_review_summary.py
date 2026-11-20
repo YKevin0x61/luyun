@@ -94,7 +94,8 @@ class ReviewFixture(unittest.IsolatedAsyncioTestCase):
         await rules.commit()
 
     async def _seed_snapshot(self, day, item_id, suggested, *, final=None,
-                             item_name=ITEM_NAME, unit=UNIT, clock="07:00"):
+                             source=None, item_name=ITEM_NAME, unit=UNIT,
+                             clock="07:00"):
         start = datetime.fromisoformat(f"{day}T{clock}:00+08:00")
         end = start + timedelta(hours=24)
         tdb = self.db.table("prep_plan_snapshots")
@@ -104,13 +105,14 @@ class ReviewFixture(unittest.IsolatedAsyncioTestCase):
                 INSERT INTO prep_plan_snapshots (
                     snapshot_at, window_start, window_end, plan_day,
                     prep_item_id, item_name, unit, station,
-                    suggested_qty, demand_qty, final_qty, store_factor, quantile,
-                    basis_json, rules_fingerprint, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1.0, 0.5, '{}', ?, ?)
+                    suggested_qty, demand_qty, final_qty, qty_source,
+                    store_factor, quantile, basis_json, rules_fingerprint, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1.0, 0.5, '{}', ?, ?)
                 """,
                 (
                     start.isoformat(), start.isoformat(), end.isoformat(), day,
                     item_id, item_name, unit, STATION, suggested, suggested, final,
+                    source or ("manual" if final is not None else "suggested"),
                     FP, self.stamp,
                 ),
             )
@@ -244,12 +246,12 @@ def _json(value):
 
 
 class MetricTests(ReviewFixture):
-    async def test_three_deviation_metrics_use_primary_clock_and_final_qty(self):
+    async def test_two_baselines_are_computed_side_by_side(self):
         item_id = await self._seed_item()
-        # 10-19：建议 100（无手改），实际 80 → +20
+        # 10-19：参考 100、未手改 → 下达 100，实际 80
         await self._seed_snapshot("2026-10-19", item_id, 100)
         await self._seed_actual("2026-10-19", item_id, 80)
-        # 10-20：建议 50、店长手改成 60，实际 70 → −10（按 60 算，不是 50）
+        # 10-20：参考 50、店长手改成 60 → 下达 60，实际 70
         await self._seed_snapshot("2026-10-20", item_id, 50, final=60)
         await self._seed_actual("2026-10-20", item_id, 70)
         # 10-21：窗口未结束（没有实际行）→ 不进任何指标
@@ -260,14 +262,28 @@ class MetricTests(ReviewFixture):
         self.assertEqual(body["primary_clock"], "07:00")
         self.assertEqual(metrics["measured_days"], 2)
         self.assertEqual(metrics["measured_item_days"], 2)
-        self.assertAlmostEqual(metrics["suggested_total"], 160)
         self.assertAlmostEqual(metrics["sold_total"], 150)
-        self.assertAlmostEqual(metrics["absolute_deviation"], 30 / 150)
-        self.assertAlmostEqual(metrics["direction_deviation"], 10 / 150)
-        self.assertAlmostEqual(metrics["coverage_qty"], 140 / 150)
-        # 品数口径：10-19 够卖、10-20 不够 → 1/2
-        self.assertEqual(metrics["covered_items"], 1)
-        self.assertAlmostEqual(metrics["coverage_items"], 1 / 2)
+        self.assertEqual(metrics["planned_sources"], {"manual": 1, "suggested": 1})
+
+        reference = metrics["reference"]
+        self.assertAlmostEqual(reference["qty_total"], 150)
+        self.assertAlmostEqual(reference["shortfall_qty"], 20)
+        self.assertAlmostEqual(reference["overfill_qty"], 20)
+        self.assertAlmostEqual(reference["absolute_deviation"], 40 / 150)
+        self.assertAlmostEqual(reference["direction_deviation"], 0.0)
+        self.assertAlmostEqual(reference["coverage_qty"], 130 / 150)
+        self.assertEqual(reference["covered_items"], 1)
+        self.assertAlmostEqual(reference["coverage_items"], 1 / 2)
+
+        planned = metrics["planned"]
+        self.assertAlmostEqual(planned["qty_total"], 160)
+        self.assertAlmostEqual(planned["shortfall_qty"], 10)
+        self.assertAlmostEqual(planned["overfill_qty"], 20)
+        self.assertAlmostEqual(planned["absolute_deviation"], 30 / 150)
+        self.assertAlmostEqual(planned["direction_deviation"], 10 / 150)
+        self.assertAlmostEqual(planned["coverage_qty"], 140 / 150)
+        self.assertEqual(planned["covered_items"], 1)
+        self.assertAlmostEqual(planned["coverage_items"], 1 / 2)
 
     async def test_non_primary_clock_rows_are_ignored(self):
         item_id = await self._seed_item()
@@ -279,7 +295,8 @@ class MetricTests(ReviewFixture):
 
         body = await self._summary("2026-10-19", days=1)
         self.assertEqual(body["metrics"]["measured_item_days"], 1)
-        self.assertAlmostEqual(body["metrics"]["suggested_total"], 100)
+        self.assertAlmostEqual(body["metrics"]["reference"]["qty_total"], 100)
+        self.assertAlmostEqual(body["metrics"]["planned"]["qty_total"], 100)
         self.assertAlmostEqual(body["metrics"]["sold_total"], 90)
 
 
@@ -314,28 +331,34 @@ class GroupTests(ReviewFixture):
         monday = self._bucket(groups, "weekday", "1")
         self.assertEqual(monday["n"], 5)
         self.assertFalse(monday["insufficient"])
-        self.assertAlmostEqual(monday["direction_deviation"], 10 / 90)
-        self.assertAlmostEqual(monday["absolute_deviation"], 10 / 90)
+        for baseline in ("reference", "planned"):
+            self.assertAlmostEqual(
+                monday["baselines"][baseline]["direction_deviation"], 10 / 90
+            )
+            self.assertAlmostEqual(
+                monday["baselines"][baseline]["absolute_deviation"], 10 / 90
+            )
 
         tuesday = self._bucket(groups, "weekday", "2")
         self.assertEqual(tuesday["n"], 2)
         self.assertTrue(tuesday["insufficient"])
-        self.assertIsNone(tuesday["direction_deviation"])
-        self.assertIsNone(tuesday["absolute_deviation"])
+        for baseline in ("reference", "planned"):
+            self.assertIsNone(tuesday["baselines"][baseline]["direction_deviation"])
+            self.assertIsNone(tuesday["baselines"][baseline]["absolute_deviation"])
 
         rain = self._bucket(groups, "weather", "rain")
         self.assertEqual(rain["n"], 5)
-        self.assertIsNotNone(rain["absolute_deviation"])
+        self.assertIsNotNone(rain["baselines"]["reference"]["absolute_deviation"])
         no_weather = self._bucket(groups, "weather", "unknown")
         self.assertEqual(no_weather["label"], "无数据")
         self.assertEqual(no_weather["n"], 2)
         self.assertTrue(no_weather["insufficient"])
-        self.assertIsNone(no_weather["absolute_deviation"])
+        self.assertIsNone(no_weather["baselines"]["reference"]["absolute_deviation"])
         self.assertEqual(self._bucket(groups, "weather", "hot")["n"], 0)
 
         staff_34 = self._bucket(groups, "staff", "3-4")
         self.assertEqual(staff_34["n"], 5)
-        self.assertIsNotNone(staff_34["direction_deviation"])
+        self.assertIsNotNone(staff_34["baselines"]["reference"]["direction_deviation"])
         staff_12 = self._bucket(groups, "staff", "1-2")
         self.assertEqual(staff_12["n"], 2)
         self.assertTrue(staff_12["insufficient"])
@@ -370,7 +393,8 @@ class GroupTests(ReviewFixture):
         groups = body["groups"]
         hot = self._bucket(groups, "weather", "hot")
         self.assertEqual(hot["n"], 5)
-        self.assertIsNotNone(hot["absolute_deviation"])
+        self.assertIsNotNone(hot["baselines"]["reference"]["absolute_deviation"])
+        self.assertIsNotNone(hot["baselines"]["planned"]["absolute_deviation"])
         self.assertEqual(self._bucket(groups, "weather", "normal")["n"], 0)
 
         self.assertEqual(self._bucket(groups, "staff", "1-2")["n"], 2)
@@ -381,7 +405,8 @@ class GroupTests(ReviewFixture):
         for key in ("1-2", "3-4", "5+", "unknown"):
             row = self._bucket(groups, "staff", key)
             self.assertTrue(row["insufficient"])
-            self.assertIsNone(row["direction_deviation"])
+            self.assertIsNone(row["baselines"]["reference"]["direction_deviation"])
+            self.assertIsNone(row["baselines"]["planned"]["direction_deviation"])
 
 
 class CostTests(ReviewFixture):
@@ -511,6 +536,19 @@ class SnapshotDayTests(ReviewFixture):
         self.assertIsNone(group_items["叉烧馅"]["sold_out_at"])
         self.assertAlmostEqual(group_items[ITEM_NAME]["sold_1h"], 85)
         self.assertIsNone(group_items["叉烧馅"]["sold_next_day"])
+
+    async def test_snapshot_day_picks_true_earliest_across_time_offsets(self):
+        """文本排序会把 09:00+00:00 排在 10:00+08:00 前面，但真实时刻更晚。"""
+        item_id = await self._seed_item()
+        day = "2026-10-22"
+        await self._seed_snapshot(day, item_id, 100)
+        await self._seed_event(day, item_id, f"{day}T09:00:00+00:00")  # 北京 17:00
+        await self._seed_event(day, item_id, f"{day}T10:00:00+08:00")  # 北京 10:00
+
+        payload = await self.service.get_snapshot_day(self.db, day)
+        row = next(row for row in payload["items"] if row["item_name"] == ITEM_NAME)
+
+        self.assertEqual(row["sold_out_at"], f"{day}T10:00:00+08:00")
 
     async def test_snapshot_day_separates_real_sellout_from_legacy_event(self):
         """ADR 0146：只有新判定（meta.reliable）算停卖；旧事件标存疑，不能当删失。"""
@@ -649,7 +687,8 @@ def test_review_summary_api_returns_metrics_groups_and_cost(admin_client):
     assert body["primary_clock"] == "07:00"
     assert body["period"] == {"start": "2026-10-13", "end": "2026-10-19", "days": 7}
     assert body["metrics"]["measured_item_days"] == 1
-    assert body["metrics"]["suggested_total"] == 100
+    assert body["metrics"]["reference"]["qty_total"] == 100
+    assert body["metrics"]["planned"]["qty_total"] == 100
     assert body["metrics"]["sold_total"] == 90
     for dimension in ("weekday", "holiday", "weather", "staff", "note"):
         assert isinstance(body["groups"][dimension], list)
@@ -731,7 +770,9 @@ def test_cost_price_prefers_id_bucket_and_falls_back_to_name_bucket():
         "key": ("id", 7),
         "item_name": ITEM_NAME,
         "unit": UNIT,
-        "suggested": 10.0,
+        "reference_qty": 10.0,
+        "planned_qty": 10.0,
+        "planned_source": "suggested",
         "sold": 0.0,
         "sold_next_day": 0.0,
     }

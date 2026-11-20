@@ -783,7 +783,7 @@ onMounted(async () => {
 .pr-cov-text b { color: var(--ink); }
 .pr-cov-text .warn { color: var(--warn); }
 .pr-error { margin: 0; font-size: var(--fs-12); color: var(--danger-bright); }
-.pr-migrate { margin: 0; font-size: var(--fs-11); color: var(--warn); background: var(--warn-soft); border: 1px solid var(--warn-soft); border-radius: var(--r-1); padding: 8px 12px; }
+.pr-migrate { margin: 0; font-size: var(--fs-11); color: var(--warn); background: var(--warn-soft); border: var(--edge-w, 2px) solid var(--warn-soft); border-radius: var(--r-1); padding: 8px 12px; }
 
 /* 外壳 `.wb-main` 是自然流、不持有高度：这里按视口扣掉顶栏/页头/padding 给双栏一个
    确定的高度，否则面板被内容撑高、底部「保存」会掉到视口外（实测踩过）。 */
@@ -791,7 +791,8 @@ onMounted(async () => {
   height: calc(100vh - 210px); min-height: 420px; }
 .pr-panel {
   background: var(--surface-1);
-  border: 1px solid var(--line);
+  border: var(--edge-w, 2px) solid var(--edge);
+  box-shadow: var(--paper-shadow-sm);
   border-radius: var(--r-2);
   display: flex;
   flex-direction: column;
@@ -802,7 +803,7 @@ onMounted(async () => {
 .pr-input {
   width: 100%;
   background: var(--surface-2);
-  border: 1px solid var(--line);
+  border: var(--edge-w, 2px) solid var(--edge);
   border-radius: var(--r-1);
   padding: 8px 11px;
   color: var(--ink);
@@ -811,7 +812,7 @@ onMounted(async () => {
   outline: none;
 }
 .pr-input:focus { border-color: var(--line-control); }
-.pr-seg { display: flex; background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--r-1); padding: 2px; }
+.pr-seg { display: flex; background: var(--surface-2); border: var(--edge-w, 2px) solid var(--edge); border-radius: var(--r-1); padding: 2px; }
 .pr-seg button {
   flex: 1;
   border: 0;
@@ -840,7 +841,7 @@ onMounted(async () => {
   font-size: var(--fs-11);
   padding: 4px 9px;
   border-radius: 99px;
-  border: 1px solid var(--line);
+  border: var(--edge-w, 2px) solid var(--edge);
   background: transparent;
   color: var(--ink-dim);
   font-family: inherit;
@@ -869,7 +870,7 @@ onMounted(async () => {
 .pr-item-name { font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .pr-item-meta { display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--ink-faint); margin-top: 2px; overflow: hidden; white-space: nowrap; }
 .pr-semi { color: var(--action); }
-.pr-badge { border: 1px solid var(--line-strong); border-radius: 99px; padding: 0 5px; font-size: 10px; }
+.pr-badge { background: var(--surface-1); border: var(--edge-w, 2px) solid var(--edge); border-radius: 99px; padding: 0 5px; font-size: 10px; }
 .pr-miss { color: var(--warn); }
 .pr-qty { font-size: var(--fs-11); color: var(--ink-dim); font-variant-numeric: tabular-nums; }
 .pr-empty { padding: 24px 16px; font-size: var(--fs-12); color: var(--ink-faint); }
@@ -885,12 +886,12 @@ onMounted(async () => {
 .pr-detail-qty b { display: block; font-size: var(--fs-16); font-variant-numeric: tabular-nums; }
 .pr-detail-qty span { font-size: var(--fs-11); color: var(--ink-faint); }
 .pr-body { flex: 1; overflow: auto; padding: 16px 20px; display: flex; flex-direction: column; gap: 14px; }
-.pr-tip { background: var(--warn-soft); border: 1px solid var(--warn-soft); border-radius: var(--r-1); padding: 9px 12px; font-size: var(--fs-11); color: var(--warn); line-height: 1.6; }
+.pr-tip { background: var(--warn-soft); border: var(--edge-w, 2px) solid var(--warn-soft); border-radius: var(--r-1); padding: 9px 12px; font-size: var(--fs-11); color: var(--warn); line-height: 1.6; }
 .pr-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px 14px; }
 .pr-f { display: flex; flex-direction: column; gap: 5px; }
 .pr-f.wide { grid-column: span 2; }
 .pr-f > span { font-size: var(--fs-11); color: var(--ink-dim); display: flex; align-items: center; gap: 5px; }
-.pr-f em { font-style: normal; font-size: 10px; color: var(--ink-faint); border: 1px solid var(--line); border-radius: 99px; padding: 0 6px; }
+.pr-f em { font-style: normal; font-size: 10px; color: var(--ink-faint); border: var(--edge-w, 2px) solid var(--edge); border-radius: 99px; padding: 0 6px; }
 .pr-f .pr-input[disabled] { color: var(--ink-faint); }
 .pr-hot { color: var(--action); border-color: var(--line-control); }
 /* 选品候选：绝对定位的下拉卡片（之前这段样式被一次替换弄丢了，列表浮在页面上没有框） */
@@ -902,9 +903,9 @@ onMounted(async () => {
   right: 0;
   z-index: var(--z-dialog);
   background: var(--surface-1);
-  border: 1px solid var(--line-strong);
+  border: var(--edge-w, 2px) solid var(--edge);
   border-radius: var(--r-1);
-  box-shadow: 0 12px 32px var(--scrim);
+  box-shadow: var(--paper-shadow);
   max-height: 240px;
   overflow: auto;
   list-style: none;
@@ -929,12 +930,13 @@ onMounted(async () => {
   font-size: var(--fs-11);
   line-height: 1;
   color: var(--ink-dim);
-  border: 1px solid var(--line-strong);
+  background: var(--surface-1);
+  border: var(--edge-w, 2px) solid var(--edge);
   border-radius: 99px;
   padding: 3px 7px;
   white-space: nowrap;
 }
-.pr-tag.bought { color: var(--warn); border-color: var(--warn-soft); }
+.pr-tag.bought { color: var(--warn); border-color: var(--warn); }
 .pr-combo-empty { color: var(--warn); font-size: var(--fs-11); cursor: default; }
 .pr-combo-empty:hover { background: transparent; }
 .pr-combo-create { padding: 2px 4px 4px; cursor: default; }
@@ -953,7 +955,7 @@ onMounted(async () => {
 .pr-calc {
   display: flex; align-items: center; gap: 8px;
   background: var(--action-soft);
-  border: 1px solid var(--action-soft);
+  border: var(--edge-w, 2px) solid var(--action-soft);
   border-radius: var(--r-1);
   padding: 10px 12px;
   font-size: var(--fs-12);
@@ -962,7 +964,7 @@ onMounted(async () => {
 .pr-calc b { color: var(--ink); font-variant-numeric: tabular-nums; }
 .pr-eq { color: var(--ink-faint); }
 .pr-res { color: var(--action) !important; }
-.pr-card { border: 1px solid var(--line); border-radius: var(--r-1); padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; background: var(--surface-2); }
+.pr-card { border: var(--edge-w, 2px) solid var(--edge); border-radius: var(--r-1); padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; background: var(--surface-2); }
 .pr-card h3 { margin: 0; font-size: var(--fs-12); font-weight: 600; color: var(--ink-dim); display: flex; gap: 8px; align-items: center; }
 .pr-card h3 span { font-weight: 500; color: var(--ink-faint); font-size: var(--fs-11); }
 .pr-var {
@@ -983,7 +985,7 @@ onMounted(async () => {
 .pr-chk { display: flex; align-items: center; gap: 7px; font-size: var(--fs-11); color: var(--ink-dim); margin-top: 2px; }
 .pr-warn { margin: 0; font-size: var(--fs-11); color: var(--warn); line-height: 1.6; }
 .pr-foot { flex: none; display: flex; align-items: center; gap: 10px; padding: 12px 20px; border-top: 1px solid var(--line); }
-.pr-btn { border: 1px solid var(--line); background: transparent; color: var(--ink); padding: 8px 16px; border-radius: var(--r-1); font-size: var(--fs-13); font-family: inherit; cursor: pointer; }
+.pr-btn { border: var(--edge-w, 2px) solid var(--edge); background: transparent; color: var(--ink); padding: 8px 16px; border-radius: var(--r-1); font-size: var(--fs-13); font-family: inherit; cursor: pointer; }
 .pr-btn.primary { background: var(--action); border-color: var(--action); color: var(--action-ink); font-weight: 600; }
 .pr-btn[disabled] { opacity: 0.6; cursor: default; }
 .pr-save-msg { font-size: var(--fs-11); color: var(--ink-faint); }
@@ -1001,7 +1003,8 @@ onMounted(async () => {
 .pr-mask { position: fixed; inset: 0; z-index: var(--z-dialog); background: var(--scrim);
   display: flex; align-items: center; justify-content: center; }
 .pr-modal { width: 420px; max-width: calc(100vw - 32px); background: var(--surface-1);
-  border: 1px solid var(--line-strong); border-radius: var(--r-2); padding: 18px 20px;
+  border: var(--edge-w, 2px) solid var(--edge);
+  box-shadow: var(--paper-shadow-sm); border-radius: var(--r-2); padding: 18px 20px;
   display: flex; flex-direction: column; gap: 12px; }
 .pr-modal h3 { margin: 0; font-size: var(--fs-16); font-weight: 600; }
 .pr-modal-hint { margin: 0; font-size: var(--fs-11); color: var(--ink-faint); }

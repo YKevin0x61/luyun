@@ -35,6 +35,7 @@ from database import CHINA_TZ
 from services.app_runtime import get_runtime
 from services.business_day import workbench_day_range
 from services.identity.zones import ZoneDirectory
+from services.scheduling.day_grid import DayGrid
 from services.prep_plan_service import (
     DEFAULT_CLOSE,
     DEFAULT_OPEN,
@@ -595,30 +596,25 @@ class PrepPlanContextService:
         """当天有班次的人在岗数，按工作区名映射成岗位；认不出的落 other。
 
         工作区名单走公共层的 `ZoneDirectory`（AGENTS.md：整店共享的区名单只有这一个
-        只读入口）。这里只查「按区数了几个人」，再去名单里把区 id 换成名字，
-        不 import 卫生的任何东西。
+        只读入口）；「那天谁在上班」走 `DayGrid`（ADR 0138：`staff_assignments` 的
+        唯一只读入口，按在册名单过滤）—— 直接数结果行会把已离职的人也算进来，
+        同一天在排班页与备货页就会是两个人数。
         """
-        tdb = db.table("staff_assignments")
-        async with tdb.conn.cursor() as cursor:
-            await cursor.execute(
-                """
-                SELECT zone_id, COUNT(*) AS staff_count
-                FROM staff_assignments
-                WHERE business_date = ? AND shift_id IS NOT NULL
-                GROUP BY zone_id
-                """,
-                (plan_day,),
-            )
-            rows = await cursor.fetchall()
+        cells = await DayGrid(db).cells(plan_day, plan_day)
+        by_zone: Dict[Optional[int], int] = {}
+        for cell in cells:
+            if cell.shift_id is None:
+                continue
+            by_zone[cell.zone_id] = by_zone.get(cell.zone_id, 0) + 1
 
         zone_names = {
             zone["id"]: zone["name"] for zone in await ZoneDirectory(db).list_zones()
         }
         counts: Dict[str, int] = {}
-        for row in rows:
-            zone_name = str(zone_names.get(row["zone_id"]) or "").strip()
+        for zone_id, staff_count in by_zone.items():
+            zone_name = str(zone_names.get(zone_id) or "").strip()
             position = zone_name if zone_name in POSITION_STATION_MAP else OTHER_POSITION
-            counts[position] = counts.get(position, 0) + int(row["staff_count"] or 0)
+            counts[position] = counts.get(position, 0) + int(staff_count or 0)
         return counts
 
     # ------------------------------------------------------------ 票 08 四个信号

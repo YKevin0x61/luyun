@@ -9,9 +9,9 @@
 `services/staff_meal/service.py`。四张表只有本 store 一个写入口，Admin 数据浏览器
 只读列出（`db_core/schema.py` 的 `STAFF_MEAL_TABLES`）。
 
-写操作走 `services.identity.serialized_write`：共用 `DatabaseManager._write_lock`
-（与其它域同一把全局锁），异常时回滚半截事务。脱开 DatabaseManager 单独构造
-（单测、脚本）时退化为私有锁。
+写操作走 `db_core.write_gate.serialized_write`：共用连接上的全局写锁
+（`DatabaseConnection.write_lock`，与其它域同一把），异常时回滚半截事务。脱开
+DatabaseManager 单独构造（单测、脚本）时不取锁 —— 没有连接就没有事务可管。
 """
 
 from __future__ import annotations
@@ -165,19 +165,6 @@ class StaffMealStore:
         self._conn = conn
         self._now = now or (lambda: datetime.now(CHINA_TZ))
         self._write_lock_owner = conn_or_db
-        self._local_write_lock = None
-
-    @property
-    def _write_lock(self):
-        shared = getattr(self._write_lock_owner, "_write_lock", None)
-        if shared is not None:
-            return shared
-        if self._local_write_lock is None:
-            import asyncio
-
-            self._local_write_lock = asyncio.Lock()
-        return self._local_write_lock
-
     # ── 通用 ──────────────────────────────────────────────────
 
     def _now_dt(self) -> datetime:

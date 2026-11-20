@@ -26,7 +26,7 @@
 import json
 import logging
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterable, Optional
 
 from database import CHINA_TZ
 
@@ -229,36 +229,54 @@ def _parse_event_at(raw: Any) -> Optional[datetime]:
     return parsed.astimezone(CHINA_TZ)
 
 
+def earliest_by_item(
+    rows: Iterable[Dict[str, Any]],
+) -> Dict[int, Dict[str, Any]]:
+    """同一批售罄事件里，每个品按**解析后的时刻**取最早的一条。
+
+    不把 `at::timestamptz` 交给数据库排序：历史事件里混过带不同偏移量的 ISO
+    文本，`ORDER BY at` 是字典序，会把「09:00+00:00」排在「10:00+08:00」前面，
+    而后者才是真正的 10:00。解析失败的 `at` 跳过（它不参与先后判断）。
+
+    `at` 原样带回（不换成归一化时间），调用方展示的仍是库里那条文本。
+    """
+    earliest: Dict[int, Any] = {}
+    for row in rows:
+        mapping = dict(row)
+        raw_id = mapping.get("prep_item_id")
+        if raw_id is None:
+            continue
+        parsed = _parse_event_at(mapping.get("at"))
+        if parsed is None:
+            continue
+        item_id = int(raw_id)
+        current = earliest.get(item_id)
+        if current is None or parsed < current[0]:
+            earliest[item_id] = (parsed, mapping)
+    return {item_id: picked[1] for item_id, picked in earliest.items()}
+
+
 async def _earliest_sold_out(
     db, *, plan_day: str, prep_item_id: int
 ) -> Optional[Dict[str, Any]]:
     """同 (plan_day, prep_item_id, kind='sold_out') 里 `at` 最早的那条。
 
-    逐行解析再比时间，不把 `at::timestamptz` 交给数据库：历史事件里混过带
-    不同偏移量的 ISO 文本，文本排序会得到错的「最早」，而一行按一个键解析的
-    行数很少。
+    逐行解析再比时间，不把 `at::timestamptz` 交给数据库（原因见
+    `earliest_by_item`）。同一品的候选行通常只有一两条。
     """
     conn = _connection(db)
     async with conn.cursor() as cursor:
         await cursor.execute(
             """
-            SELECT id, at, meta_json FROM prep_plan_events
+            SELECT id, prep_item_id, at, meta_json FROM prep_plan_events
              WHERE plan_day = ? AND prep_item_id = ? AND kind = ?
              ORDER BY id
             """,
             (plan_day, prep_item_id, SOLD_OUT),
         )
         rows = await cursor.fetchall()
-    earliest = None
-    earliest_at = None
-    for row in rows:
-        parsed = _parse_event_at(row["at"])
-        if parsed is None:
-            continue
-        if earliest_at is None or parsed < earliest_at:
-            earliest = dict(row)
-            earliest_at = parsed
-    return earliest
+    picked = earliest_by_item(rows or [])
+    return next(iter(picked.values()), None)
 
 
 async def record_sold_out(

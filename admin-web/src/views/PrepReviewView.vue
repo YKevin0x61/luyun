@@ -281,12 +281,30 @@ function afterWindowLabel(item, key) {
   return value === null ? '—' : num(value)
 }
 
-function verdict(item) {
-  if (item.sold_qty === null || item.sold_qty === undefined) return { text: '窗口没结束', kind: 'pending' }
-  const gap = item.sold_qty - item.suggested_qty
-  if (Math.abs(gap) < 0.05) return { text: '刚好', kind: 'even' }
-  if (gap > 0) return { text: `缺 ${num(gap)}`, kind: 'short' }
-  return { text: `多 ${num(-gap)}`, kind: 'over' }
+const BASELINE_LABELS = [
+  ['reference', '参考值'],
+  ['planned', '下达量'],
+]
+
+/** 同一份汇总里的两条基线，顺序固定（参考在前，下达在后）。 */
+function baselineRows(data) {
+  return BASELINE_LABELS.map(([key, label]) => ({ key, label, data: data?.[key] || null }))
+}
+
+/** 下达量是不是店长手改的；`suggested` = 未手改（回落参考值）。 */
+function plannedTag(item) {
+  return item?.planned_source === 'manual' ? '手改' : '未手改'
+}
+
+/** 明细里「对参考 / 对下达」：卖多了记负（缺货红），卖少了记正（多出黄）。 */
+function gapVs(item, key) {
+  if (item?.sold_qty === null || item?.sold_qty === undefined) return '—'
+  return signed(Number(item.sold_qty) - Number(item[key] || 0))
+}
+
+function gapClass(item, key) {
+  if (item?.sold_qty === null || item?.sold_qty === undefined) return ''
+  return Number(item.sold_qty) > Number(item[key] || 0) ? 'is-short' : 'is-over'
 }
 
 function stationName(id) {
@@ -543,9 +561,9 @@ onMounted(() => {
 
     <template v-if="current">
       <p class="pr-line">
-        <b>{{ current.clock }}</b> 这一版参考值：实际卖出 {{ num(current.summary.sold_total) }}，参考合计
-        {{ num(current.summary.suggested_total) }}，参考 ÷ 实际
-        <b>{{ num(current.summary.ref_ratio, 2) }}</b>
+        <b>{{ current.clock }}</b> 这一版快照：实际卖出 {{ num(current.summary.sold_total) }}，参考合计
+        {{ num(current.summary.reference?.qty_total) }}，下达合计
+        {{ num(current.summary.planned?.qty_total) }}
         <span v-if="current.summary.pending" class="pr-dim">
           · 还有 {{ current.summary.pending }} 个窗口没结束（要等 24 小时）
         </span>
@@ -557,26 +575,42 @@ onMounted(() => {
         </span>
       </p>
 
-      <!-- 这个钟点的窗口还没结束（measured = 0）时，三张卡全是「— / 0.0」，白占一屏；
+      <!-- 这个钟点的窗口还没结束（measured = 0）时，表格全是「— / 0.0」，白占一屏；
            收成一行提示，把下面的近 90 天结论（方向偏差＝备多了/备少了）提到首屏。 -->
-      <div v-if="current.summary.measured > 0" class="pr-metrics">
-        <div class="pr-metric">
-          <p class="pr-metric-k">够卖</p>
-          <p class="pr-metric-v" :class="current.summary.covered >= 0.7 ? 'is-ok' : 'is-warn'">
-            {{ pct(current.summary.covered) }}
-          </p>
-          <p class="pr-metric-h">{{ current.summary.measured }} 个品里，参考值 ≥ 实际的有多少</p>
-        </div>
-        <div class="pr-metric">
-          <p class="pr-metric-k">缺货</p>
-          <p class="pr-metric-v is-short">{{ pct(current.summary.shortfall_ratio) }}</p>
-          <p class="pr-metric-h">少做了 {{ num(current.summary.shortfall) }}，占实际销量</p>
-        </div>
-        <div class="pr-metric">
-          <p class="pr-metric-k">多出</p>
-          <p class="pr-metric-v is-over">{{ pct(current.summary.overfill_ratio) }}</p>
-          <p class="pr-metric-h">多做/买了 {{ num(current.summary.overfill) }}，占实际销量</p>
-        </div>
+      <div v-if="current.summary.measured > 0" class="pr-compare">
+        <table class="pr-table pr-table-compact pr-compare-table pr-compare-day">
+          <thead>
+            <tr>
+              <th>口径</th>
+              <th class="n">合计</th>
+              <th class="n">÷ 实卖</th>
+              <th class="n">够卖品数</th>
+              <th class="n">缺货</th>
+              <th class="n">多出</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="row in baselineRows(current.summary)" :key="row.key">
+              <td class="pr-baseline">{{ row.label }}</td>
+              <td class="n" data-label="合计">{{ num(row.data?.qty_total) }}</td>
+              <td class="n" data-label="÷ 实卖">{{ num(row.data?.ratio, 2) }}</td>
+              <td class="n" data-label="够卖品数" :class="row.data?.coverage_items >= 0.7 ? 'is-ok' : 'is-warn'">
+                {{ pct(row.data?.coverage_items) }}
+              </td>
+              <td class="n is-short" data-label="缺货">
+                {{ pct(row.data?.shortfall_ratio) }}
+                <span class="pr-dim">· {{ num(row.data?.shortfall_qty) }}</span>
+              </td>
+              <td class="n is-over" data-label="多出">
+                {{ pct(row.data?.overfill_ratio) }}
+                <span class="pr-dim">· {{ num(row.data?.overfill_qty) }}</span>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+        <p class="pr-metric-h">
+          参考值是机器按历史算的；下达量是店长当天最终执行的量（没手改时就是参考值）。
+        </p>
       </div>
       <p v-else class="pr-line pr-dim">
         这个钟点还没有可判定的品 —— 先看下面的近 90 天偏差。
@@ -588,27 +622,55 @@ onMounted(() => {
     <template v-if="summary">
       <p class="pr-scope">{{ summaryPeriodHint }}</p>
 
-      <div class="pr-metrics">
-        <div class="pr-metric pr-metric-review">
-          <p class="pr-metric-k">{{ PREP_REVIEW_METRIC_ABS }}</p>
-          <p class="pr-metric-v">{{ pct(summary.metrics?.absolute_deviation) }}</p>
-          <p class="pr-metric-h">{{ PREP_REVIEW_METRIC_ABS_HINT }}</p>
-        </div>
-        <div class="pr-metric pr-metric-review">
-          <p class="pr-metric-k">{{ PREP_REVIEW_METRIC_DIR }}</p>
-          <p class="pr-metric-v" :class="directionClass(summary.metrics?.direction_deviation)">
-            {{ signedPct(summary.metrics?.direction_deviation) }}
-            <span v-if="directionWord(summary.metrics?.direction_deviation)" class="pr-metric-word">
-              {{ directionWord(summary.metrics?.direction_deviation) }}
-            </span>
-          </p>
-          <p class="pr-metric-h">{{ PREP_REVIEW_METRIC_DIR_HINT }}</p>
-        </div>
-        <div class="pr-metric pr-metric-review">
-          <p class="pr-metric-k">{{ PREP_REVIEW_METRIC_COVERAGE }}</p>
-          <p class="pr-metric-v">{{ pct(summary.metrics?.coverage_qty) }}</p>
-          <p class="pr-metric-h">{{ PREP_REVIEW_METRIC_COVERAGE_HINT }}</p>
-        </div>
+      <div class="pr-compare">
+        <table class="pr-table pr-table-compact pr-compare-table pr-compare-review">
+          <thead>
+            <tr>
+              <th>指标</th>
+              <th class="n">参考值</th>
+              <th class="n">下达量</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>{{ PREP_REVIEW_METRIC_ABS }}</td>
+              <td class="n">{{ pct(summary.metrics?.reference?.absolute_deviation) }}</td>
+              <td class="n">{{ pct(summary.metrics?.planned?.absolute_deviation) }}</td>
+            </tr>
+            <tr>
+              <td>{{ PREP_REVIEW_METRIC_DIR }}</td>
+              <td
+                class="n"
+                :class="directionClass(summary.metrics?.reference?.direction_deviation)"
+              >
+                {{ signedPct(summary.metrics?.reference?.direction_deviation) }}
+                <span class="pr-metric-word">
+                  {{ directionWord(summary.metrics?.reference?.direction_deviation) }}
+                </span>
+              </td>
+              <td
+                class="n"
+                :class="directionClass(summary.metrics?.planned?.direction_deviation)"
+              >
+                {{ signedPct(summary.metrics?.planned?.direction_deviation) }}
+                <span class="pr-metric-word">
+                  {{ directionWord(summary.metrics?.planned?.direction_deviation) }}
+                </span>
+              </td>
+            </tr>
+            <tr>
+              <td>{{ PREP_REVIEW_METRIC_COVERAGE }}</td>
+              <td class="n">{{ pct(summary.metrics?.reference?.coverage_qty) }}</td>
+              <td class="n">{{ pct(summary.metrics?.planned?.coverage_qty) }}</td>
+            </tr>
+          </tbody>
+        </table>
+        <p class="pr-metric-h">
+          参考合计 {{ num(summary.metrics?.reference?.qty_total) }}，下达合计
+          {{ num(summary.metrics?.planned?.qty_total) }}，实卖
+          {{ num(summary.metrics?.sold_total) }}；两条基线各算各的。
+          {{ PREP_REVIEW_METRIC_ABS_HINT }}
+        </p>
       </div>
 
       <section class="pr-block pr-why">
@@ -624,17 +686,28 @@ onMounted(() => {
                 class="pr-why-row"
                 :class="{ 'is-insufficient': row.insufficient }"
               >
-                <span class="pr-why-label">{{ row.label }}</span>
-                <span class="pr-why-n">{{ row.n }} 天</span>
-                <template v-if="row.insufficient">
-                  <span class="pr-why-short">{{ PREP_REVIEW_SAMPLE_SHORT }}</span>
-                </template>
-                <template v-else>
-                  <span class="pr-why-dir" :class="directionClass(row.direction_deviation)">
-                    {{ directionWord(row.direction_deviation) }} {{ signedPct(row.direction_deviation) }}
-                  </span>
-                  <span class="pr-why-abs">{{ pct(row.absolute_deviation) }}</span>
-                </template>
+                <div class="pr-why-head">
+                  <span class="pr-why-label">{{ row.label }}</span>
+                  <span class="pr-why-n">{{ row.n }} 天</span>
+                </div>
+                <p v-if="row.insufficient" class="pr-why-short">{{ PREP_REVIEW_SAMPLE_SHORT }}</p>
+                <div v-else class="pr-why-lines">
+                  <div
+                    v-for="baseline in baselineRows(row.baselines)"
+                    :key="baseline.key"
+                    class="pr-why-line"
+                  >
+                    <span class="pr-why-tag">{{ baseline.label }}</span>
+                    <span
+                      class="pr-why-dir"
+                      :class="directionClass(baseline.data?.direction_deviation)"
+                    >
+                      {{ directionWord(baseline.data?.direction_deviation) }}
+                      {{ signedPct(baseline.data?.direction_deviation) }}
+                    </span>
+                    <span class="pr-why-abs">{{ pct(baseline.data?.absolute_deviation) }}</span>
+                  </div>
+                </div>
               </li>
             </ul>
           </div>
@@ -644,6 +717,9 @@ onMounted(() => {
       <section v-if="summary.cost" class="pr-block pr-cost">
         <h2 class="pr-section-title">{{ PREP_REVIEW_COST_TITLE }}</h2>
         <p class="pr-section-hint">{{ PREP_REVIEW_COST_HINT }}</p>
+        <p class="pr-cost-basis">
+          按下达量算（店长当天最终执行的量）；参考值那一套只在上面的偏差表里。
+        </p>
         <div class="pr-cost-total">
           <span class="pr-cost-k">{{ PREP_REVIEW_COST_TOTAL }}</span>
           <span class="pr-cost-v">{{ num(summary.cost.overfill_qty) }}</span>
@@ -679,16 +755,17 @@ onMounted(() => {
     <template v-if="current">
       <p class="pr-section-hint">{{ PREP_REVIEW_DETAIL_HINT }}</p>
       <div class="pr-scroll">
-        <table class="pr-table">
+        <table class="pr-table pr-table-detail">
           <thead>
             <tr>
               <th>备货品</th>
               <th>档口</th>
               <th>档位</th>
               <th class="n">参考值</th>
+              <th class="n">下达量</th>
               <th class="n">实际卖出</th>
-              <th class="n">偏差</th>
-              <th class="n">判定</th>
+              <th class="n">对参考</th>
+              <th class="n">对下达</th>
               <th class="n" :title="PREP_REVIEW_SOLD_OUT_HINT">{{ PREP_REVIEW_TH_SOLD_OUT }}</th>
               <th class="n">{{ PREP_REVIEW_TH_AFTER_1H }}</th>
               <th class="n">{{ PREP_REVIEW_TH_AFTER_2H }}</th>
@@ -707,13 +784,17 @@ onMounted(() => {
               </td>
               <td class="pr-dim">{{ stationName(item.station) }}</td>
               <td class="pr-dim">{{ tier(item) }}</td>
-              <td class="n">{{ num(item.suggested_qty) }}</td>
-              <td class="n">{{ item.sold_qty === null ? '—' : num(item.sold_qty) }}</td>
-              <td class="n" :class="item.sold_qty === null ? '' : item.sold_qty > item.suggested_qty ? 'is-short' : 'is-over'">
-                {{ item.sold_qty === null ? '—' : signed(item.sold_qty - item.suggested_qty) }}
-              </td>
+              <td class="n">{{ num(item.reference_qty) }}</td>
               <td class="n">
-                <span class="pr-verdict" :class="`is-${verdict(item).kind}`">{{ verdict(item).text }}</span>
+                {{ num(item.planned_qty) }}
+                <span class="pr-unit">{{ plannedTag(item) }}</span>
+              </td>
+              <td class="n">{{ item.sold_qty === null ? '—' : num(item.sold_qty) }}</td>
+              <td class="n" :class="gapClass(item, 'reference_qty')">
+                {{ gapVs(item, 'reference_qty') }}
+              </td>
+              <td class="n" :class="gapClass(item, 'planned_qty')">
+                {{ gapVs(item, 'planned_qty') }}
               </td>
               <td class="n">
                 <template v-if="item.sold_out_at">
@@ -742,22 +823,26 @@ onMounted(() => {
             <thead>
               <tr>
                 <th>快照钟点</th>
-                <th class="n">够卖</th>
+                <th>口径</th>
+                <th class="n">够卖品数</th>
                 <th class="n">缺货</th>
                 <th class="n">多出</th>
-                <th class="n">参考 ÷ 实际</th>
+                <th class="n">合计 ÷ 实际</th>
               </tr>
             </thead>
             <tbody>
-              <tr v-for="group in otherClocks" :key="group.clock">
-                <td>
-                  <button type="button" class="pr-link" @click="clock = group.clock">{{ group.clock }}</button>
-                </td>
-                <td class="n">{{ pct(group.summary.covered) }}</td>
-                <td class="n is-short">{{ pct(group.summary.shortfall_ratio) }}</td>
-                <td class="n is-over">{{ pct(group.summary.overfill_ratio) }}</td>
-                <td class="n">{{ num(group.summary.ref_ratio, 2) }}</td>
-              </tr>
+              <template v-for="group in otherClocks" :key="group.clock">
+                <tr v-for="(baseline, index) in baselineRows(group.summary)" :key="baseline.key">
+                  <td v-if="index === 0" :rowspan="2">
+                    <button type="button" class="pr-link" @click="clock = group.clock">{{ group.clock }}</button>
+                  </td>
+                  <td>{{ baseline.label }}</td>
+                  <td class="n">{{ pct(baseline.data?.coverage_items) }}</td>
+                  <td class="n is-short">{{ pct(baseline.data?.shortfall_ratio) }}</td>
+                  <td class="n is-over">{{ pct(baseline.data?.overfill_ratio) }}</td>
+                  <td class="n">{{ num(baseline.data?.ratio, 2) }}</td>
+                </tr>
+              </template>
             </tbody>
           </table>
         </div>
@@ -920,7 +1005,8 @@ onMounted(() => {
 .pr-note-cancel {
   min-height: var(--tap);
   padding: 0 12px;
-  border: 1px solid var(--line);
+  border: var(--edge-w, 2px) solid var(--edge);
+  box-shadow: var(--paper-shadow-sm);
   border-radius: var(--r-1);
   background: var(--surface-1);
   color: var(--ink-dim);
@@ -946,7 +1032,7 @@ onMounted(() => {
   min-width: 0;
   min-height: var(--tap);
   padding: 0 10px;
-  border: 1px solid var(--line-strong);
+  border: var(--edge-w, 2px) solid var(--edge);
   border-radius: var(--r-1);
   background: var(--surface-1);
   color: var(--ink);
@@ -966,7 +1052,8 @@ onMounted(() => {
 .pr-weather-btn {
   min-height: var(--tap);
   padding: 0 12px;
-  border: 1px solid var(--line);
+  border: var(--edge-w, 2px) solid var(--edge);
+  box-shadow: var(--paper-shadow-sm);
   border-radius: var(--r-1);
   background: var(--surface-1);
   color: var(--ink-dim);
@@ -1001,7 +1088,8 @@ onMounted(() => {
   max-height: calc(100vh - 32px);
   overflow: auto;
   padding: var(--sp-4);
-  border: 1px solid var(--line);
+  border: var(--edge-w, 2px) solid var(--edge);
+  box-shadow: var(--paper-shadow-sm);
   border-radius: var(--r-2);
   background: var(--surface-1);
   color: var(--ink);
@@ -1051,7 +1139,7 @@ onMounted(() => {
   min-width: 0;
   min-height: var(--tap);
   padding: 0 10px;
-  border: 1px solid var(--line-strong);
+  border: var(--edge-w, 2px) solid var(--edge);
   border-radius: var(--r-1);
   background: var(--surface-1);
   color: var(--ink);
@@ -1069,7 +1157,7 @@ onMounted(() => {
 .pr-weather-save {
   min-height: var(--tap);
   padding: 0 14px;
-  border: 1px solid var(--line);
+  border: var(--edge-w, 2px) solid var(--edge);
   border-radius: var(--r-1);
   font: inherit;
   font-size: var(--fs-13);
@@ -1126,7 +1214,7 @@ onMounted(() => {
 .pr-quality {
   margin: 6px 0 0;
   padding: 8px 12px;
-  border: 1px solid var(--warn);
+  border: var(--edge-w, 2px) solid var(--warn);
   border-left-width: 3px;
   border-radius: var(--r-1, 8px);
   background: var(--warn-soft);
@@ -1184,7 +1272,7 @@ onMounted(() => {
   align-items: center;
   min-height: var(--tap);
   padding: 3px 9px;
-  border: 1px solid var(--line);
+  border: var(--edge-w, 2px) solid var(--edge);
   border-radius: var(--r-full);
   background: transparent;
   color: var(--ink-dim);
@@ -1213,7 +1301,7 @@ onMounted(() => {
 
 .pr-metric {
   padding: var(--sp-3);
-  border: 1px solid var(--line);
+  border: var(--edge-w, 2px) solid var(--edge);
   border-radius: var(--r-2);
   background: var(--surface-2);
 }
@@ -1241,7 +1329,8 @@ onMounted(() => {
   font-weight: 400;
 }
 
-.pr-metric-v.is-ok {
+.pr-metric-v.is-ok,
+.is-ok {
   color: var(--ok);
 }
 
@@ -1273,7 +1362,7 @@ onMounted(() => {
 .pr-why-card {
   min-width: 0;
   padding: var(--sp-2) var(--sp-3);
-  border: 1px solid var(--line);
+  border: var(--edge-w, 2px) solid var(--edge);
   border-radius: var(--r-2);
   background: var(--surface-2);
 }
@@ -1292,12 +1381,32 @@ onMounted(() => {
 }
 
 .pr-why-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) minmax(0, 1fr);
-  gap: 6px;
   padding: 4px 0;
   border-top: 1px solid var(--line);
   font-size: var(--fs-12);
+}
+
+.pr-why-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.pr-why-lines {
+  margin-top: 2px;
+}
+
+.pr-why-line {
+  display: grid;
+  grid-template-columns: 3.2em minmax(0, 1fr) minmax(0, 1fr);
+  gap: 6px;
+  align-items: baseline;
+}
+
+.pr-why-tag {
+  color: var(--ink-faint);
+  font-size: var(--fs-11);
 }
 
 .pr-why-row:first-child {
@@ -1323,9 +1432,29 @@ onMounted(() => {
 }
 
 .pr-why-short {
-  grid-column: span 2;
+  margin: 2px 0 0;
   text-align: right;
   color: var(--ink-faint);
+}
+
+/* 两条基线并排：同一份汇总里的参考值 / 下达量。 */
+.pr-compare {
+  overflow-x: auto;
+}
+
+.pr-compare-table {
+  min-width: 620px;
+}
+
+.pr-baseline {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.pr-cost-basis {
+  margin: 2px 0 var(--sp-2);
+  font-size: var(--fs-12);
+  color: var(--ink-dim);
 }
 
 .pr-cost-total {
@@ -1374,7 +1503,7 @@ onMounted(() => {
 .pr-est {
   margin-left: 6px;
   padding: 1px 6px;
-  border: 1px solid var(--line-strong);
+  border: var(--edge-w, 2px) solid var(--edge);
   border-radius: var(--r-full);
   font-size: var(--fs-11);
   color: var(--ink-faint);
@@ -1461,27 +1590,10 @@ onMounted(() => {
   color: var(--warn);
 }
 
-.pr-verdict {
-  font-size: var(--fs-12);
-}
-
-.pr-verdict.is-short {
-  color: var(--danger-bright);
-}
-
-.pr-verdict.is-over {
-  color: var(--warn);
-}
-
-.pr-verdict.is-even,
-.pr-verdict.is-pending {
-  color: var(--ink-faint);
-}
-
 .pr-soldout-tag {
   margin-left: 4px;
   padding: 0 3px;
-  border: 1px solid currentColor;
+  border: var(--edge-w, 2px) solid currentColor;
   border-radius: 4px;
   font-size: var(--fs-11);
   line-height: 13px;
@@ -1538,6 +1650,55 @@ onMounted(() => {
 
   .pr-table {
     font-size: var(--fs-12);
+  }
+
+  /* 当天两套口径在手机上排成两组键值行：六列横滑会把缺货/多出藏在屏外。 */
+  .pr-compare-day {
+    min-width: 0;
+  }
+
+  .pr-compare-day thead {
+    display: none;
+  }
+
+  .pr-compare-day tbody,
+  .pr-compare-day tr {
+    display: block;
+  }
+
+  .pr-compare-day tr {
+    padding: 6px 0 8px;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .pr-compare-day td {
+    display: flex;
+    justify-content: space-between;
+    gap: var(--sp-3);
+    padding: 2px 0;
+    border: 0;
+    text-align: right;
+  }
+
+  .pr-compare-day td::before {
+    content: attr(data-label);
+    color: var(--ink-dim);
+    text-align: left;
+  }
+
+  .pr-compare-day td.pr-baseline {
+    display: block;
+    padding-bottom: 4px;
+    text-align: left;
+  }
+
+  .pr-compare-day td.pr-baseline::before {
+    content: none;
+  }
+
+  /* 90 天只有三列，不必为了对齐去横滑。 */
+  .pr-compare-review {
+    min-width: 0;
   }
 }
 </style>

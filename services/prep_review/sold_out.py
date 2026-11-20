@@ -5,7 +5,8 @@
 复盘页要回答「这个品几点卖完的」，但现场没有人会专门去点一个「售罄」按钮。
 这里只用两样已经存在的事实反推：
 
-- **07:00 主口径快照**给出的建议量（`final_qty` 优先，空则 `suggested_qty`）；
+- **07:00 主口径快照**给出的下达量（店长手改后的 `final_qty`；未手改回落参考值
+  `suggested_qty`，两边共用 `services.prep_review.measure.basis`）；
 - 当天订单流水（卖出菜品数量 × 配方系数，与票 04 的 `_sold_stats` 同口径）。
 
 累计销量首次 ≥ 建议量的位置通常落在两条订单之间：用前一条累计和这一条的
@@ -35,6 +36,7 @@ from services.business_day import REVIEW_CLOCK, review_day_range
 from services.dish_normalize import normalize_dish_name
 from services.prep_item_identity import keys_for, rule_usage
 from services.prep_plan_service import LOUMIAN_STATION, prep_plan_service
+from services.prep_review import measure
 from services.prep_review.events import record_sold_out
 
 logger = logging.getLogger(__name__)
@@ -91,7 +93,8 @@ async def _load_targets(db, plan_day: str) -> Dict[int, Dict[str, Any]]:
         await cursor.execute(
             """
             SELECT prep_item_id, item_name, unit, station,
-                   suggested_qty, final_qty, window_start, window_end, snapshot_at
+                   suggested_qty, final_qty, qty_source, window_start, window_end,
+                   snapshot_at
               FROM prep_plan_snapshots
              WHERE plan_day = ?
                AND prep_item_id IS NOT NULL
@@ -110,14 +113,9 @@ async def _load_targets(db, plan_day: str) -> Dict[int, Dict[str, Any]]:
         item_id = int(row["prep_item_id"])
         if item_id in targets:
             continue
-        # 师傅手改过的量（final_qty）才是现场真正执行的量；没改过才用建议量。
-        if row["final_qty"] is not None:
-            qty = float(row["final_qty"])
-        elif row["suggested_qty"] is not None:
-            qty = float(row["suggested_qty"])
-        else:
-            continue
-        if qty <= 0:
+        # 师傅手改过的量才是现场真正执行的量；没改过回落参考值（measure.basis）。
+        qty = measure.basis(dict(row))["planned_qty"]
+        if qty is None or qty <= 0:
             # 建议量 0 的品没有「跨线」可言，写一条 0 点售罄只会污染复盘页。
             continue
         start, end = _window(dict(row), plan_day)

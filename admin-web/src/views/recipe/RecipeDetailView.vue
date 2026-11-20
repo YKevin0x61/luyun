@@ -1191,7 +1191,8 @@ onBeforeUnmount(() => {
   gap: 6px;
   min-height: 44px;
   padding: 0 12px;
-  border: 1px solid var(--line);
+  border: var(--edge-w, 2px) solid var(--edge);
+  box-shadow: var(--paper-shadow-sm);
   border-radius: var(--r-1);
   background: var(--surface-1);
   font-size: 12px;
@@ -1244,7 +1245,8 @@ onBeforeUnmount(() => {
   }
   .sop-toolbar-chip {
     border-radius: var(--r-1);
-    border: 1px solid var(--line-strong);
+    border: var(--edge-w, 2px) solid var(--edge);
+  box-shadow: var(--paper-shadow-sm);
     background: var(--surface-1);
     color: var(--ink);
   }
@@ -1268,15 +1270,15 @@ onBeforeUnmount(() => {
   .sop-panel {
     border-color: var(--line);
     border-radius: var(--r-2);
-    box-shadow: var(--hy-shadow-sm);
+    box-shadow: var(--paper-shadow-sm);
   }
 
   /* 章节目录（aside）：面板 + 行，选中项用左条 + 正文色，不再整块薄荷填充。 */
   .sop-toc {
-    border: 1px solid var(--line);
+    border: var(--edge-w, 2px) solid var(--edge);
     border-radius: var(--r-2);
     background: var(--surface-1);
-    box-shadow: var(--hy-shadow-sm);
+    box-shadow: var(--paper-shadow-sm);
   }
   .sop-toc :deep(a) {
     border-radius: var(--r-1);
@@ -1342,10 +1344,10 @@ onBeforeUnmount(() => {
 
   /* 配方卡 = 面板（唯一卡片语言）：去顶部渐变光条、去悬停浮起。 */
   .sop-body :deep(.recipe-card) {
-    border: 1px solid var(--line);
+    border: var(--edge-w, 2px) solid var(--edge);
     border-radius: var(--r-2);
     background: var(--surface-1);
-    box-shadow: var(--hy-shadow-sm);
+    box-shadow: var(--paper-shadow-sm);
   }
   .sop-body :deep(.recipe-card::before) {
     display: none;
@@ -1353,11 +1355,11 @@ onBeforeUnmount(() => {
   .sop-body :deep(.recipe-card:hover) {
     transform: none;
     border-color: var(--line-strong);
-    box-shadow: var(--hy-shadow-sm);
+    box-shadow: var(--paper-shadow-sm);
   }
   .sop-body :deep(.recipe-card.recipe-card--focus) {
     border-color: var(--action);
-    box-shadow: 0 0 0 3px var(--wb-tint-14), var(--hy-shadow-sm);
+    box-shadow: 0 0 0 3px var(--wb-tint-14), var(--paper-shadow-sm);
   }
   .sop-body :deep(.recipe-card-head) {
     background: var(--surface-2);

@@ -87,7 +87,23 @@ class ContextRefreshTests(unittest.IsolatedAsyncioTestCase):
         await tdb.commit()
         return zone_id
 
+    async def _seed_employee(self, employee_id):
+        """日格读口按在册名单过滤，夹具里的排班行也要有对应员工。"""
+        tdb = self.db.table("hygiene_employees")
+        async with tdb.conn.cursor() as cursor:
+            await cursor.execute(
+                """
+                INSERT INTO hygiene_employees
+                    (id, phone, password_hash, name, approved, created_at, updated_at)
+                VALUES (?, ?, '', ?, 1, ?, ?)
+                ON CONFLICT (id) DO NOTHING
+                """,
+                (employee_id, f"1380000{employee_id:04d}", f"员工{employee_id}", STAMP, STAMP),
+            )
+        await tdb.commit()
+
     async def _seed_assignment(self, employee_id, *, zone_id=None, shift_id=1, day=DAY):
+        await self._seed_employee(employee_id)
         tdb = self.db.table("staff_assignments")
         async with tdb.conn.cursor() as cursor:
             await cursor.execute(
@@ -212,6 +228,23 @@ class ContextRefreshTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             context["staff"], {"熟笼": 1, "馅档": 1, "案板": 1, "other": 2}
         )
+
+    async def test_resigned_employee_is_not_counted_on_duty(self):
+        shulong = await self._seed_zone("熟笼")
+        await self._seed_assignment(1, zone_id=shulong)
+        await self._seed_assignment(2, zone_id=shulong)
+        tdb = self.db.table("hygiene_employees")
+        async with tdb.conn.cursor() as cursor:
+            await cursor.execute(
+                "UPDATE hygiene_employees SET resigned_at = ? WHERE id = ?",
+                ("2020-01-01", 2),
+            )
+        await tdb.commit()
+
+        await self.service.refresh(self.db, DAY, now=NOW)
+
+        context = await self.service.get_context(self.db, DAY)
+        self.assertEqual(context["staff"], {"熟笼": 1})
 
     async def test_existing_staff_counts_are_kept_when_assignments_disappear(self):
         shulong = await self._seed_zone("熟笼")

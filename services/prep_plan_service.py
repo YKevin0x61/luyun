@@ -48,6 +48,7 @@ from services.prep_plan_forecast import (
     resolve_horizon_hours,
 )
 from services.prep_review import events as prep_review_events
+from services.prep_review import measure
 
 logger = logging.getLogger(__name__)
 
@@ -494,7 +495,7 @@ class PrepPlanService:
         async with tdb.conn.cursor() as cursor:
             await cursor.execute(
                 """
-                SELECT e.id, e.prep_item_id, e.final_qty, e.suggested_qty,
+                SELECT e.id, e.prep_item_id, e.final_qty, e.suggested_qty, e.qty_source,
                        i.kind, d.plan_day
                   FROM prep_plan_entries e
                   LEFT JOIN prep_items i ON i.id = e.prep_item_id
@@ -536,9 +537,7 @@ class PrepPlanService:
         # 事件采集（票 03）：手改 / 完成是现场真实动作，有就记；写失败只记日志，
         # 不影响这次 PATCH 本身（`record_event` 内部已兜住异常）。
         plan_day = row["plan_day"] or stamp[:10]
-        before_qty = float(
-            row["final_qty"] if row["final_qty"] is not None else row["suggested_qty"] or 0
-        )
+        before_qty = float(measure.basis(dict(row))["planned_qty"] or 0)
         after_qty = before_qty
         if final_qty is not None:
             after_qty = fit_qty(final_qty, row["kind"] or "")
@@ -1228,8 +1227,8 @@ class PrepPlanService:
             await cursor.execute(
                 """
                 SELECT s.snapshot_at, s.window_start, s.prep_item_id, s.item_name,
-                       s.unit, s.station, s.suggested_qty, s.final_qty, s.store_factor,
-                       s.rules_fingerprint, s.basis_json,
+                       s.unit, s.station, s.suggested_qty, s.final_qty, s.qty_source,
+                       s.store_factor, s.rules_fingerprint, s.basis_json,
                        a.sold_qty, a.sold_1h, a.sold_2h, a.sold_next_day,
                        a.refund_qty, a.rules_fingerprint AS actual_fingerprint
                 FROM prep_plan_snapshots s
@@ -1255,21 +1254,19 @@ class PrepPlanService:
         async with edb.conn.cursor() as cursor:
             await cursor.execute(
                 """
-                SELECT DISTINCT ON (prep_item_id) prep_item_id, at, meta_json
+                SELECT prep_item_id, at, meta_json
                 FROM prep_plan_events
                 WHERE plan_day = ? AND kind = 'sold_out'
-                ORDER BY prep_item_id, at
+                ORDER BY id
                 """,
                 (day,),
             )
-            for event in await cursor.fetchall():
-                if event["prep_item_id"] is None:
-                    continue
-                item_id = int(event["prep_item_id"])
-                sold_out_at[item_id] = event["at"]
-                sold_out_reliable[item_id] = prep_review_events.is_reliable(
-                    event["meta_json"]
-                )
+            events = await cursor.fetchall()
+        for item_id, event in prep_review_events.earliest_by_item(events).items():
+            sold_out_at[item_id] = event["at"]
+            sold_out_reliable[item_id] = prep_review_events.is_reliable(
+                event["meta_json"]
+            )
 
         # ADR 0141：按备货品身份聚合（有 id 按 id，没 id 才回落名字键）。同一 id 当天
         # 改过名会并成一行；显示名 / 单位取当天最新一条快照的名字。
@@ -1298,8 +1295,7 @@ class PrepPlanService:
             bucket["hours"].append(
                 {
                     "snapshot_at": row["snapshot_at"],
-                    "suggested_qty": float(row["suggested_qty"] or 0),
-                    "final_qty": row["final_qty"],
+                    **measure.basis(row),
                     "sold_qty": None if row["sold_qty"] is None else float(row["sold_qty"]),
                     "sold_1h": _optional_float(row["sold_1h"]),
                     "sold_2h": _optional_float(row["sold_2h"]),
@@ -1358,8 +1354,7 @@ class PrepPlanService:
                     "item_name": row["item_name"] or "",
                     "unit": row["unit"] or "",
                     "station": row["station"] or "",
-                    "suggested_qty": float(row["suggested_qty"] or 0),
-                    "final_qty": None if row["final_qty"] is None else float(row["final_qty"]),
+                    **measure.basis(row),
                     "sold_qty": sold,
                     "sold_1h": _optional_float(row["sold_1h"]),
                     "sold_2h": _optional_float(row["sold_2h"]),
@@ -1387,63 +1382,15 @@ class PrepPlanService:
         out = []
         for clock in sorted(groups):
             group = groups[clock]
-            group["items"].sort(key=lambda i: -i["suggested_qty"])
+            group["items"].sort(key=lambda i: -i["reference_qty"])
             group["summary"] = _summarise_snapshot(group["items"])
             out.append(group)
         return out
 
 
 def _summarise_snapshot(items: List[dict]) -> dict:
-    """够卖率 / 缺货量 / 多出量 / 参考·实际比。窗口未结束或配方变过的行不进指标。"""
-    # 配方改过的行不剔除，只计数标注：剔除会让「那天改过一次配方」的整天变成空白，
-    # 复盘页就没有数据可看（实际销量是按当前配方重算的，误差方向已知）。
-    usable = [i for i in items if i["sold_qty"] is not None]
-    pending = sum(1 for i in items if i["sold_qty"] is None)
-    drifted = sum(1 for i in usable if not i["same_rules"])
-    # 售罄跟窗口结不结束无关：卖完是已经发生的事，窗口没结束也照样算。
-    # 两个数必须一起给：只看「售罄 5 个」会把旧判定（卖到建议量后还在卖）
-    # 也当成删失，复盘页会误以为实际卖出全是下界。
-    sold_out = sum(1 for i in items if i.get("sold_out_at"))
-    sold_out_reliable = sum(1 for i in items if i.get("sold_out_reliable"))
-    if not usable:
-        return {
-            "measured": 0,
-            "pending": pending,
-            "drifted": drifted,
-            "sold_out": sold_out,
-            "sold_out_reliable": sold_out_reliable,
-            "covered": None,
-            "sold_total": 0.0,
-            "suggested_total": 0.0,
-            "shortfall": 0.0,
-            "overfill": 0.0,
-            "shortfall_ratio": None,
-            "overfill_ratio": None,
-            "ref_ratio": None,
-        }
-    sold_total = sum(i["sold_qty"] for i in usable)
-    sugg_total = sum(i["suggested_qty"] for i in usable)
-    shortfall = sum(max(0.0, i["sold_qty"] - i["suggested_qty"]) for i in usable)
-    overfill = sum(max(0.0, i["suggested_qty"] - i["sold_qty"]) for i in usable)
-    covered = sum(1 for i in usable if i["suggested_qty"] >= i["sold_qty"])
-    # 实际一件没卖时比例没有分母：宁可是 None（页面显示「—」），
-    # 也不要拿 0 去伪装成「参考值是实际的无穷倍」或「缺货 0%」。
-    denom = sold_total if sold_total > 0 else None
-    return {
-        "measured": len(usable),
-        "pending": pending,
-        "drifted": drifted,
-        "sold_out": sold_out,
-        "sold_out_reliable": sold_out_reliable,
-        "covered": covered / len(usable),
-        "sold_total": round(sold_total, 1),
-        "suggested_total": round(sugg_total, 1),
-        "shortfall": round(shortfall, 1),
-        "overfill": round(overfill, 1),
-        "shortfall_ratio": None if denom is None else shortfall / denom,
-        "overfill_ratio": None if denom is None else overfill / denom,
-        "ref_ratio": None if denom is None else sugg_total / denom,
-    }
+    """两条基线的够卖 / 缺货 / 多出 / 参考·实际比；窗口未结束或配方变过的行不进指标。"""
+    return measure.snapshot_summary(items)
 
 
 prep_plan_service = PrepPlanService()

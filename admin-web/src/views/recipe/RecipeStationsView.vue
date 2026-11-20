@@ -416,7 +416,8 @@ function onDocumentPointerDown(evt) {
   align-items: center;
   gap: 6px;
   padding: 7px 10px;
-  border: 1px solid var(--line-strong);
+  border: var(--edge-w, 2px) solid var(--edge);
+  box-shadow: var(--paper-shadow-sm);
   border-radius: var(--r-1);
   background: var(--surface-1);
   color: var(--ink-dim);
@@ -466,7 +467,7 @@ function onDocumentPointerDown(evt) {
   align-items: center;
   gap: 5px;
   padding: 2px 8px 2px 6px;
-  border: 1px solid var(--wb-warn-a45);
+  border: var(--edge-w, 2px) solid var(--wb-warn-a45);
   border-radius: var(--r-full);
   background: var(--wb-warn-a10);
   color: var(--warn);
@@ -486,16 +487,16 @@ function onDocumentPointerDown(evt) {
 
 @media screen {
   .station-search-input {
-    border: 1px solid var(--line-strong);
+    border: var(--edge-w, 2px) solid var(--edge);
     border-radius: var(--r-1);
     background: var(--surface-1);
   }
   /* 唯一卡片语言：面板；岗位是面板里的行，不再是「大卡套卡片」。 */
   .station-panel {
     background: var(--surface-1);
-    border: 1px solid var(--line);
+    border: var(--edge-w, 2px) solid var(--edge);
     border-radius: var(--r-2);
-    box-shadow: var(--hy-shadow-sm);
+    box-shadow: var(--paper-shadow-sm);
     overflow: hidden;
   }
   /* v3 审查：4 行改成岗位卡网格（宽屏 2 行 × 3 列），卡内带二维码入口。 */
@@ -516,10 +517,10 @@ function onDocumentPointerDown(evt) {
     display: flex;
     flex-direction: column;
     height: 100%;
-    border: 1px solid var(--line);
+    border: var(--edge-w, 2px) solid var(--edge);
     border-radius: var(--r-2);
     background: var(--surface-1);
-    box-shadow: var(--hy-shadow-sm);
+    box-shadow: var(--paper-shadow-sm);
     overflow: hidden;
     transition: border-color .15s var(--ease), background .15s var(--ease);
   }
@@ -528,7 +529,7 @@ function onDocumentPointerDown(evt) {
   }
   .station-item.is-checked .station-card {
     border-color: var(--action);
-    box-shadow: 0 0 0 2px var(--wb-tint-22), var(--hy-shadow-sm);
+    box-shadow: 0 0 0 2px var(--wb-tint-22), var(--paper-shadow-sm);
   }
   .station-link {
     position: relative;
@@ -561,7 +562,7 @@ function onDocumentPointerDown(evt) {
     width: 2.4rem;
     height: 2.4rem;
     margin-left: 0;
-    border: 1px solid var(--line);
+    border: var(--edge-w, 2px) solid var(--edge);
     border-radius: var(--r-1);
     background: var(--surface-2);
     color: var(--action);
@@ -611,7 +612,7 @@ function onDocumentPointerDown(evt) {
     justify-content: center;
     min-height: 44px;
     padding: 0 14px;
-    border: 1px solid var(--line-strong);
+    border: var(--edge-w, 2px) solid var(--edge);
     border-radius: var(--r-1);
     background: transparent;
     color: var(--ink-dim);

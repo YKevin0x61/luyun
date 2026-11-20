@@ -395,7 +395,8 @@ function doPrint() {
   align-items: center;
   gap: 6px;
   padding: 7px 10px;
-  border: 1px solid var(--line-strong);
+  border: var(--edge-w, 2px) solid var(--edge);
+  box-shadow: var(--paper-shadow-sm);
   border-radius: var(--r-1);
   background: var(--surface-1);
   color: var(--ink-dim);
@@ -459,11 +460,12 @@ function doPrint() {
     background: var(--surface-1);
     border-bottom: 1px solid var(--line);
     color: var(--ink);
-    box-shadow: var(--hy-shadow-sm);
+    box-shadow: var(--paper-shadow-sm);
   }
   .sop-print-preview-sheet-pick {
     background: var(--surface-1);
-    border: 1px solid var(--line);
+    border: var(--edge-w, 2px) solid var(--edge);
+  box-shadow: var(--paper-shadow-sm);
     border-radius: var(--r-1);
     color: var(--ink);
   }

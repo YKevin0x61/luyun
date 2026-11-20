@@ -402,18 +402,6 @@ class WastageStore:
         self._captures = captures
         self._now = now or (lambda: datetime.now(CHINA_TZ))
         self._write_lock_owner = conn_or_db
-        self._local_write_lock = None
-
-    @property
-    def _write_lock(self):
-        shared = getattr(self._write_lock_owner, "_write_lock", None)
-        if shared is not None:
-            return shared
-        if self._local_write_lock is None:
-            import asyncio
-
-            self._local_write_lock = asyncio.Lock()
-        return self._local_write_lock
 
     def _now_dt(self) -> datetime:
         value = self._now()

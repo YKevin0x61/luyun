@@ -9,8 +9,11 @@ export const REVIEW_CSV_HEADERS = [
   '品名',
   '单位',
   '参考值',
+  '下达量',
+  '下达来源',
   '实际卖出',
-  '偏差',
+  '对参考',
+  '对下达',
   '售罄时刻',
   '售罄判定',
   '窗口后+1h',
@@ -63,21 +66,34 @@ function escapeCell(value) {
   return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text
 }
 
+/** 下达量来源：店长手改过就写「手改」，回落参考值写「未手改」。 */
+export function reviewPlannedSource(item) {
+  if (!item) return ''
+  return item.planned_source === 'manual' ? '手改' : '未手改'
+}
+
+/** 实际卖减基线：正数 = 卖得比基线多（缺货方向），负数 = 多做了。 */
+function gapText(item, key) {
+  if (item?.sold_qty === null || item?.sold_qty === undefined) return ''
+  const baseline = item?.[key]
+  if (baseline === null || baseline === undefined) return ''
+  return signedText(Number(item.sold_qty) - Number(baseline))
+}
+
 /** 当前选中日 + 当前钟点组的明细 CSV，带 UTF-8 BOM（Excel 直接打开不乱码）。 */
 export function buildReviewCsv({ items = [] } = {}) {
   const lines = [REVIEW_CSV_HEADERS.join(',')]
   for (const item of items) {
-    const deviation =
-      item.sold_qty === null || item.sold_qty === undefined || item.suggested_qty === null || item.suggested_qty === undefined
-        ? null
-        : Number(item.sold_qty) - Number(item.suggested_qty)
     lines.push(
       [
         item.item_name,
         item.unit,
-        item.suggested_qty,
+        item.reference_qty,
+        item.planned_qty,
+        reviewPlannedSource(item),
         item.sold_qty,
-        signedText(deviation),
+        gapText(item, 'reference_qty'),
+        gapText(item, 'planned_qty'),
         reviewSoldOutTime(item.sold_out_at),
         reviewSoldOutVerdict(item),
         reviewAfterWindow(item, 'sold_1h'),

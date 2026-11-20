@@ -649,7 +649,7 @@ applyManageQuery()
 /* B 案：拖拽柄是小件（4px 方角），颜色走正文次级色。 */
 .drag-handle {
   cursor: grab;
-  border: 1px solid var(--line-strong);
+  border: var(--edge-w, 2px) solid var(--edge);
   background: var(--surface-2);
   color: var(--ink-dim);
   border-radius: var(--r-1);
@@ -761,9 +761,9 @@ applyManageQuery()
 }
 .manage-panel {
   background: var(--surface-1);
-  border: 1px solid var(--line);
+  border: var(--edge-w, 2px) solid var(--edge);
   border-radius: var(--r-2);
-  box-shadow: var(--hy-shadow-sm);
+  box-shadow: var(--paper-shadow-sm);
   overflow: hidden;
 }
 .manage-panel-head {
@@ -861,7 +861,7 @@ applyManageQuery()
     flex-direction: column;
     min-width: 8.5rem;
     padding: 4px;
-    border: 1px solid var(--line);
+    border: var(--edge-w, 2px) solid var(--edge);
     border-radius: var(--r-1);
     background: var(--surface-1);
     box-shadow: var(--hy-shadow-md);
@@ -939,7 +939,7 @@ applyManageQuery()
   .badge-new {
     min-width: 0;
     padding: 2px 8px;
-    border: 1px solid var(--wb-warn-a45);
+    border: var(--edge-w, 2px) solid var(--wb-warn-a45);
     border-radius: var(--r-full);
     background: var(--wb-warn-a10);
     color: var(--warn);
