@@ -33,6 +33,11 @@ from services.business_day import current_business_date
 from services.hygiene.accounts import EmployeeAccounts
 import services.wecom_request_notice as notice_module
 from services.overtime.ledger import (
+    ACTION_APPROVE,
+    ACTION_REJECT,
+    ACTION_VOID,
+    BOOK_DEDUCTION,
+    BOOK_ENTRY,
     MAX_REASON,
     EntryActor,
     OvertimeError,
@@ -239,7 +244,7 @@ class OvertimeLedgerTest(unittest.IsolatedAsyncioTestCase):
             EntryActor(employee_id=employee["id"]), TODAY, 4, "临时加班"
         )
 
-        cancelled = await self.ledger.cancel(employee["id"], entry["id"])
+        cancelled = await self.ledger.withdraw(BOOK_ENTRY, employee["id"], entry["id"])
 
         self.assertEqual(cancelled["status"], "cancelled")
         self.assertIsNotNone(cancelled["decided_at"])
@@ -257,17 +262,17 @@ class OvertimeLedgerTest(unittest.IsolatedAsyncioTestCase):
 
         # 别人的登记一律当作「不存在」：不告诉调用方「它在，但不是你的」。
         with self.assertRaises(OvertimeError) as caught:
-            await self.ledger.cancel(other["id"], mine["id"])
+            await self.ledger.withdraw(BOOK_ENTRY, other["id"], mine["id"])
         self.assertEqual(caught.exception.code, "unknown_entry")
 
         with self.assertRaises(OvertimeError) as caught:
-            await self.ledger.cancel(me["id"], 999999)
+            await self.ledger.withdraw(BOOK_ENTRY, me["id"], 999999)
         self.assertEqual(caught.exception.code, "unknown_entry")
 
         # 状态机只往前走：撤过一次就不能再撤。
-        await self.ledger.cancel(me["id"], mine["id"])
+        await self.ledger.withdraw(BOOK_ENTRY, me["id"], mine["id"])
         with self.assertRaises(OvertimeError) as caught:
-            await self.ledger.cancel(me["id"], mine["id"])
+            await self.ledger.withdraw(BOOK_ENTRY, me["id"], mine["id"])
         self.assertEqual(caught.exception.code, "entry_not_pending")
 
     async def _approve_raw(self, entry_id: int) -> None:
@@ -319,7 +324,7 @@ class OvertimeLedgerTest(unittest.IsolatedAsyncioTestCase):
             EntryActor(employee_id=employee["id"]), TODAY, 4, "下午加班"
         )
 
-        approved = await self.ledger.approve(EntryActor(), entry["id"])
+        approved = await self.ledger.decide(BOOK_ENTRY, entry["id"], ACTION_APPROVE, EntryActor())
 
         self.assertEqual(approved["status"], "approved")
         self.assertEqual(approved["decided_by"], "super")
@@ -334,20 +339,20 @@ class OvertimeLedgerTest(unittest.IsolatedAsyncioTestCase):
         )
 
         with self.assertRaises(OvertimeError) as caught:
-            await self.ledger.reject(EntryActor(), entry["id"], "   ")
+            await self.ledger.decide(BOOK_ENTRY, entry["id"], ACTION_REJECT, EntryActor(), "   ")
         self.assertEqual(caught.exception.code, "missing_reject_reason")
         # 被拒的那一次一个字都没写：它还在待审批里等下一次判。
         mine = (await self.ledger.list_mine(employee["id"]))["entries"]
         self.assertEqual((mine[0]["status"], mine[0]["reject_reason"]), ("pending", None))
 
-        rejected = await self.ledger.reject(EntryActor(), entry["id"], "那天没有排班")
+        rejected = await self.ledger.decide(BOOK_ENTRY, entry["id"], ACTION_REJECT, EntryActor(), "那天没有排班")
         self.assertEqual(rejected["status"], "rejected")
         self.assertEqual(rejected["reject_reason"], "那天没有排班")
         self.assertEqual(rejected["decided_by"], "super")
 
         # 状态机只往前走：已经驳过的不再动。
         with self.assertRaises(OvertimeError) as caught:
-            await self.ledger.reject(EntryActor(), entry["id"], "再驳一次")
+            await self.ledger.decide(BOOK_ENTRY, entry["id"], ACTION_REJECT, EntryActor(), "再驳一次")
         self.assertEqual(caught.exception.code, "entry_not_pending")
 
     async def test_void_only_applies_to_approved_entries(self):
@@ -359,11 +364,11 @@ class OvertimeLedgerTest(unittest.IsolatedAsyncioTestCase):
 
         # 还没批的作废不了：作废撤销的是「已经点过的头」，不是「别急」。
         with self.assertRaises(OvertimeError) as caught:
-            await self.ledger.void(EntryActor(), entry["id"])
+            await self.ledger.decide(BOOK_ENTRY, entry["id"], ACTION_VOID, EntryActor())
         self.assertEqual(caught.exception.code, "entry_not_approved")
 
-        await self.ledger.approve(EntryActor(), entry["id"])
-        voided = await self.ledger.void(EntryActor(), entry["id"])
+        await self.ledger.decide(BOOK_ENTRY, entry["id"], ACTION_APPROVE, EntryActor())
+        voided = await self.ledger.decide(BOOK_ENTRY, entry["id"], ACTION_VOID, EntryActor())
 
         self.assertEqual(voided["status"], "voided")
         self.assertEqual(voided["decided_by"], "super")
@@ -375,7 +380,7 @@ class OvertimeLedgerTest(unittest.IsolatedAsyncioTestCase):
         )
 
         with self.assertRaises(OvertimeError) as caught:
-            await self.ledger.void(EntryActor(), entry["id"])
+            await self.ledger.decide(BOOK_ENTRY, entry["id"], ACTION_VOID, EntryActor())
         self.assertEqual(caught.exception.code, "entry_not_approved")
 
     # ── 票 03：底薪快照（该月第一次审批定音）────────────────────────────────
@@ -387,14 +392,14 @@ class OvertimeLedgerTest(unittest.IsolatedAsyncioTestCase):
         first = await self.ledger.submit(actor, TODAY, 13, "中秋加班")
         second = await self.ledger.submit(actor, TODAY, 4, "又来一笔")
 
-        await self.ledger.approve(EntryActor(), first["id"])
+        await self.ledger.decide(BOOK_ENTRY, first["id"], ACTION_APPROVE, EntryActor())
         self.assertEqual(
             await self.ledger.salary_snapshot(employee["id"], "2026-09"), 5100
         )
 
         # 月中调薪：第二笔审批不覆盖快照 —— 这个月的钱按第一次点头那一刻的底薪算。
         await self.accounts.update_fields(employee["id"], base_salary=6000)
-        await self.ledger.approve(EntryActor(), second["id"])
+        await self.ledger.decide(BOOK_ENTRY, second["id"], ACTION_APPROVE, EntryActor())
         self.assertEqual(
             await self.ledger.salary_snapshot(employee["id"], "2026-09"), 5100
         )
@@ -407,7 +412,7 @@ class OvertimeLedgerTest(unittest.IsolatedAsyncioTestCase):
         )
 
         with self.assertRaises(OvertimeError) as caught:
-            await self.ledger.approve(EntryActor(), entry["id"])
+            await self.ledger.decide(BOOK_ENTRY, entry["id"], ACTION_APPROVE, EntryActor())
         self.assertEqual(caught.exception.code, "salary_missing")
 
         rows = (await self.ledger.list_mine(employee["id"]))["entries"]
@@ -425,7 +430,7 @@ class OvertimeLedgerTest(unittest.IsolatedAsyncioTestCase):
             EntryActor(), "2026-08-31", 6, "上月末加班", target_employee_id=employee["id"]
         )
 
-        await self.ledger.approve(EntryActor(), august["id"])
+        await self.ledger.decide(BOOK_ENTRY, august["id"], ACTION_APPROVE, EntryActor())
 
         self.assertEqual(
             await self.ledger.salary_snapshot(employee["id"], "2026-08"), 5100
@@ -448,9 +453,7 @@ class OvertimeLedgerTest(unittest.IsolatedAsyncioTestCase):
         )
 
         with self.assertRaises(OvertimeError) as caught:
-            await self.ledger.approve(
-                EntryActor(employee_id=supervisor["id"], can_backfill=True), own["id"]
-            )
+            await self.ledger.decide(BOOK_ENTRY, own["id"], ACTION_APPROVE, EntryActor(employee_id=supervisor["id"], can_backfill=True))
         self.assertEqual(caught.exception.code, "cannot_self_accept")
 
         rows = (await self.ledger.list_mine(supervisor["id"]))["entries"]
@@ -491,7 +494,7 @@ class OvertimeLedgerTest(unittest.IsolatedAsyncioTestCase):
 
         with patch.object(OvertimeLedger, "_write_snapshot", gated_write_snapshot):
             approving = asyncio.create_task(
-                self.ledger.approve(EntryActor(), entry["id"])
+                self.ledger.decide(BOOK_ENTRY, entry["id"], ACTION_APPROVE, EntryActor())
             )
             await asyncio.wait_for(inserted.wait(), timeout=5)
 
@@ -543,7 +546,7 @@ class OvertimeLedgerTest(unittest.IsolatedAsyncioTestCase):
             EntryActor(employee_id=other["id"]), TODAY, 4, "加班"
         )
         for entry in (first, second, his):
-            await self.ledger.approve(EntryActor(), entry["id"])
+            await self.ledger.decide(BOOK_ENTRY, entry["id"], ACTION_APPROVE, EntryActor())
 
         stats = await self.ledger.monthly_stats("2026-09")
 
@@ -570,17 +573,17 @@ class OvertimeLedgerTest(unittest.IsolatedAsyncioTestCase):
         actor = EntryActor(employee_id=employee["id"])
         overtime = await self.ledger.submit(actor, TODAY, 2, "加班")
         makeup = await self.ledger.submit(actor, TODAY, -13, "补钟")
-        await self.ledger.approve(EntryActor(), overtime["id"])
-        await self.ledger.approve(EntryActor(), makeup["id"])
+        await self.ledger.decide(BOOK_ENTRY, overtime["id"], ACTION_APPROVE, EntryActor())
+        await self.ledger.decide(BOOK_ENTRY, makeup["id"], ACTION_APPROVE, EntryActor())
         # 待审批、已驳回、已撤回、已作废：一笔都不该出现在这个月的账上。
         await self.ledger.submit(actor, TODAY, 8, "还没批")
         rejected = await self.ledger.submit(actor, TODAY, 6, "被驳")
-        await self.ledger.reject(EntryActor(), rejected["id"], "不算")
+        await self.ledger.decide(BOOK_ENTRY, rejected["id"], ACTION_REJECT, EntryActor(), "不算")
         withdrawn = await self.ledger.submit(actor, TODAY, 5, "撤回")
-        await self.ledger.cancel(employee["id"], withdrawn["id"])
+        await self.ledger.withdraw(BOOK_ENTRY, employee["id"], withdrawn["id"])
         voided = await self.ledger.submit(actor, TODAY, 4, "批了又作废")
-        await self.ledger.approve(EntryActor(), voided["id"])
-        await self.ledger.void(EntryActor(), voided["id"])
+        await self.ledger.decide(BOOK_ENTRY, voided["id"], ACTION_APPROVE, EntryActor())
+        await self.ledger.decide(BOOK_ENTRY, voided["id"], ACTION_VOID, EntryActor())
 
         stats = await self.ledger.monthly_stats("2026-09")
 
@@ -628,11 +631,11 @@ class OvertimeLedgerTest(unittest.IsolatedAsyncioTestCase):
         withdrawn = await self.ledger.submit(
             EntryActor(employee_id=me["id"]), TODAY, 1, "撤回掉"
         )
-        await self.ledger.cancel(me["id"], withdrawn["id"])
+        await self.ledger.withdraw(BOOK_ENTRY, me["id"], withdrawn["id"])
         approved = await self.ledger.submit(
             EntryActor(employee_id=other["id"]), TODAY, 4, "批过的"
         )
-        await self.ledger.approve(EntryActor(), approved["id"])
+        await self.ledger.decide(BOOK_ENTRY, approved["id"], ACTION_APPROVE, EntryActor())
 
         pending = await self.ledger.list_pending()
 
@@ -660,7 +663,7 @@ class OvertimeLedgerTest(unittest.IsolatedAsyncioTestCase):
         approved = await self.ledger.submit(
             EntryActor(employee_id=me["id"]), TODAY, 4, "已批的加班"
         )
-        await self.ledger.approve(EntryActor(), approved["id"])
+        await self.ledger.decide(BOOK_ENTRY, approved["id"], ACTION_APPROVE, EntryActor())
 
         listing = await self.ledger.list_entries()
 

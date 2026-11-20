@@ -293,12 +293,12 @@ onMounted(() => {
 .hHint { margin: 0; font-size: 12.5px; color: var(--ink-dim); }
 .hErr {
   margin: 0; padding: 9px var(--sp-3); border-radius: var(--r-1);
-  border: 1px solid var(--wb-danger-a45); background: var(--danger-soft);
+  border: var(--edge-w, 2px) solid var(--wb-danger-a45); background: var(--danger-soft);
   font-size: 12.5px; color: var(--danger-bright);
 }
 .hOk {
   margin: 0; padding: 9px var(--sp-3); border-radius: var(--r-1);
-  border: 1px solid var(--line-strong); background: var(--ok-soft);
+  border: var(--edge-w, 2px) solid var(--edge); background: var(--ok-soft);
   font-size: 12.5px; color: var(--ok);
 }
 /* 四块 2×2 等宽面板（每块 510 左右），两栏 stretch 同高。 */
@@ -306,8 +306,8 @@ onMounted(() => {
 /* 面板（唯一卡片语言）。 */
 .hCard {
   display: flex; flex-direction: column; min-width: 0;
-  background: var(--surface-1); border: 1px solid var(--line);
-  border-radius: var(--r-2); box-shadow: var(--hy-shadow-sm); overflow: hidden;
+  background: var(--surface-1); border: var(--edge-w, 2px) solid var(--edge);
+  border-radius: var(--r-2); box-shadow: var(--paper-shadow-sm); overflow: hidden;
 }
 .hCard-hd { display: flex; align-items: center; gap: 9px; padding: 11px 14px; border-bottom: 1px solid var(--line); }
 .hCard-hd h2 {

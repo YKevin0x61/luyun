@@ -745,12 +745,12 @@ useNudgePull({
 .oTop .btn { margin-left: auto; flex: none; }
 .oHint { margin: 8px 0 0; font-size: 12px; line-height: 1.7; color: var(--ink-dim); }
 .oErr {
-  margin: 0 0 12px; padding: 9px 12px; border-radius: var(--r-2);
+  margin: 0 0 12px; padding: 9px 12px; border-radius: var(--r-1);
   border: 1px solid var(--wb-danger-a45); background: var(--wb-danger-a16);
   font-size: 12.5px; color: var(--danger-bright);
 }
 .oOk {
-  margin: 0 0 12px; padding: 9px 12px; border-radius: var(--r-2);
+  margin: 0 0 12px; padding: 9px 12px; border-radius: var(--r-1);
   border: 1px solid var(--wb-tint-45); background: var(--wb-tint-08);
   font-size: 12.5px; color: var(--action);
 }
@@ -759,7 +759,8 @@ useNudgePull({
 .oStats { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; }
 .oStat {
   flex: 1 1 150px; min-width: 0; padding: 10px 14px;
-  border: 1px solid var(--line); border-radius: var(--r-2); background: var(--surface-1);
+  border: var(--edge-w, 2px) solid var(--edge);
+  box-shadow: var(--paper-shadow-sm); border-radius: var(--r-1); background: var(--surface-1);
 }
 .oStat-k { display: block; font-size: 11.5px; color: var(--ink-faint); }
 .oStat-v {
@@ -785,7 +786,8 @@ useNudgePull({
 }
 
 .oCard {
-  padding: 14px; border: 1px solid var(--line);
+  padding: 14px; border: var(--edge-w, 2px) solid var(--edge);
+  box-shadow: var(--paper-shadow-sm);
   border-radius: var(--r-3); background: var(--surface-1);
 }
 .oCard-hd { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
@@ -812,7 +814,7 @@ useNudgePull({
 .oH.minus { color: var(--danger-bright); }
 .oKind {
   padding: 1px 8px; border-radius: var(--r-full); font-size: 11px;
-  color: var(--info); border: 1px solid var(--info); background: var(--info-soft);
+  color: var(--info); border: var(--edge-w, 2px) solid var(--info); background: var(--info-soft);
 }
 .oPend { margin-left: auto; font-size: 11.5px; color: var(--warn); }
 .oSt { margin-left: auto; font-size: 11.5px; }
@@ -833,7 +835,7 @@ useNudgePull({
 .oField { display: flex; align-items: center; gap: 10px; }
 .oLabel { width: 52px; flex: none; font-size: 12.5px; color: var(--ink-dim); }
 .oInput {
-  padding: 7px 10px; border: 1px solid var(--line); border-radius: var(--r-2);
+  padding: 7px 10px; border: var(--edge-w, 2px) solid var(--edge); border-radius: var(--r-2);
   background: transparent; font-size: 13px; color: var(--ink);
 }
 .oField .oInput { flex: 1; }
@@ -842,7 +844,7 @@ useNudgePull({
 .oField :deep(.luyun-date-picker .dp--input) { width: 100%; font-size: 13px; }
 .oStepper { display: flex; align-items: center; gap: 10px; }
 .oStep {
-  width: 32px; height: 32px; border: 1px solid var(--line); border-radius: 50%;
+  width: 32px; height: 32px; border: var(--edge-w, 2px) solid var(--edge); border-radius: 50%;
   background: transparent; font-size: 17px; line-height: 1; color: var(--ink);
 }
 /* 手机档把「−/+」撑到 44：这是代录时唯一要连点的控件，32px 的圆圈在 390 上实测

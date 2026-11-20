@@ -45,6 +45,11 @@ from services.overtime_contract import (
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "ACTION_APPROVE",
+    "ACTION_REJECT",
+    "ACTION_VOID",
+    "BOOK_DEDUCTION",
+    "BOOK_ENTRY",
     "HALF_HOURS_MAX",
     "HALF_HOURS_PER_LEAVE_DAY",
     "HOURS_PER_DAY",
@@ -74,6 +79,14 @@ KIND_MAKEUP = "makeup"
 # 补钟用存假抵扣（ADR 0124）：它不是加班登记的一种，是那张 `overtime_leave_deductions`
 # 表上的一行 —— 但列表接口把两种记录并排下发时，前端要靠这个字段分渲染。
 KIND_LEAVE_DEDUCTION = "leave_deduction"
+
+# 两本账共用一台状态机（ADR 0153）：`book` 选表与错误码，`action` 选目标状态。
+# 名字不叫 `kind`：那个词已经被加班 / 补钟 / 抵扣三类记录占了。
+BOOK_ENTRY = "entry"
+BOOK_DEDUCTION = "deduction"
+ACTION_APPROVE = "approve"
+ACTION_REJECT = "reject"
+ACTION_VOID = "void"
 
 # 界面上的步长是 0.5 小时，库里存它的整数倍（`half_hours`）。单条上限 ±12 小时 ——
 # 防的是手滑打成 120，不是替业务定政策。
@@ -170,6 +183,39 @@ class OvertimeError(ValueError):
     def __init__(self, code: str, message: str = ""):
         self.code = code
         super().__init__(message or code)
+
+
+@dataclass(frozen=True)
+class _Action:
+    """一条裁决动作：目标状态、期望的当下状态、失败时用哪本账的错误码。"""
+
+    status: str
+    expect: str
+    error_attr: str
+    requires_reason: bool = False
+
+
+_ACTIONS = {
+    ACTION_APPROVE: _Action(STATUS_APPROVED, STATUS_PENDING, "not_pending"),
+    ACTION_REJECT: _Action(
+        STATUS_REJECTED, STATUS_PENDING, "not_pending", requires_reason=True
+    ),
+    ACTION_VOID: _Action(STATUS_VOIDED, STATUS_APPROVED, "not_approved"),
+}
+
+
+@dataclass(frozen=True)
+class _Book:
+    """一本账的适配器：读哪张表、报哪个 code、批之前还要过哪道守卫。"""
+
+    name: str
+    table: str
+    unknown: str
+    not_pending: str
+    not_approved: str
+    read: Callable[[int], Any]
+    prepare: Optional[Callable[[], Any]]
+    before: dict[str, Callable[..., Any]]
 
 
 def _require_date(value: Any) -> str:
@@ -363,18 +409,35 @@ class OvertimeLedger:
         self._conn = conn
         self._now = now or (lambda: datetime.now(CHINA_TZ))
         self._write_lock_owner = conn_or_db
-        self._local_write_lock = None
-
-    @property
-    def _write_lock(self):
-        shared = getattr(self._write_lock_owner, "_write_lock", None)
-        if shared is not None:
-            return shared
-        if self._local_write_lock is None:
-            import asyncio
-
-            self._local_write_lock = asyncio.Lock()
-        return self._local_write_lock
+        # 两本账只差「读哪张表、报哪个 code、批之前多过哪道守卫」；状态机不复制。
+        self._books = {
+            BOOK_ENTRY: _Book(
+                name=BOOK_ENTRY,
+                table="overtime_entries",
+                unknown="unknown_entry",
+                not_pending="entry_not_pending",
+                not_approved="entry_not_approved",
+                read=self._entry_by_id,
+                prepare=None,
+                before={
+                    ACTION_APPROVE: self._before_entry_approve,
+                    ACTION_VOID: self._before_entry_void,
+                },
+            ),
+            BOOK_DEDUCTION: _Book(
+                name=BOOK_DEDUCTION,
+                table="overtime_leave_deductions",
+                unknown="unknown_deduction",
+                not_pending="deduction_not_pending",
+                not_approved="deduction_not_approved",
+                read=self._deduction_by_id,
+                prepare=self._require_deduction_table,
+                before={
+                    ACTION_APPROVE: self._before_deduction_approve,
+                    ACTION_VOID: self._before_deduction_void,
+                },
+            ),
+        }
 
     def _now_dt(self) -> datetime:
         value = self._now()
@@ -519,7 +582,8 @@ class OvertimeLedger:
         只给员工号等于让店长自己去查名单。
 
         `exclude_employee_id` 只给店长那一面（`/review/pending`）用：**自己提的那几笔
-        不进队列** —— 他不能批自己的登记（`approve()` 的 `cannot_self_accept`），摆在
+        不进队列** —— 他不能批自己的登记（`decide(..., ACTION_APPROVE, ...)` 的
+        `cannot_self_accept`），摆在
         队列里就是一颗点了必被拒的「批准」。管理端的超管没有员工号，不传这个参数，
         队列照旧是全店的。
         """
@@ -566,107 +630,136 @@ class OvertimeLedger:
             row["employee_name"] = names.get(int(row["employee_id"]), "")
         return {"today": self.today(), "count": len(rows), "entries": rows}
 
-    async def _claim(
+    @_needs_migration
+    @serialized_write
+    async def decide(
         self,
-        entry_id: int,
+        book: str,
+        target_id: int,
+        action: str,
+        actor: EntryActor,
+        reason: Any = None,
+    ) -> dict:
+        """两本账共用的一台状态机：批 / 驳 / 作废。
+
+        book 选表与错误码（entry / deduction），action 选目标状态
+        （approve / reject / void）。两本账只在「读哪张表、批之前多过哪道守卫」上不同，
+        那两件事由 self._books 里的适配器提供，状态转移只有这一份。
+
+        判的顺序是**状态 → 身份 → 理由**：先回读并比期望状态（已经处理过就报
+        *_not_pending，不覆盖别人的决定），再判自己 / 超管，最后才校验驳回理由。
+        于是重复点击得到的是「已经处理过了」，而不是在陈旧行上写快照或算容量。
+
+        @serialized_write 把这一整段（含守卫里的写快照 / 算容量）与那次 UPDATE 收在
+        同一个写单元里：快照、容量、状态一起成或一起败。
+        """
+        spec = self._books.get(book)
+        if spec is None:
+            raise ValueError(f"unknown overtime book: {book!r}")
+        rule = _ACTIONS.get(action)
+        if rule is None:
+            raise ValueError(f"unknown overtime action: {action!r}")
+        if spec.prepare is not None:
+            await spec.prepare()
+        row = await spec.read(int(target_id))
+        if row is None:
+            raise OvertimeError(spec.unknown, spec.unknown)
+        if row.get("status") != rule.expect:
+            code = getattr(spec, rule.error_attr)
+            raise OvertimeError(code, code)
+        self._require_actor(action, actor, row)
+        reject_reason = _clean_reject_reason(reason) if rule.requires_reason else None
+        guard = spec.before.get(action)
+        if guard is not None:
+            await guard(actor, row)
+        return await self._transition(
+            spec,
+            int(target_id),
+            rule.status,
+            (rule.expect,),
+            actor.stamp,
+            reject_reason,
+            getattr(spec, rule.error_attr),
+        )
+
+    @_needs_migration
+    @serialized_write
+    async def withdraw(self, book: str, employee_id: int, target_id: int) -> dict:
+        """员工撤回自己还没被审批的那一笔；别人的一律当作「不存在」。
+
+        撤回也是判决（判的人是他自己），所以同样落 decided_by=staff:<id>；
+        但不校验驳回理由，也不走批 / 驳的身份规则 —— 这是唯一允许提交人自己动的动作。
+        """
+        spec = self._books.get(book)
+        if spec is None:
+            raise ValueError(f"unknown overtime book: {book!r}")
+        if spec.prepare is not None:
+            await spec.prepare()
+        row = await spec.read(int(target_id))
+        if row is None or int(row["employee_id"]) != int(employee_id):
+            raise OvertimeError(spec.unknown, spec.unknown)
+        if row.get("status") != STATUS_PENDING:
+            raise OvertimeError(spec.not_pending, spec.not_pending)
+        return await self._transition(
+            spec,
+            int(target_id),
+            STATUS_CANCELLED,
+            (STATUS_PENDING,),
+            f"staff:{int(employee_id)}",
+            None,
+            spec.not_pending,
+        )
+
+    def _require_actor(self, action: str, actor: EntryActor, row: dict) -> None:
+        """作废只认超管；批 / 驳不许提交人自己点头。
+
+        身份判据看「这一笔算谁的」（employee_id），不看 created_by —— 店长代别人
+        补录的那一笔，批的仍然是他，允许。
+        """
+        if action == ACTION_VOID:
+            if not actor.is_super:
+                raise OvertimeError("forbidden", "forbidden")
+            return
+        if actor.employee_id is not None and int(actor.employee_id) == int(
+            row["employee_id"]
+        ):
+            raise OvertimeError("cannot_self_accept", "cannot_self_accept")
+
+    async def _transition(
+        self,
+        spec: _Book,
+        target_id: int,
         status: str,
         expect: tuple[str, ...],
-        stamp: str,
         decided_by: str,
-        reject_reason: Optional[str] = None,
-        error_code: str = "entry_not_pending",
-    ) -> None:
-        """把这一笔从 `expect` 里的某个状态改成 `status`；没抢到就报「已经处理过了」。
+        reject_reason: Optional[str],
+        error_code: str,
+    ) -> dict:
+        """唯一一条 SET status：条件 UPDATE → 提交 → 回读。
 
         **状态谓词落在写锁里**：调用方那次「读出来是待审批」的判断在锁外，双击、两个
         标签页、网关重试会双双通过那道判断。到这儿再比一次状态，只有第一个改得动这一行。
-        不提交：调用方决定这一条 UPDATE 与它后面的读怎么收尾。
-
-        判「抢没抢到」用 `rowcount` 而不是 `... RETURNING id`：方言层对 UPDATE 只解析
-        asyncpg 的 command tag，RETURNING 的行取不出来（同排班 `_claim_request`）。
+        判「抢没抢到」用 rowcount 而不是 RETURNING（方言层只解析 command tag）。
         """
+        stamp = self._now_iso()
         marks = ", ".join("?" for _ in expect)
         cur = await self._conn.execute(
-            f"""UPDATE overtime_entries
+            f"""UPDATE {spec.table}
                 SET status = ?, decided_at = ?, decided_by = ?, reject_reason = ?,
                     updated_at = ?
                 WHERE id = ? AND status IN ({marks})""",
-            (status, stamp, decided_by, reject_reason, stamp, int(entry_id), *expect),
+            (status, stamp, decided_by, reject_reason, stamp, int(target_id), *expect),
         )
         if cur.rowcount != 1:
-            # 0 = 状态已经被人改了；-1 = command tag 没解析出来。两种都按「没抢到」办 ——
-            # 宁可让调用方刷新一次，也不能重复写一遍。
+            # 0 = 状态已经被人改了；-1 = command tag 没解析出来。两种都按「没抢到」办。
             raise OvertimeError(error_code, error_code)
-
-    @serialized_write
-    async def _decide(
-        self,
-        entry_id: int,
-        status: str,
-        expect: tuple[str, ...],
-        decided_by: str,
-        reject_reason: Optional[str] = None,
-        error_code: str = "entry_not_pending",
-    ) -> dict:
-        """把这一笔从 `expect` 置成 `status`，并记下**谁判的、什么时候判的**。
-
-        撤回与票 02 的批 / 驳共用同一条路：`decided_by` 是 `EntryActor.stamp` 的形状
-        （`super` 或 `staff:<员工号>`），`decided_at` 是判的那一刻 —— 台账要说得清
-        「这笔是谁点头的」，那是它当工资依据的一半。
-
-        `reject_reason` 只有驳回那一条路带值；批 / 撤 / 作废传 `None`，于是那一列被
-        显式写回空（本轮之前它本来就该是空的）。
-        """
-        return await self._decide_locked(
-            entry_id, status, expect, decided_by, reject_reason, error_code
-        )
-
-    async def _decide_locked(
-        self,
-        entry_id: int,
-        status: str,
-        expect: tuple[str, ...],
-        decided_by: str,
-        reject_reason: Optional[str] = None,
-        error_code: str = "entry_not_pending",
-    ) -> dict:
-        """`_decide` 的锁内主体：**调用方已经持有写锁**，这里只改状态、提交、回读。
-
-        单独拆出来是因为 `approve()` 要把「底薪快照 INSERT」与这次状态变更收在**同一
-        个 `serialized_write`** 里；`asyncio.Lock` 不可重入，`approve` 拿到锁之后再去
-        调 `_decide` 就会自己等自己。两条路共用这一份改状态的实现，不各写一遍。
-        """
-        stamp = self._now_iso()
-        await self._claim(entry_id, status, expect, stamp, decided_by, reject_reason, error_code)
         await self._conn.commit()
-        entry = await self._entry_by_id(int(entry_id))
-        assert entry is not None  # 刚改过的那一行
-        # 名字跟着结果回去：批完要往群里推一条「批没批」，调用方不该为了一个名字再查
-        # 一次花名册（2026-11-02 的审批结果通知）。同 `SchedulingStore._approve`。
-        entry["employee_name"] = (await self._name_index()).get(
-            int(entry["employee_id"]), ""
+        row = await spec.read(int(target_id))
+        assert row is not None  # 刚改过的那一行
+        row["employee_name"] = (await self._name_index()).get(
+            int(row["employee_id"]), ""
         )
-        return entry
-
-    @_needs_migration
-    async def cancel(self, employee_id: int, entry_id: int) -> dict:
-        """员工撤回自己**还没被审批**的那一笔。
-
-        撤回只动这一行：台账是流水，撤回不是删除（记录还在、状态是 `cancelled`）。
-        管理端的待办按 `pending` 读，所以它自己就不在那儿了 —— 票 02 兑现那一半。
-
-        别人的登记一律当作「不存在」：不告诉调用方「它在，但不是你的」。
-        """
-        row = await self._entry_by_id(entry_id)
-        if row is None or int(row["employee_id"]) != int(employee_id):
-            raise OvertimeError("unknown_entry", "unknown_entry")
-        if row["status"] != STATUS_PENDING:
-            # 批完 / 驳完 / 已撤回 / 已作废都不再动：状态机只往前走。
-            raise OvertimeError("entry_not_pending", "entry_not_pending")
-        # 撤回也是「判」过这一笔 —— 只不过判的人是他自己。
-        return await self._decide(
-            int(entry_id), STATUS_CANCELLED, (STATUS_PENDING,), f"staff:{int(employee_id)}"
-        )
+        return row
 
     # ── 补钟用存假抵扣（ADR 0124，2026-10-31 用户裁定）────────────────────────
     #
@@ -866,7 +959,8 @@ class OvertimeLedger:
         """全店**等审批**的抵扣单（旧的在前，同加班登记那条队列的口径）。
 
         `exclude_employee_id` 给店长那一面用：自己提的抵扣不能自己批（同
-        `approve_deduction` 的 `cannot_self_accept`），摆在队列里就是一颗点了必被拒的钥匙。
+        `decide(..., ACTION_APPROVE, ...)` 的 `cannot_self_accept`），摆在队列里就是一颗点了
+        必被拒的钥匙。
         """
         clause = " WHERE status = ?"
         params: list[Any] = [STATUS_PENDING]
@@ -908,135 +1002,21 @@ class OvertimeLedger:
             row["employee_name"] = names.get(int(row["employee_id"]), "")
         return {"today": self.today(), "count": len(rows), "deductions": rows}
 
-    async def _claim_deduction(
-        self,
-        deduction_id: int,
-        status: str,
-        expect: tuple[str, ...],
-        stamp: str,
-        decided_by: str,
-        reject_reason: Optional[str] = None,
-        error_code: str = "deduction_not_pending",
-    ) -> None:
-        """把这一张从 `expect` 改成 `status`；没抢到报「已经处理过了」（同 `_claim`）。"""
-        marks = ", ".join("?" for _ in expect)
-        cur = await self._conn.execute(
-            f"""UPDATE overtime_leave_deductions
-                SET status = ?, decided_at = ?, decided_by = ?, reject_reason = ?,
-                    updated_at = ?
-                WHERE id = ? AND status IN ({marks})""",
-            (status, stamp, decided_by, reject_reason, stamp, int(deduction_id), *expect),
-        )
-        if cur.rowcount != 1:
-            raise OvertimeError(error_code, error_code)
+    async def _before_deduction_approve(self, actor: EntryActor, row: dict) -> None:
+        """批抵扣前的额外守卫：那个月剩下的补钟还够不够扣。
 
-    async def _decide_deduction_locked(
-        self,
-        deduction_id: int,
-        status: str,
-        expect: tuple[str, ...],
-        decided_by: str,
-        reject_reason: Optional[str] = None,
-        error_code: str = "deduction_not_pending",
-    ) -> dict:
-        """锁内的状态变更 + 提交 + 回读（`_decide_locked` 的抵扣单版本）。"""
-        stamp = self._now_iso()
-        await self._claim_deduction(
-            deduction_id, status, expect, stamp, decided_by, reject_reason, error_code
-        )
-        await self._conn.commit()
-        deduction = await self._deduction_by_id(int(deduction_id))
-        assert deduction is not None  # 刚改过的那一行
-        # 同 `_decide_locked`：批完要往群里推一条，名字一起带回去。
-        deduction["employee_name"] = (await self._name_index()).get(
-            int(deduction["employee_id"]), ""
-        )
-        return deduction
-
-    @_needs_migration
-    @serialized_write
-    async def approve_deduction(self, actor: EntryActor, deduction_id: int) -> dict:
-        """批一张抵扣单（店长 / 超管）。
-
-        批之前**重算一次上限**：提交到批准之间可能又抵了别的、或某笔补钟被作废，照着
-        旧的数字放行就是超额抵扣。判据与提交同一份（`_capacity_for_decision`）。
-        自己提的不能自己批（`cannot_self_accept`，同加班登记）。
+        容量在锁内、状态回读之后算 —— 两个管理员同时批两张单时，第二张看到的是第一张
+        已经占掉的额度，不会两张都过。
         """
-        await self._require_deduction_table()
-        row = await self._deduction_by_id(int(deduction_id))
-        if row is None:
-            raise OvertimeError("unknown_deduction", "unknown_deduction")
-        employee_id = int(row["employee_id"])
-        if actor.employee_id is not None and int(actor.employee_id) == employee_id:
-            raise OvertimeError("cannot_self_accept", "cannot_self_accept")
-        if row["status"] != STATUS_PENDING:
-            raise OvertimeError("deduction_not_pending", "deduction_not_pending")
-        await self._capacity_for_decision(employee_id, str(row["month"]), int(row["days"]))
-        return await self._decide_deduction_locked(
-            int(deduction_id), STATUS_APPROVED, (STATUS_PENDING,), actor.stamp
+        await self._capacity_for_decision(
+            int(row["employee_id"]), str(row["month"]), int(row["days"])
         )
 
-    @_needs_migration
-    @serialized_write
-    async def reject_deduction(
-        self, actor: EntryActor, deduction_id: int, reason: Any
-    ) -> dict:
-        """驳回一张抵扣单 —— **必须写理由**（同加班登记的驳回口径）。"""
-        text = _clean_reject_reason(reason)
-        await self._require_deduction_table()
-        row = await self._deduction_by_id(int(deduction_id))
-        if row is None:
-            raise OvertimeError("unknown_deduction", "unknown_deduction")
-        if row["status"] != STATUS_PENDING:
-            raise OvertimeError("deduction_not_pending", "deduction_not_pending")
-        return await self._decide_deduction_locked(
-            int(deduction_id),
-            STATUS_REJECTED,
-            (STATUS_PENDING,),
-            actor.stamp,
-            reject_reason=text,
-        )
-
-    @_needs_migration
-    @serialized_write
-    async def cancel_deduction(self, employee_id: int, deduction_id: int) -> dict:
-        """员工撤回自己**还没被审批**的那张抵扣单（别人的当作不存在）。"""
-        await self._require_deduction_table()
-        row = await self._deduction_by_id(int(deduction_id))
-        if row is None or int(row["employee_id"]) != int(employee_id):
-            raise OvertimeError("unknown_deduction", "unknown_deduction")
-        if row["status"] != STATUS_PENDING:
-            raise OvertimeError("deduction_not_pending", "deduction_not_pending")
-        return await self._decide_deduction_locked(
-            int(deduction_id),
-            STATUS_CANCELLED,
-            (STATUS_PENDING,),
-            f"staff:{int(employee_id)}",
-        )
-
-    @_needs_migration
-    @serialized_write
-    async def void_deduction(self, actor: EntryActor, deduction_id: int) -> dict:
-        """作废一张**已批准**的抵扣单（超管，封账前）。
-
-        封账之后锁死：那个月的存假已经是定稿，再撤一张抵扣单会让封下的数与现状各说
-        各话 —— 要改只能走考勤表人工定稿（那是另一条有留痕的路，不是这个接口）。
-        """
-        await self._require_deduction_table()
-        row = await self._deduction_by_id(int(deduction_id))
-        if row is None:
-            raise OvertimeError("unknown_deduction", "unknown_deduction")
-        if row["status"] != STATUS_APPROVED:
-            raise OvertimeError("deduction_not_approved", "deduction_not_approved")
-        if await self._month_sealed(str(row["month"])):
-            raise OvertimeError("month_sealed", str(row["month"]))
-        return await self._decide_deduction_locked(
-            int(deduction_id),
-            STATUS_VOIDED,
-            (STATUS_APPROVED,),
-            actor.stamp,
-            error_code="deduction_not_approved",
-        )
+    async def _before_deduction_void(self, actor: EntryActor, row: dict) -> None:
+        """作废抵扣前的额外守卫：封账的月份不许再动（ADR 0124）。"""
+        month = str(row["month"])
+        if await self._month_sealed(month):
+            raise OvertimeError("month_sealed", month)
 
     # ── 按月统计与加班费（票 03）────────────────────────────────────────────
 
@@ -1159,7 +1139,7 @@ class OvertimeLedger:
     ) -> None:
         """写下这个月的计费底薪 —— **已经有的不覆盖**（该月第一次审批定音）。
 
-        不提交，而且**调用方必须已经持有写锁**（`approve()` 就在自己的
+        不提交，而且**调用方必须已经持有写锁**（`_before_entry_approve` 在 `decide` 的
         `@serialized_write` 里调用它）：锁保证这一条 INSERT 与它后面那次状态变更之间
         不会有别的写请求收事务，于是「批了却没记底薪」与「记了底薪却没批」两种半截账
         都不会留在库里。
@@ -1185,92 +1165,33 @@ class OvertimeLedger:
 
     @_needs_migration
     @serialized_write
-    async def approve(self, actor: EntryActor, entry_id: int) -> dict:
-        """批准一笔**待审批**的登记（票 02），顺带定下这个月的计费底薪（票 03）。
+    async def _before_entry_approve(self, actor: EntryActor, row: dict) -> None:
+        """批登记前的额外守卫：定下这个月的计费底薪（票 03）。
 
-        状态谓词落在 `_claim` 的写锁里：只有第一个改得动这一行 —— 双击、两个标签页、
-        网关重试里的第二个会拿到「已经处理过了」，而不是把同一笔批两遍。
-
-        **底薪待补的人批不了**（票 03 的验收 3）：钱算不出来，先让超管去花名册补档案。
-        快照按**登记日期**那个月写（验收 4：8 月的单 9 月才批，写的还是 8 月），而且
-        只在该月还没有快照时才写 —— 于是「该月第一次点头」那一刻的底薪说了算。
-
-        **提交人不能批自己的登记**（同卫生 `cannot_self_accept` 的口径）：钱与留痕都是
-        自己给自己。判据看「这一笔算谁的」（`employee_id`），不看 `created_by` —— 店长
-        代别人补录的那一笔，批的仍然是他，允许。
-
-        **读档案底薪 + 写快照 + 改状态收在同一个 `serialized_write` 里**：这一段以前
-        落在锁外，未提交的快照 INSERT 会被任何并发写请求的收尾带上（成功 commit 落成
-        「没人批过却有底薪」的孤儿行，失败 rollback 则吞掉快照、批准照旧提交 —— 那笔
-        已批准的加班费从此算不出来）。快照必须与批准同生共死，锁内才做得到。
+        **底薪待补的人批不了**：钱算不出来，先让超管去花名册补档案。快照按**登记
+        日期**那个月写（8 月的单 9 月才批，写的还是 8 月），而且只在该月还没有快照
+        时才写 —— 「该月第一次点头」那一刻的底薪说了算。
         """
-        row = await self._entry_by_id(int(entry_id))
-        if row is None:
-            raise OvertimeError("unknown_entry", "unknown_entry")
         employee_id = int(row["employee_id"])
-        if actor.employee_id is not None and int(actor.employee_id) == employee_id:
-            raise OvertimeError("cannot_self_accept", "cannot_self_accept")
         month = str(row["entry_date"])[:7]
         if await self.salary_snapshot(employee_id, month) is None:
             salary = await self._base_salary(employee_id)
             if salary is None:
                 raise OvertimeError("salary_missing", "salary_missing")
             await self._write_snapshot(employee_id, month, salary)
-        # 异常时 `serialized_write` 无条件 rollback：上面那条还没提交的快照 INSERT 与
-        # 半截状态变更一起被丢掉，不会挂在一个失败的事务里被后面某次 commit 顺手带走。
-        return await self._decide_locked(
-            int(entry_id), STATUS_APPROVED, (STATUS_PENDING,), actor.stamp
-        )
 
-    @_needs_migration
-    async def reject(self, actor: EntryActor, entry_id: int, reason: Any) -> dict:
-        """驳回一笔待审批的登记 —— **必须写理由**（票 02 的验收 1）。
+    async def _before_entry_void(self, actor: EntryActor, row: dict) -> None:
+        """作废补钟前的额外守卫：已经拿去抵扣的小时不能凭空消失。
 
-        理由比「驳回」这个结果本身更重要：员工看到的是状态，需要的是为什么 ——
-        没有理由他只能来问人，而且下一笔还会照原样提上来。
+        判据是「作废后，那个月剩下的已批补钟还够不够抵已批的抵扣天数」——不够就拒
+        （makeup_in_use），提示先作废抵扣单。
         """
-        text = _clean_reject_reason(reason)
-        return await self._decide(
-            int(entry_id),
-            STATUS_REJECTED,
-            (STATUS_PENDING,),
-            actor.stamp,
-            reject_reason=text,
-        )
-
-    @_needs_migration
-    @serialized_write
-    async def void(self, actor: EntryActor, entry_id: int) -> dict:
-        """作废一笔**已批准**的登记（票 02 的验收 3）。
-
-        批准之后员工不能动它（状态机只往前走），填错了、批错了只有管理端能救 ——
-        而「救」是把这一笔作废，不是删掉它：那一行还在（状态 `voided`），台账要留着
-        「曾经批过、又被作废」这件事本身，否则月底对不上账时无从解释。
-
-        期望状态是 `approved`（不是 `pending`），所以失败时用的 code 也不一样：
-        「还没批」与「已经不是已批准了」是两件事。
-
-        **已经拿去抵扣的补钟不能作废**（ADR 0124 的作废冲突，用户裁定）：那部分小时已经
-        变成存假了，作废这一笔会让存假凭空少一天。判据是「作废后，那个月剩下的已批补钟
-        还够不够抵已批的抵扣天数」——不够就拒（`makeup_in_use`），提示先作废抵扣单。
-        """
-        row = await self._entry_by_id(int(entry_id))
-        if row is None:
-            raise OvertimeError("unknown_entry", "unknown_entry")
-        if int(row["half_hours"]) < 0:
-            employee_id = int(row["employee_id"])
-            month = str(row["entry_date"])[:7]
-            makeup = await self._approved_makeup_half_hours(employee_id, month)
-            deducted = (
-                await self._deduction_days(employee_id, month)
-            ) * HALF_HOURS_PER_LEAVE_DAY
-            remaining = makeup - abs(int(row["half_hours"]))
-            if remaining < deducted:
-                raise OvertimeError("makeup_in_use", month)
-        return await self._decide_locked(
-            int(entry_id),
-            STATUS_VOIDED,
-            (STATUS_APPROVED,),
-            actor.stamp,
-            error_code="entry_not_approved",
-        )
+        if int(row["half_hours"]) >= 0:
+            return
+        employee_id = int(row["employee_id"])
+        month = str(row["entry_date"])[:7]
+        makeup = await self._approved_makeup_half_hours(employee_id, month)
+        deducted = (await self._deduction_days(employee_id, month)) * HALF_HOURS_PER_LEAVE_DAY
+        remaining = makeup - abs(int(row["half_hours"]))
+        if remaining < deducted:
+            raise OvertimeError("makeup_in_use", month)

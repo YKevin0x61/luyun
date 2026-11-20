@@ -39,7 +39,14 @@ from database import CHINA_TZ, DatabaseManager
 from services.app_runtime import AppRuntime, set_runtime
 from services.attendance import AttendanceStore
 from services.hygiene.accounts import EmployeeAccounts
-from services.overtime.ledger import EntryActor, OvertimeLedger
+from services.overtime.ledger import (
+    ACTION_APPROVE,
+    ACTION_REJECT,
+    ACTION_VOID,
+    BOOK_ENTRY,
+    EntryActor,
+    OvertimeLedger,
+)
 from services.scheduling.store import SchedulingStore
 from tests.hygiene_profile import id_card
 
@@ -478,20 +485,20 @@ def test_net_hours_is_approved_overtime_minus_makeup_in_the_entry_month(attendan
 
     overtime = _run(ledger.submit(mine, "2026-09-10", 7, "中秋加班"))
     makeup = _run(ledger.submit(mine, "2026-09-11", -3, "那天迟来两小时"))
-    _run(ledger.approve(super_actor, overtime["id"]))
-    _run(ledger.approve(super_actor, makeup["id"]))
+    _run(ledger.decide(BOOK_ENTRY, overtime["id"], ACTION_APPROVE, super_actor))
+    _run(ledger.decide(BOOK_ENTRY, makeup["id"], ACTION_APPROVE, super_actor))
     # 不计数的那四种状态，一样来一笔。
     _run(ledger.submit(mine, "2026-09-12", 4, "还没人批"))
     rejected = _run(ledger.submit(mine, "2026-09-13", 4, "会被驳"))["id"]
-    _run(ledger.reject(super_actor, rejected, "不算"))
+    _run(ledger.decide(BOOK_ENTRY, rejected, ACTION_REJECT, super_actor, "不算"))
     withdrawn = _run(ledger.submit(mine, "2026-09-14", 4, "自己撤"))["id"]
-    _run(ledger.cancel(employee_id, withdrawn))
+    _run(ledger.withdraw(BOOK_ENTRY, employee_id, withdrawn))
     voided = _run(ledger.submit(mine, "2026-09-15", 5, "批了又作废"))["id"]
-    _run(ledger.approve(super_actor, voided))
-    _run(ledger.void(super_actor, voided))
+    _run(ledger.decide(BOOK_ENTRY, voided, ACTION_APPROVE, super_actor))
+    _run(ledger.decide(BOOK_ENTRY, voided, ACTION_VOID, super_actor))
     # 上个月那一笔已经批了：归月按登记日期，不进九月。
     last_month = _run(ledger.submit(mine, "2026-08-31", 16, "八月的班"))
-    _run(ledger.approve(super_actor, last_month["id"]))
+    _run(ledger.decide(BOOK_ENTRY, last_month["id"], ACTION_APPROVE, super_actor))
 
     card = _card(_sheet(client, admin), employee_id)
 
@@ -1189,18 +1196,18 @@ def test_unapproved_overtime_is_flagged_with_its_hours_but_never_counted(attenda
     super_actor = EntryActor()
 
     approved = _run(ledger.submit(mine, "2026-09-10", 7, "批了的加班"))
-    _run(ledger.approve(super_actor, approved["id"]))
+    _run(ledger.decide(BOOK_ENTRY, approved["id"], ACTION_APPROVE, super_actor))
     # 等着批的两笔：一笔加班、一笔补钟（负的）。
     _run(ledger.submit(mine, "2026-09-11", 5, "还没批的加班"))
     _run(ledger.submit(mine, "2026-09-12", -3, "还没批的补钟"))
     # 另外三种状态都不是「等着批」：驳了、自己撤了、批了又作废。
     rejected = _run(ledger.submit(mine, "2026-09-13", 6, "会被驳"))["id"]
-    _run(ledger.reject(super_actor, rejected, "不算"))
+    _run(ledger.decide(BOOK_ENTRY, rejected, ACTION_REJECT, super_actor, "不算"))
     withdrawn = _run(ledger.submit(mine, "2026-09-14", 6, "自己撤"))["id"]
-    _run(ledger.cancel(employee_id, withdrawn))
+    _run(ledger.withdraw(BOOK_ENTRY, employee_id, withdrawn))
     voided = _run(ledger.submit(mine, "2026-09-15", 6, "批了又作废"))["id"]
-    _run(ledger.approve(super_actor, voided))
-    _run(ledger.void(super_actor, voided))
+    _run(ledger.decide(BOOK_ENTRY, voided, ACTION_APPROVE, super_actor))
+    _run(ledger.decide(BOOK_ENTRY, voided, ACTION_VOID, super_actor))
 
     card = _card(_sheet(client, admin), employee_id)
 
@@ -2880,10 +2887,10 @@ def test_a_refused_day_edit_never_writes_the_assignment_row(attendance_http, mon
 
 
 def test_the_attendance_store_defines_its_shared_helpers_once():
-    """⑤ `_write_lock` 与 `_now_iso` 在同一个类体里**各只留一份**。
+    """⑤ 考勤**不再自带写锁**，`_now_iso` 在类体里只留一份。
 
-    这是一条读源码的契约（同前端那几条 `readFileSync` 式断言）：定义两遍时，前一遍谁也
-    不执行 —— 改它没有任何效果，改错了也看不出来。这里把「只剩一份」钉住。
+    写锁已经只有 `db_core` 一份（ADR 0152）：各域服务自己再定义一把，定义两遍时前一
+    遍谁都不执行、改它没有任何效果。这里把「考勤这层一把都没有」钉住。
     """
     from pathlib import Path
 
@@ -2891,7 +2898,7 @@ def test_the_attendance_store_defines_its_shared_helpers_once():
         Path(__file__).resolve().parents[1] / "services" / "attendance" / "store.py"
     ).read_text(encoding="utf-8")
 
-    assert len(re.findall(r"^    def _write_lock\(", source, re.M)) == 1
+    assert len(re.findall(r"^    def _write_lock\(", source, re.M)) == 0
     assert len(re.findall(r"^    def _now_iso\(", source, re.M)) == 1
 
 

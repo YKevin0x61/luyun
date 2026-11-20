@@ -27,6 +27,11 @@ from database import get_db
 from services.identity import EmployeeAccounts
 from services.identity.capabilities import CAP_SCHEDULE
 from services.overtime.ledger import (
+    ACTION_APPROVE,
+    ACTION_REJECT,
+    ACTION_VOID,
+    BOOK_DEDUCTION,
+    BOOK_ENTRY,
     HALF_HOURS_MAX,
     MAX_REASON,
     MAX_REJECT_REASON,
@@ -95,6 +100,9 @@ _ERROR_DETAILS = {
     "deduction_not_pending": "这张抵扣单已经处理过了：刷新看看它现在到哪一步",
     "deduction_not_approved": "只有已批准的抵扣单能作废：这一张还没批，或已经被作废了",
     "makeup_in_use": "这笔补钟里有已经抵扣出去的小时：请先作废对应的抵扣单，再作废补钟",
+    # 作废只认超管（服务层再兜一层）：店长走 `/review/*`，点不到这个按钮，
+    # 但直连接口也不该被放过。
+    "forbidden": "只有超级管理员能作废：请让超管处理这一笔",
 }
 
 _ERROR_STATUS = {
@@ -102,6 +110,8 @@ _ERROR_STATUS = {
     "unknown_entry": 404,
     "unknown_employee": 404,
     "unknown_deduction": 404,
+    # 作废的身份门在台账里，不在路由上：店长那两条 `/review/*` 也能到 void 的动作表。
+    "forbidden": 403,
     # `cannot_self_accept`（403）、`month_sealed`（409）与 `not_migrated`（503）由
     # 共享例外表提供，本域不再复写。
 }
@@ -114,6 +124,20 @@ _OVERTIME_ERRORS = WorkbenchErrors(
     status_overrides=_ERROR_STATUS,
     default_text="加班登记参数不合法",
 )
+
+
+async def _decide_http(db, actor, book: str, target_id: int, action: str, reason=None):
+    """十个批 / 驳 / 作废 handler 共用的一段：拼身份、调状态机、翻错误。
+
+    nudge 与群通知留在各 handler：它们是「这一笔判完之后要叫谁」的事，不是裁决。
+    """
+    ledger = OvertimeLedger(db)
+    try:
+        return await ledger.decide(
+            book, int(target_id), action, EntryActor.from_actor(actor), reason
+        )
+    except OvertimeError as exc:
+        raise _OVERTIME_ERRORS.http(exc) from exc
 
 
 class EntryRequest(BaseModel):
@@ -224,7 +248,7 @@ async def cancel_entry(
     """
     ledger = OvertimeLedger(db)
     try:
-        entry = await ledger.cancel(actor.employee_id, entry_id)
+        entry = await ledger.withdraw(BOOK_ENTRY, actor.employee_id, entry_id)
     except OvertimeError as exc:
         raise _OVERTIME_ERRORS.http(exc) from exc
     # 撤回了：管理端的待办里那一行自己就不在了，但要叫它重读一次才看得见。
@@ -295,7 +319,9 @@ async def cancel_deduction(
     """撤回自己**还没被审批**的那张抵扣单。别人的一律 404（不区分「不存在」与「不是你的」）。"""
     ledger = OvertimeLedger(db)
     try:
-        deduction = await ledger.cancel_deduction(actor.employee_id, deduction_id)
+        deduction = await ledger.withdraw(
+            BOOK_DEDUCTION, actor.employee_id, deduction_id
+        )
     except OvertimeError as exc:
         raise _OVERTIME_ERRORS.http(exc) from exc
     await _overtime_nudge("deduction_cancelled", deduction["employee_id"])
@@ -464,11 +490,7 @@ async def admin_approve(
     actor: WorkbenchActor = Depends(admin_session_actor),
 ) -> dict:
     """批准一笔待审批的登记。状态谓词在服务层的写锁里：重复点只有第一次算数。"""
-    ledger = OvertimeLedger(db)
-    try:
-        entry = await ledger.approve(EntryActor.from_actor(actor), entry_id)
-    except OvertimeError as exc:
-        raise _OVERTIME_ERRORS.http(exc) from exc
+    entry = await _decide_http(db, actor, BOOK_ENTRY, entry_id, ACTION_APPROVE)
     await _overtime_nudge("entry_approved", entry["employee_id"])
     # 群里也知会一声「批了」：店长勾了「加班/补钟申请」订阅，就该同时看到「谁提了」
     # 与「批没批」（2026-11-02 的审批结果通知）。
@@ -484,11 +506,9 @@ async def admin_reject(
     actor: WorkbenchActor = Depends(admin_session_actor),
 ) -> dict:
     """驳回一笔待审批的登记 —— **必须写理由**，理由会出现在员工手机上。"""
-    ledger = OvertimeLedger(db)
-    try:
-        entry = await ledger.reject(EntryActor.from_actor(actor), entry_id, payload.reason)
-    except OvertimeError as exc:
-        raise _OVERTIME_ERRORS.http(exc) from exc
+    entry = await _decide_http(
+        db, actor, BOOK_ENTRY, entry_id, ACTION_REJECT, payload.reason
+    )
     # 驳回的理由就在这条登记上：员工端重读一次才看得到为什么。
     await _overtime_nudge("entry_rejected", entry["employee_id"])
     # 群里也带上那句理由 —— 「没批」不写为什么，员工只能来问人。
@@ -506,11 +526,7 @@ async def admin_void(
 
     作废不是删除 —— 那一行还在（状态 `voided`），员工手机上看得见它被作废过。
     """
-    ledger = OvertimeLedger(db)
-    try:
-        entry = await ledger.void(EntryActor.from_actor(actor), entry_id)
-    except OvertimeError as exc:
-        raise _OVERTIME_ERRORS.http(exc) from exc
+    entry = await _decide_http(db, actor, BOOK_ENTRY, entry_id, ACTION_VOID)
     # 作废也要让员工知道：他手机上那一笔从「已批准」变成了「已作废」。
     await _overtime_nudge("entry_voided", entry["employee_id"])
     return {"entry": entry}
@@ -519,7 +535,7 @@ async def admin_void(
 # ── 店长那一面（票 04）：员工会话 + 「人事管理」能力 ───────────────────────────
 #
 # 与上面 `/admin/*` 那组**能力相同、门不同**：超管走管理端 cookie，店长走员工 cookie
-# 加一个能力键。两扇门落在同一套服务层方法上（`list_pending` / `approve` / `reject` /
+# 加一个能力键。两扇门落在同一套服务层方法上（`list_pending` / `decide` / `withdraw` /
 # `submit`），所以「批一笔」只有一份实现，不存在两种口径 —— 这也正是 `docs/adr/0103`
 # 选的形状：不发明第三种身份、也不新开第二套登录。
 #
@@ -610,11 +626,7 @@ async def review_approve(
     actor: WorkbenchActor = Depends(_overtime_review),
 ) -> dict:
     """批准一笔待审批的登记。状态谓词在服务层的写锁里：重复点只有第一次算数。"""
-    ledger = OvertimeLedger(db)
-    try:
-        entry = await ledger.approve(EntryActor.from_actor(actor), entry_id)
-    except OvertimeError as exc:
-        raise _OVERTIME_ERRORS.http(exc) from exc
+    entry = await _decide_http(db, actor, BOOK_ENTRY, entry_id, ACTION_APPROVE)
     await _overtime_nudge("entry_approved", entry["employee_id"])
     # 群里也知会一声「批了」：店长勾了「加班/补钟申请」订阅，就该同时看到「谁提了」
     # 与「批没批」（2026-11-02 的审批结果通知）。
@@ -630,11 +642,9 @@ async def review_reject(
     actor: WorkbenchActor = Depends(_overtime_review),
 ) -> dict:
     """驳回一笔待审批的登记 —— **必须写理由**，理由会出现在员工手机上。"""
-    ledger = OvertimeLedger(db)
-    try:
-        entry = await ledger.reject(EntryActor.from_actor(actor), entry_id, payload.reason)
-    except OvertimeError as exc:
-        raise _OVERTIME_ERRORS.http(exc) from exc
+    entry = await _decide_http(
+        db, actor, BOOK_ENTRY, entry_id, ACTION_REJECT, payload.reason
+    )
     await _overtime_nudge("entry_rejected", entry["employee_id"])
     # 群里也带上那句理由 —— 「没批」不写为什么，员工只能来问人。
     await notify_overtime_decision(db, entry, approved=False, note=payload.reason)
@@ -674,11 +684,9 @@ async def admin_approve_deduction(
     actor: WorkbenchActor = Depends(admin_session_actor),
 ) -> dict:
     """批准一张待审批的抵扣单。状态谓词与上限校验都在服务层的写锁里。"""
-    ledger = OvertimeLedger(db)
-    try:
-        deduction = await ledger.approve_deduction(EntryActor.from_actor(actor), deduction_id)
-    except OvertimeError as exc:
-        raise _OVERTIME_ERRORS.http(exc) from exc
+    deduction = await _decide_http(
+        db, actor, BOOK_DEDUCTION, deduction_id, ACTION_APPROVE
+    )
     await _overtime_nudge("deduction_approved", deduction["employee_id"])
     await notify_overtime_deduction_decision(db, deduction, approved=True)
     return {"deduction": deduction}
@@ -692,13 +700,9 @@ async def admin_reject_deduction(
     actor: WorkbenchActor = Depends(admin_session_actor),
 ) -> dict:
     """驳回一张待审批的抵扣单 —— **必须写理由**，理由会出现在员工手机上。"""
-    ledger = OvertimeLedger(db)
-    try:
-        deduction = await ledger.reject_deduction(
-            EntryActor.from_actor(actor), deduction_id, payload.reason
-        )
-    except OvertimeError as exc:
-        raise _OVERTIME_ERRORS.http(exc) from exc
+    deduction = await _decide_http(
+        db, actor, BOOK_DEDUCTION, deduction_id, ACTION_REJECT, payload.reason
+    )
     await _overtime_nudge("deduction_rejected", deduction["employee_id"])
     await notify_overtime_deduction_decision(
         db, deduction, approved=False, note=payload.reason
@@ -713,11 +717,9 @@ async def admin_void_deduction(
     actor: WorkbenchActor = Depends(admin_session_actor),
 ) -> dict:
     """作废一张**已批准**的抵扣单（封账前）。封过账的月份锁死 —— 服务层里判。"""
-    ledger = OvertimeLedger(db)
-    try:
-        deduction = await ledger.void_deduction(EntryActor.from_actor(actor), deduction_id)
-    except OvertimeError as exc:
-        raise _OVERTIME_ERRORS.http(exc) from exc
+    deduction = await _decide_http(
+        db, actor, BOOK_DEDUCTION, deduction_id, ACTION_VOID
+    )
     await _overtime_nudge("deduction_voided", deduction["employee_id"])
     return {"deduction": deduction}
 
@@ -743,13 +745,9 @@ async def review_approve_deduction(
     db=Depends(get_db),
     actor: WorkbenchActor = Depends(_overtime_review),
 ) -> dict:
-    ledger = OvertimeLedger(db)
-    try:
-        deduction = await ledger.approve_deduction(
-            EntryActor.from_actor(actor), deduction_id
-        )
-    except OvertimeError as exc:
-        raise _OVERTIME_ERRORS.http(exc) from exc
+    deduction = await _decide_http(
+        db, actor, BOOK_DEDUCTION, deduction_id, ACTION_APPROVE
+    )
     await _overtime_nudge("deduction_approved", deduction["employee_id"])
     await notify_overtime_deduction_decision(db, deduction, approved=True)
     return {"deduction": deduction}
@@ -762,13 +760,9 @@ async def review_reject_deduction(
     db=Depends(get_db),
     actor: WorkbenchActor = Depends(_overtime_review),
 ) -> dict:
-    ledger = OvertimeLedger(db)
-    try:
-        deduction = await ledger.reject_deduction(
-            EntryActor.from_actor(actor), deduction_id, payload.reason
-        )
-    except OvertimeError as exc:
-        raise _OVERTIME_ERRORS.http(exc) from exc
+    deduction = await _decide_http(
+        db, actor, BOOK_DEDUCTION, deduction_id, ACTION_REJECT, payload.reason
+    )
     await _overtime_nudge("deduction_rejected", deduction["employee_id"])
     await notify_overtime_deduction_decision(
         db, deduction, approved=False, note=payload.reason

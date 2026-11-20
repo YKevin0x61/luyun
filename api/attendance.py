@@ -128,6 +128,9 @@ _WRITE_DETAILS = {
     "unknown_zone": "工作区不存在：请先在卫生的工作区页面新建，或刷新本页",
     "past_day": "超出可补记窗口：{} 之前的日子不再改写",
     "beyond_window": "这天还没排到：排班只铺到 {}，等它进窗口再改",
+    # 「休半天」也走落笔闸（paint_gate），那边同样会拒有已批假的格子：与月历那句
+    # 同一个词、同一层意思，只是这里的动词换成「改这一天」。
+    "leave_approved": "这天有已批准的假：先撤掉假再改这一天",
     "rest_with_details": "「改成休」的那天不能再带班次或工作区：请把这两项留空",
     # 这一页多出来的那条闸（票 06 验收 3）：口头说清楚「谁在等、等什么」，
     # 让店长知道该先去待办里把那条申请处理掉。`{}` 由 `_WRITE_ERRORS` 填。
@@ -478,8 +481,11 @@ async def _set_half_rest(
     一句说得通的话（那天到底上不上班？），服务层也不该替调用方猜。
 
     写实现在 `SchedulingStore.set_half_rest`（ADR 0143）：这一层只把「那天没有班次」
-    翻成 `_ATTENDANCE_ERRORS` 里那一句并广播。三道服务端闸已经在 `set_attendance_day`
-    分派之前跑过，这里不重复；传进来的 `business_date` 是闸规整过的 `YYYY-MM-DD`。
+    翻成 `_ATTENDANCE_ERRORS` 里那一句并广播。**月份 / 今天之后 / 封账**三道闸已经在
+    `set_attendance_day` 分派之前跑过，这里不重复；**在册 / 窗口 / 请假 / 那天有没有
+    班次**由 `paint_gate` 在写口里判（跟月历、批量同一道门），所以这里也要接得住它抛的
+    那几个码 —— 按月历那套 `_WRITE_DETAILS` 翻，措辞按「点考勤表」的口吻写。
+    传进来的 `business_date` 是闸规整过的 `YYYY-MM-DD`。
     """
     if payload.is_rest or payload.shift_id is not None:
         raise HTTPException(
@@ -493,8 +499,11 @@ async def _set_half_rest(
     except SchedulingError as exc:
         # 写实现搬进排班域后，缺表 / 缺列由那边的 `_needs_migration` 换成了
         # `SchedulingError("not_migrated")`；这一层仍按考勤的错误表翻回 503，
-        # 不能让店长看到一个 500 traceback（ADR 0143）。
-        raise _ATTENDANCE_ERRORS.http(AttendanceError(exc.code, str(exc))) from exc
+        # 不能让店长看到一个 500 traceback（ADR 0143）。落笔闸那几条（past_day /
+        # beyond_window / leave_approved / resigned_employee）走逐日改格那份文案表 ——
+        # 这一页是「点某一天」，不是月历。
+        table = _WRITE_ERRORS if exc.code in _WRITE_DETAILS else _ATTENDANCE_ERRORS
+        raise table.http(AttendanceError(exc.code, str(exc))) from exc
     if reason is not None:
         raise _ATTENDANCE_ERRORS.http(AttendanceError(reason, business_date))
     # 员工手机上那一屏要跟着变（班次没变，但那天从「上班」变成了「上半天」）。

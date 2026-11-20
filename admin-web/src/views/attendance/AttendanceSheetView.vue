@@ -203,6 +203,15 @@ function employees() {
   }))
 }
 
+/** 净时长的正负档：正数 / 负数 / 0。只给类名，颜色一律在样式里走语义令牌
+ *  （本文件 strict，不写色值）—— 找欠班的人不用把每个数字都读一遍。 */
+function netTone(hours) {
+  const value = Number(hours) || 0
+  if (value > 0) return 'is-positive'
+  if (value < 0) return 'is-negative'
+  return 'is-zero'
+}
+
 /** 这个人这个月有几天是「待补」—— 规则没铺到的那几天要一眼看得出来（验收 3 的用法）。 */
 function todoDays(person) {
   return (person.cells || []).filter((cell) => cell.state === 'todo').length
@@ -790,7 +799,7 @@ onMounted(() => {
           <button type="button" class="aRankRow" @click="focusEmployee(person)">
             <b>{{ person.name || '（没有名字）' }}</b>
             <span class="aRankDays">待补 {{ todoDays(person) }} 天</span>
-            <span class="aRankNet">{{ formatNetHours(person.net_hours) }}</span>
+            <span class="aRankNet" :class="netTone(person.net_hours)">{{ formatNetHours(person.net_hours) }}</span>
             <span class="aRankGo">›</span>
           </button>
         </li>
@@ -816,7 +825,7 @@ onMounted(() => {
           <b class="aName">{{ person.name || '（没有名字）' }}</b>
           <span class="aCardMeta">{{ person.job_title || '—' }}</span>
           <span v-if="todoDays(person)" class="aTodo">待补 {{ todoDays(person) }} 天</span>
-          <span class="aCardNet">{{ formatNetHours(person.net_hours) }}</span>
+          <span class="aCardNet" :class="netTone(person.net_hours)">{{ formatNetHours(person.net_hours) }}</span>
           <button
             class="aCardToggle"
             type="button"
@@ -838,7 +847,7 @@ onMounted(() => {
           <!-- 净时长只算**已批准**的单：还没批的那几笔在这儿标色并报出小时数，
                一分都不进这个数字（故事 14）。 -->
           <span class="aStat" :class="{ 'is-pending': person.pending_count > 0 }">
-            <i>当月净时长</i><b class="aNet">{{ formatNetHours(person.net_hours) }}</b>
+            <i>当月净时长</i><b class="aNet" :class="netTone(person.net_hours)">{{ formatNetHours(person.net_hours) }}</b>
             <em v-if="person.pending_count" class="aPending">
               {{ pendingOvertimeText(person.pending_count, person.pending_hours) }}
             </em>
@@ -1146,7 +1155,8 @@ onMounted(() => {
 }
 .aMonthBtn {
   min-width: var(--tap); min-height: var(--tap); padding: 0 var(--sp-2);
-  border: 1px solid var(--line-strong); border-radius: var(--r-1);
+  border: var(--edge-w, 2px) solid var(--edge);
+  box-shadow: var(--paper-shadow-sm); border-radius: var(--r-1);
   background: var(--surface-1); color: var(--ink-dim);
   font: inherit; font-family: var(--font-mono); font-size: var(--fs-12);
   line-height: 1; cursor: pointer;
@@ -1162,12 +1172,13 @@ onMounted(() => {
 .aMonthBack { font-family: var(--font-sans); font-size: var(--fs-11); }
 .aSub { margin: 0; padding: 0 14px 12px; max-width: 760px; font-size: var(--fs-12); line-height: 1.7; color: var(--ink-dim); }
 .aHelp {
-  border: 1px solid var(--line); border-radius: var(--r-1); background: var(--surface-1);
+  border: var(--edge-w, 2px) solid var(--edge);
+  box-shadow: var(--paper-shadow-sm); border-radius: var(--r-1); background: var(--surface-1);
 }
 .aHelp summary {
   display: flex; align-items: center; gap: 8px; min-height: var(--tap);
   padding: 0 14px; cursor: pointer;
-  font-family: var(--font-sans); font-size: 9.5px; letter-spacing: .18em; color: var(--ink-faint);
+  font-family: var(--font-sans); font-size: 9.5px; letter-spacing: .01em; color: var(--ink-dim);
 }
 .aHelp summary::before {
   content: ""; width: 6px; height: 6px; flex: none; border-radius: 50%; background: var(--action);
@@ -1180,17 +1191,18 @@ onMounted(() => {
 .aKpis { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
 .aKpi {
   display: flex; align-items: baseline; gap: 8px; padding: 10px 14px;
-  background: var(--surface-1); border: 1px solid var(--line); border-radius: var(--r-2);
+  background: var(--surface-1); border: var(--edge-w, 2px) solid var(--edge);
+  box-shadow: var(--paper-shadow-sm); border-radius: var(--r-1);
 }
 .aKpi i {
   font-style: normal; font-family: var(--font-sans); font-size: 9.5px;
-  letter-spacing: .18em; color: var(--ink-faint);
+  letter-spacing: .01em; color: var(--ink-dim);
 }
-.aKpi b { font-family: var(--font-mono); font-size: 20px; line-height: 1; font-weight: 600; color: var(--ink); }
+.aKpi b { font-family: var(--font-display); font-size: 20px; line-height: 1; font-weight: 600; color: var(--ink); }
 .aKpi em { font-style: normal; font-size: 9.5px; color: var(--ink-faint); }
 /* 待补排行（页头下第一块）：姓名 / 待补天数 / 净时长，点人展开。 */
 .aRankPanel {
-  background: var(--surface-1); border: 1px solid var(--line);
+  background: var(--surface-1); border: var(--edge-w, 2px) solid var(--edge);
   border-radius: var(--r-2); box-shadow: none; overflow: hidden;
 }
 .aRank-hd {
@@ -1233,23 +1245,24 @@ onMounted(() => {
 /* 当月是暂算值（票 03）：这一条不是装饰 —— 它是「别拿这个数去结账」的告示。 */
 .aProvisional {
   margin: 0; padding: 9px var(--sp-3); border-radius: var(--r-1);
-  border: 1px solid var(--info); background: var(--info-soft);
+  border: var(--edge-w, 2px) solid var(--info); background: var(--info-soft);
   font-size: var(--fs-12); color: var(--ink);
 }
 /* 历史月（R2）：封账回执 / 「按现有数据重算」那一句。中性色 —— 它不是告警，
    只是把这一页的口径说清楚（封账那一刻只有结余与时刻落进了台账）。 */
 .aHistoryNote {
   margin: 0; padding: 9px var(--sp-3); border-radius: var(--r-1);
-  border: 1px solid var(--line-strong); background: var(--surface-2);
+  border: var(--edge-w, 2px) solid var(--edge); background: var(--surface-2);
   font-size: var(--fs-12); line-height: 1.6; color: var(--ink-dim);
 }
 .aErr {
   margin: 0; padding: 9px var(--sp-3); border-radius: var(--r-1);
-  border: 1px solid var(--danger); background: var(--danger-soft);
+  border: var(--edge-w, 2px) solid var(--danger); background: var(--danger-soft);
   font-size: var(--fs-13); color: var(--danger-bright);
 }
 .aCard {
-  padding: 0; border: 1px solid var(--line); overflow: hidden;
+  padding: 0; border: var(--edge-w, 2px) solid var(--edge);
+  box-shadow: var(--paper-shadow-sm); overflow: hidden;
   /* 圆角与节假日日历页的卡片一致（`--r-2`，B 批返工 ⑧）：同一个人事组里两张卡不该
      一个 16px 一个 12px。 */
   border-radius: var(--r-2); background: var(--surface-1);
@@ -1279,7 +1292,7 @@ onMounted(() => {
 }
 .aCardToggle {
   flex: none; min-height: var(--tap); padding: 0 10px;
-  border: 1px solid var(--line-strong); border-radius: var(--r-1);
+  border: var(--edge-w, 2px) solid var(--edge); border-radius: var(--r-1);
   background: transparent; color: var(--ink-dim); font: inherit; font-size: 10px; cursor: pointer;
 }
 .aTodo {
@@ -1305,13 +1318,25 @@ onMounted(() => {
   font-family: var(--font-mono); font-size: 13px; color: var(--ink);
 }
 .aNet { font-family: var(--font-mono); }
+/* 净时长按正负着色：正数绿、负数红、0 灰 —— 找欠班的人不用逐个读数字。
+   颜色只走语义令牌（--ok / --danger-bright / --ink-faint，对白底都 ≥ 4.5:1）。
+   待批那一格仍按下面的既有语义整格标 --warn（未批的加班不算进这个数字）。 */
+.aRankNet.is-positive,
+.aCardNet.is-positive,
+.aNet.is-positive { color: var(--ok); }
+.aRankNet.is-negative,
+.aCardNet.is-negative,
+.aNet.is-negative { color: var(--danger-bright); }
+.aRankNet.is-zero,
+.aCardNet.is-zero,
+.aNet.is-zero { color: var(--ink-faint); }
 .aDaysHead {
   display: flex; align-items: baseline; gap: 10px; padding: 11px 14px 7px;
   border-top: 1px solid var(--wb-ink-a08);
 }
 .aDaysHead > span:first-child {
   font-family: var(--font-sans); font-size: 9px; font-weight: 600;
-  letter-spacing: .18em; color: var(--ink-faint);
+  letter-spacing: .01em; color: var(--ink-dim);
 }
 .aDaysHint { margin-left: auto; font-family: var(--font-mono); font-size: 9px; color: var(--ink-faint); }
 .aDays {
@@ -1322,7 +1347,7 @@ onMounted(() => {
   display: flex; flex-direction: column; align-items: center; justify-content: center;
   gap: 1px; min-height: var(--tap);
   padding: var(--sp-1) 2px; border-radius: var(--r-1);
-  border: 1px solid var(--line); background: transparent;
+  border: var(--edge-w, 2px) solid var(--edge); background: transparent;
   /* 改不了的那一格（今天之后）不该出现可点的光标。 */
   cursor: default;
 }
@@ -1374,7 +1399,7 @@ onMounted(() => {
 .aEditBar {
   display: flex; flex-direction: column; gap: var(--sp-1);
   margin-top: var(--sp-2); padding: var(--sp-2);
-  border: 1px solid var(--accent); border-radius: var(--r-2); background: var(--surface-2);
+  border: var(--edge-w, 2px) solid var(--accent); border-radius: var(--r-2); background: var(--surface-2);
 }
 .aEditNow {
   display: flex; align-items: baseline; flex-wrap: wrap; gap: 5px; margin: 0;
@@ -1389,7 +1414,7 @@ onMounted(() => {
    390 实测），手机上点起来比旁边几颗难得多 —— 五颗 chip 一行仍放得下。 */
 .aChip {
   min-width: var(--tap); min-height: var(--tap); padding: 2px var(--sp-2);
-  border: 1px solid var(--line-strong); border-radius: var(--r-full);
+  border: var(--edge-w, 2px) solid var(--edge); border-radius: var(--r-1);
   background: transparent; color: var(--ink-dim);
   font: inherit; font-size: var(--fs-11); line-height: 1.6; cursor: pointer;
 }
@@ -1458,7 +1483,7 @@ onMounted(() => {
 .aManualHead:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
 .aManualTitle {
   flex: none; font-family: var(--font-sans); font-size: 9px; line-height: 1.6;
-  letter-spacing: .18em; color: var(--ink-faint);
+  letter-spacing: .01em; color: var(--ink-dim);
 }
 .aManualSummary {
   display: flex; flex-wrap: wrap; gap: 3px var(--sp-3);
@@ -1472,7 +1497,8 @@ onMounted(() => {
    这一颗会被丢进中间的 `1fr` 那条、被拉成整行宽。 */
 .aManualAct {
   flex: none; justify-self: end; padding: 2px 8px;
-  border: 1px solid var(--line-strong); border-radius: var(--r-1);
+  background: var(--surface-1); box-shadow: 2px 2px 0 var(--shadow-ink);
+  border: var(--edge-w, 2px) solid var(--edge); border-radius: var(--r-1);
   font-size: 10px; line-height: 1.6; color: var(--ink-dim);
 }
 .aManualBody { padding: 2px 14px 14px; }
@@ -1485,7 +1511,7 @@ onMounted(() => {
 .aManualField { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .aManualLabel { font-size: var(--fs-11); color: var(--ink-faint); }
 .aManualInput {
-  width: 100%; min-height: var(--tap); padding: 4px var(--sp-2); border: 1px solid var(--line);
+  width: 100%; min-height: var(--tap); padding: 4px var(--sp-2); border: var(--edge-w, 2px) solid var(--edge);
   border-radius: var(--r-1); background: var(--surface-2); color: var(--ink);
   font-size: var(--fs-12); font-family: inherit;
 }
@@ -1524,7 +1550,7 @@ onMounted(() => {
 .aClosingLabel { font-size: var(--fs-11); color: var(--ink-faint); }
 .aOpeningInput,
 .aClosingInput {
-  width: 100%; min-height: var(--tap); padding: 4px var(--sp-2); border: 1px solid var(--line);
+  width: 100%; min-height: var(--tap); padding: 4px var(--sp-2); border: var(--edge-w, 2px) solid var(--edge);
   border-radius: var(--r-1); background: var(--surface-2); color: var(--ink);
   font-size: var(--fs-12); font-family: inherit;
 }

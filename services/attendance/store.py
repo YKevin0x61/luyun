@@ -193,23 +193,6 @@ class AttendanceStore:
         self._conn = conn
         self._now = now or (lambda: datetime.now(CHINA_TZ))
         self._write_lock_owner = conn_or_db
-        self._local_write_lock = None
-
-    @property
-    def _write_lock(self):
-        """写锁：跟着 holder（`DatabaseManager`）那一把全局锁走，别自己另开一把。
-
-        同 `HolidayCalendar` / `SchedulingStore` 的口径 —— 两个服务各持一把私有锁的话，
-        隐式事务会交错。拿不到共享锁时（直接传连接）才退化成一把本实例的锁。
-        """
-        shared = getattr(self._write_lock_owner, "_write_lock", None)
-        if shared is not None:
-            return shared
-        lock = getattr(self, "_local_write_lock", None)
-        if lock is None:
-            lock = asyncio.Lock()
-            self._local_write_lock = lock
-        return lock
 
     def _now_dt(self) -> datetime:
         value = self._now()

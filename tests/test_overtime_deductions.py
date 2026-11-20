@@ -31,7 +31,16 @@ from database import CHINA_TZ, DatabaseManager
 from services.app_runtime import AppRuntime, set_runtime
 from services.attendance import AttendanceStore
 from services.hygiene.accounts import EmployeeAccounts
-from services.overtime.ledger import EntryActor, OvertimeError, OvertimeLedger
+from services.overtime.ledger import (
+    ACTION_APPROVE,
+    ACTION_REJECT,
+    ACTION_VOID,
+    BOOK_DEDUCTION,
+    BOOK_ENTRY,
+    EntryActor,
+    OvertimeError,
+    OvertimeLedger,
+)
 
 PASSWORD = "password123"
 ADMIN = {"username": "admin", "password": PASSWORD, "confirm_password": PASSWORD}
@@ -91,7 +100,7 @@ class DeductionLedgerTest(unittest.IsolatedAsyncioTestCase):
             "补钟",
             target_employee_id=employee_id,
         )
-        return await self.ledger.approve(EntryActor(), entry["id"])
+        return await self.ledger.decide(BOOK_ENTRY, entry["id"], ACTION_APPROVE, EntryActor())
 
     async def _enough_leave_in(self, employee_id: int, month: str, days: float = 5.0) -> float:
         """给**任意月份**造出「够扣的存假」：直接写那一行的人工期初。
@@ -196,7 +205,7 @@ class DeductionLedgerTest(unittest.IsolatedAsyncioTestCase):
         summary = (await self.ledger.list_mine(employee["id"]))["summary"]
         self.assertEqual(summary["approved"]["net_half_hours"], -17)
 
-        approved = await self.ledger.approve_deduction(EntryActor(), deduction["id"])
+        approved = await self.ledger.decide(BOOK_DEDUCTION, deduction["id"], ACTION_APPROVE, EntryActor())
         self.assertEqual(approved["status"], "approved")
         self.assertEqual(approved["days"], 1)
         self.assertEqual(approved["half_hours"], 17)
@@ -219,18 +228,14 @@ class DeductionLedgerTest(unittest.IsolatedAsyncioTestCase):
         )
 
         with self.assertRaises(OvertimeError) as caught:
-            await self.ledger.approve_deduction(
-                EntryActor(employee_id=employee["id"]), deduction["id"]
-            )
+            await self.ledger.decide(BOOK_DEDUCTION, deduction["id"], ACTION_APPROVE, EntryActor(employee_id=employee["id"]))
         self.assertEqual(caught.exception.code, "cannot_self_accept")
 
         with self.assertRaises(OvertimeError) as caught:
-            await self.ledger.reject_deduction(EntryActor(), deduction["id"], "  ")
+            await self.ledger.decide(BOOK_DEDUCTION, deduction["id"], ACTION_REJECT, EntryActor(), "  ")
         self.assertEqual(caught.exception.code, "missing_reject_reason")
 
-        rejected = await self.ledger.reject_deduction(
-            EntryActor(), deduction["id"], "这个月不用抵"
-        )
+        rejected = await self.ledger.decide(BOOK_DEDUCTION, deduction["id"], ACTION_REJECT, EntryActor(), "这个月不用抵")
         self.assertEqual(rejected["status"], "rejected")
         self.assertEqual(rejected["reject_reason"], "这个月不用抵")
 
@@ -244,13 +249,13 @@ class DeductionLedgerTest(unittest.IsolatedAsyncioTestCase):
 
         other = await self._employee(phone="13900139000", name="李四")
         with self.assertRaises(OvertimeError) as caught:
-            await self.ledger.cancel_deduction(other["id"], deduction["id"])
+            await self.ledger.withdraw(BOOK_DEDUCTION, other["id"], deduction["id"])
         self.assertEqual(caught.exception.code, "unknown_deduction")
 
-        cancelled = await self.ledger.cancel_deduction(employee["id"], deduction["id"])
+        cancelled = await self.ledger.withdraw(BOOK_DEDUCTION, employee["id"], deduction["id"])
         self.assertEqual(cancelled["status"], "cancelled")
         with self.assertRaises(OvertimeError) as caught:
-            await self.ledger.cancel_deduction(employee["id"], deduction["id"])
+            await self.ledger.withdraw(BOOK_DEDUCTION, employee["id"], deduction["id"])
         self.assertEqual(caught.exception.code, "deduction_not_pending")
 
     # ── 封账 ───────────────────────────────────────────────────────────────
@@ -278,11 +283,11 @@ class DeductionLedgerTest(unittest.IsolatedAsyncioTestCase):
         deduction = await self.ledger.submit_deduction(
             EntryActor(employee_id=employee["id"]), "2026-08", 1
         )
-        await self.ledger.approve_deduction(EntryActor(), deduction["id"])
+        await self.ledger.decide(BOOK_DEDUCTION, deduction["id"], ACTION_APPROVE, EntryActor())
         await self.attendance.seal("2026-08")
 
         with self.assertRaises(OvertimeError) as caught:
-            await self.ledger.void_deduction(EntryActor(), deduction["id"])
+            await self.ledger.decide(BOOK_DEDUCTION, deduction["id"], ACTION_VOID, EntryActor())
         self.assertEqual(caught.exception.code, "month_sealed")
 
     async def test_seal_writes_the_balance_with_deductions_applied(self):
@@ -298,7 +303,7 @@ class DeductionLedgerTest(unittest.IsolatedAsyncioTestCase):
         deduction = await self.ledger.submit_deduction(
             EntryActor(employee_id=employee["id"]), "2026-08", 2
         )
-        await self.ledger.approve_deduction(EntryActor(), deduction["id"])
+        await self.ledger.decide(BOOK_DEDUCTION, deduction["id"], ACTION_APPROVE, EntryActor())
         await self.attendance.seal("2026-08")
 
         # 封账之后读 8 月：手填/封账值就是含抵扣的那个数。
@@ -324,18 +329,18 @@ class DeductionLedgerTest(unittest.IsolatedAsyncioTestCase):
         deduction = await self.ledger.submit_deduction(
             EntryActor(employee_id=employee["id"]), "2026-09", 1
         )
-        await self.ledger.approve_deduction(EntryActor(), deduction["id"])
+        await self.ledger.decide(BOOK_DEDUCTION, deduction["id"], ACTION_APPROVE, EntryActor())
 
         with self.assertRaises(OvertimeError) as caught:
-            await self.ledger.void(EntryActor(), makeup["id"])
+            await self.ledger.decide(BOOK_ENTRY, makeup["id"], ACTION_VOID, EntryActor())
         self.assertEqual(caught.exception.code, "makeup_in_use")
 
         # 先作废抵扣单，再作废补钟就通了（存假也回来了）。
-        voided = await self.ledger.void_deduction(EntryActor(), deduction["id"])
+        voided = await self.ledger.decide(BOOK_DEDUCTION, deduction["id"], ACTION_VOID, EntryActor())
         self.assertEqual(voided["status"], "voided")
         leave = (await self.attendance.leave_summary(employee["id"], "2026-09"))["leave"]
         self.assertEqual(leave["deducted_days"], 0)
-        await self.ledger.void(EntryActor(), makeup["id"])
+        await self.ledger.decide(BOOK_ENTRY, makeup["id"], ACTION_VOID, EntryActor())
 
     async def test_unused_makeup_can_still_be_voided(self):
         """没被抵扣的补钟照旧能作废（别把那道闸修成「所有补钟都不能动」）。"""
@@ -343,7 +348,7 @@ class DeductionLedgerTest(unittest.IsolatedAsyncioTestCase):
         await self._enough_leave(employee["id"], days=5)
         makeup = await self._approve_makeup(employee["id"], TODAY, 4)
 
-        voided = await self.ledger.void(EntryActor(), makeup["id"])
+        voided = await self.ledger.decide(BOOK_ENTRY, makeup["id"], ACTION_VOID, EntryActor())
         self.assertEqual(voided["status"], "voided")
 
 
@@ -421,7 +426,7 @@ def test_staff_reads_own_leave_and_applies_for_deduction(deduction_http):
     entry = _run(
         ledger.submit(EntryActor(), TODAY, -17, "补钟", target_employee_id=employee_id)
     )
-    _run(ledger.approve(EntryActor(), entry["id"]))
+    _run(ledger.decide(BOOK_ENTRY, entry["id"], ACTION_APPROVE, EntryActor()))
 
     _staff_cookie(client, accounts)
     mine = client.get("/api/attendance/me?month=2026-09")
@@ -465,7 +470,7 @@ def test_admin_pending_lists_deductions_and_approves(deduction_http):
     entry = _run(
         ledger.submit(EntryActor(), TODAY, -17, "补钟", target_employee_id=employee_id)
     )
-    _run(ledger.approve(EntryActor(), entry["id"]))
+    _run(ledger.decide(BOOK_ENTRY, entry["id"], ACTION_APPROVE, EntryActor()))
     deduction = _run(
         ledger.submit_deduction(
             EntryActor(employee_id=employee_id), "2026-09", 1
@@ -506,12 +511,12 @@ def test_approving_a_deduction_carries_the_name_back(deduction_http):
     entry = _run(
         ledger.submit(EntryActor(), TODAY, -17, "补钟", target_employee_id=employee_id)
     )
-    _run(ledger.approve(EntryActor(), entry["id"]))
+    _run(ledger.decide(BOOK_ENTRY, entry["id"], ACTION_APPROVE, EntryActor()))
     deduction = _run(
         ledger.submit_deduction(EntryActor(employee_id=employee_id), "2026-09", 1)
     )
 
-    approved = _run(ledger.approve_deduction(EntryActor(), deduction["id"]))
+    approved = _run(ledger.decide(BOOK_DEDUCTION, deduction["id"], ACTION_APPROVE, EntryActor()))
 
     assert approved["status"] == "approved"
     assert approved["employee_name"] == NAME
@@ -533,7 +538,7 @@ def test_a_sealed_month_is_409_with_its_sentence_and_code(deduction_http):
             target_employee_id=employee_id,
         )
     )
-    _run(ledger.approve(EntryActor(), entry["id"]))
+    _run(ledger.decide(BOOK_ENTRY, entry["id"], ACTION_APPROVE, EntryActor()))
     assert _run(attendance.seal("2026-08"))["sealed_employees"] == 1
 
     _staff_cookie(client, accounts)

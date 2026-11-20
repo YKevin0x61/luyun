@@ -334,7 +334,7 @@ onMounted(() => {
 }
 .hHelp summary::before {
   content: "?"; width: 14px; height: 14px; display: grid; place-items: center;
-  border: 1px solid var(--line-strong); border-radius: 50%; font-size: 8px;
+  border: var(--edge-w, 2px) solid var(--edge); border-radius: 50%; font-size: 8px;
 }
 .hSub { margin: 8px 0 0; max-width: 760px; font-size: var(--fs-12); line-height: 1.7; color: var(--ink-dim); }
 .hSub b { color: var(--warn); }
@@ -343,12 +343,12 @@ onMounted(() => {
 .hHint { margin: 0; font-size: 12.5px; color: var(--ink-dim); }
 .hErr {
   margin: 0; padding: 9px var(--sp-3); border-radius: var(--r-1);
-  border: 1px solid var(--danger); background: var(--danger-soft);
+  border: var(--edge-w, 2px) solid var(--danger); background: var(--danger-soft);
   font-size: 12.5px; color: var(--danger-bright);
 }
 .hOk {
   margin: 0; padding: 9px var(--sp-3); border-radius: var(--r-1);
-  border: 1px solid var(--line-strong); background: var(--ok-soft);
+  border: var(--edge-w, 2px) solid var(--edge); background: var(--ok-soft);
   font-size: 12.5px; color: var(--ok);
 }
 /* 编辑带：挂在网格**下面**的一条（色点 / 日期 / 状态 / 名称 / 提示 / 动作），
@@ -371,7 +371,7 @@ onMounted(() => {
 .hAct .btn { border-radius: var(--r-1); min-height: var(--tap); }
 /* 唯一的主面板：一个月的网格。 */
 .hPanel {
-  background: var(--surface-1); border: 1px solid var(--line);
+  background: var(--surface-1); border: var(--edge-w, 2px) solid var(--edge);
   border-radius: var(--r-2); box-shadow: none; overflow: hidden;
 }
 .hPanel-hd {
@@ -382,7 +382,7 @@ onMounted(() => {
 .hMonthNav { display: flex; align-items: center; gap: 6px; }
 .hNav {
   width: var(--tap); height: var(--tap); display: grid; place-items: center;
-  padding: 0; border: 1px solid var(--line-strong); border-radius: var(--r-1);
+  padding: 0; border: var(--edge-w, 2px) solid var(--edge); border-radius: var(--r-1);
   background: var(--surface-2); color: var(--ink-dim);
   font-family: var(--font-sans); font-size: 15px; line-height: 1; cursor: pointer;
 }
@@ -434,7 +434,8 @@ onMounted(() => {
 .hCount {
   padding: 1px var(--sp-2); border-radius: var(--r-full); font-family: var(--font-mono);
   font-size: 9px; color: var(--action);
-  border: 1px solid var(--line-strong); background: var(--surface-1);
+  border: var(--edge-w, 2px) solid var(--edge);
+  box-shadow: var(--paper-shadow-sm); background: var(--surface-1);
 }
 .hCount-new { color: var(--ink-dim); border-color: var(--line); background: transparent; }
 @media (max-width: 900px) {

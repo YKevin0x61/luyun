@@ -615,9 +615,9 @@ useNudgePull({ id: 'me-overtime', topics: ['overtime'], pull: () => load(true) }
 }
 .panel {
   background: var(--surface-1);
-  border: 1px solid var(--line);
+  border: var(--edge-w, 2px) solid var(--edge);
   border-radius: var(--r-2);
-  box-shadow: var(--hy-shadow-sm);
+  box-shadow: var(--paper-shadow-sm);
   overflow: hidden;
 }
 .panel-hd {
@@ -654,7 +654,7 @@ useNudgePull({ id: 'me-overtime', topics: ['overtime'], pull: () => load(true) }
   flex-direction: column;
   gap: 8px;
   padding: 10px 11px;
-  border: 1px solid var(--line);
+  border: var(--edge-w, 2px) solid var(--edge);
   border-radius: var(--r-1);
   background: var(--surface-2);
 }
@@ -663,7 +663,7 @@ useNudgePull({ id: 'me-overtime', topics: ['overtime'], pull: () => load(true) }
   display: flex;
   align-items: baseline;
   margin: 0;
-  font-family: var(--font-mono), var(--font-sans);
+  font-family: var(--font-display), var(--font-sans);
   font-size: 19px;
   font-weight: 600;
   line-height: 1;
@@ -717,7 +717,7 @@ useNudgePull({ id: 'me-overtime', topics: ['overtime'], pull: () => load(true) }
   font-weight: 600;
   color: var(--ink);
   background: transparent;
-  border: 1px solid var(--line-strong);
+  border: var(--edge-w, 2px) solid var(--edge);
   border-radius: var(--r-1);
   cursor: pointer;
   transition: border-color .16s var(--ease), color .16s var(--ease), background .16s var(--ease);
@@ -749,7 +749,7 @@ useNudgePull({ id: 'me-overtime', topics: ['overtime'], pull: () => load(true) }
   line-height: 1;
   color: var(--ink);
   background: var(--surface-2);
-  border: 1px solid var(--line-strong);
+  border: var(--edge-w, 2px) solid var(--edge);
   border-radius: var(--r-1);
   cursor: pointer;
   transition: border-color .16s var(--ease), color .16s var(--ease), background .16s var(--ease);
@@ -768,7 +768,7 @@ useNudgePull({ id: 'me-overtime', topics: ['overtime'], pull: () => load(true) }
   margin: 0;
 }
 .hours {
-  font-family: var(--font-mono), var(--font-sans);
+  font-family: var(--font-display), var(--font-sans);
   font-size: 24px;
   font-weight: 600;
   line-height: 1;
@@ -783,7 +783,7 @@ useNudgePull({ id: 'me-overtime', topics: ['overtime'], pull: () => load(true) }
   letter-spacing: .06em;
   white-space: nowrap;
   color: var(--ink-faint);
-  border: 1px solid var(--line-strong);
+  border: var(--edge-w, 2px) solid var(--edge);
   border-radius: var(--r-full);
 }
 .kind.is-overtime { color: var(--ok); border-color: var(--ok); background: var(--ok-soft); }
@@ -846,8 +846,8 @@ useNudgePull({ id: 'me-overtime', topics: ['overtime'], pull: () => load(true) }
   line-height: 1.6;
   white-space: nowrap;
   color: var(--ink-faint);
-  border: 1px solid var(--line-strong);
-  border-radius: var(--r-full);
+  border: var(--edge-w, 2px) solid var(--edge);
+  border-radius: var(--r-1);
 }
 .oPill.wait { color: var(--warn); border-color: var(--warn); background: var(--warn-soft); }
 .oPill.ok { color: var(--ok); border-color: var(--ok); background: var(--ok-soft); }
@@ -887,7 +887,7 @@ useNudgePull({ id: 'me-overtime', topics: ['overtime'], pull: () => load(true) }
   font-size: 12px;
   color: var(--ink);
   background: transparent;
-  border: 1px solid var(--line-strong);
+  border: var(--edge-w, 2px) solid var(--edge);
   border-radius: var(--r-1);
   cursor: pointer;
 }
