@@ -61,6 +61,16 @@ const scopeLabel = computed(() => {
   return '厨房出品（不含楼面）'
 })
 
+// 起止同一天时走势图只有一个数据点（真机截图里只剩一个绿点 + 一个 x 轴标签），等于
+// 常驻空图。这里不另造分时数据：隐藏图表、换成一句说明，当天分时看同页的「时段分析」。
+const isSingleDay = computed(() => (endDate.value || startDate.value) === startDate.value)
+
+// 「环比」只是参考口径，不代表经营好坏。卡片原来按涨跌涂红/绿（红色警示与口径行
+// 的「仅供参考」自相矛盾），这里统一不给判断色，只在数字后补一句对比口径。
+const revenueCompareText = computed(() => (
+  revenueCompareTrend.value ? revenueCompareSub.value + '（对比前一个等长周期）' : revenueCompareSub.value
+))
+
 async function loadFixedDishes() {
   try {
     const data = await api.get('/api/report-dishes/')
@@ -230,7 +240,7 @@ onBeforeUnmount(() => {
     </div>
 
     <div v-if="activeTab === 'report'" class="scope-note">
-      口径：{{ scopeLabel }}<template v-if="isPartialPeriod"> · 本期尚未结束，环比仅供参考</template>
+      口径：{{ scopeLabel }} · 环比＝与前一个等长周期对比，仅供参考<template v-if="isPartialPeriod">（本期尚未结束）</template>
     </div>
 
     <div v-if="activeTab === 'report'" style="display:flex;flex-direction:column;gap:8px">
@@ -238,8 +248,7 @@ onBeforeUnmount(() => {
         :summary="reportData?.summary"
         :top-dish="topDish"
         :refund-count="refundStatsCache?.refund_line_count ?? '--'"
-        :revenue-compare-sub="revenueCompareSub"
-        :revenue-compare-trend="revenueCompareTrend"
+        :revenue-compare-sub="revenueCompareText"
         @open-refunds="modal = 'refund'"
       />
 
@@ -247,9 +256,13 @@ onBeforeUnmount(() => {
         <div class="insight-card">
           <div class="insight-card-header">
             <h3>营业额 / 订单走势</h3>
-            <span class="badge">{{ trendGranularity === 'week' ? '按周' : '按日' }}</span>
+            <span v-if="!isSingleDay" class="badge">{{ trendGranularity === 'week' ? '按周' : '按日' }}</span>
           </div>
-          <div class="insight-card-body"><TrendChart :series="trendSeries" :error="trendError" /></div>
+          <!-- 单日查询只有一个数据点，画出来就是一个点 + 一个 x 轴标签，不如直接说明。 -->
+          <div v-if="isSingleDay" class="insight-card-body">
+            <p class="single-day-note">单日查询，走势图需要至少两天；当天分时见「时段分析」。</p>
+          </div>
+          <div v-else class="insight-card-body"><TrendChart :series="trendSeries" :error="trendError" /></div>
         </div>
         <div class="insight-card insight-card--share">
           <div class="insight-card-header">
@@ -400,5 +413,17 @@ onBeforeUnmount(() => {
   margin: 0 0 8px;
   font-size: 11px;
   color: var(--text-dim);
+}
+
+/* 单日查询时走势图卡片里的一行说明，占满卡片高度、垂直居中，避免卡片塌成一条。 */
+.single-day-note {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  margin: 0;
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1.6;
 }
 </style>

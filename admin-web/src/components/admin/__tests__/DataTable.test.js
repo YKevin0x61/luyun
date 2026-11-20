@@ -211,3 +211,124 @@ describe('DataTable 删除确认（A9）', () => {
     expect(tableState.deleteRow).toHaveBeenCalledWith(7)
   })
 })
+
+// 真机截图（2026-11-20）里的四个问题：时间列显示原始 ISO 串、tenant_id 占一整列全是 1、
+// 流水号长串把列撑到约 400px、每行一个红框实心「删除」。
+describe('DataTable 时间列格式化', () => {
+  it('ISO 时间显示为 YYYY-MM-DD HH:mm，title 也是格式化后的值', () => {
+    const wrapper = mountTable({
+      columns: ['order_time'],
+      rows: [{ rowid: 9, order_time: '2026-11-20T16:00:00+08:00' }],
+    })
+    const cell = wrapper.find('td[data-col="下单时间"]')
+
+    expect(cell.text()).toBe('2026-11-20 16:00')
+    expect(cell.attributes('title')).toBe('2026-11-20 16:00')
+    expect(cell.text()).not.toContain('T')
+  })
+
+  it('非时间列原样显示，不误伤普通文本', () => {
+    const cell = mountTable().find('td[data-col="菜品名称"]')
+
+    expect(cell.text()).toBe('宫保鸡丁')
+  })
+})
+
+describe('DataTable 冗余的租户ID列', () => {
+  const rows = [
+    { rowid: 1, tenant_id: 1, dish_name: '宫保鸡丁' },
+    { rowid: 2, tenant_id: 1, dish_name: '鱼香肉丝' },
+  ]
+
+  it('当前页该列全为同一个值时，表头与单元格都不渲染', () => {
+    const wrapper = mountTable({ columns: ['tenant_id', 'dish_name'], rows })
+
+    expect(wrapper.findAll('th.dt-col-sortable')).toHaveLength(1)
+    expect(wrapper.findAll('td[data-col="租户ID"]')).toHaveLength(0)
+    expect(wrapper.find('td[data-col="菜品名称"]').exists()).toBe(true)
+  })
+
+  it('出现多个租户时照常显示这一列', () => {
+    const wrapper = mountTable({
+      columns: ['tenant_id', 'dish_name'],
+      rows: [rows[0], { rowid: 2, tenant_id: 2, dish_name: '鱼香肉丝' }],
+    })
+
+    expect(wrapper.findAll('td[data-col="租户ID"]')).toHaveLength(2)
+  })
+})
+
+describe('DataTable 流水号长串', () => {
+  it('单行省略，完整值放在单元格 title 里', () => {
+    const serial = 'YY001301-261120-0202_乌榄角酱香捞面_002'
+    const wrapper = mountTable({
+      columns: ['business_flow_id'],
+      rows: [{ rowid: 11, business_flow_id: serial }],
+    })
+    const cell = wrapper.find('td[data-col="流水号"]')
+    const span = cell.find('span.dt-cell-ellipsis')
+
+    expect(span.exists()).toBe(true)
+    expect(span.text()).toBe(serial)
+    expect(cell.attributes('title')).toBe(serial)
+  })
+})
+
+describe('DataTable 行内删除按钮', () => {
+  it('降为文字按钮：保留危险色，但不带实心红框的 btn-danger', () => {
+    const table = mountTable()
+    const deleteBtn = table
+      .findAll('td.dt-col-actions button')
+      .find((btn) => btn.text().includes('删除'))
+
+    expect(deleteBtn.classes()).toContain('dt-delete-btn')
+    expect(deleteBtn.classes()).not.toContain('btn-danger')
+  })
+})
+
+// 「全选本页」原来没有对应的复选框（多选状态本来就有，只是没渲染）。现在补上表头与
+// 每行的勾选框，并保持只读表没有选择列。
+describe('DataTable 全选本页复选框', () => {
+  it('表头勾选框联动选中本页所有行', async () => {
+    const wrapper = mountTable({
+      rows: [
+        { rowid: 1, dish_name: '宫保鸡丁' },
+        { rowid: 2, dish_name: '鱼香肉丝' },
+      ],
+    })
+    const headerBox = wrapper.find('thead input.dt-checkbox')
+
+    expect(headerBox.exists()).toBe(true)
+    headerBox.element.checked = true
+    await headerBox.trigger('change')
+
+    expect(wrapper.findAll('tbody tr').every((row) => row.classes().includes('dt-row-selected'))).toBe(true)
+    expect(wrapper.find('thead input.dt-checkbox').element.checked).toBe(true)
+  })
+
+  it('点行首勾选框只切换那一行，并显示已选条数', async () => {
+    const wrapper = mountTable({
+      rows: [
+        { rowid: 1, dish_name: '宫保鸡丁' },
+        { rowid: 2, dish_name: '鱼香肉丝' },
+      ],
+    })
+    const rowBox = wrapper.findAll('tbody input.dt-checkbox')[0]
+
+    rowBox.element.checked = true
+    await rowBox.trigger('change')
+
+    const rows = wrapper.findAll('tbody tr')
+    expect(rows[0].classes()).toContain('dt-row-selected')
+    expect(rows[1].classes()).not.toContain('dt-row-selected')
+    expect(wrapper.text()).toContain('已选 1 条')
+  })
+
+  it('只读表没有选择列，也没有表头勾选框', () => {
+    const wrapper = mountTable({ readOnly: true })
+
+    expect(wrapper.find('thead input.dt-checkbox').exists()).toBe(false)
+    expect(wrapper.find('td.dt-col-select').exists()).toBe(false)
+    expect(wrapper.find('table.dt-has-select').exists()).toBe(false)
+  })
+})

@@ -175,7 +175,8 @@ function closePanel() {
 .image-upload-queue.is-collapsed { width: auto; }
 .image-upload-panel,
 .image-upload-chip {
-  border: 1px solid var(--line-strong);
+  border: var(--edge-w, 2px) solid var(--edge);
+  box-shadow: var(--paper-shadow-sm);
   border-radius: var(--r-2);
   background: var(--surface-1);
   color: var(--ink);
@@ -314,7 +315,7 @@ function closePanel() {
   gap: 5px;
   min-height: 44px;
   padding: 0 12px;
-  border: 1px solid var(--line-strong);
+  border: var(--edge-w, 2px) solid var(--edge);
   border-radius: var(--r-1);
   background: var(--surface-2);
   color: var(--ink);

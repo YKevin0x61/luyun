@@ -23,7 +23,7 @@ defineProps({
   align-items: center;
   gap: 6px;
   padding: 3px 10px;
-  border-radius: 999px;
+  border-radius: var(--r-1);
   border: 1px solid transparent;
   font-size: 11px;
   font-weight: 700;

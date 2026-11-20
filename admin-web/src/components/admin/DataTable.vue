@@ -81,6 +81,10 @@ const selectedCount = computed(() => selectedRowIds.value.size)
 const allPageSelected = computed(() =>
   rows.value.length > 0 && rows.value.every((row) => selectedRowIds.value.has(rowKey(row))),
 )
+// 表头全选框的第三种状态：本页勾了一部分，既不是全选也不是没选。
+const somePageSelected = computed(() =>
+  !allPageSelected.value && rows.value.some((row) => selectedRowIds.value.has(rowKey(row))),
+)
 
 function clearSelection() {
   selectedRowIds.value = new Set()
@@ -273,11 +277,45 @@ function rowLabel(row) {
   return summary ? `第 ${rowKey(row)} 行：${summary}` : `第 ${rowKey(row)} 行`
 }
 
+// 单店部署里 tenant_id 恒为 1，一整列却没有信息量（真机截图：当前页 17 行全是 1）。
+// 当前页该列全为同一个非空值时，表头与单元格都不渲染；多租户/跨租户的一页照常显示。
+const visibleColumns = computed(() => columns.value.filter((col) => !isRedundantTenantColumn(col)))
+
+function isRedundantTenantColumn(col) {
+  if (String(col).toLowerCase() !== 'tenant_id') return false
+  const values = rows.value.map((row) => row?.[col])
+  if (!values.length) return false
+  const first = values[0]
+  if (first === null || first === undefined || first === '') return false
+  return values.every((value) => value === first)
+}
+
+// 流水号（orders.business_flow_id）是「业务流ID_菜名_序号」拼起来的长串，整列能撑到约
+// 400px。只给这一列做单行省略（完整值走单元格 title），不碰其它列的宽度。
+const serialColumns = computed(() => new Set(
+  columns.value.filter((col) => getColumnLabel(currentTable.value, col) === '流水号'),
+))
+
+// 接口原样返回 ISO 时间串（2026-11-20T16:00:00+08:00），一整列都是那个 T 和时区。
+// 这里只改**显示**：排序仍由后端按原值排，编辑弹窗仍提交 row 里的原值。
+const DATE_TIME_COLUMN_PATTERN = /(^|_)(date|time|at|day)($|_)/i
+const ISO_DATE_TIME_PATTERN = /^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2})(?::\d{2}(?:\.\d+)?)?(?:\s*(?:Z|[+-]\d{2}:?\d{2}))?$/
+
+function isDateTimeColumn(col) {
+  return DATE_TIME_COLUMN_PATTERN.test(String(col))
+}
+
+function formatDateTimeDisplay(text) {
+  const match = ISO_DATE_TIME_PATTERN.exec(text)
+  return match ? `${match[1]} ${match[2]}` : text
+}
+
 function formatCellText(col, val) {
   if (val === null || val === undefined || val === '') return ''
   if (typeof val === 'object') return JSON.stringify(val)
   const mapped = getCellLabel(currentTable.value, col, val)
-  return mapped === undefined || mapped === null ? String(val) : String(mapped)
+  const text = mapped === undefined || mapped === null ? String(val) : String(mapped)
+  return isDateTimeColumn(col) ? formatDateTimeDisplay(text) : text
 }
 </script>
 
@@ -367,12 +405,23 @@ function formatCellText(col, val) {
       <div v-else-if="error" class="empty-state">{{ error }}</div>
       <div v-else-if="!rows.length" class="empty-state">暂无数据</div>
       <div v-else class="data-table-wrap luyun-scrollbar">
-        <table class="data-table">
+        <table class="data-table" :class="{ 'dt-has-select': !tableReadOnly }">
           <thead>
             <tr>
+              <th v-if="!tableReadOnly" class="dt-col-select">
+                <input
+                  type="checkbox"
+                  class="dt-checkbox"
+                  :checked="allPageSelected"
+                  :indeterminate="somePageSelected"
+                  :title="allPageSelected ? '取消全选本页' : '全选本页'"
+                  aria-label="全选本页"
+                  @change="toggleSelectAllPage"
+                />
+              </th>
               <th class="dt-col-key">序号</th>
               <th
-                v-for="col in columns"
+                v-for="col in visibleColumns"
                 :key="col"
                 class="dt-col-sortable"
                 :class="{ 'is-sorted': sortField === col }"
@@ -404,21 +453,34 @@ function formatCellText(col, val) {
               :aria-label="rowLabel(row)"
               @click="tableReadOnly ? undefined : toggleRowSelection(rowKey(row))"
             >
+              <!-- 行首复选框：多选状态本来就有（点行也能选），此前只是没渲染勾选框，
+                   工具栏的「全选本页」因此无从对应。只读表不渲染选择列。 -->
+              <td v-if="!tableReadOnly" class="dt-col-select" data-col="选择" @click.stop>
+                <input
+                  type="checkbox"
+                  class="dt-checkbox"
+                  :checked="selectedRowIds.has(rowKey(row))"
+                  :aria-label="rowLabel(row)"
+                  @change="toggleRowSelection(rowKey(row))"
+                />
+              </td>
               <td class="dt-col-key" style="color:var(--text-dim)">{{ rowKey(row) }}</td>
               <!-- data-col 是窄屏卡片布局的字段名来源（见样式里的 ::before）。 -->
               <td
-                v-for="col in columns"
+                v-for="col in visibleColumns"
                 :key="col"
                 :data-col="getColumnLabel(currentTable, col)"
                 :title="formatCellText(col, row[col])"
               >
                 <span v-if="row[col] === null || row[col] === undefined" style="color:var(--text-dim)">NULL</span>
                 <span v-else-if="row[col] === ''" style="color:var(--text-dim)">—</span>
+                <!-- 流水号这类复合长串单行省略，完整值在上面的 title 里。 -->
+                <span v-else-if="serialColumns.has(col)" class="dt-cell-ellipsis">{{ formatCellText(col, row[col]) }}</span>
                 <template v-else>{{ formatCellText(col, row[col]) }}</template>
               </td>
               <td v-if="!tableReadOnly" class="actions dt-col-actions" @click.stop>
                 <button class="btn btn-sm" @click="openEdit(row)"><SvgIcon name="pencil" :size="12" /> 编辑</button>
-                <button class="btn btn-sm btn-danger" @click="handleDelete(row)"><SvgIcon name="trash-2" :size="12" /> 删除</button>
+                <button class="btn btn-sm dt-delete-btn" @click="handleDelete(row)"><SvgIcon name="trash-2" :size="12" /> 删除</button>
               </td>
             </tr>
           </tbody>
@@ -645,12 +707,14 @@ function formatCellText(col, val) {
 @media (min-width: 701px) {
   /* sticky 的 th/td 需要不透明底色，否则横向滚动时下面的列会从它底下透出来。
      th 的底色跟 theme.css 的 var(--card2) 对齐，td 用卡片底色。 */
+  :deep(table.data-table) .dt-col-select,
   :deep(table.data-table) .dt-col-key,
   :deep(table.data-table) .dt-col-actions {
     position: sticky;
     background: var(--card);
     z-index: var(--z-shell);
   }
+  :deep(table.data-table) thead .dt-col-select,
   :deep(table.data-table) thead .dt-col-key,
   :deep(table.data-table) thead .dt-col-actions {
     background: var(--card2);
@@ -662,6 +726,16 @@ function formatCellText(col, val) {
     z-index: calc(var(--z-shell) + 1);
   }
   /* 宽度原来写在模板的 inline style 上，挪到这里是因为钉住的列必须能算准偏移 */
+  /* 选择列钉在序号列左边（36px = 左右各 8px 内边距 + 20px 内容，14px 勾选框放得下）；
+     有选择列时序号列右移一个选择列的宽度。只读表没有选择列，序号列仍从 0 开始。 */
+  :deep(table.data-table) .dt-col-select {
+    left: 0;
+    width: 36px;
+    padding-left: 8px;
+    padding-right: 8px;
+    text-align: center;
+  }
+  :deep(table.data-table.dt-has-select) .dt-col-key { left: 36px; }
   :deep(table.data-table) .dt-col-key { left: 0; width: 60px; }
   :deep(table.data-table) .dt-col-actions {
     right: 0;
@@ -703,6 +777,41 @@ function formatCellText(col, val) {
 :deep(table.data-table) th.dt-col-sortable.is-sorted .dt-sort-mark {
   opacity: 1;
   color: var(--accent);
+}
+
+/* 选择列的行首勾选框。多选状态本来就有（点行也能选），此前只是没渲染勾选框，
+   工具栏的「全选本页」因此无从对应。 */
+.dt-checkbox {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  vertical-align: middle;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+/* 每行一个「删除」：以前一屏 17 个红框按钮，整张表像在报警。降为文字按钮，危险色只
+   留在文字与 hover 上；批量删除仍保留 btn-danger 的重量（一次删多条，需要更强的确认感）。 */
+.dt-delete-btn {
+  background: transparent;
+  border-color: transparent;
+  color: var(--red);
+}
+.dt-delete-btn:hover {
+  background: var(--card2);
+  border-color: var(--red);
+  color: var(--red);
+}
+
+/* 流水号是「业务流ID_菜名_序号」拼起来的长串（约 400px 宽）。单行省略，完整值在
+   单元格的 title 上；用内层 span 限制，不动表格整体的列宽分配。 */
+:deep(table.data-table) .dt-cell-ellipsis {
+  display: inline-block;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
 }
 
 /* 窄屏卡片：一行一张卡 —— 列名走 data-col，值排在后面。
