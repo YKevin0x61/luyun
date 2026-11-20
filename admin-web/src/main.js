@@ -37,6 +37,34 @@ const app = createApp(App)
 app.use(createPinia())
 app.use(router)
 
+// 组件级异常兜底：渲染 / 生命周期 / 事件回调里抛出的错误，Vue 默认只在控制台留一行
+// （生产包连那行都没有），页面却可能停在半截或直接白屏。这里统一记一条带组件名与当前
+// 路由的日志保住现场 —— 只记录、不 recover，异常原因照旧打出来，不做「静默吞掉」。
+app.config.errorHandler = (err, instance, info) => {
+  const componentName =
+    instance?.$options?.name ||
+    instance?.$options?.__name ||
+    instance?.type?.name ||
+    instance?.type?.__name ||
+    '未知组件'
+  console.error(
+    `[全局错误] 组件「${componentName}」在 ${info} 阶段抛出异常（路由 ${router.currentRoute.value.fullPath}）：`,
+    err,
+    instance,
+  )
+}
+
+// 未处理的 Promise 拒绝（async 生命周期、事件回调里 `void` 掉的请求等）Vue 的
+// errorHandler 管不到，浏览器默认只留一行原始记录。补一条带路由的日志，店员报
+// 「页面卡住了」时能定位是哪一页。故意**不** event.preventDefault()：浏览器原生那条
+// 记录照旧保留，不吞掉原始堆栈。
+window.addEventListener('unhandledrejection', (event) => {
+  console.error(
+    `[全局错误] 未处理的 Promise 异常（路由 ${router.currentRoute.value.fullPath}）：`,
+    event.reason,
+  )
+})
+
 // 工作台的文档级契约（`<html data-workbench>` + 共享样式表那一份 `<link>`）不在这里：
 // 票 06 起由 `router/index.js` 的 `installWorkbenchDocument(router)` 装（判据是路由 meta
 // `workbenchTheme`，由页面清单派生；实现与理由见 `utils/workbenchDocument.js`）。

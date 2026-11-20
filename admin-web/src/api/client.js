@@ -35,7 +35,31 @@ function redirectToLogin() {
   window.location.href = '/login?next=' + encodeURIComponent(next)
 }
 
-async function request(path, { method = 'GET', params, body, signal, cache } = {}) {
+/** 普通请求的默认超时（毫秒）：门店网络假死（连得上但不回包）时不能永久 loading。 */
+export const REQUEST_TIMEOUT_MS = 20000
+
+/** 上传的默认超时（毫秒）：要真传字节，比普通请求宽得多；调用方仍可再覆盖。 */
+export const UPLOAD_TIMEOUT_MS = 120000
+
+/** 超时错误：`code = 'timeout'` 让调用方把「没等到响应」和「服务端拒绝」分开。 */
+function timeoutError(message) {
+  const err = new Error(message)
+  err.code = 'timeout'
+  return err
+}
+
+async function request(
+  path,
+  {
+    method = 'GET',
+    params,
+    body,
+    signal,
+    cache,
+    // 默认 20 秒；上传、导出等慢接口由调用方传更长（api.* 的最后一个 options 参数）。
+    timeoutMs = REQUEST_TIMEOUT_MS,
+  } = {},
+) {
   let url = path
   if (params && Object.keys(params).length) {
     const qs = new URLSearchParams()
@@ -46,12 +70,31 @@ async function request(path, { method = 'GET', params, body, signal, cache } = {
     if (qsStr) url += (url.includes('?') ? '&' : '?') + qsStr
   }
 
-  // fetch 只在网络层失败时 reject（断网 / DNS 失败 / 商场 AP 假死）。以前这里直接冒泡，
+  // fetch 只在网络层失败时 reject（断网 / DNS 失败 / 被 abort）。以前这里直接冒泡，
   // 店长看到的是 "Failed to fetch"「Load failed」这种英文原文；服务端 400 的中文 `detail`
   // 走的是下面那条路（带 `status`），两者本来可以分开 —— 冒泡之后 `status` 是 undefined，
   // 页面无从分派。这里统一翻成中文，并且**不带 status**（口径同 `utils/hygieneStaff.js`
   // 的 `staffRequest` 与上传那一路的 `xhr.onerror`）：调用方据此知道「没连上，可以重试」，
   // 而不是「服务端拒绝了这次操作」。
+  //
+  // 但「商场 AP 假死」不会 reject —— 请求永远挂着。所以这里必须自己兜时间上限：
+  // 到点 abort，与「立刻连不上」分开报（`code = 'timeout'`、文案说「请求超时」），
+  // 否则调用方只能一直等 loading。请求结束（成功 / 失败 / 超时）都要 clearTimeout。
+  const controller = new AbortController()
+  let timedOut = false
+  const timer = setTimeout(() => {
+    timedOut = true
+    controller.abort()
+  }, timeoutMs)
+  // 调用方自带的 signal（组件卸载 / 新一轮请求顶掉旧请求）仍要能取消：挂到同一个
+  // controller 上，并在 finally 里摘掉监听，避免长命的 signal 上越积越多。
+  let onExternalAbort = null
+  if (signal && typeof signal.addEventListener === 'function') {
+    onExternalAbort = () => controller.abort()
+    if (signal.aborted) controller.abort()
+    else signal.addEventListener('abort', onExternalAbort, { once: true })
+  }
+
   let res
   try {
     res = await fetch(url, {
@@ -59,11 +102,17 @@ async function request(path, { method = 'GET', params, body, signal, cache } = {
       credentials: 'include',
       headers: body ? { 'Content-Type': 'application/json' } : undefined,
       body: body ? JSON.stringify(body) : undefined,
-      signal,
+      signal: controller.signal,
       cache,
     })
   } catch (_err) {
+    if (timedOut) throw timeoutError('请求超时，请检查网络后重试')
     throw new Error('网络连不上，请检查网络后重试')
+  } finally {
+    clearTimeout(timer)
+    if (onExternalAbort && typeof signal.removeEventListener === 'function') {
+      signal.removeEventListener('abort', onExternalAbort)
+    }
   }
 
   if (res.status === 401 && !isStandaloneAuthRoute()) {
@@ -98,11 +147,17 @@ async function request(path, { method = 'GET', params, body, signal, cache } = {
 //   - done=true：字节已全部发送、进入服务器处理阶段（percent=100）。
 // 契约与旧版保持一致：resolve 解析后的 JSON；非 2xx 抛带 detail 的 Error；
 // 401 且非独立鉴权路由时跳转登录。不传 onProgress 时行为与原 fetch 版等价。
-function upload(path, formData, onProgress) {
+// timeoutMs 默认取 UPLOAD_TIMEOUT_MS（上传比普通请求宽），调用方可通过
+// api.upload 的第 4 个 options 参数覆盖。
+function upload(path, formData, onProgress, timeoutMs = UPLOAD_TIMEOUT_MS) {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest()
     xhr.open('POST', path)
     xhr.withCredentials = true
+    // 网络假死时 XHR 同样不会自己返回：任务会永远停在 uploading，占满上传队列。
+    // 用 XHR 原生的 timeout 兜底（拒绝时带 code='timeout'，与「网络错误，上传失败」分开）。
+    xhr.timeout = timeoutMs
+    xhr.ontimeout = () => reject(timeoutError('上传超时，请检查网络后重试'))
 
     if (typeof onProgress === 'function' && xhr.upload) {
       xhr.upload.onprogress = (event) => {
@@ -271,13 +326,22 @@ async function downloadPost(path, body, fallbackFilename = 'download') {
   return filename
 }
 
+// 各方法的最后一个 options 参数只用来覆盖超时：`{ timeoutMs: 60000 }`。
+// 现有调用方的位置参数（get 的 cache、post 的 params……）一个都没动 —— 新增的只能
+// 追加在末尾，传了就覆盖默认值，不传（或传 null）走 REQUEST_TIMEOUT_MS / UPLOAD_TIMEOUT_MS。
 export const api = {
-  get: (path, params, signal, cache) => request(path, { method: 'GET', params, signal, cache }),
-  post: (path, body, params) => request(path, { method: 'POST', body, params }),
-  put: (path, body, params) => request(path, { method: 'PUT', body, params }),
-  patch: (path, body, params) => request(path, { method: 'PATCH', body, params }),
-  delete: (path, params) => request(path, { method: 'DELETE', params }),
-  upload,
+  get: (path, params, signal, cache, options) =>
+    request(path, { method: 'GET', params, signal, cache, timeoutMs: options?.timeoutMs }),
+  post: (path, body, params, options) =>
+    request(path, { method: 'POST', body, params, timeoutMs: options?.timeoutMs }),
+  put: (path, body, params, options) =>
+    request(path, { method: 'PUT', body, params, timeoutMs: options?.timeoutMs }),
+  patch: (path, body, params, options) =>
+    request(path, { method: 'PATCH', body, params, timeoutMs: options?.timeoutMs }),
+  delete: (path, params, options) =>
+    request(path, { method: 'DELETE', params, timeoutMs: options?.timeoutMs }),
+  upload: (path, formData, onProgress, options) =>
+    upload(path, formData, onProgress, options?.timeoutMs),
   download,
   downloadPost,
   downloadUrl,
