@@ -496,7 +496,7 @@ useNudgePull({
   font: inherit;
   font-size: 11.5px;
   color: var(--ink);
-  border: 1px solid var(--line-strong);
+  border: var(--edge-w, 2px) solid var(--edge);
   border-radius: var(--r-1);
   padding: 0 12px;
   background: transparent;
@@ -508,7 +508,7 @@ useNudgePull({
   min-height: 48px !important;
   border-radius: var(--r-1);
   background: transparent;
-  border: 1px solid var(--line-strong);
+  border: var(--edge-w, 2px) solid var(--edge);
   color: var(--ink);
 }
 .month-page.hygiene-staff .btn:hover:not(:disabled) {
@@ -548,7 +548,8 @@ useNudgePull({
 
 .mBoard {
   background: var(--surface-1);
-  border: 1px solid var(--line);
+  border: var(--edge-w, 2px) solid var(--edge);
+  box-shadow: var(--paper-shadow-sm);
   border-radius: var(--r-2);
   overflow: hidden;
 }
@@ -572,7 +573,7 @@ useNudgePull({
   font-size: 16px;
   line-height: 1;
   color: var(--ink);
-  border: 1px solid var(--line-strong);
+  border: var(--edge-w, 2px) solid var(--edge);
   border-radius: var(--r-1);
   background: transparent;
   padding: 0 12px;
@@ -619,7 +620,7 @@ useNudgePull({
 .mD {
   position: relative;
   height: 54px;
-  border: 1px solid var(--line);
+  border: var(--edge-w, 2px) solid var(--edge);
   border-radius: var(--r-1);
   background: var(--surface-2);
   padding: 5px 4px 0;
@@ -719,9 +720,11 @@ useNudgePull({
   color: var(--ink-faint);
 }
 
-/* 请假（票 08）：批过的假。跟「休」分开上色 —— 休是排班给的，假是自己提的。 */
+/* 请假（票 08）：批过的假。跟「休」分开上色 —— 休是排班给的，假是自己提的。
+   贴纸皮肤里 --info 与 --ok 同值（三色上限压出来的），请假改挂自己的语义名 --state-leave：
+   上班绿 / 休半天青 / 休灰 / 请假紫 / 已调整橙红，五态在色相上就能分开。 */
 .mD.leave .s {
-  color: var(--info);
+  color: var(--state-leave);
 }
 
 /* 半天休（票 07 / ADR 0114）：仍然上班，只是只上半天。自己一档色 ——
@@ -779,7 +782,8 @@ useNudgePull({
   align-items: center;
   gap: 4px 8px;
   padding: 6px 8px;
-  border: 1px solid var(--line);
+  border: var(--edge-w, 2px) solid var(--edge);
+  box-shadow: var(--paper-shadow-sm);
   border-radius: var(--r-1);
   background: var(--surface-1);
   font-size: 9px;
@@ -812,7 +816,7 @@ useNudgePull({
 }
 
 .dot.leave {
-  background: var(--info);
+  background: var(--state-leave);
 }
 
 /* 半天休（票 07）：跟 `.mD.half` 同一个颜色来源（语义令牌 `--accent-alt`）——
@@ -826,7 +830,7 @@ useNudgePull({
 }
 
 .dot.none {
-  border: 1px solid var(--line-strong);
+  border: var(--edge-w, 2px) solid var(--edge);
   background: transparent;
 }
 
@@ -853,9 +857,9 @@ useNudgePull({
 }
 
 .leaveBig {
-  font: 600 26px/1.1 var(--font-mono);
+  font: 600 26px/1.1 var(--font-display);
   color: var(--ink);
-}
+  font-weight: 800;}
 
 .leaveBig.neg {
   color: var(--warn);
@@ -864,7 +868,7 @@ useNudgePull({
 .leaveTag {
   margin-left: auto;
   padding: 2px 9px;
-  border: 1px solid var(--line);
+  border: var(--edge-w, 2px) solid var(--edge);
   border-radius: var(--r-full);
   font-size: 11px;
   color: var(--ink-dim);

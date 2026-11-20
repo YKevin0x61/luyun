@@ -307,13 +307,15 @@ describe('工作台首页 · 管理端的下月员工餐提醒', () => {
     expect(wrapper.find('.wbh-meal-next').exists()).toBe(false)
   })
 
-  it('下月菜单读失败：不提醒，也不影响管理端四格', async () => {
+  it('下月菜单读失败：不提醒，也不影响管理端的读数', async () => {
     const { wrapper } = await mountHome({
       identity: 'super',
       table: managerData(staffMeal('fail')),
     })
 
     expect(wrapper.find('.wbh-meal-next').exists()).toBe(false)
-    expect(wrapper.findAll('.wbh-kpi')).toHaveLength(4)
+    // 默认数据四张读数都是 0：不占大卡，收成一条小字（0 仍是 0，没被读失败牵连）。
+    expect(wrapper.findAll('.wbh-kpi')).toHaveLength(0)
+    expect(wrapper.get('.wbh-kpi-zeros').text()).toContain('人事提醒 0')
   })
 })

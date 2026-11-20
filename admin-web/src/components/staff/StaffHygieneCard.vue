@@ -409,9 +409,9 @@ useNudgePull({
    全部走语义令牌；卡片 = 1px 线 + --hy-shadow-sm，没有渐变光晕。 */
 .shc {
   background: var(--surface-1);
-  border: 1px solid var(--line);
+  border: var(--edge-w, 2px) solid var(--edge);
   border-radius: var(--r-2);
-  box-shadow: var(--hy-shadow-sm);
+  box-shadow: var(--paper-shadow-sm);
   overflow: hidden;
   color: var(--ink);
   font-family: var(--font-sans);
@@ -504,7 +504,7 @@ useNudgePull({
   min-height: 48px;
   min-width: 64px;
   padding: 0 12px;
-  border: 1px solid var(--line-strong);
+  border: var(--edge-w, 2px) solid var(--edge);
   border-radius: var(--r-1);
   background: transparent;
   color: var(--ink);
@@ -579,7 +579,7 @@ useNudgePull({
   font-size: .95rem;
   border-radius: var(--r-1);
   background: transparent;
-  border: 1px solid var(--line-strong);
+  border: var(--edge-w, 2px) solid var(--edge);
   color: var(--ink);
 }
 </style>

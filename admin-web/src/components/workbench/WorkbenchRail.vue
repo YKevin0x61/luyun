@@ -61,7 +61,10 @@ function isCurrent(page) {
   flex: 0 0 auto;
   position: sticky;
   top: var(--head-h);
-  align-self: flex-start;
+  /* 铺满一屏：内容少的页（三张卡的现场日常、空列表）原来只有列表那么高，
+     浅橙底在半空断开，看着像一块砖贴在暖白纸上。 */
+  align-self: stretch;
+  min-height: calc(100vh - var(--head-h));
   max-height: calc(100vh - var(--head-h));
   overflow: auto;
   display: flex;
@@ -69,7 +72,7 @@ function isCurrent(page) {
   gap: 2px;
   padding: 10px 8px 14px;
   background: var(--surface-3);
-  border-right: 1px solid var(--hy-line);
+  border-right: var(--edge-w, 2px) solid var(--edge);
 }
 .wb-rail-item {
   display: inline-flex;
@@ -77,13 +80,22 @@ function isCurrent(page) {
   gap: 8px;
   min-height: 40px;
   padding: 0 10px;
+  border: var(--edge-w, 2px) solid transparent;
   border-radius: var(--r-1);
   color: var(--hy-muted);
   font-size: 13px;
   text-decoration: none;
 }
 .wb-rail-item:hover { color: var(--hy-ink); background: var(--hy-surface-2); }
-.wb-rail-item.is-on { color: var(--ink); background: var(--surface-1); box-shadow: inset 3px 0 0 var(--action); font-weight: 600; }
+/* 选中项是一张贴纸，不是"白底 + 左色条"：旧写法那条 inset 会压在 2px 描边内侧，
+   在圆角处切出一道断口。 */
+.wb-rail-item.is-on {
+  color: var(--ink);
+  background: var(--action-soft);
+  border-color: var(--edge);
+  box-shadow: 3px 3px 0 var(--shadow-ink);
+  font-weight: 700;
+}
 .wb-rail-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* 手机档：rail 整个收起来（组内页走页头那个下拉，拇指区走底栏）。 */

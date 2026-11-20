@@ -137,12 +137,14 @@ const hygieneSummary = computed(() => {
   }
 })
 
-/** 「店里的事」的眉标：这条里现在放的是哪几种管理员权限（排班 / 卫生 / 两者都有）。 */
+/** 「店里的事」的眉标：这条里现在放的是哪几种能力（排班 / 卫生 / 两者都有）。
+ *  不写「管理员」：顶栏徽标显示的是登录身份（超级管理员 / 员工），而「管理员」在词表里
+ *  是花名册真人的卫生权限档位 —— 同一页两种身份说法会打架，能力不是身份。 */
 const teamHint = computed(() => {
   const parts = []
   if (teamSummary.value) parts.push('排班')
   if (hygieneSummary.value) parts.push('卫生')
-  return parts.length ? `管理员 · ${parts.join(' + ')}` : '管理员'
+  return parts.join(' + ')
 })
 
 /** 「店里的事」那颗灯：条里任何一笔待办（排班 / 卫生复核 / 被驳回）有数字就黄，
@@ -194,6 +196,29 @@ function numberText(value) {
 function toneOn(value) {
   return typeof value === 'number' && value > 0
 }
+
+/** `0` 不占大卡（2026-11-20 走查）：手机首屏上值为 0 的读数卡也各占一整张 ——
+ *  真压着人的那两张反而被挤到下面、还要滑一屏。`null`（读不到，画「—」）不是 0，
+ *  照常占卡；只有确定是 0 才收进那条小字，且链接照旧。 */
+function isZero(value) {
+  return value === 0
+}
+
+/** 店里四张读数卡：还占着卡的那几张决定这一行要不要放宽（全部非 0 时与改动前一致）。 */
+const managerKpiValues = computed(() => [
+  summary.value.leaves,
+  summary.value.reviews,
+  summary.value.fixes,
+  summary.value.reminders,
+])
+const managerZeroCount = computed(() => managerKpiValues.value.filter(isZero).length)
+const managerKpiCardCount = computed(() => managerKpiValues.value.length - managerZeroCount.value)
+
+/** 员工那三张读数卡里 0 的个数；0 的收进一条小字，不再各占一张卡。 */
+const staffZeroCount = computed(() => {
+  const work = summary.value.work || {}
+  return [taskTodoCount.value, work.pending, summary.value.incoming].filter(isZero).length
+})
 
 /** 几块并行、各拉各的：失败把那块留成 `null`，不抛出去影响别的块。 */
 async function safe(promise, sink, pick = (data) => data) {
@@ -454,28 +479,38 @@ useNudgePull({
 
     <!-- ── 店长：四个读数 + 今天的班 ─────────────────────────────────── -->
     <template v-else-if="summary.view === IDENTITY_ADMIN">
-      <div class="wbh-kpis">
-        <router-link class="wbh-kpi wbh-cell leaves" :class="{ 'is-warn': toneOn(summary.leaves) }" :to="HOME_LINKS.leaves">
+      <div v-if="managerKpiCardCount" class="wbh-kpis" :class="{ 'is-lean': managerKpiCardCount < 4 }">
+        <router-link v-if="!isZero(summary.leaves)" class="wbh-kpi wbh-cell leaves" :class="{ 'is-warn': toneOn(summary.leaves) }" :to="HOME_LINKS.leaves">
           <div class="wbh-kh"><span>待批请假</span><i class="wbh-led" :class="toneOn(summary.leaves) ? 'warn' : 'off'"></i></div>
           <b class="wbh-num" :class="{ 'is-warn': toneOn(summary.leaves) }">{{ numberText(summary.leaves) }}</b>
           <p class="wbh-kf">排班待办 · 员工已提</p>
         </router-link>
-        <router-link class="wbh-kpi wbh-cell reviews" :class="{ 'is-warn': toneOn(summary.reviews) }" :to="HOME_LINKS.reviews">
+        <router-link v-if="!isZero(summary.reviews)" class="wbh-kpi wbh-cell reviews" :class="{ 'is-warn': toneOn(summary.reviews) }" :to="HOME_LINKS.reviews">
           <div class="wbh-kh"><span>待验收</span><i class="wbh-led" :class="toneOn(summary.reviews) ? 'warn' : 'off'"></i></div>
           <b class="wbh-num" :class="{ 'is-warn': toneOn(summary.reviews) }">{{ numberText(summary.reviews) }}</b>
           <p class="wbh-kf">日常检查 · 现在能验收</p>
         </router-link>
-        <router-link class="wbh-kpi wbh-cell fixes" :class="{ 'is-bad': toneOn(summary.fixes) }" :to="HOME_LINKS.fixes">
+        <router-link v-if="!isZero(summary.fixes)" class="wbh-kpi wbh-cell fixes" :class="{ 'is-bad': toneOn(summary.fixes) }" :to="HOME_LINKS.fixes">
           <div class="wbh-kh"><span>逾期整改</span><i class="wbh-led" :class="toneOn(summary.fixes) ? 'bad' : 'off'"></i></div>
           <b class="wbh-num" :class="{ 'is-bad': toneOn(summary.fixes) }">{{ numberText(summary.fixes) }}</b>
           <p class="wbh-kf">超过期限 · 未回拍</p>
         </router-link>
-        <router-link class="wbh-kpi wbh-cell reminders" :to="HOME_LINKS.reminders">
+        <router-link v-if="!isZero(summary.reminders)" class="wbh-kpi wbh-cell reminders" :to="HOME_LINKS.reminders">
           <div class="wbh-kh"><span>人事提醒</span><i class="wbh-led" :class="toneOn(summary.reminders) ? 'sig' : 'off'"></i></div>
           <b class="wbh-num">{{ numberText(summary.reminders) }}</b>
           <p class="wbh-kf">{{ reminderHint }}</p>
         </router-link>
       </div>
+
+      <!-- 0 值不占大卡（2026-11-20 走查）：四张里两张是 0 时也各占一张等宽大卡，手机首屏
+           里真正压着人的那张反而被挤。0 的收成一条小字，门（链接）还留着，点得进去。 -->
+      <p v-if="managerZeroCount" class="wbh-kpi-zeros">
+        <span class="wbh-kpi-zeros-lab">其余 0：</span>
+        <router-link v-if="isZero(summary.leaves)" class="wbh-kpi-zero wbh-label" :to="HOME_LINKS.leaves">待批请假 0</router-link>
+        <router-link v-if="isZero(summary.reviews)" class="wbh-kpi-zero wbh-label" :to="HOME_LINKS.reviews">待验收 0</router-link>
+        <router-link v-if="isZero(summary.fixes)" class="wbh-kpi-zero wbh-label" :to="HOME_LINKS.fixes">逾期整改 0</router-link>
+        <router-link v-if="isZero(summary.reminders)" class="wbh-kpi-zero wbh-label" :to="HOME_LINKS.reminders">人事提醒 0</router-link>
+      </p>
 
       <!-- 跨月提前报单（S7）：下月菜单还没导入，员工报不了 1 号的单。只在 `days` 为空时
            出现；读不到就不提示 —— 这是首页的一句提醒，不是待办清单，别让它变成噪音。 -->
@@ -602,8 +637,10 @@ useNudgePull({
             <span class="wbh-team-lab">人今天上班 ›</span>
           </router-link>
           <router-link class="wbh-team-cell" :class="{ 'is-warn': toneOn(teamSummary.remaining) }" to="/workbench/kitchen/prep-plan">
-            <b class="wbh-num" :class="{ 'is-warn': toneOn(teamSummary.remaining) }">{{ numberText(teamSummary.remaining) }}<small v-if="teamPrep && teamPrep.total" class="wbh-den">/{{ teamPrep.total }}</small></b>
-            <span class="wbh-team-lab">项备货还差 ›</span>
+            <!-- 语义必须在数字前面（2026-11-20 走查）：手机上原来是「63/63」大字在上、
+                 「项备货还差」小字在下，读起来像已经备完 63/63。 -->
+            <span class="wbh-prep-line"><span v-if="teamSummary.remaining != null" class="wbh-prep-lead">还差</span><b class="wbh-num" :class="{ 'is-warn': toneOn(teamSummary.remaining) }">{{ numberText(teamSummary.remaining) }}<small v-if="teamPrep && teamPrep.total" class="wbh-den">/{{ teamPrep.total }}</small></b><span v-if="teamSummary.remaining != null" class="wbh-prep-unit">项</span></span>
+            <span class="wbh-team-lab">备货计划 ›</span>
           </router-link>
         </div>
         <!-- 卫生复核（2026-11-10 用户裁定）：一行小条而不是第四格 —— 排班三格是同一件事，
@@ -667,7 +704,7 @@ useNudgePull({
 
       <!-- 任务（票 07）：独立一张卡，不并进「我的待办」—— 卫生那三块与工作任务
            是两条动线（一个在卫生页、一个在任务页），混在一个数字里没人知道点去哪。 -->
-      <div class="wbh-cells wbh-cells-task">
+      <div v-if="!isZero(taskTodoCount)" class="wbh-cells wbh-cells-task">
         <router-link class="wbh-cell myTasks" :class="{ 'is-warn': toneOn(taskTodoCount) }" :to="HOME_LINKS.myTasks">
           <div class="wbh-kh"><span>任务</span><i class="wbh-led" :class="toneOn(taskTodoCount) ? 'warn' : 'off'"></i></div>
           <b class="wbh-num" :class="{ 'is-warn': toneOn(taskTodoCount) }">{{ numberText(taskTodoCount) }}</b>
@@ -675,18 +712,27 @@ useNudgePull({
         </router-link>
       </div>
 
-      <div class="wbh-cells">
-        <router-link class="wbh-cell myItems" :class="{ 'is-warn': toneOn(summary.work.pending) }" :to="HOME_LINKS.myItems">
+      <div v-if="!isZero(summary.work.pending) || !isZero(summary.incoming)" class="wbh-cells">
+        <router-link v-if="!isZero(summary.work.pending)" class="wbh-cell myItems" :class="{ 'is-warn': toneOn(summary.work.pending) }" :to="HOME_LINKS.myItems">
           <div class="wbh-kh"><span>我的待办</span><i class="wbh-led" :class="toneOn(summary.work.pending) ? 'warn' : 'off'"></i></div>
           <b class="wbh-num" :class="{ 'is-warn': toneOn(summary.work.pending) }">{{ numberText(summary.work.pending) }}</b>
           <p class="wbh-kf">卫生待办 ›</p>
         </router-link>
-        <router-link class="wbh-cell myRequests" :to="HOME_LINKS.myRequests">
+        <router-link v-if="!isZero(summary.incoming)" class="wbh-cell myRequests" :to="HOME_LINKS.myRequests">
           <div class="wbh-kh"><span>等我回应</span><i class="wbh-led" :class="toneOn(summary.incoming) ? 'sig' : 'off'"></i></div>
           <b class="wbh-num">{{ numberText(summary.incoming) }}</b>
           <p class="wbh-kf">我的申请 ›</p>
         </router-link>
       </div>
+
+      <!-- 0 值不占大卡（2026-11-20 走查）：下面这两张读数卡值为 0 时只剩一张空卡占着
+           两列等宽的位置，收成一条小字；门（链接）还留着，点得进去。 -->
+      <p v-if="staffZeroCount" class="wbh-zero-strip">
+        <span class="wbh-zero-strip-lab">其余 0：</span>
+        <router-link v-if="isZero(taskTodoCount)" class="wbh-zero wbh-label" :to="HOME_LINKS.myTasks">任务 0</router-link>
+        <router-link v-if="isZero(summary.work.pending)" class="wbh-zero wbh-label" :to="HOME_LINKS.myItems">我的待办 0</router-link>
+        <router-link v-if="isZero(summary.incoming)" class="wbh-zero wbh-label" :to="HOME_LINKS.myRequests">等我回应 0</router-link>
+      </p>
       </template>
     </template>
   </div>
@@ -719,7 +765,8 @@ useNudgePull({
 .wbh-pills { margin-left: auto; display: flex; flex-wrap: wrap; gap: 8px; }
 .wbh-pill {
   display: inline-flex; align-items: center; gap: 6px;
-  padding: 7px 10px; border: 1px solid var(--line-strong); border-radius: var(--r-1);
+  padding: 7px 10px; border: var(--edge-w, 2px) solid var(--edge);
+  box-shadow: var(--paper-shadow-sm); border-radius: var(--r-1);
   background: var(--surface-1); color: var(--ink-dim);
   font: 500 10px/1 var(--font-mono);
 }
@@ -737,25 +784,31 @@ useNudgePull({
 .wbh-onsite.is-half, .wbh-onsite.is-moved { color: var(--warn); }
 
 .wbh-kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+/* 0 值卡收走后剩下的几张按可用宽度铺开：四张都非 0 时不加 is-lean，桌面（1440）与改动前
+   逐像素一致；有 0 时让出来的位置给真需要的卡，不再留等宽空位。 */
+.wbh-kpis.is-lean { grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); }
 .wbh-kpi {
   position: relative; overflow: hidden;
   display: flex; flex-direction: column; gap: 9px;
   padding: 13px 15px 12px;
   background: var(--surface-1);
-  border: 1px solid var(--line);
+  border: var(--edge-w, 2px) solid var(--edge);
   border-radius: var(--r-2);
-  box-shadow: var(--hy-shadow-sm);
+  box-shadow: var(--paper-shadow-sm);
   text-decoration: none;
 }
-.wbh-kpi::after { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: var(--action); }
-.wbh-kpi.is-warn::after { background: var(--warn); }
-.wbh-kpi.is-bad::after { background: var(--danger); }
+/* 换皮（2026-11-20）：删掉左缘那条 3px 色条 —— 它挨着 2px 深墨描边，在圆角处切出一道
+   杂边；状态改由右上那颗 LED 与数字色表达（.wbh-led / .is-warn / .is-bad 都还在）。 */
 .wbh-kh {
   display: flex; align-items: center; gap: 7px;
-  font: 500 9.5px/1 var(--font-sans); letter-spacing: .18em; color: var(--ink-faint);
+  /* 贴纸风里这行不再是「仪表盘小号大写标签」：9.5px + .18em 字距是旧皮的标志，
+     换成 11px/700 的正常字距，读起来像手写卡片上的标注。 */
+  font: 700 11px/1.2 var(--font-sans); letter-spacing: .01em; color: var(--ink-dim);
 }
 .wbh-kh .wbh-led { margin-left: auto; }
-.wbh-num { font: 500 30px/1 var(--font-mono); letter-spacing: -.03em; color: var(--ink); }
+/* 大数字用标题字体（SF Pro Rounded 的 0/6/8 是圆头），比等宽字体更贴纸；等宽只留给
+   真正的数字表格与时间。 */
+.wbh-num { font: 800 30px/1 var(--font-display); letter-spacing: -.02em; color: var(--ink); }
 .wbh-num.is-warn { color: var(--warn); }
 .wbh-num.is-bad { color: var(--danger-bright); }
 /* 备货的分子/分母（2026-11-13 走查）：「还差 70」在 70/70 与 58/70 下读起来一样，分母才
@@ -768,13 +821,31 @@ useNudgePull({
 .wbh-kpi.is-bad .wbh-gauge i.on { background: var(--danger); }
 .wbh-kf { margin: 0; font-size: 9.5px; color: var(--ink-faint); }
 
+/* 0 值统计条（2026-11-20 走查）：值为 0 的读数卡不再各占一张大卡，收成一条小字；
+   链接还在，点进去还是原来那一页。店长（四格）与员工（三张读数卡）共用这套样式。 */
+.wbh-kpi-zeros,
+.wbh-zero-strip {
+  margin: 8px 0 0;
+  display: flex; flex-wrap: wrap; align-items: baseline;
+  font-size: 10.5px; color: var(--ink-faint);
+}
+.wbh-kpi-zeros-lab,
+.wbh-zero-strip-lab { margin-right: 2px; }
+.wbh-kpi-zero,
+.wbh-zero { color: var(--ink-dim); text-decoration: none; white-space: nowrap; }
+.wbh-kpi-zero:hover,
+.wbh-zero:hover { color: var(--action); }
+/* 分隔点用 ::before：收条里只剩一两项时也不留下孤零零的「·」。 */
+.wbh-kpi-zero + .wbh-kpi-zero::before,
+.wbh-zero + .wbh-zero::before { content: ' · '; color: var(--ink-faint); }
+
 .wbh-cols { display: grid; grid-template-columns: 1.6fr 1fr; gap: 14px; align-items: start; }
 .wbh-side { display: flex; flex-direction: column; gap: 14px; }
 .wbh-panel {
   background: var(--surface-1);
-  border: 1px solid var(--line);
+  border: var(--edge-w, 2px) solid var(--edge);
   border-radius: var(--r-2);
-  box-shadow: var(--hy-shadow-sm);
+  box-shadow: var(--paper-shadow-sm);
   overflow: hidden;
 }
 .wbh-ph { display: flex; align-items: center; gap: 9px; padding: 11px 14px; border-bottom: 1px solid var(--line); }
@@ -833,7 +904,8 @@ useNudgePull({
 
 .wbh-rem { display: flex; flex-direction: column; }
 .wbh-rem-row { display: flex; align-items: baseline; gap: 10px; padding: 12px 14px; }
-.wbh-rem-row b { font: 500 22px/1 var(--font-mono); color: var(--ink); }
+.wbh-rem-row b { font: 500 22px/1 var(--font-display); color: var(--ink);
+  font-weight: 800;}
 .wbh-rem-row span { font-size: 10px; color: var(--ink-dim); }
 .wbh-rem-go {
   display: block; padding: 9px 14px; border-top: 1px solid var(--wb-ink-a08);
@@ -864,13 +936,13 @@ useNudgePull({
    外壳不是链接：请假 / 换班 是两张碰得到的入口，链接不能套链接。 */
 .wbh-me-card {
   background: var(--surface-1);
-  border: 1px solid var(--line);
+  border: var(--edge-w, 2px) solid var(--edge);
   border-radius: var(--r-2);
-  box-shadow: var(--hy-shadow-sm);
+  /* 左缘那抹橙走 inset 阴影：旧写法是一条 3px 的绝对定位竖条，直着画、
+     不跟 2px 描边的圆角走，四角各露一个断口，像贴歪了。 */
+  box-shadow: var(--paper-shadow-sm), inset 4px 0 0 var(--action);
   overflow: hidden;
-  position: relative;
 }
-.wbh-me-card::after { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: var(--action); }
 .wbh-me {
   display: flex; flex-direction: column; gap: 10px;
   padding: 14px 16px 12px;
@@ -904,9 +976,9 @@ useNudgePull({
   display: flex; flex-direction: column; gap: 8px;
   padding: 12px 14px;
   background: var(--surface-1);
-  border: 1px solid var(--line);
-  border-radius: var(--r-2);
-  box-shadow: var(--hy-shadow-sm);
+  border: var(--edge-w, 2px) solid var(--edge);
+  border-radius: var(--r-1);
+  box-shadow: var(--paper-shadow-sm);
   text-decoration: none;
 }
 
@@ -914,7 +986,8 @@ useNudgePull({
    三格等宽、手机上也是一行 —— 它是管理摘要，不该比下面的「我的班」更占地方。 */
 .wbh-team {
   background: var(--surface-1);
-  border: 1px solid var(--line);
+  border: var(--edge-w, 2px) solid var(--edge);
+  box-shadow: var(--paper-shadow-sm);
   border-radius: var(--r-2);
   overflow: hidden;
 }
@@ -928,6 +1001,8 @@ useNudgePull({
 .wbh-team-cell:first-child { border-left: 0; }
 .wbh-team-cell .wbh-num { font-size: 24px; }
 .wbh-team-cell span { font-size: 10px; line-height: 1.4; color: var(--ink-dim); }
+/* 备货格（2026-11-20 走查）：「还差 63/63 项」语义排在数字前面，别让人把 63/63 读成完成度。 */
+.wbh-prep-line { display: flex; align-items: baseline; gap: 4px; }
 .wbh-team-cell:hover { background: var(--surface-2); }
 
 /* 卫生复核那一行（2026-11-10 用户裁定）：管理员（员工会话 + 卫生复核能力）的
@@ -954,7 +1029,8 @@ useNudgePull({
   display: flex; align-items: center; gap: 8px;
   min-height: 44px; padding: 0 14px;
   background: var(--surface-1);
-  border: 1px solid var(--line);
+  border: var(--edge-w, 2px) solid var(--edge);
+  box-shadow: var(--paper-shadow-sm);
   border-radius: var(--r-2);
   text-decoration: none;
 }
@@ -971,7 +1047,8 @@ useNudgePull({
   display: flex; align-items: center; gap: 8px;
   min-height: 44px; padding: 10px 14px;
   background: var(--surface-1);
-  border: 1px solid var(--line);
+  border: var(--edge-w, 2px) solid var(--edge);
+  box-shadow: var(--paper-shadow-sm);
   border-left: 3px solid var(--warn);
   border-radius: var(--r-2);
   text-decoration: none;
@@ -987,6 +1064,8 @@ useNudgePull({
    大卡各占半屏、一个数字孤零零地摆在中间。 */
 @media (max-width: 720px) {
   .wbh-kpis { grid-template-columns: repeat(2, 1fr); }
+  /* 只剩一两张读数卡时按 150px 起的 auto-fit 排，宁可一行铺满也不留半屏空位。 */
+  .wbh-kpis.is-lean { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
   .wbh-head { align-items: flex-start; flex-direction: column; gap: 10px; }
   .wbh-pills { margin-left: 0; }
   .wbh-title { font-size: 22px; }

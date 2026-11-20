@@ -147,6 +147,8 @@ useNudgePull({ id: 'tasks-recurring', topics: ['tasks'], pull: () => { void load
 .tasks-page {
   max-width: 1080px;
   margin: 0 auto;
+  /* 同上：flex 列里的 auto 外边距会让 stretch 失效，缺 width 就缩成内容宽（2026-11-20）。 */
+  width: 100%;
   padding: 20px 16px 40px;
 }
 .tasks-head {
@@ -158,7 +160,7 @@ useNudgePull({ id: 'tasks-recurring', topics: ['tasks'], pull: () => { void load
 }
 .tasks-kicker {
   margin: 0 0 4px;
-  font-size: 12px;
+  font-size: var(--fs-12);
   letter-spacing: 0.08em;
   color: var(--ink-faint);
 }
@@ -171,24 +173,25 @@ useNudgePull({ id: 'tasks-recurring', topics: ['tasks'], pull: () => { void load
 }
 .tasks-sub {
   margin: 6px 0 0;
-  font-size: 13px;
+  font-size: var(--fs-13);
   line-height: 1.6;
   color: var(--ink-dim);
 }
 .tasks-hint {
   margin: 0 0 10px;
-  font-size: 13px;
+  font-size: var(--fs-13);
   color: var(--ink-faint);
 }
 .tasks-panel {
   background: var(--surface-1);
-  border: 1px solid var(--line);
+  border: var(--edge-w, 2px) solid var(--edge);
+  box-shadow: var(--paper-shadow-sm);
   border-radius: var(--r-2);
   padding: 28px 18px;
 }
 .tasks-empty {
   margin: 0;
-  font-size: 13px;
+  font-size: var(--fs-13);
   line-height: 1.7;
   color: var(--ink-faint);
   text-align: center;
@@ -200,17 +203,18 @@ useNudgePull({ id: 'tasks-recurring', topics: ['tasks'], pull: () => { void load
   border-radius: var(--r-2);
   background: var(--action);
   color: var(--action-ink);
-  font-size: 14px;
+  font-size: var(--fs-14);
   cursor: pointer;
 }
 .task-secondary {
   min-height: var(--tap);
   padding: 0 14px;
-  border: 1px solid var(--line-strong);
+  border: var(--edge-w, 2px) solid var(--edge);
+  box-shadow: var(--paper-shadow-sm);
   border-radius: var(--r-2);
   background: var(--surface-1);
   color: var(--ink);
-  font-size: 13px;
+  font-size: var(--fs-13);
   cursor: pointer;
 }
 .task-danger {
@@ -220,7 +224,7 @@ useNudgePull({ id: 'tasks-recurring', topics: ['tasks'], pull: () => { void load
   border-radius: var(--r-2);
   background: var(--surface-1);
   color: var(--danger-bright);
-  font-size: 13px;
+  font-size: var(--fs-13);
   cursor: pointer;
 }
 .task-error {
@@ -229,7 +233,7 @@ useNudgePull({ id: 'tasks-recurring', topics: ['tasks'], pull: () => { void load
   border-radius: var(--r-1);
   background: var(--danger-soft);
   color: var(--danger-bright);
-  font-size: 13px;
+  font-size: var(--fs-13);
 }
 .task-recurring-list {
   margin: 0;
@@ -240,7 +244,8 @@ useNudgePull({ id: 'tasks-recurring', topics: ['tasks'], pull: () => { void load
 }
 .task-recurring {
   background: var(--surface-1);
-  border: 1px solid var(--line);
+  border: var(--edge-w, 2px) solid var(--edge);
+  box-shadow: var(--paper-shadow-sm);
   border-radius: var(--r-2);
   padding: 16px 18px;
 }
@@ -251,14 +256,14 @@ useNudgePull({ id: 'tasks-recurring', topics: ['tasks'], pull: () => { void load
 }
 .task-recurring-head h2 {
   margin: 0;
-  font-size: 16px;
+  font-size: var(--fs-16);
   font-weight: 600;
   color: var(--ink);
 }
 .task-recurring-status {
   padding: 2px 8px;
   border-radius: var(--r-full);
-  font-size: 12px;
+  font-size: var(--fs-12);
 }
 .task-recurring-status.is-active {
   background: var(--action-soft);
@@ -270,7 +275,7 @@ useNudgePull({ id: 'tasks-recurring', topics: ['tasks'], pull: () => { void load
 }
 .task-recurring-freq {
   margin: 8px 0 0;
-  font-size: 13px;
+  font-size: var(--fs-13);
   color: var(--ink);
 }
 .task-recurring-range {
@@ -282,7 +287,7 @@ useNudgePull({ id: 'tasks-recurring', topics: ['tasks'], pull: () => { void load
   flex-wrap: wrap;
   gap: 4px 16px;
   margin: 6px 0 0;
-  font-size: 13px;
+  font-size: var(--fs-13);
   color: var(--ink-dim);
 }
 .task-recurring-rate {
@@ -290,12 +295,17 @@ useNudgePull({ id: 'tasks-recurring', topics: ['tasks'], pull: () => { void load
 }
 .task-recurring-warn {
   margin: 8px 0 0;
-  font-size: 12px;
+  font-size: var(--fs-12);
   color: var(--danger-bright);
 }
 .task-recurring-actions {
   display: flex;
   gap: 8px;
   margin-top: 12px;
+}
+
+@media (max-width: 720px) {
+  /* 眉标「工作台 · 任务」桌面看是路径提示，手机上是紧挨 H1 的第二遍标题（2026-11-20）。 */
+  .tasks-kicker { display: none; }
 }
 </style>

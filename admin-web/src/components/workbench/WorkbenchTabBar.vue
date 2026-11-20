@@ -220,8 +220,9 @@ const ICONS = {
     right: 0;
     bottom: 0;
     z-index: var(--z-tabbar);
-    background: var(--surface-1);
-    border-top: 1px solid var(--hy-line);
+    /* 贴纸风（2026-11-20）：暖纸底 + 2px 深墨上边 —— 与手机页头同一套硬分界。 */
+    background: var(--chrome);
+    border-top: var(--edge-w) solid var(--edge);
     /* iPhone 的 home indicator 区域：不给这一条留白，最后一格会被系统手势条压住。 */
     padding-bottom: env(safe-area-inset-bottom, 0px);
   }
@@ -264,6 +265,12 @@ const ICONS = {
     box-shadow: 0 0 0 1.5px var(--surface-1);
   }
 
+  /* 选中格：图标托一块浅主色圆角贴纸 + 主色字（不铺满整格，底栏留白才不闷）。 */
   .wb-tab.is-on { color: var(--hy-mint); font-weight: 700; }
+  .wb-tab.is-on .wb-tab-icon-wrap {
+    padding: 2px 9px;
+    border-radius: 10px;
+    background: var(--action-soft);
+  }
 }
 </style>

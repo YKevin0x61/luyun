@@ -144,10 +144,11 @@ describe('员工端「整月」页（票 06）', () => {
 
   it('请假那格有自己的颜色与图例，不跟「休」混（票 08）', () => {
     // 语气与文案的判据在 util 里（todayShift.test.js）；这一页只管上色与图例。
-    // 纯视觉断言维护（2026-10-17 B 案「钢面 · 仪」）：请假从兼容层 --hy-aqua 换成语义层
-    // 的 --info（信息一档）；判据仍是「请假与休、上班各自一色」。
-    expect(view).toMatch(/\.mD\.leave \.s\s*\{[^}]*var\(--info\)/)
-    expect(view).toMatch(/\.dot\.leave\s*\{[^}]*var\(--info\)/)
+    // 纯视觉断言维护（贴纸皮肤 2026-11-20）：--info 与 --ok 在新令牌层同值，请假改用
+    // 自己的语义名 --state-leave；判据仍是「请假与休、上班各自一色」（下面那条两两比
+    // 才是真守卫）。
+    expect(view).toMatch(/\.mD\.leave \.s\s*\{[^}]*var\(--state-leave\)/)
+    expect(view).toMatch(/\.dot\.leave\s*\{[^}]*var\(--state-leave\)/)
     // 图例三条排开：上班 / 休 / 请假（少一条员工就猜「这格子什么意思」）。
     expect(view).toMatch(/class="dot shift"[^<]*\/>上班/)
     expect(view).toMatch(/class="dot rest"[^<]*\/>休/)

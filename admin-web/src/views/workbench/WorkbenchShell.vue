@@ -276,7 +276,8 @@ watch(identity, keepViewAllowed)
   min-height: 52px;
   padding: 6px 20px 0;
   background: var(--chrome);
-  border-bottom: 1px solid var(--hy-line);
+  /* 2px 深墨压边（贴纸风：壳与内容之间是一条硬分界，不是淡线）。 */
+  border-bottom: var(--edge-w) solid var(--edge);
 }
 /* 不占满整行的那几件：补 4px 下边距；导航（下划线 tab）不在此列 —— 它要贴到底边。 */
 .wb-back, .wb-brand, .wb-id-switcher { margin-bottom: 4px; }
@@ -306,12 +307,15 @@ watch(identity, keepViewAllowed)
   font-size: 12px;
   color: var(--hy-muted);
   text-decoration: none;
-  background: var(--hy-surface-2);
-  border: 1px solid var(--hy-line-strong);
+  background: var(--hy-surface);
+  border: var(--edge-w) solid var(--edge);
   border-radius: var(--r-1);
   padding: 5px 10px;
   white-space: nowrap;
+  box-shadow: 2px 2px 0 var(--edge);
 }
+.wb-back:hover { background: var(--hy-surface-2); }
+.wb-back:active { transform: translate(2px, 2px); box-shadow: none; }
 .wb-back:hover { color: var(--hy-ink); border-color: var(--hy-line-strong); }
 /* 切换器与导航之间一条细分隔：两件事（我是谁 / 去哪一页），别挤成一团。 */
 .wb-id-switcher { margin-left: 4px; padding-right: 10px; border-right: 1px solid var(--hy-line); }

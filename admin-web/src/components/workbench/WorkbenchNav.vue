@@ -264,7 +264,8 @@ const isGroupCurrent = (cell) => cell.key === currentGroup.value
   overscroll-behavior: contain;
   padding: 6px;
   background: var(--surface-1);
-  border: 1px solid var(--line-strong);
+  border: var(--edge-w, 2px) solid var(--edge);
+  box-shadow: var(--paper-shadow-sm);
   border-radius: var(--r-2);
 }
 .wb-nav-menu-item {

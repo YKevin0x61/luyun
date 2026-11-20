@@ -1536,7 +1536,8 @@ onBeforeUnmount(() => {
   width: 40px;
   height: 40px;
   border-radius: 10px;
-  border: 1px solid var(--line);
+  border: var(--edge-w, 2px) solid var(--edge);
+  box-shadow: var(--paper-shadow-sm);
   background: var(--surface-1);
   color: var(--ink);
   font-size: 20px;
@@ -1548,7 +1549,8 @@ onBeforeUnmount(() => {
   min-height: 44px;
   padding: 0 10px;
   border-radius: 10px;
-  border: 1px solid var(--line);
+  border: var(--edge-w, 2px) solid var(--edge);
+  box-shadow: var(--paper-shadow-sm);
   background: var(--surface-1);
   color: var(--ink);
   font-size: 13px;
@@ -1580,8 +1582,8 @@ onBeforeUnmount(() => {
 .sm-pill {
   display: inline-block;
   padding: 1px 8px;
-  border-radius: 999px;
-  border: 1px solid var(--line-strong);
+  border-radius: var(--r-1);
+  border: var(--edge-w, 2px) solid var(--edge);
   font-size: 11.5px;
   color: var(--ink-dim);
 }
@@ -1658,7 +1660,8 @@ onBeforeUnmount(() => {
   min-height: 64px;
   padding: 5px 4px;
   border-radius: 8px;
-  border: 1px solid var(--line);
+  border: var(--edge-w, 2px) solid var(--edge);
+  box-shadow: var(--paper-shadow-sm);
   background: var(--surface-1);
   color: var(--ink);
   font-size: 11.5px;
@@ -1736,7 +1739,8 @@ onBeforeUnmount(() => {
   margin: 0 0 12px;
   padding: 12px;
   border-radius: 12px;
-  border: 1px solid var(--line);
+  border: var(--edge-w, 2px) solid var(--edge);
+  box-shadow: var(--paper-shadow-sm);
   background: var(--surface-1);
 }
 .sm-card h2 {
@@ -1784,7 +1788,7 @@ onBeforeUnmount(() => {
 .sm-tag {
   font-size: 11px;
   color: var(--ink-dim);
-  border: 1px solid var(--line);
+  border: var(--edge-w, 2px) solid var(--edge);
   border-radius: 999px;
   padding: 0 7px;
 }
@@ -1803,7 +1807,7 @@ onBeforeUnmount(() => {
   min-height: 44px;
   padding: 8px 9px;
   border-radius: 8px;
-  border: 1px solid var(--line-strong);
+  border: var(--edge-w, 2px) solid var(--edge);
   background: var(--surface-2);
   color: var(--ink);
   font-size: 16px;
@@ -1831,7 +1835,7 @@ onBeforeUnmount(() => {
   width: 30px;
   height: 30px;
   border-radius: 8px;
-  border: 1px solid var(--line);
+  border: var(--edge-w, 2px) solid var(--edge);
   background: transparent;
   color: var(--ink-dim);
   font-size: 18px;
@@ -1858,8 +1862,8 @@ onBeforeUnmount(() => {
 .sm-chip {
   min-height: 44px;
   padding: 0 9px;
-  border-radius: 999px;
-  border: 1px solid var(--line-strong);
+  border-radius: var(--r-1);
+  border: var(--edge-w, 2px) solid var(--edge);
   background: var(--surface-2);
   color: var(--ink);
   font-size: 12px;
@@ -1938,7 +1942,7 @@ onBeforeUnmount(() => {
   min-height: 44px;
   padding: 0 14px;
   border-radius: 10px;
-  border: 1px solid var(--line-strong);
+  border: var(--edge-w, 2px) solid var(--edge);
   background: var(--surface-2);
   color: var(--ink);
   font-size: 14px;
@@ -1995,10 +1999,10 @@ onBeforeUnmount(() => {
   max-width: 420px;
   padding: 16px;
   border-radius: 14px;
-  border: 1px solid var(--line-strong);
+  border: var(--edge-w, 2px) solid var(--edge);
   background: var(--surface-0);
   color: var(--ink);
-  box-shadow: 0 18px 48px var(--scrim);
+  box-shadow: var(--paper-shadow);
   font-size: 13.5px;
 }
 .sm-dialog h2 {
@@ -2035,7 +2039,7 @@ onBeforeUnmount(() => {
   border-radius: 16px 16px 0 0;
   background: var(--surface-0);
   color: var(--ink);
-  box-shadow: 0 -12px 36px var(--scrim);
+  box-shadow: 0 -4px 0 var(--shadow-ink);
 }
 .sm-sheet-head {
   display: flex;
@@ -2055,7 +2059,7 @@ onBeforeUnmount(() => {
 .sm-sheet-opt {
   min-height: 44px;
   border-radius: 10px;
-  border: 1px solid var(--line-strong);
+  border: var(--edge-w, 2px) solid var(--edge);
   background: var(--surface-2);
   color: var(--ink);
   font-size: 15px;

@@ -267,16 +267,20 @@ describe('工作台首页 · 店长视角', () => {
     })
 
     const cells = wrapper.findAll('.wbh-cell')
-    expect(cells).toHaveLength(4)
+    expect(cells).toHaveLength(3)
+    // 四张里三张非 0、一张 0：卡片区收窄（is-lean），桌面 1440 上把空间让给真需要的卡。
+    expect(wrapper.get('.wbh-kpis').classes()).toContain('is-lean')
     expect(cells.map((cell) => cell.attributes('href'))).toEqual([
       '/workbench/hr/inbox', '/workbench/floor/daily', '/workbench/floor/fix',
-      '/workbench/hr/reminders',
     ])
     // 待批请假只数请假（换班那条还在等对方点头，店长这儿看不到）。
     expect(wrapper.get('.wbh-cell.leaves .wbh-num').text()).toBe('1')
     expect(wrapper.get('.wbh-cell.reviews .wbh-num').text()).toBe('2')
     // 逾期整改只数过了截止时间、还等着回拍的那张。
     expect(wrapper.get('.wbh-cell.fixes .wbh-num').text()).toBe('1')
+    // 人事提醒是 0：不占第四张大卡，收进小字条（链接还在）。
+    expect(wrapper.find('.wbh-cell.reminders').exists()).toBe(false)
+    expect(wrapper.get('.wbh-kpi-zeros').get('a[href="/workbench/hr/reminders"]').exists()).toBe(true)
   })
 
   it('健康证到期不再占首页一格：它的数字并进人事提醒（2026-10-08 用户裁定）', async () => {
@@ -294,7 +298,9 @@ describe('工作台首页 · 店长视角', () => {
     })
 
     expect(wrapper.find('.wbh-cell.certs').exists()).toBe(false)
-    expect(wrapper.get('.wbh-cell.reminders').attributes('href')).toBe('/workbench/hr/reminders')
+    // 人事提醒是 0：不占卡，收进小字条，链接还在。
+    expect(wrapper.find('.wbh-cell.reminders').exists()).toBe(false)
+    expect(wrapper.get('.wbh-kpi-zeros').find('a[href="/workbench/hr/reminders"]').exists()).toBe(true)
     // 首页只摊数字：敏感字段（底薪 / 身份证号）哪里都不出现。
     expect(wrapper.text()).not.toContain('底薪')
     expect(wrapper.text()).not.toContain('身份证号')
@@ -337,16 +343,19 @@ describe('工作台首页 · 店长视角', () => {
     expect(cell.attributes('href')).toBe('/workbench/hr/reminders')
   })
 
-  it('数字为 0 时是稳稳的 0（不是空白、也不是整块消失）', async () => {
+  it('数字为 0 时收成一条小字（不再各占一张大卡），仍是稳稳的 0', async () => {
     const { wrapper } = await mountHome({ identity: 'super', table: managerData() })
 
-    for (const key of ['leaves', 'reviews', 'fixes', 'reminders']) {
-      const num = wrapper.get(`.wbh-cell.${key} .wbh-num`)
-      expect(num.text()).toBe('0')
+    // 四张读数全 0：一张大卡都不占，收成一条小字；不是空白、也没把 0 写成「—」。
+    expect(wrapper.findAll('.wbh-kpi')).toHaveLength(0)
+    const zeros = wrapper.get('.wbh-kpi-zeros')
+    expect(zeros.text()).toContain('其余 0：')
+    for (const label of ['待批请假 0', '待验收 0', '逾期整改 0', '人事提醒 0']) {
+      expect(zeros.text()).toContain(label)
     }
     expect(wrapper.get('.wbh-duty').text()).toContain('今天还没排班')
     // 0 也照旧点得进去（门口的意义就是「去看那一页」）。
-    expect(wrapper.get('.wbh-cell.leaves').attributes('href')).toBe('/workbench/hr/inbox')
+    expect(zeros.get('a[href="/workbench/hr/inbox"]').exists()).toBe(true)
   })
 
   it('某一块读不出来时那一格给「—」，别的格子照常显示', async () => {
@@ -360,7 +369,10 @@ describe('工作台首页 · 店长视角', () => {
 
     expect(wrapper.get('.wbh-cell.leaves .wbh-num').text()).toBe('1')
     expect(wrapper.get('.wbh-cell.reviews .wbh-num').text()).toBe('—')
-    expect(wrapper.get('.wbh-cell.fixes .wbh-num').text()).toBe('0')
+    // 确定的 0 不占卡，读不出来的「—」仍占卡：两种状态不能混成一种处理。
+    expect(wrapper.find('.wbh-cell.fixes').exists()).toBe(false)
+    expect(wrapper.get('.wbh-kpi-zeros').text()).toContain('逾期整改 0')
+    expect(wrapper.get('.wbh-kpis').classes()).toContain('is-lean')
   })
 
   it('首页不发任何写请求、也不打员工端那些接口', async () => {
@@ -444,6 +456,9 @@ describe('工作台首页 · 员工视角', () => {
     const cell = wrapper.get('.wbh-cell.myRequests')
     expect(cell.get('.wbh-num').text()).toBe('1')
     expect(cell.attributes('href')).toBe('/workbench/staff/today')
+    // 同一行另一张卡是 0：它不占位置，收进下面那条小字里。
+    expect(wrapper.find('.wbh-cell.myItems').exists()).toBe(false)
+    expect(wrapper.get('.wbh-zero-strip').text()).toContain('我的待办 0')
   })
 
   it('没班 / 数据为空时给一句人话，不是空白', async () => {
@@ -459,7 +474,7 @@ describe('工作台首页 · 员工视角', () => {
     })
 
     expect(wrapper.get('.wbh-me').text()).toContain('休')
-    expect(wrapper.get('.wbh-cell.myItems .wbh-num').text()).toBe('0')
+    expect(wrapper.get('.wbh-zero-strip').text()).toContain('我的待办 0')
   })
 
   it('今天的活那一块在首页上：日常进度、仪容仪表与两颗入口（2026-10-14 用户裁定）', async () => {
@@ -491,16 +506,15 @@ describe('工作台首页 · 员工视角', () => {
 })
 
 describe('工作台首页 · 灯的亮灭跟着数字走（2026-11-09 走查）', () => {
-  it('四个读数为 0 时全用中性灯：第一屏不该每天先报一次警', async () => {
+  it('四个读数为 0 时一张大卡都不占：第一屏不该每天先报一次警', async () => {
     const { wrapper } = await mountHome({ identity: 'super', table: managerData() })
 
-    for (const key of ['leaves', 'reviews', 'fixes']) {
-      expect(wrapper.get(`.wbh-cell.${key}`).classes()).not.toContain('is-warn')
-      expect(wrapper.get(`.wbh-cell.${key}`).classes()).not.toContain('is-bad')
-      expect(wrapper.get(`.wbh-cell.${key} .wbh-led`).classes()).toContain('off')
-    }
-    // 人事提醒 0 人也一样：中性灯，别用蓝点假装有动静。
-    expect(wrapper.get('.wbh-cell.reminders .wbh-led').classes()).toContain('off')
+    // 0 值不占卡、也没有灯：报一次警的前提是「真有事」。
+    expect(wrapper.findAll('.wbh-kpi')).toHaveLength(0)
+    const zeros = wrapper.get('.wbh-kpi-zeros')
+    expect(zeros.text()).toContain('人事提醒 0')
+    expect(zeros.findAll('.is-warn')).toHaveLength(0)
+    expect(zeros.findAll('.is-bad')).toHaveLength(0)
   })
 
   it('有数字时才亮：待批 1 件是黄灯，逾期整改 1 件是红灯', async () => {
@@ -520,11 +534,17 @@ describe('工作台首页 · 灯的亮灭跟着数字走（2026-11-09 走查）'
     expect(wrapper.get('.wbh-cell.fixes .wbh-led').classes()).toContain('bad')
   })
 
-  it('员工两格：0 待办 / 0 回应不亮灯', async () => {
+  it('员工读数卡为 0 时：不占卡、也不亮灯', async () => {
     const { wrapper } = await mountHome({ identity: 'staff', table: staffData() })
 
-    expect(wrapper.get('.wbh-cell.myItems .wbh-led').classes()).toContain('off')
-    expect(wrapper.get('.wbh-cell.myRequests .wbh-led').classes()).toContain('off')
+    expect(wrapper.find('.wbh-cell.myItems').exists()).toBe(false)
+    expect(wrapper.find('.wbh-cell.myRequests').exists()).toBe(false)
+    expect(wrapper.find('.wbh-cell.myTasks').exists()).toBe(false)
+    const zeros = wrapper.get('.wbh-zero-strip')
+    expect(zeros.text()).toContain('任务 0')
+    expect(zeros.text()).toContain('我的待办 0')
+    expect(zeros.text()).toContain('等我回应 0')
+    expect(zeros.findAll('.is-warn')).toHaveLength(0)
   })
 })
 
@@ -556,6 +576,16 @@ describe('工作台首页 · 店长（员工会话 + schedule）的「店里的�
     expect(cells[0].get('.wbh-num').text()).toBe('1') // 自己提的那条不算待批
     expect(cells[1].get('.wbh-num').text()).toBe('3')
     expect(cells[2].get('.wbh-num').text()).toBe('70')
+    // 语义在数字前：先说「还差」，再放数字，63/63 就不会被读成完成度。
+    const prepLine = cells[2].get('.wbh-prep-line').text()
+    expect(prepLine.startsWith('还差')).toBe(true)
+    expect(prepLine.endsWith('项')).toBe(true)
+    expect(prepLine.indexOf('70')).toBeGreaterThan(prepLine.indexOf('还差'))
+    expect(cells[2].get('.wbh-team-lab').text()).toBe('备货计划 ›')
+    // 眉标只说这条里有哪些能力，不再写「管理员」：顶部徽标才是身份（超级管理员 / 员工）。
+    const hint = wrapper.get('.wbh-hint').text()
+    expect(hint).toBe('排班')
+    expect(hint).not.toContain('管理员')
     expect(cells[0].attributes('href')).toBe('/workbench/hr/inbox')
     expect(cells[1].attributes('href')).toBe('/workbench/hr/calendar')
     expect(cells[2].attributes('href')).toBe('/workbench/kitchen/prep-plan')

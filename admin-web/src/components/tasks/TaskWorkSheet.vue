@@ -213,7 +213,8 @@ async function submitNow() {
   max-height: 92vh;
   overflow-y: auto;
   padding: 16px;
-  border: 1px solid var(--line);
+  border: var(--edge-w, 2px) solid var(--edge);
+  box-shadow: var(--paper-shadow-sm);
   border-radius: var(--r-2);
   background: var(--surface-1);
 }
@@ -241,7 +242,7 @@ async function submitNow() {
   flex: none;
   min-height: var(--tap);
   padding: 6px 12px;
-  border: 1px solid var(--line);
+  border: var(--edge-w, 2px) solid var(--edge);
   border-radius: var(--r-1);
   background: var(--surface-2);
   color: var(--ink-dim);
@@ -260,7 +261,7 @@ async function submitNow() {
   max-height: 46vh;
   object-fit: contain;
   border-radius: var(--r-1);
-  border: 1px solid var(--line);
+  border: var(--edge-w, 2px) solid var(--edge);
   margin-bottom: 8px;
 }
 .work-photos {
@@ -277,7 +278,7 @@ async function submitNow() {
   height: 110px;
   object-fit: cover;
   border-radius: var(--r-1);
-  border: 1px solid var(--line);
+  border: var(--edge-w, 2px) solid var(--edge);
 }
 .work-link {
   margin-top: 2px;
@@ -311,7 +312,7 @@ async function submitNow() {
   font-weight: 700;
 }
 .work-secondary {
-  border: 1px solid var(--line-strong);
+  border: var(--edge-w, 2px) solid var(--edge);
   background: var(--surface-2);
   color: var(--ink-dim);
 }

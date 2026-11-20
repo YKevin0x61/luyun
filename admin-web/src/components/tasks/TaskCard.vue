@@ -72,7 +72,8 @@ function open() {
   gap: 8px;
   padding: 12px;
   margin-bottom: 10px;
-  border: 1px solid var(--line);
+  border: var(--edge-w, 2px) solid var(--edge);
+  box-shadow: var(--paper-shadow-sm);
   border-radius: var(--r-2);
   background: var(--surface-1);
   cursor: pointer;

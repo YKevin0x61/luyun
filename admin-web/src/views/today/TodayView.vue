@@ -675,7 +675,9 @@ useNudgePull({
          手机端 1 击可达；这一页只有 staff 会话能进，所以不用再判身份）。 -->
     <header class="tTop" :inert="anyModalOpen || null">
       <div class="tTop-main">
-        <p class="kicker">我的</p>
+        <!-- 页头只有这一行标题（2026-11-20）：原来上面还压着一条眉标「我的」，与 H1
+             逐字重复，手机上一屏里同一句话写两遍、还把 H1 往下顶。眉标整条删掉 ——
+             这一页不需要它说明自己是谁，底栏那一格与路由标题都已经在说。 -->
         <h1 class="tDay">我的</h1>
       </div>
       <div class="tTop-side">
@@ -825,9 +827,11 @@ useNudgePull({
           </dl>
         </template>
 
-        <!-- 口径收进卡内折叠：数字的解释跟着数字走，但不占常驻行数。 -->
+        <!-- 口径收进卡内折叠：数字的解释跟着数字走，但不占常驻行数。
+             summary 原生的展开标记被样式隐藏了，这里自己带一颗箭头：只写「口径」
+             两个字，真机上看着像内容缺失（走查截图）。 -->
         <details class="card-rules">
-          <summary>口径</summary>
+          <summary>成绩口径<span class="card-rules-arrow" aria-hidden="true">▸</span></summary>
           <p class="tA-sub">次数口径，与红黑榜同一份记录。</p>
         </details>
 
@@ -1264,13 +1268,6 @@ useNudgePull({
 
 .tTop-main { min-width: 0; }
 
-.kicker {
-  margin: 0 0 5px;
-  font: 500 9.5px/1 var(--font-sans);
-  letter-spacing: .26em;
-  color: var(--ink-faint);
-}
-
 .tDay {
   margin: 0;
   font: 600 26px/1 var(--font-sans);
@@ -1295,9 +1292,11 @@ useNudgePull({
   padding: 0 12px;
   font-size: 11.5px;
   color: var(--ink);
+  background: var(--surface-1);
+  box-shadow: 2px 2px 0 var(--shadow-ink);
   text-decoration: none;
   white-space: nowrap;
-  border: 1px solid var(--line-strong);
+  border: var(--edge-w, 2px) solid var(--edge);
   border-radius: var(--r-1);
 }
 .tTop-link:hover {
@@ -1348,9 +1347,9 @@ useNudgePull({
 
 .tA-card {
   background: var(--surface-1);
-  border: 1px solid var(--line);
+  border: var(--edge-w, 2px) solid var(--edge);
   border-radius: var(--r-2);
-  box-shadow: var(--hy-shadow-sm);
+  box-shadow: var(--paper-shadow-sm);
   overflow: hidden;
   padding: 0 0 12px;
 }
@@ -1398,7 +1397,7 @@ useNudgePull({
   min-height: 48px !important;
   border-radius: var(--r-1);
   background: transparent;
-  border: 1px solid var(--line-strong);
+  border: var(--edge-w, 2px) solid var(--edge);
   color: var(--ink);
 }
 .today-page.hygiene-staff .btn:hover:not(:disabled) {
@@ -1540,7 +1539,7 @@ useNudgePull({
   flex-direction: column;
   gap: 5px;
   padding: 9px 10px;
-  border: 1px solid var(--line);
+  border: var(--edge-w, 2px) solid var(--edge);
   border-radius: var(--r-1);
   background: var(--surface-2);
 }
@@ -1551,7 +1550,7 @@ useNudgePull({
 }
 .score-split dd {
   margin: 0;
-  font-family: var(--font-mono), var(--font-sans);
+  font-family: var(--font-display), var(--font-sans);
   font-size: 20px;
   font-weight: 600;
   color: var(--ink);
@@ -1613,6 +1612,14 @@ useNudgePull({
   color: var(--ink-dim);
 }
 .card-rules > summary::-webkit-details-marker { display: none; }
+/* 自带的展开指示（原生 marker 被上面藏掉了）：收起 ▸、展开转成 ▾。 */
+.card-rules-arrow {
+  display: inline-block;
+  margin-left: 4px;
+  font-size: 9px;
+  color: var(--ink-faint);
+}
+.card-rules[open] .card-rules-arrow { transform: rotate(90deg); }
 .card-rules .tA-sub {
   margin: 4px 0 0;
   font-size: 10.5px;
@@ -1664,7 +1671,7 @@ details.tA-card.me > summary.me-sum {
   padding: 8px 10px;
   border-radius: var(--r-1);
   background: var(--ok-soft);
-  border: 1px solid var(--ok);
+  border: var(--edge-w, 2px) solid var(--ok);
   color: var(--ok);
   font-size: 11.5px;
   font-weight: 600;
@@ -1672,7 +1679,7 @@ details.tA-card.me > summary.me-sum {
 .me-meta {
   display: grid;
   gap: 0;
-  border: 1px solid var(--line);
+  border: var(--edge-w, 2px) solid var(--edge);
   border-radius: var(--r-1);
   background: var(--surface-2);
   overflow: hidden;
@@ -1815,7 +1822,7 @@ details.tA-foot {
   gap: 8px;
   margin: 0;
   padding: 10px 12px;
-  border: 1px solid var(--danger);
+  border: var(--edge-w, 2px) solid var(--danger);
   border-radius: var(--r-1);
   background: var(--danger-soft);
   color: var(--danger-bright);

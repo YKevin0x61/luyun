@@ -165,6 +165,8 @@ function onWorkSubmitted() {
 .tasks-page {
   max-width: 720px;
   margin: 0 auto;
+  /* 同上：flex 列里的 auto 外边距会让 stretch 失效，缺 width 就缩成内容宽（2026-11-20）。 */
+  width: 100%;
   padding: 20px 16px 40px;
 }
 .tasks-head {
@@ -176,7 +178,7 @@ function onWorkSubmitted() {
 }
 .tasks-kicker {
   margin: 0 0 4px;
-  font-size: 12px;
+  font-size: var(--fs-12);
   letter-spacing: 0.08em;
   color: var(--ink-faint);
 }
@@ -189,7 +191,7 @@ function onWorkSubmitted() {
 }
 .tasks-sub {
   margin: 6px 0 0;
-  font-size: 13px;
+  font-size: var(--fs-13);
   line-height: 1.6;
   color: var(--ink-dim);
 }
@@ -202,7 +204,7 @@ function onWorkSubmitted() {
   background: var(--action);
   color: var(--action-ink);
   font: inherit;
-  font-size: 13px;
+  font-size: var(--fs-13);
   font-weight: 700;
   cursor: pointer;
 }
@@ -212,7 +214,7 @@ function onWorkSubmitted() {
   border-radius: var(--r-1);
   background: var(--danger-soft);
   color: var(--danger-bright);
-  font-size: 13px;
+  font-size: var(--fs-13);
   line-height: 1.6;
 }
 .tasks-panels {
@@ -222,7 +224,8 @@ function onWorkSubmitted() {
 }
 .tasks-panel {
   background: var(--surface-1);
-  border: 1px solid var(--line);
+  border: var(--edge-w, 2px) solid var(--edge);
+  box-shadow: var(--paper-shadow-sm);
   border-radius: var(--r-2);
   padding: 14px;
   min-height: 120px;
@@ -243,17 +246,22 @@ function onWorkSubmitted() {
 .tasks-chip {
   min-width: 22px;
   padding: 1px 7px;
-  border-radius: var(--r-full);
+  border-radius: var(--r-1);
   background: var(--action-soft);
   color: var(--action);
-  font-size: 12px;
+  font-size: var(--fs-12);
   font-weight: 700;
   text-align: center;
 }
 .tasks-empty {
   margin: 0;
-  font-size: 13px;
+  font-size: var(--fs-13);
   line-height: 1.7;
   color: var(--ink-faint);
+}
+
+@media (max-width: 720px) {
+  /* 眉标「工作台 · 我的」桌面看是路径提示，手机上是紧挨 H1 的第二遍标题（2026-11-20）。 */
+  .tasks-kicker { display: none; }
 }
 </style>

@@ -264,35 +264,43 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
     z-index: var(--z-dialog);
     min-height: 56px;
     padding: 6px max(12px, env(safe-area-inset-right)) 6px max(12px, env(safe-area-inset-left));
-    background: var(--surface-1);
-    border-bottom: 1px solid var(--hy-line);
+    /* 贴纸风（2026-11-20）：暖纸底 + 2px 深墨压边，与页面同色不割裂、靠一条硬线分界。 */
+    background: var(--chrome);
+    border-bottom: var(--edge-w) solid var(--edge);
   }
 }
 
-/* 组名（2026-10-08 起它同时是换页入口）：外观仍是个安静的小标签 —— 页面名已经不在
-   顶栏了，这一行最重的东西交给右边那颗身份；热区照旧 ≥44px，手机上点得动。 */
+/* 组名（2026-10-08 起它同时是换页入口）：**安静的小标签**，不是这一行里最重的东西。
+   2026-11-20 之前它是个贴纸按钮（2px 压边 + 硬阴影 + 700 字重），比页内 H1 还重，
+   手机上一屏里于是有三层标题在抢眼（顶栏组名 / 页头眉标 / H1）。眉标删掉之后，
+   顶栏这一处退回真正的「标签」：无边框、无底、无阴影，灰字 + 箭头，热区照旧 ≥44px 可点。
+   颜色取 --hy-muted 而不是 --hy-ink —— 页面标题才是这一屏最深的字。 */
 .wmh-grp {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
+  gap: 4px;
   flex: 0 0 auto;
   min-height: 44px;
-  padding: 0 10px;
+  padding: 0 4px;
+  /* 热区往左撑 4px 再吃回来：文字与页内容左缘对齐，44px 的点击区一点没丢。 */
+  margin-left: -4px;
   border: 0;
   border-radius: var(--r-1);
-  background: var(--surface-2);
+  background: none;
   color: var(--hy-muted);
   font: inherit;
-  font-size: 12.5px;
+  font-size: var(--fs-13);
   font-weight: 600;
   white-space: nowrap;
   cursor: pointer;
 }
-.wmh-grp:hover { background: var(--hy-mint-soft); color: var(--hy-ink); }
+.wmh-grp:hover { background: var(--hy-surface-2); color: var(--hy-ink); }
+.wmh-grp:active { background: var(--hy-mint-soft); }
 /* 组里只有一页（「今天」）：它是标签不是按钮，别画成可点的样子。 */
 .wmh-grp.is-static { cursor: default; }
 .wmh-grp-name { max-width: 7.5em; overflow: hidden; text-overflow: ellipsis; }
-.wmh-caret { color: var(--hy-mint); }
+/* 箭头跟文字同色（原来单独给薄荷绿：在一处本该安静的标签上，那点彩色比字还显眼）。 */
+.wmh-caret { color: inherit; opacity: .65; }
 
 .wmh-sp { flex: 1 1 auto; min-width: 0; }
 

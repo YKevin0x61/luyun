@@ -27,8 +27,10 @@ const pageRoutes = readFileSync(join(here, '../../../router/pageRoutes.json'), '
 describe('员工端「我的」页（IA 第二层）', () => {
   it('标题就是「我的」：页头、document.title、页面清单三处同一个词', () => {
     // 用户裁定：这一页不再承担「今天」——与工作台首页的员工档（也叫「今天」）撞名。
-    expect(view).toMatch(/class="kicker">我的</)
+    // 2026-11-20：标题只出现一次 —— 原来 H1 上方还有一条同样的眉标「我的」，
+    // 手机上同一句话写两遍，眉标整条删掉（连带 .kicker 的样式）。
     expect(view).toMatch(/class="tDay">我的</)
+    expect(view).not.toMatch(/class="kicker"/)
     expect(view).toContain("workbenchDocumentTitle('我的')")
     // 页面清单里这一行的 title 也跟着改（底栏「我的」那一格点进来时页头/标签一致）。
     expect(pageRoutes).toMatch(/"path": "\/workbench\/staff\/today",\s*"title": "我的"/)

@@ -41,7 +41,7 @@ const { loggingOut, confirmOpen, queuedCount, ask, cancel, logout } = useStaffLo
   font-family: var(--font-sans);
   font-size: 11.5px;
   color: var(--ink);
-  border: 1px solid var(--line-strong);
+  border: var(--edge-w, 2px) solid var(--edge);
   border-radius: var(--r-1);
   background: transparent;
   cursor: pointer;

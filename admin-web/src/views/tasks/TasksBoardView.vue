@@ -165,6 +165,10 @@ function reloadAfterChange() {
 .tasks-page {
   max-width: 1080px;
   margin: 0 auto;
+  /* `.wb-main` 是 flex 列：交叉轴上给了 auto 外边距，stretch 就失效，容器缩成内容宽度
+     （桌面任务页实测 546px，三张卡挤在左三分之一、右边整片空）。补 width: 100% 后
+     max-width 才真正起作用，auto 外边距再把它居中（2026-11-20）。 */
+  width: 100%;
   padding: 20px 16px 40px;
 }
 .tasks-head {
@@ -176,7 +180,7 @@ function reloadAfterChange() {
 }
 .tasks-kicker {
   margin: 0 0 4px;
-  font-size: 12px;
+  font-size: var(--fs-12);
   letter-spacing: 0.08em;
   color: var(--ink-faint);
 }
@@ -189,7 +193,7 @@ function reloadAfterChange() {
 }
 .tasks-sub {
   margin: 6px 0 0;
-  font-size: 13px;
+  font-size: var(--fs-13);
   line-height: 1.6;
   color: var(--ink-dim);
 }
@@ -202,7 +206,7 @@ function reloadAfterChange() {
   background: var(--action);
   color: var(--action-ink);
   font: inherit;
-  font-size: 13px;
+  font-size: var(--fs-13);
   font-weight: 700;
   cursor: pointer;
 }
@@ -212,12 +216,12 @@ function reloadAfterChange() {
   border-radius: var(--r-1);
   background: var(--danger-soft);
   color: var(--danger-bright);
-  font-size: 13px;
+  font-size: var(--fs-13);
   line-height: 1.6;
 }
 .tasks-hint {
   margin: 0 0 12px;
-  font-size: 13px;
+  font-size: var(--fs-13);
   color: var(--ink-faint);
 }
 .tasks-overdue {
@@ -226,7 +230,7 @@ function reloadAfterChange() {
   border-radius: var(--r-1);
   background: var(--warn-soft);
   color: var(--warn);
-  font-size: 13px;
+  font-size: var(--fs-13);
   line-height: 1.6;
 }
 .tasks-segments {
@@ -239,10 +243,14 @@ function reloadAfterChange() {
   .tasks-segments {
     grid-template-columns: minmax(0, 1fr);
   }
+  /* 眉标「工作台 · 任务」是给桌面看的路径提示；手机上它紧挨着 H1「任务」，
+     同一屏先说一遍位置再说一遍名字，是三处标题里多余的那一处（2026-11-20）。 */
+  .tasks-kicker { display: none; }
 }
 .tasks-segment {
   background: var(--surface-1);
-  border: 1px solid var(--line);
+  border: var(--edge-w, 2px) solid var(--edge);
+  box-shadow: var(--paper-shadow-sm);
   border-radius: var(--r-2);
   padding: 14px;
   min-height: 180px;
@@ -262,16 +270,16 @@ function reloadAfterChange() {
 .tasks-chip {
   min-width: 22px;
   padding: 1px 7px;
-  border-radius: var(--r-full);
+  border-radius: var(--r-1);
   background: var(--action-soft);
   color: var(--action);
-  font-size: 12px;
+  font-size: var(--fs-12);
   font-weight: 700;
   text-align: center;
 }
 .tasks-empty {
   margin: 0;
-  font-size: 13px;
+  font-size: var(--fs-13);
   line-height: 1.7;
   color: var(--ink-faint);
 }
@@ -282,21 +290,22 @@ function reloadAfterChange() {
   align-items: center;
   margin: 0 0 12px;
   padding: 8px 12px;
-  border-radius: var(--r-2);
+  border-radius: var(--r-1);
   background: var(--warn-soft);
   color: var(--ink);
-  font-size: 13px;
+  font-size: var(--fs-13);
   line-height: 1.6;
 }
 .tasks-reassign-filter {
   min-height: var(--tap);
   padding: 2px 10px;
-  border: 1px solid var(--line-strong);
+  border: var(--edge-w, 2px) solid var(--edge);
+  box-shadow: var(--paper-shadow-sm);
   border-radius: var(--r-full);
   background: var(--surface-1);
   color: var(--action);
   font: inherit;
-  font-size: 12px;
+  font-size: var(--fs-12);
   font-weight: 700;
   cursor: pointer;
 }

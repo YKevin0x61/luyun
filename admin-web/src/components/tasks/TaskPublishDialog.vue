@@ -550,7 +550,7 @@ function finishAfterWarning() {
 .task-mode-btn {
   flex: 1;
   padding: 7px 10px;
-  border: 1px solid var(--line);
+  border: var(--edge-w, 2px) solid var(--edge);
   border-radius: var(--r-1);
   background: var(--surface-2);
   color: var(--ink-dim);
@@ -572,7 +572,7 @@ function finishAfterWarning() {
   overflow-y: auto;
   padding: 6px 8px;
   margin-bottom: 8px;
-  border: 1px solid var(--line);
+  border: var(--edge-w, 2px) solid var(--edge);
   border-radius: var(--r-1);
   background: var(--surface-2);
 }
@@ -626,7 +626,7 @@ function finishAfterWarning() {
   height: 72px;
   object-fit: cover;
   border-radius: var(--r-1);
-  border: 1px solid var(--line);
+  border: var(--edge-w, 2px) solid var(--edge);
 }
 .task-link {
   border: 0;
@@ -654,7 +654,7 @@ function finishAfterWarning() {
   cursor: pointer;
 }
 .task-secondary {
-  border: 1px solid var(--line-strong);
+  border: var(--edge-w, 2px) solid var(--edge);
   background: var(--surface-2);
   color: var(--ink-dim);
 }
@@ -684,7 +684,7 @@ function finishAfterWarning() {
   gap: 12px;
   margin-top: 10px;
   padding: 10px 12px;
-  border-radius: var(--r-2);
+  border-radius: var(--r-1);
   background: var(--warn-soft);
   color: var(--ink);
 }

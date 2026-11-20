@@ -186,7 +186,7 @@ function goHome() {
 .wb-forbid-btn {
   font: inherit; font-size: 14px; cursor: pointer;
   color: var(--hy-mint-ink); background: var(--hy-mint);
-  border: 1px solid var(--hy-mint-line); border-radius: 999px;
+  border: var(--edge-w, 2px) solid var(--hy-mint-line); border-radius: var(--r-1);
   padding: 9px 22px;
 }
 .wb-forbid-btn:hover { background: var(--hy-mint-bright); }

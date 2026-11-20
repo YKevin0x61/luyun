@@ -477,7 +477,7 @@ async function doReject() {
 .task-review {
   margin-top: 12px;
   padding: 10px;
-  border: 1px solid var(--line);
+  border: var(--edge-w, 2px) solid var(--edge);
   border-radius: var(--r-1);
   background: var(--surface-2);
 }
@@ -492,14 +492,15 @@ async function doReject() {
   height: 88px;
   object-fit: cover;
   border-radius: var(--r-1);
-  border: 1px solid var(--line);
+  border: var(--edge-w, 2px) solid var(--edge);
   cursor: zoom-in;
 }
 .task-review-reason {
   width: 100%;
   box-sizing: border-box;
   padding: 8px;
-  border: 1px solid var(--line-strong);
+  border: var(--edge-w, 2px) solid var(--edge);
+  box-shadow: var(--paper-shadow-sm);
   border-radius: var(--r-1);
   background: var(--surface-1);
   color: var(--ink);
@@ -608,7 +609,7 @@ async function doReject() {
   height: 90px;
   object-fit: cover;
   border-radius: var(--r-1);
-  border: 1px solid var(--line);
+  border: var(--edge-w, 2px) solid var(--edge);
 }
 .task-warn {
   margin: 0 0 8px;
@@ -654,7 +655,7 @@ async function doReject() {
   height: 66px;
   object-fit: cover;
   border-radius: var(--r-1);
-  border: 1px solid var(--line);
+  border: var(--edge-w, 2px) solid var(--edge);
 }
 .task-reject {
   margin: 0 0 8px;
@@ -682,12 +683,12 @@ async function doReject() {
   font-weight: 700;
 }
 .task-secondary {
-  border: 1px solid var(--line-strong);
+  border: var(--edge-w, 2px) solid var(--edge);
   background: var(--surface-2);
   color: var(--ink-dim);
 }
 .task-danger {
-  border: 1px solid var(--danger);
+  border: var(--edge-w, 2px) solid var(--danger);
   background: var(--danger-soft);
   color: var(--danger-bright);
   font-weight: 700;
@@ -719,7 +720,7 @@ async function doReject() {
 .task-reassign {
   margin-top: 12px;
   padding: 10px;
-  border: 1px solid var(--line);
+  border: var(--edge-w, 2px) solid var(--edge);
   border-radius: var(--r-1);
   background: var(--surface-2);
 }
@@ -736,7 +737,8 @@ async function doReject() {
 .task-reassign-mode button {
   flex: 1;
   min-height: var(--tap);
-  border: 1px solid var(--line-strong);
+  border: var(--edge-w, 2px) solid var(--edge);
+  box-shadow: var(--paper-shadow-sm);
   border-radius: var(--r-1);
   background: var(--surface-1);
   color: var(--ink-dim);
@@ -757,7 +759,7 @@ async function doReject() {
   min-height: var(--tap);
   margin-bottom: 8px;
   padding: 6px 8px;
-  border: 1px solid var(--line-strong);
+  border: var(--edge-w, 2px) solid var(--edge);
   border-radius: var(--r-1);
   background: var(--surface-1);
   color: var(--ink);
