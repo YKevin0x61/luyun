@@ -200,16 +200,21 @@ onBeforeUnmount(() => {
 .std-cache-trigger {
   position: fixed;
   right: 14px;
-  bottom: 76px;
+  /* 2026-11-20：原来桌面 / 手机各写死一个 bottom（76 / 86px）—— 都没算安全区，
+     iPhone 上底栏 56px + 34px 的 home indicator 会让这颗按钮骑在底栏上沿；
+     而它又浮在列表之上，390 宽下正好压住最后一行的「已超时 N 小时」。
+     改成按底栏高度 + 安全区算，并且页面底部留出同样高度的空白（HygieneHomeView）。 */
+  bottom: calc(56px + var(--safe-b) + 10px);
   z-index: var(--z-scrim);
-  border: 1px solid var(--hy-line);
-  border-radius: 999px;
+  border: var(--edge-w, 2px) solid var(--edge);
+  border-radius: var(--r-1);
   background: var(--hy-surface);
-  color: var(--hy-muted);
-  padding: 7px 11px;
-  font: 700 11px/1 var(--font-mono);
-  box-shadow: 0 8px 20px var(--wb-scrim);
+  color: var(--hy-ink);
+  padding: 8px 12px;
+  font: 700 var(--fs-12)/1 var(--font-sans);
+  box-shadow: var(--paper-shadow-sm);
 }
+.std-cache-trigger:active { transform: translate(2px, 2px); box-shadow: none; }
 .std-cache-trigger span {
   margin-left: 5px;
   color: var(--hy-mint-bright);
@@ -221,7 +226,7 @@ onBeforeUnmount(() => {
   display: grid;
   place-items: center;
   padding: 18px;
-  background: rgba(3, 11, 10, .72);
+  background: var(--wb-scrim-strong, rgba(29, 27, 58, .52));
   backdrop-filter: blur(8px);
 }
 /* 首次下载提示必须低于拍摄/对照弹层（.staff-preview 是 60）：它是启动时自动弹的，
@@ -234,12 +239,12 @@ onBeforeUnmount(() => {
   width: min(520px, 100%);
   max-height: min(86vh, 720px);
   overflow: auto;
-  border: 1px solid var(--hy-line);
-  border-radius: 10px;
+  border: var(--edge-w, 2px) solid var(--edge);
+  border-radius: var(--r-2);
   background: var(--hy-surface);
   color: var(--hy-ink);
   padding: 20px;
-  box-shadow: 0 24px 60px var(--wb-scrim);
+  box-shadow: var(--paper-shadow);
 }
 .std-cache-card h2 {
   margin: 0 0 10px;
@@ -272,7 +277,7 @@ onBeforeUnmount(() => {
   border: 1px solid var(--hy-line);
   border-radius: 8px;
   background: var(--hy-surface);
-  box-shadow: 0 16px 36px var(--wb-scrim);
+  box-shadow: var(--paper-shadow);
 }
 .std-cache-progress {
   bottom: 14px;
@@ -344,7 +349,6 @@ onBeforeUnmount(() => {
 }
 .std-cache-error { color: var(--red) !important; }
 @media (max-width: 720px) {
-  .std-cache-trigger { bottom: 86px; }
   .std-cache-stats { grid-template-columns: 1fr; }
 }
 </style>

@@ -6,8 +6,9 @@
 （见 `delete_archive_record` / `purge_archive_records`）。分成两块是因为照片引用散在
 六张业务表里，查询要 UNION 归一，而删除要回退待办状态——两者的关注点与风险不同。
 
-六类照片各自的"营业日"来源不同：日常/专项挂在实例的 `business_date` 上，整改、教材、
-标准图版本只有创建时间，所以后三类按 06:00 切日自行折算，与 ADR-0053 一致。
+六类照片各自的一天来源不同：日常/专项挂在实例的 `business_date` 上，整改、教材、
+标准图版本只有创建时间，所以后三类按**卫生的一天**（00:00 切，ADR 0125）折算 ——
+窗口与标签都走 `services.hygiene.day`，同一行不会出现两个日期。
 """
 
 from __future__ import annotations
@@ -20,29 +21,23 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Iterable, Optional
 
-from services.hygiene.accounts import hygiene_business_date
 from database import CHINA_TZ
+from services.hygiene import captures_ledger
+from services.hygiene.day import day_of, today as hygiene_today, window_text
+from services.hygiene.kinds import (
+    KIND_ATTIRE,
+    KIND_DAILY,
+    KIND_DEEP,
+    KIND_FIX,
+    KIND_FIX_RESHOOT,
+    KIND_LABELS,
+    KIND_STANDARD,
+    KIND_TEACHING,
+)
 from services.hygiene.standards_export import safe_component
 
 logger = logging.getLogger(__name__)
 
-KIND_DAILY = "daily"
-KIND_DEEP = "deep"
-KIND_FIX = "fix"
-KIND_FIX_RESHOOT = "fix_reshoot"
-KIND_TEACHING = "teaching"
-KIND_STANDARD = "standard"
-KIND_ATTIRE = "attire"
-
-KIND_LABELS = {
-    KIND_DAILY: "日常实拍",
-    KIND_DEEP: "专项前后",
-    KIND_FIX: "整改原图",
-    KIND_FIX_RESHOOT: "整改回拍",
-    KIND_TEACHING: "卫生教材",
-    KIND_STANDARD: "标准图版本",
-    KIND_ATTIRE: "仪容仪表",
-}
 ARCHIVE_KINDS = tuple(KIND_LABELS)
 
 # 管理端能删的类型。整改单（KIND_FIX）不在里面：整单删除仍是整改页的能力
@@ -89,7 +84,7 @@ def parse_archive_range(
     now: Optional[datetime] = None,
 ) -> tuple[str, str]:
     """把可选的营业日区间规范成 (from, to)，并挡住过宽与非法输入。"""
-    today = hygiene_business_date(now or datetime.now(CHINA_TZ))
+    today = hygiene_today(now or datetime.now(CHINA_TZ))
     end = _clean_date(date_to) or today
     start = _clean_date(date_from) or _shift_date(end, -(DEFAULT_RANGE_DAYS - 1))
     if start > end:
@@ -121,15 +116,14 @@ def _shift_date(text: str, days: int) -> str:
 
 
 def created_range(start: str, end: str) -> tuple[str, str]:
-    """把营业日区间翻成 created_at 的 ISO 半开区间（06:00 切日）。
+    """把日期区间翻成 created_at 的 ISO 半开区间（卫生的一天，00:00 切）。
 
-    边界必须带 ``+08:00``：created_at 是 TEXT，比较是字典序，不带偏移的上界会把
-    ``06:00:00+08:00`` 那一秒算进前一天。
+    边界必须带 ``+08:00``（`services.hygiene.day.window_text` 负责）：created_at
+    是 TEXT，比较是字典序，不带偏移的上界会把次日 ``00:00:00+08:00`` 那一秒算进
+    前一天。标签（`_business_date_of`）与窗口同源，凌晨交的照片不会「算昨天、从今天
+    的窗口里消失」。
     """
-    return (
-        f"{start}T06:00:00+08:00",
-        f"{_shift_date(end, 1)}T06:00:00+08:00",
-    )
+    return window_text(start)[0], window_text(end)[1]
 
 
 def normalize_kinds(raw: Optional[Iterable[str]]) -> tuple[str, ...]:
@@ -211,8 +205,8 @@ class HygieneDataArchive:
         占用取自文件系统而不是表里的 byte_size：只有标准图那一张表记了字节数，
         其余类型没有；而"磁盘到底被占了多大"本来就该问磁盘。
         """
-        owners = await self._capture_owners()
-        variants = await self._variant_sources()
+        owners = await captures_ledger.owners(self._conn)
+        variants = await captures_ledger.variant_index(self._conn)
         on_disk = await self._disk_sizes()
 
         buckets = {
@@ -259,10 +253,10 @@ class HygieneDataArchive:
         cleaned = str(capture_id or "").strip()
         if not cleaned:
             raise ArchiveQueryError("bad_capture", "缺少照片标识")
-        meta = await self._capture_meta(cleaned)
+        meta = await captures_ledger.meta(self._conn, cleaned)
         wanted = str(variant or "original").strip().lower()
         if wanted in VARIANT_ROLES:
-            row = await self._variant_meta(cleaned, wanted)
+            row = (await captures_ledger.variants(self._conn, cleaned)).get(wanted)
             if row is not None:
                 path = await self._captures.path_async(row["capture_id"])
                 if path is not None and Path(path).is_file():
@@ -513,39 +507,6 @@ class HygieneDataArchive:
             "current": bool(row.get("current")),
         }
 
-    async def _capture_owners(self) -> dict[str, str]:
-        """capture_id → 类型。同一张图被多处引用时按先出现的类型归一。"""
-        owners: dict[str, str] = {}
-        pairs = (
-            (KIND_DAILY, "SELECT capture_id FROM hygiene_daily_submissions"),
-            (KIND_DEEP, "SELECT before_capture_id AS capture_id FROM hygiene_deep_clean_submissions"),
-            (KIND_DEEP, "SELECT after_capture_id AS capture_id FROM hygiene_deep_clean_submissions"),
-            (KIND_FIX, "SELECT capture_id FROM hygiene_fix_tickets"),
-            (KIND_FIX_RESHOOT, "SELECT capture_id FROM hygiene_fix_reshoots"),
-            (KIND_TEACHING, "SELECT left_capture_id AS capture_id FROM hygiene_teaching_examples"),
-            (KIND_TEACHING, "SELECT right_capture_id AS capture_id FROM hygiene_teaching_examples"),
-            (KIND_STANDARD, "SELECT capture_id FROM hygiene_standards"),
-            (KIND_ATTIRE, "SELECT capture_id FROM hygiene_attire_shots"),
-            (KIND_ATTIRE, "SELECT capture_id FROM hygiene_attire_standard"),
-        )
-        for kind, sql in pairs:
-            for row in await self._fetch(sql, []):
-                capture_id = str(row.get("capture_id") or "")
-                if capture_id and capture_id not in owners:
-                    owners[capture_id] = kind
-        return owners
-
-    async def _variant_sources(self) -> dict[str, tuple[str, ...]]:
-        rows = await self._fetch(
-            "SELECT source_capture_id, capture_id FROM hygiene_capture_variants", []
-        )
-        grouped: dict[str, list[str]] = {}
-        for row in rows:
-            grouped.setdefault(str(row["source_capture_id"]), []).append(
-                str(row["capture_id"])
-            )
-        return {key: tuple(value) for key, value in grouped.items()}
-
     async def _disk_sizes(self) -> dict[str, int]:
         sizes: dict[str, int] = {}
         for capture_id in await self._captures.list_ids_async():
@@ -557,42 +518,6 @@ class HygieneDataArchive:
             except OSError:
                 continue
         return sizes
-
-    async def _capture_meta(self, capture_id: str) -> Optional[dict]:
-        sql = """SELECT capture_id, content_type FROM hygiene_standards WHERE capture_id = ?
-                 UNION ALL
-                 SELECT capture_id, content_type FROM hygiene_daily_submissions WHERE capture_id = ?
-                 UNION ALL
-                 SELECT before_capture_id, before_content_type FROM hygiene_deep_clean_submissions
-                   WHERE before_capture_id = ?
-                 UNION ALL
-                 SELECT after_capture_id, after_content_type FROM hygiene_deep_clean_submissions
-                   WHERE after_capture_id = ?
-                 UNION ALL
-                 SELECT capture_id, content_type FROM hygiene_fix_tickets WHERE capture_id = ?
-                 UNION ALL
-                 SELECT capture_id, content_type FROM hygiene_fix_reshoots WHERE capture_id = ?
-                 UNION ALL
-                 SELECT left_capture_id, left_content_type FROM hygiene_teaching_examples
-                   WHERE left_capture_id = ?
-                 UNION ALL
-                 SELECT right_capture_id, right_content_type FROM hygiene_teaching_examples
-                   WHERE right_capture_id = ?
-                 UNION ALL
-                 SELECT capture_id, content_type FROM hygiene_attire_shots WHERE capture_id = ?
-                 UNION ALL
-                 SELECT capture_id, content_type FROM hygiene_attire_standard WHERE capture_id = ?
-                 LIMIT 1"""
-        rows = await self._fetch(sql, [capture_id] * 10)
-        return rows[0] if rows else None
-
-    async def _variant_meta(self, capture_id: str, variant: str) -> Optional[dict]:
-        rows = await self._fetch(
-            """SELECT capture_id, content_type FROM hygiene_capture_variants
-               WHERE source_capture_id = ? AND variant = ?""",
-            [capture_id, variant],
-        )
-        return rows[0] if rows else None
 
 
 def _tag(rows: list[dict], kind: str, roles=("照片",), no_submitter: bool = False) -> list[dict]:
@@ -611,7 +536,7 @@ def _business_date_of(occurred_at: str) -> str:
     if not text:
         return ""
     try:
-        return hygiene_business_date(datetime.fromisoformat(text))
+        return day_of(text)
     except ValueError:
         return text[:10]
 

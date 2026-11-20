@@ -185,8 +185,8 @@ function openTeaching(row) {
 .wbx-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; align-items: stretch; }
 .wbx-panel {
   display: flex; flex-direction: column;
-  background: var(--surface-1); border: 1px solid var(--line);
-  border-radius: var(--r-2); box-shadow: 0 1px 2px var(--wb-ink-a08); overflow: hidden;
+  background: var(--surface-1); border: var(--edge-w, 2px) solid var(--edge);
+  border-radius: var(--r-2); box-shadow: var(--paper-shadow-sm); overflow: hidden;
 }
 .wbx-ph { display: flex; align-items: center; gap: 9px; padding: 11px 14px; border-bottom: 1px solid var(--line); }
 .wbx-ph h2 { margin: 0; font: 600 12.5px/1 var(--font-sans); letter-spacing: .06em; color: var(--ink); }
@@ -218,7 +218,7 @@ function openTeaching(row) {
 .wbx-tbtn {
   display: flex; flex-direction: column; gap: 4px; width: 100%; min-height: 48px;
   padding: 9px 12px; text-align: left; cursor: pointer;
-  background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--r-1); color: var(--ink);
+  background: var(--surface-2); border: var(--edge-w, 2px) solid var(--edge); border-radius: var(--r-1); color: var(--ink);
 }
 .wbx-tbtn strong { font-size: 11.5px; font-weight: 600; }
 .wbx-tbtn span { font: 500 9.5px/1 var(--font-mono); color: var(--ink-faint); }

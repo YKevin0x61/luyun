@@ -29,7 +29,8 @@ import {
   normalizeCaps,
 } from '../../utils/adminCaps'
 import { hygienePermissionLabel, rosterStatusLabel } from '../../utils/hygieneCopy'
-import { chinaTodayDate, formatHygieneStamp } from '../../utils/hygieneTime'
+import { formatHygieneStamp } from '../../utils/hygieneTime'
+import { useHygieneDayStore } from '../../stores/hygieneDay'
 import { STAFF_ENTRY_PATH } from '../../utils/staffPaths'
 import { pageTitle } from '../../router/pageRoutes.js'
 import { workbenchDocumentTitle } from '../../utils/workbenchCopy'
@@ -71,7 +72,10 @@ const inviteCopied = ref(false)
 const inviteCopyTitle = ref('')
 const qrCanvas = ref(null)
 
-const todayDate = chinaTodayDate()
+// 健康证办理上限、离职默认日期都用服务端认定的「卫生的一天」。浏览器本机时钟
+// 与 +08:00 的偏差在凌晨会让这两格差一天（ADR 0125「没做的事」就是它们）。
+const hygieneDay = useHygieneDayStore()
+const todayDate = computed(() => hygieneDay.today)
 
 function flash(text) {
   savedHint.value = text
@@ -230,6 +234,7 @@ function onKeydown(event) {
 onMounted(() => {
   // 本页原来没设过标题，浏览器 tab 一直停在「厨务管家 · 管理后台」（真机走查）。
   document.title = workbenchDocumentTitle(pageTitle('/workbench/hr/roster'))
+  hygieneDay.load().catch(() => {})
   loadRoster()
   document.addEventListener('keydown', onKeydown)
 })
@@ -595,15 +600,10 @@ const resignDate = ref('')
 const resignPlan = ref(null) // { assignments_to_remove, rule_cleared } | null
 const cancelResignOpen = ref(false)
 
-function todayText() {
-  const now = new Date()
-  const pad = (n) => String(n).padStart(2, '0')
-  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`
-}
-
-function askResign() {
+async function askResign() {
   if (busy.value || !drawerRow.value) return
-  resignDate.value = todayText()
+  await hygieneDay.load().catch(() => {})
+  resignDate.value = hygieneDay.today
   resignPlan.value = null
   resignOpen.value = true
 }
@@ -1464,9 +1464,9 @@ async function copyInvite() {
   column-gap: 16px;
   align-items: end;
   background: var(--surface-1);
-  border: 1px solid var(--line);
+  border: var(--edge-w, 2px) solid var(--edge);
   border-radius: var(--r-2);
-  box-shadow: 0 1px 2px var(--wb-ink-a08);
+  box-shadow: var(--paper-shadow-sm);
   -webkit-backdrop-filter: none;
   backdrop-filter: none;
   padding: 14px 16px;
@@ -1490,8 +1490,8 @@ async function copyInvite() {
 .roster-tools-bar {
   display: flex; flex-wrap: wrap; align-items: center; gap: 10px;
   padding: 8px 14px;
-  background: var(--surface-1); border: 1px solid var(--line);
-  border-radius: var(--r-2); box-shadow: 0 1px 2px var(--wb-ink-a08);
+  background: var(--surface-1); border: var(--edge-w, 2px) solid var(--edge);
+  border-radius: var(--r-1); box-shadow: var(--paper-shadow-sm);
 }
 .roster-led { width: 6px; height: 6px; border-radius: 50%; display: inline-block; flex: 0 0 6px; background: var(--line-strong); }
 .roster-led.ok { background: var(--ok); }
@@ -1510,12 +1510,12 @@ async function copyInvite() {
 .roster-page .roster-search-clear:hover { color: var(--ink); }
 .roster-page .roster-seg {
   display: flex; align-items: center; gap: .2rem; padding: .18rem;
-  border: 1px solid var(--line); border-radius: var(--r-1); background: var(--surface-2);
+  border: var(--edge-w, 2px) solid var(--edge); border-radius: var(--r-1); background: var(--surface-2);
 }
 .roster-page .roster-seg-item {
   display: inline-flex; align-items: center; justify-content: center; gap: .3rem;
   min-height: 40px; padding: 0 .7rem;
-  border: 1px solid transparent; border-radius: var(--r-1); background: transparent;
+  border: var(--edge-w, 2px) solid transparent; border-radius: var(--r-1); background: transparent;
   color: var(--ink-dim); font: inherit; font-size: .8rem; white-space: nowrap; cursor: pointer;
   transition: color .18s var(--ease), background .18s var(--ease), border-color .18s var(--ease);
 }
@@ -1528,9 +1528,9 @@ async function copyInvite() {
 .roster-page section.table-card,
 .roster-page div.table-card {
   background: var(--surface-1);
-  border: 1px solid var(--line);
+  border: var(--edge-w, 2px) solid var(--edge);
   border-radius: var(--r-2);
-  box-shadow: var(--hy-shadow-sm);
+  box-shadow: var(--paper-shadow-sm);
   overflow: hidden;
 }
 .roster-page section.table-card > .table-card-header {
@@ -1548,7 +1548,7 @@ async function copyInvite() {
 .roster-page section.table-card > .table-card-header h3 span {
   display: inline-grid; place-items: center;
   min-width: 1.4rem; height: 1.2rem; padding: 0 .35rem;
-  border: 1px solid var(--line); border-radius: var(--r-full);
+  border: var(--edge-w, 2px) solid var(--edge); border-radius: var(--r-1);
   background: var(--surface-2); color: var(--ink-dim);
   font: 500 9.5px/1 var(--font-mono);
 }
@@ -1582,7 +1582,7 @@ async function copyInvite() {
 .roster-page .roster-row .roster-chip {
   display: inline-flex; align-items: center;
   min-height: 22px; padding: .15rem .5rem;
-  border: 1px solid var(--line); border-radius: var(--r-full);
+  border: var(--edge-w, 2px) solid var(--edge); border-radius: var(--r-1);
   background: var(--surface-2); color: var(--ink-dim);
   font-size: .7rem; line-height: 1.5; overflow-wrap: anywhere;
 }
@@ -1710,7 +1710,7 @@ async function copyInvite() {
 .roster-page .roster-cert-card {
   display: flex; flex-direction: column; gap: .45rem;
   padding: .6rem .7rem;
-  border: 1px solid var(--line); border-radius: var(--r-1); background: var(--surface-2);
+  border: var(--edge-w, 2px) solid var(--edge); border-radius: var(--r-1); background: var(--surface-2);
 }
 .roster-page .roster-cert-card-head { display: flex; flex-wrap: wrap; align-items: center; gap: .45rem; font-size: .84rem; }
 .roster-page .roster-cert-facts {
@@ -1736,7 +1736,8 @@ async function copyInvite() {
 .roster-page .roster-cert-box .roster-chip {
   display: inline-flex; align-items: center;
   padding: .15rem .5rem;
-  border: 1px solid var(--line); border-radius: var(--r-full);
+  border: var(--edge-w, 2px) solid var(--edge);
+  box-shadow: var(--paper-shadow-sm); border-radius: var(--r-1);
   background: var(--surface-1); color: var(--ink-dim);
   font-size: .7rem; line-height: 1.5; overflow-wrap: anywhere;
 }
@@ -1756,7 +1757,7 @@ async function copyInvite() {
 .roster-page .roster-cap span { min-width: 0; }
 /* 管理权限开关：滑轨 + 圆点。原生 checkbox 透明铺满整条 —— 键盘、读屏、触控都还靠它，
    44px 的触控下限也由它撑着（designGuard 只拦 min-height < 44 的控件）。 */
-.roster-page .roster-cap-toggle { position: relative; display: inline-flex; align-items: center; gap: .6rem; min-height: 44px; padding: .3rem .8rem .3rem .4rem; border: 1px solid var(--line); border-radius: .5rem; background: var(--surface-2); }
+.roster-page .roster-cap-toggle { position: relative; display: inline-flex; align-items: center; gap: .6rem; min-height: 44px; padding: .3rem .8rem .3rem .4rem; border: var(--edge-w, 2px) solid var(--edge); border-radius: .5rem; background: var(--surface-2); }
 .roster-page .roster-cap-toggle-input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; }
 .roster-page .roster-cap-toggle-input:disabled { cursor: not-allowed; }
 /* 滑轨与文字不接点击：整条都交给那层透明 input，鼠标、自动化、读屏走同一条路。 */

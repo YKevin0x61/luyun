@@ -14,9 +14,7 @@ import csv
 import io
 import json
 import logging
-import tempfile
 import time
-import uuid
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
@@ -25,9 +23,23 @@ from pydantic import BaseModel, Field
 from api.security import require_session
 from config import settings
 from database import CHINA_TZ, get_db
-from services.business_day import business_date_of
+from services.hygiene import day as hygiene_day
+from services.hygiene import judge
 from db_core.errors import is_integrity_violation
 from services import auth_service
+from services.export_jobs import (
+    ExportJobBusy,
+    ExportJobError,
+    ExportJobFailed,
+    ExportJobGone,
+    ExportJobNotReady,
+    ExportJobNotFound,
+    JobHandle,
+    JobResult,
+    KIND_ARCHIVE,
+    KIND_STANDARDS,
+    export_jobs,
+)
 from services.hygiene.accounts import (
     EmployeeAccounts,
     EmployeeAccountsError,
@@ -189,6 +201,8 @@ _ERROR_DETAILS = {
     "live_required": "必须现场拍摄，不能从相册选图",
     "capture_required": "请拍摄日常检查照片",
     "cannot_self_accept": "交这张的人不能自己验收",
+    # 整改单的时限：到了时限才轮到别人判，之前只有开单人能收。
+    "before_deadline": "时限未到：这份只有开单人能现在验收",
     "already_accepted": "这项已经通过，不能再交",
     "not_pending": "没有待验收的实拍",
     # 隔夜补验的边界：能补验最近几天，再往前是历史回看（改判会动到红黑榜与趋势的旧数）。
@@ -274,7 +288,12 @@ def _http_error(exc: EmployeeAccountsError) -> HTTPException:
 
 
 def _work_http_error(exc: HygieneWorkError) -> HTTPException:
-    if exc.code in ("forbidden", "cannot_self_accept", "zone_mismatch"):
+    if exc.code in (
+        "forbidden",
+        "cannot_self_accept",
+        "before_deadline",
+        "zone_mismatch",
+    ):
         status = 403
     elif exc.code in (
         "zone_not_found",
@@ -1431,9 +1450,9 @@ async def admin_resign(
 ) -> Dict[str, Any]:
     """登记离职（2026-10-29 取代「停用」）：写日期 + 删离职日之后的排班 + 停轮转规则。
 
-    **先删排班、再落日期**，顺序不是随手定的：日期一落库这个人就按离职算了（不能登录、
-    不能再排班），而删排班要按「离职日之后」挑行 —— 先删、删成功了再落日期，任何一步
-    失败都不会留下「已离职但排班还在」的半截状态。
+    **一个事务**：删排班与落日期要么都成、要么都不成。以前是两步各自提交，第二次
+    失败就留下「排班删了、人还在职」——看起来只是少几天班，实际是这个人继续能登录、
+    继续被排班，而抽屉已经显示离职。
 
     `dry_run=true` 只回「会删掉几天排班」（抽屉里那句确认用它），**一个字节都不写**。
     """
@@ -1447,9 +1466,10 @@ async def admin_resign(
     plan = await store.clear_after_resignation(employee_id, value, dry_run=True)
     if payload.dry_run:
         return {"dry_run": True, **plan}
-    await store.clear_after_resignation(employee_id, value, dry_run=False)
     try:
-        employee = await accounts.resign(employee_id, value)
+        async with db.write():
+            await store.clear_after_resignation(employee_id, value, dry_run=False)
+            employee = await accounts.resign(employee_id, value)
     except EmployeeAccountsError as exc:
         raise _http_error(exc) from exc
     await _hygiene_nudge("roster", "resigned", employee_id=employee_id)
@@ -1461,6 +1481,7 @@ async def admin_cancel_resignation(
     employee_id: int,
     _session_id: str = Depends(require_session),
     accounts: EmployeeAccounts = Depends(_get_accounts),
+    db=Depends(get_db),
 ) -> Dict[str, Any]:
     """取消离职（清空日期回到在职）。
 
@@ -1468,7 +1489,8 @@ async def admin_cancel_resignation(
     界面上那句「排班已删，需要重铺」就是这一步的收尾。
     """
     try:
-        employee = await accounts.cancel_resignation(employee_id)
+        async with db.write():
+            employee = await accounts.cancel_resignation(employee_id)
     except EmployeeAccountsError as exc:
         raise _http_error(exc) from exc
     await _hygiene_nudge("roster", "resignation_cancelled", employee_id=employee_id)
@@ -1654,70 +1676,53 @@ async def _standard_export_entries(work: HygieneWork, variant: str) -> list:
     return entries
 
 
-# 导出任务表：单 worker 进程内存在内存里（部署约束就是一个 worker），重启即丢——
-# 导出是"点一下、等几秒、下载"的操作，丢了重来即可，不值得落库。
-_EXPORT_JOBS: Dict[str, Dict[str, Any]] = {}
-_EXPORT_JOB_TTL_SECONDS = 30 * 60
-_EXPORT_MAX_RUNNING = 2
+# 导出任务的生命周期（状态、TTL、并发、临时文件）在 services/export_jobs.py，
+# 这里只负责「怎么把标准图打成包」和 HTTP 字段投影（ADR 0155）。
 
 
-def _prune_export_jobs(now: float) -> None:
-    for job_id, job in list(_EXPORT_JOBS.items()):
-        if now - job["started_at"] < _EXPORT_JOB_TTL_SECONDS:
-            continue
-        path = job.get("path")
-        if path is not None:
-            try:
-                path.unlink(missing_ok=True)
-            except OSError:
-                logger.debug("清理导出临时文件失败 job=%s", job_id, exc_info=True)
-        _EXPORT_JOBS.pop(job_id, None)
+def _export_job_http_error(exc: ExportJobError) -> HTTPException:
+    if isinstance(exc, ExportJobBusy):
+        return HTTPException(status_code=429, detail=str(exc))
+    if isinstance(exc, ExportJobNotFound):
+        return HTTPException(status_code=404, detail=str(exc))
+    if isinstance(exc, ExportJobGone):
+        return HTTPException(status_code=410, detail=str(exc))
+    if isinstance(exc, ExportJobNotReady):
+        return HTTPException(status_code=409, detail=str(exc))
+    if isinstance(exc, ExportJobFailed):
+        return HTTPException(status_code=409, detail=str(exc))
+    return HTTPException(status_code=409, detail=str(exc) or "导出失败")
 
 
-async def _run_export_job(job_id: str, work: HygieneWork, size: str) -> None:
-    """后台把标准图烘焙进图片并按工作区打包。进度写在任务表里，前端轮询。"""
-    job = _EXPORT_JOBS[job_id]
-    archive_path: Optional[Path] = None
-    try:
-        entries = await _standard_export_entries(work, size)
-        if not entries:
-            job.update(state="failed", error="还没有带标准图的日常检查项")
-            return
-        job["total"] = len(entries)
-        with tempfile.NamedTemporaryFile(
-            prefix="hygiene-standards-", suffix=".zip", delete=False
-        ) as handle:
-            archive_path = Path(handle.name)
+async def _build_standards_export(
+    handle: JobHandle, work: HygieneWork, size: str
+) -> JobResult:
+    """把标准图烘焙进图片并按工作区打包；进度交给注册表，前端轮询。"""
+    entries = await _standard_export_entries(work, size)
+    if not entries:
+        raise ExportJobFailed("还没有带标准图的日常检查项")
+    handle.progress(done=0, total=len(entries), stage="packing")
+    archive_path = Path(handle.workdir) / "standards.zip"
 
-        def report(done: int, total: int) -> None:
-            job["done"] = done
-            job["total"] = total
+    def report(done: int, total: int) -> None:
+        handle.progress(done=done, total=total, stage="packing")
 
-        written, failed = await asyncio.to_thread(
-            write_archive, entries, archive_path, report
-        )
-        if not written:
-            archive_path.unlink(missing_ok=True)
-            job.update(state="failed", error="标准图文件读不出来，无法导出")
-            return
-        stamp = datetime.now(timezone(timedelta(hours=8))).strftime("%Y%m%d")
-        job.update(
-            state="done",
-            path=archive_path,
-            count=written,
-            skipped=failed,
-            filename=f"标准图-{stamp}.zip",
-            bytes=archive_path.stat().st_size,
-        )
-        logger.info(
-            "📦 [审计] 导出标准图 %s 张（跳过 %s 张，变体=%s，%.1f MB）",
-            written, failed, size, job["bytes"] / 1024 / 1024,
-        )
-    except Exception as exc:  # noqa: BLE001 —— 后台任务必须自己收口，否则任务永远 running
-        logger.exception("导出标准图失败 job=%s", job_id)
-        if archive_path is not None:
-            archive_path.unlink(missing_ok=True)
-        job.update(state="failed", error=f"导出失败：{exc}")
+    written, failed = await asyncio.to_thread(
+        write_archive, entries, archive_path, report
+    )
+    if not written:
+        raise ExportJobFailed("标准图文件读不出来，无法导出")
+    stamp = datetime.now(timezone(timedelta(hours=8))).strftime("%Y%m%d")
+    size_bytes = archive_path.stat().st_size
+    logger.info(
+        "📦 [审计] 导出标准图 %s 张（跳过 %s 张，变体=%s，%.1f MB）",
+        written, failed, size, size_bytes / 1024 / 1024,
+    )
+    return JobResult(
+        artifact=archive_path,
+        filename=f"标准图-{stamp}.zip",
+        extra={"count": written, "skipped": failed},
+    )
 
 
 @router.post("/admin/standards-export/jobs")
@@ -1732,22 +1737,13 @@ async def start_standards_export(
     期间界面上没有任何反馈。这里改成任务：POST 立刻返回，前端按 done/total 显示
     进度，完成后再去下载。
     """
-    now = time.time()
-    _prune_export_jobs(now)
-    running = sum(1 for job in _EXPORT_JOBS.values() if job["state"] == "running")
-    if running >= _EXPORT_MAX_RUNNING:
-        raise HTTPException(status_code=429, detail="已有一个导出任务在跑，请稍候")
-    job_id = uuid.uuid4().hex
-    _EXPORT_JOBS[job_id] = {
-        "state": "running",
-        "done": 0,
-        "total": 0,
-        "error": "",
-        "started_at": now,
-        "path": None,
-        "size": size,
-    }
-    asyncio.create_task(_run_export_job(job_id, work, size))
+    async def build(handle: JobHandle) -> JobResult:
+        return await _build_standards_export(handle, work, size)
+
+    try:
+        job_id = export_jobs.start(KIND_STANDARDS, build, max_running=2)
+    except ExportJobError as exc:
+        raise _export_job_http_error(exc) from exc
     return {"job_id": job_id, "state": "running"}
 
 
@@ -1756,16 +1752,17 @@ async def read_standards_export(
     job_id: str,
     _session_id: str = Depends(require_session),
 ) -> Dict[str, Any]:
-    job = _EXPORT_JOBS.get(job_id)
-    if job is None:
-        raise HTTPException(status_code=404, detail="导出任务不存在或已过期")
+    try:
+        snapshot = export_jobs.state(job_id)
+    except ExportJobError as exc:
+        raise _export_job_http_error(exc) from exc
     return {
-        "state": job["state"],
-        "done": job["done"],
-        "total": job["total"],
-        "error": job["error"],
-        "count": job.get("count"),
-        "bytes": job.get("bytes"),
+        "state": snapshot["state"],
+        "done": snapshot["done"],
+        "total": snapshot["total"],
+        "error": snapshot["error"],
+        "count": snapshot.get("count"),
+        "bytes": snapshot.get("bytes"),
     }
 
 
@@ -1774,17 +1771,12 @@ async def download_standards_export(
     job_id: str,
     _session_id: str = Depends(require_session),
 ) -> Response:
-    job = _EXPORT_JOBS.get(job_id)
-    if job is None:
-        raise HTTPException(status_code=404, detail="导出任务不存在或已过期")
-    if job["state"] == "failed":
-        raise HTTPException(status_code=409, detail=job["error"] or "导出失败")
-    if job["state"] != "done":
-        raise HTTPException(status_code=409, detail="还在打包，请稍候")
-    path = job["path"]
-    if path is None or not Path(path).exists():
-        raise HTTPException(status_code=410, detail="导出文件已被清理，请重新导出")
-    filename = job.get("filename") or "hygiene-standards.zip"
+    try:
+        snapshot = export_jobs.state(job_id)
+        path = export_jobs.path(job_id)
+    except ExportJobError as exc:
+        raise _export_job_http_error(exc) from exc
+    filename = snapshot.get("filename") or "hygiene-standards.zip"
     return FileResponse(
         path,
         media_type="application/zip",
@@ -1794,7 +1786,7 @@ async def download_standards_export(
                 'attachment; filename="hygiene-standards.zip"; '
                 f"filename*=UTF-8''{quote(filename)}"
             ),
-            "X-Hygiene-Export-Count": str(job.get("count") or 0),
+            "X-Hygiene-Export-Count": str(snapshot.get("count") or 0),
         },
     )
 
@@ -2072,8 +2064,22 @@ async def admin_attire_day(
     _session_id: str = Depends(require_session),
     attire: HygieneAttire = Depends(_get_attire),
 ) -> Dict[str, Any]:
-    """某一天：谁要拍、各自到哪一步（名单来自排班，休假的与没排到的不在里面）。"""
-    return await attire.admin_day(date)
+    """某一天：谁要拍、各自到哪一步（名单来自排班，休假的与没排到的不在里面）。
+
+    每行带 ``review`` —— 仪容的判据是「只归超级管理员」，与通过/驳回两个口共用
+    ``services.hygiene.judge`` 那张规则表。
+    """
+    day = await attire.admin_day(date)
+    for person in day.get("people") or []:
+        person["review"] = judge.review(
+            judge.ATTIRE,
+            SUPER_ACTOR,
+            {
+                "status": person.get("status"),
+                "submitter_id": person.get("employee_id"),
+            },
+        )
+    return day
 
 
 @router.get("/admin/attire/standard")
@@ -2118,6 +2124,9 @@ async def admin_attire_accept(
     _session_id: str = Depends(require_session),
     attire: HygieneAttire = Depends(_get_attire),
 ) -> Dict[str, Any]:
+    # 仪容的判据只有一条：管理层（仪容不进员工的能力开关）。走同一张规则表，
+    # 免得「谁能判」在这一项上变成路由自己的一句话。
+    judge.require(judge.ATTIRE, SUPER_ACTOR)
     try:
         result = await attire.accept(employee_id, date)
     except HygieneWorkError as exc:
@@ -2135,6 +2144,7 @@ async def admin_attire_reject(
     attire: HygieneAttire = Depends(_get_attire),
 ) -> Dict[str, Any]:
     """驳回：原因必填 —— 员工照着这句重拍（跟日常驳回同一条口径）。"""
+    judge.require(judge.ATTIRE, SUPER_ACTOR)
     try:
         result = await attire.reject(employee_id, _require_reject_reason(payload.note), date)
     except HygieneWorkError as exc:
@@ -2346,6 +2356,19 @@ async def staff_daily_review(
         )
     except HygieneWorkError as exc:
         raise _work_http_error(exc) from exc
+
+
+@router.get("/today")
+async def hygiene_day_payload(
+    _session_id: str = Depends(require_session),
+) -> Dict[str, Any]:
+    """页面默认要用的「今天」：卫生的一天（00:00 切）。
+
+    前端不再自己算今天（ADR 0125「没做的事」）：日界只有服务端一处，浏览器只负责把
+    返回的日期填进默认值。`day_end` 是当天结束的那一刻，前端拿它判断缓存是否过期，
+    时区规则因此也不回到浏览器。字段与 `services.hygiene.day.payload` 同一个来源。
+    """
+    return hygiene_day.payload()
 
 
 @router.get("/admin/daily-queue")
@@ -2619,11 +2642,13 @@ async def staff_reject_deep_clean(
 @router.get("/staff/deep-clean/{item_id}/review")
 async def staff_deep_clean_review(
     item_id: int,
-    _staff=Depends(require_staff_session),
+    staff=Depends(require_staff_session),
     work: HygieneWork = Depends(_get_work),
 ) -> Dict[str, Any]:
     try:
-        return await work.get_deep_clean_review(item_id)
+        return await work.get_deep_clean_review(
+            item_id, actor=_staff_actor(staff["employee"])
+        )
     except HygieneWorkError as exc:
         raise _work_http_error(exc) from exc
 
@@ -2766,7 +2791,7 @@ async def admin_deep_clean_review(
     work: HygieneWork = Depends(_get_work),
 ) -> Dict[str, Any]:
     try:
-        return await work.get_deep_clean_review(item_id)
+        return await work.get_deep_clean_review(item_id, actor=SUPER_ACTOR)
     except HygieneWorkError as exc:
         raise _work_http_error(exc) from exc
 
@@ -3262,9 +3287,6 @@ async def admin_teaching_right(
 # 服务端只负责挡住越权与非法输入。查询与打包在 services/hygiene/archive.py，
 # 删除在 HygieneWork（写路径唯一）。
 
-_ARCHIVE_EXPORT_JOBS: Dict[str, Dict[str, Any]] = {}
-_ARCHIVE_EXPORT_JOB_TTL_SECONDS = 30 * 60
-_ARCHIVE_EXPORT_MAX_RUNNING = 1
 # 一次能导出多少张照片。原图 1-2MB 起，几千张就是几个 GB——门店机器磁盘经不起
 # 「手一滑导出全部」，超了让用户缩小区间重来。
 ARCHIVE_EXPORT_MAX_PHOTOS = 2000
@@ -3370,86 +3392,55 @@ async def admin_data_photo(
     )
 
 
-def _prune_archive_export_jobs(now: float) -> None:
-    for job_id, job in list(_ARCHIVE_EXPORT_JOBS.items()):
-        if now - job["started_at"] < _ARCHIVE_EXPORT_JOB_TTL_SECONDS:
-            continue
-        path = job.get("path")
-        if path is not None:
+async def _build_archive_export(
+    handle: JobHandle, archive, filters: dict, *, today: bool = False
+) -> JobResult:
+    """打包记录 CSV + 照片。进度交给注册表，前端轮询。"""
+    records = await archive.iter_records(**filters)
+    total_photos = sum(len(record["photos"]) for record in records)
+    if not records:
+        raise ExportJobFailed(_error_detail("export_empty"))
+    if total_photos > ARCHIVE_EXPORT_MAX_PHOTOS:
+        raise ExportJobFailed(
+            f"这个范围有 {total_photos} 张照片，超过一次导出的上限 "
+            f"{ARCHIVE_EXPORT_MAX_PHOTOS} 张，请缩小日期范围或类型"
+        )
+    handle.progress(done=0, total=total_photos, stage="collecting")
+    entries = []
+    for record in records:
+        photos = []
+        for photo in record["photos"]:
             try:
-                Path(path).unlink(missing_ok=True)
-            except OSError:
-                logger.debug("清理导出临时文件失败 job=%s", job_id, exc_info=True)
-        _ARCHIVE_EXPORT_JOBS.pop(job_id, None)
+                view = await archive.photo_path(photo["capture_id"], "original")
+                photos.append({**photo, "path": view["path"]})
+            except ArchiveQueryError:
+                # 文件已经没了就让它在 CSV 里留个名，别让整包导出失败。
+                photos.append({**photo, "path": None})
+        entries.append({"record": record, "photos": photos})
+    archive_path = Path(handle.workdir) / "data.zip"
 
+    def report(done: int, total: int) -> None:
+        handle.progress(done=done, total=total, stage="packing")
 
-async def _run_archive_export(job_id: str, archive, filters: dict, *, today: bool = False) -> None:
-    """后台打包：记录 CSV + 照片。进度写在任务表里，前端轮询。"""
-    job = _ARCHIVE_EXPORT_JOBS[job_id]
-    archive_path: Optional[Path] = None
-    try:
-        records = await archive.iter_records(**filters)
-        total_photos = sum(len(record["photos"]) for record in records)
-        if not records:
-            job.update(state="failed", error=_error_detail("export_empty"))
-            return
-        if total_photos > ARCHIVE_EXPORT_MAX_PHOTOS:
-            job.update(
-                state="failed",
-                error=(
-                    f"这个范围有 {total_photos} 张照片，超过一次导出的上限 "
-                    f"{ARCHIVE_EXPORT_MAX_PHOTOS} 张，请缩小日期范围或类型"
-                ),
-            )
-            return
-        job["total"] = total_photos
-        entries = []
-        for record in records:
-            photos = []
-            for photo in record["photos"]:
-                try:
-                    view = await archive.photo_path(photo["capture_id"], "original")
-                    photos.append({**photo, "path": view["path"]})
-                except ArchiveQueryError:
-                    # 文件已经没了就让它在 CSV 里留个名，别让整包导出失败。
-                    photos.append({**photo, "path": None})
-            entries.append({"record": record, "photos": photos})
-        with tempfile.NamedTemporaryFile(
-            prefix="hygiene-data-", suffix=".zip", delete=False
-        ) as handle:
-            archive_path = Path(handle.name)
-
-        def report(done: int, total: int) -> None:
-            job["done"] = done
-            job["total"] = total
-
-        written, skipped = await asyncio.to_thread(
-            write_ledger_zip, entries, archive_path, report
-        )
-        stamp = datetime.now(CHINA_TZ).strftime("%Y%m%d")
-        job.update(
-            state="done",
-            path=archive_path,
-            count=written,
-            skipped=skipped,
-            records=len(records),
-            filename=(
-                f"今天的卫生照片-{stamp}.zip" if today else f"卫生数据-{stamp}.zip"
-            ),
-            bytes=archive_path.stat().st_size,
-        )
-        logger.info(
-            "📦 [审计] 导出卫生数据 %s 条 / %s 张照片（跳过 %s 张，%.1f MB）",
-            len(records),
-            written,
-            skipped,
-            job["bytes"] / 1024 / 1024,
-        )
-    except Exception as exc:  # noqa: BLE001 —— 后台任务必须自己收口，否则永远 running
-        logger.exception("导出卫生数据失败 job=%s", job_id)
-        if archive_path is not None:
-            archive_path.unlink(missing_ok=True)
-        job.update(state="failed", error=f"导出失败：{exc}")
+    written, skipped = await asyncio.to_thread(
+        write_ledger_zip, entries, archive_path, report
+    )
+    stamp = datetime.now(CHINA_TZ).strftime("%Y%m%d")
+    size_bytes = archive_path.stat().st_size
+    logger.info(
+        "📦 [审计] 导出卫生数据 %s 条 / %s 张照片（跳过 %s 张，%.1f MB）",
+        len(records),
+        written,
+        skipped,
+        size_bytes / 1024 / 1024,
+    )
+    return JobResult(
+        artifact=archive_path,
+        filename=(
+            f"今天的卫生照片-{stamp}.zip" if today else f"卫生数据-{stamp}.zip"
+        ),
+        extra={"count": written, "skipped": skipped, "records": len(records)},
+    )
 
 
 @router.post("/admin/data/export/jobs")
@@ -3462,20 +3453,13 @@ async def start_archive_export(
     _session_id: str = Depends(require_session),
     archive=Depends(_get_archive),
 ) -> Dict[str, Any]:
-    # `scope=today`：一键保存**今天**的照片。营业日由**服务端**算（06:00 切日）——
-    # 让前端算的话，凌晨那一段「今天」会差一天，而照片上的日期是按服务端那个口径
-    # 写的；不传 kinds 就是全部类型（含仪容仪表）。
+    # `scope=today`：一键保存**今天**的照片。「今天」由**服务端**算，而且与页面、
+    # 存档列上的日期是同一把尺子（卫生的一天，00:00 切，见 services/hygiene/day.py）——
+    # 让前端算的话，凌晨那一段「今天」会差一天；不传 kinds 就是全部类型（含仪容仪表）。
     if scope:
         if scope != "today":
             raise HTTPException(status_code=400, detail=_error_detail("bad_scope"))
-        date_from = date_to = business_date_of(datetime.now(CHINA_TZ))
-    now = time.time()
-    _prune_archive_export_jobs(now)
-    running = sum(
-        1 for job in _ARCHIVE_EXPORT_JOBS.values() if job["state"] == "running"
-    )
-    if running >= _ARCHIVE_EXPORT_MAX_RUNNING:
-        raise HTTPException(status_code=429, detail=_error_detail("export_running"))
+        date_from = date_to = hygiene_day.today()
     filters = {
         "kinds": _archive_kinds(kinds),
         "date_from": date_from,
@@ -3487,18 +3471,16 @@ async def start_archive_export(
         parse_archive_range(date_from, date_to)
     except ArchiveQueryError as exc:
         raise _archive_http_error(exc) from exc
-    job_id = uuid.uuid4().hex
-    _ARCHIVE_EXPORT_JOBS[job_id] = {
-        "state": "running",
-        "done": 0,
-        "total": 0,
-        "error": "",
-        "started_at": now,
-        "path": None,
-    }
-    asyncio.create_task(
-        _run_archive_export(job_id, archive, filters, today=(scope == "today"))
-    )
+
+    async def build(handle: JobHandle) -> JobResult:
+        return await _build_archive_export(
+            handle, archive, filters, today=(scope == "today")
+        )
+
+    try:
+        job_id = export_jobs.start(KIND_ARCHIVE, build, max_running=1)
+    except ExportJobError as exc:
+        raise _export_job_http_error(exc) from exc
     return {"job_id": job_id, "state": "running"}
 
 
@@ -3507,20 +3489,21 @@ async def read_archive_export(
     job_id: str,
     _session_id: str = Depends(require_session),
 ) -> Dict[str, Any]:
-    job = _ARCHIVE_EXPORT_JOBS.get(job_id)
-    if job is None:
-        raise HTTPException(status_code=404, detail="导出任务不存在或已过期")
+    try:
+        snapshot = export_jobs.state(job_id)
+    except ExportJobError as exc:
+        raise _export_job_http_error(exc) from exc
     return {
-        "state": job["state"],
-        "done": job["done"],
-        "total": job["total"],
-        "error": job["error"],
-        "count": job.get("count"),
-        "skipped": job.get("skipped"),
-        "records": job.get("records"),
-        "bytes": job.get("bytes"),
+        "state": snapshot["state"],
+        "done": snapshot["done"],
+        "total": snapshot["total"],
+        "error": snapshot["error"],
+        "count": snapshot.get("count"),
+        "skipped": snapshot.get("skipped"),
+        "records": snapshot.get("records"),
+        "bytes": snapshot.get("bytes"),
         # 前端拿它当下载的兜底名（正常情况下后端 Content-Disposition 已经定了名）。
-        "filename": job.get("filename"),
+        "filename": snapshot.get("filename"),
     }
 
 
@@ -3529,17 +3512,12 @@ async def download_archive_export(
     job_id: str,
     _session_id: str = Depends(require_session),
 ) -> Response:
-    job = _ARCHIVE_EXPORT_JOBS.get(job_id)
-    if job is None:
-        raise HTTPException(status_code=404, detail="导出任务不存在或已过期")
-    if job["state"] == "failed":
-        raise HTTPException(status_code=409, detail=job["error"] or "导出失败")
-    if job["state"] != "done":
-        raise HTTPException(status_code=409, detail="还在打包，请稍候")
-    path = job["path"]
-    if path is None or not Path(path).exists():
-        raise HTTPException(status_code=410, detail="导出文件已被清理，请重新导出")
-    filename = job.get("filename") or "hygiene-data.zip"
+    try:
+        snapshot = export_jobs.state(job_id)
+        path = export_jobs.path(job_id)
+    except ExportJobError as exc:
+        raise _export_job_http_error(exc) from exc
+    filename = snapshot.get("filename") or "hygiene-data.zip"
     return FileResponse(
         path,
         media_type="application/zip",
@@ -3548,7 +3526,7 @@ async def download_archive_export(
                 'attachment; filename="hygiene-data.zip"; '
                 f"filename*=UTF-8''{quote(filename)}"
             ),
-            "X-Hygiene-Export-Count": str(job.get("count") or 0),
+            "X-Hygiene-Export-Count": str(snapshot.get("count") or 0),
         },
     )
 

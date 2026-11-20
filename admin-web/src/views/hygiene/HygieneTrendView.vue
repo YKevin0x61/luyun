@@ -495,8 +495,8 @@ function pointTitle(point) {
 .led.sig { background: var(--action); }
 
 .wbx-panel {
-  background: var(--surface-1); border: 1px solid var(--line);
-  border-radius: var(--r-2); box-shadow: var(--hy-shadow-sm); overflow: hidden;
+  background: var(--surface-1); border: var(--edge-w, 2px) solid var(--edge);
+  border-radius: var(--r-2); box-shadow: var(--paper-shadow-sm); overflow: hidden;
 }
 .wbx-ph { display: flex; align-items: center; gap: 9px; padding: 11px 14px; border-bottom: 1px solid var(--line); }
 .wbx-ph h2 { margin: 0; font: 600 12.5px/1 var(--font-sans); letter-spacing: .06em; color: var(--ink); }
@@ -507,18 +507,20 @@ function pointTitle(point) {
 .wbx-readline {
   display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 26px;
   padding: 10px 14px;
-  background: var(--surface-1); border: 1px solid var(--line);
-  border-radius: var(--r-2); box-shadow: 0 1px 2px var(--wb-ink-a08);
+  background: var(--surface-1); border: var(--edge-w, 2px) solid var(--edge);
+  border-radius: var(--r-1); box-shadow: var(--paper-shadow-sm);
 }
 .trend-headline { display: inline-flex; align-items: baseline; gap: 8px; }
-.trend-headline > span { font: 500 9.5px/1 var(--font-sans); letter-spacing: .18em; color: var(--ink-faint); }
-.trend-headline b { font: 500 26px/1 var(--font-mono); letter-spacing: -.02em; color: var(--ink); }
+.trend-headline > span { font: 700 11px/1.2 var(--font-sans); letter-spacing: .01em; color: var(--ink-dim); }
+.trend-headline b { font: 500 26px/1 var(--font-display); letter-spacing: -.02em; color: var(--ink);
+  font-weight: 800;}
 .wbx-inline-gauge { display: inline-flex; gap: 2px; width: 88px; margin-left: 4px; }
 .wbx-inline-gauge i { flex: 1; height: 3px; border-radius: 1px; background: var(--line); }
 .wbx-inline-gauge i.on { background: var(--action); }
 .wbx-read { display: inline-flex; align-items: baseline; gap: 6px; }
-.wbx-read span { font: 500 9.5px/1 var(--font-sans); letter-spacing: .18em; color: var(--ink-faint); }
-.wbx-read b { font: 500 20px/1 var(--font-mono); color: var(--ink); }
+.wbx-read span { font: 700 11px/1.2 var(--font-sans); letter-spacing: .01em; color: var(--ink-dim); }
+.wbx-read b { font: 500 20px/1 var(--font-display); color: var(--ink);
+  font-weight: 800;}
 .wbx-read b.is-missed { color: var(--warn); }
 .wbx-read em { font-style: normal; font-size: 9.5px; color: var(--ink-faint); }
 .wbx-range { font: 500 9.5px/1 var(--font-mono); color: var(--ink-faint); }

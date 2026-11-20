@@ -72,15 +72,29 @@ function employee(overrides) {
   }
 }
 
+/** 服务端的判据结论（services/hygiene/judge.py 里的 review）。
+ *
+ *  页面自 2026-10-05 F-04 收口起不再自己算开关与提交人，只读这几个字段；所以假服务端
+ *  也得按同一张规则表给结论，否则这一条压的就不是「页面读到什么」，而是「缺字段时它有多
+ *  保守」——那是 fail-closed 那条用例的事。
+ */
+function verdictFor(person, cap, submitterId) {
+  if (!person.admin_caps.includes(cap)) return { allowed: false, reason: 'forbidden', action: 'view' }
+  if (Number(person.id) === Number(submitterId)) return { allowed: false, reason: 'cannot_self_accept', action: 'view' }
+  return { allowed: true, reason: '', action: 'review' }
+}
+
 function tableFor(person) {
+  const dailyVerdict = verdictFor(person, 'daily_review', DAILY_PENDING.submitter_id)
+  const deepVerdict = verdictFor(person, 'deep_review', DEEP_PENDING.submitter_id)
   return {
     '/api/hygiene/staff/me': {
       employee: person,
       daily_clocks: { day_hhmm: '18:00', night_hhmm: '02:00' },
       deep_clock: { hhmm: '20:00' },
     },
-    '/api/hygiene/staff/daily-work': { items: [DAILY_PENDING] },
-    '/api/hygiene/staff/deep-clean': { items: [DEEP_PENDING], status: '待办' },
+    '/api/hygiene/staff/daily-work': { items: [{ ...DAILY_PENDING, review: dailyVerdict }] },
+    '/api/hygiene/staff/deep-clean': { items: [{ ...DEEP_PENDING, review: deepVerdict }], status: '待办' },
     '/api/hygiene/staff/fix': { items: [] },
     // 名单是**全店**的（服务端只把每个区底下的检查项按他的区切片，名单本身没切）：
     // 所以这一页拿到的 zones 一直有好几个，不能拿它当"他能开在哪个区"的判据。
@@ -89,8 +103,8 @@ function tableFor(person) {
     },
     '/api/hygiene/staff/boards': { week_start: '2026-09-28', people: [], zones: [] },
     '/api/hygiene/staff/teaching': { items: [] },
-    '/api/hygiene/staff/deep-clean/2/review': REVIEW,
-    '/api/hygiene/staff/daily/1/review': REVIEW,
+    '/api/hygiene/staff/deep-clean/2/review': { ...REVIEW, review: deepVerdict },
+    '/api/hygiene/staff/daily/1/review': { ...REVIEW, review: dailyVerdict },
   }
 }
 

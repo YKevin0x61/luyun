@@ -93,8 +93,9 @@ async function load() {
 .wbx-title { margin: 0; font: 600 26px/1.1 var(--font-sans); letter-spacing: .01em; color: var(--ink); overflow-wrap: anywhere; }
 .wbx-pills { grid-column: 2; grid-row: 1; justify-self: end; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .wbx-read { display: inline-flex; align-items: baseline; gap: 6px; font: 500 10px/1 var(--font-mono); color: var(--ink-dim); }
-.wbx-read span { font: 500 9.5px/1 var(--font-sans); letter-spacing: .18em; color: var(--ink-faint); }
-.wbx-read b { font: 500 20px/1 var(--font-mono); color: var(--ink); }
+.wbx-read span { font: 700 11px/1.2 var(--font-sans); letter-spacing: .01em; color: var(--ink-dim); }
+.wbx-read b { font: 500 20px/1 var(--font-display); color: var(--ink);
+  font-weight: 800;}
 .wbx-read em { font-style: normal; font-size: 9.5px; color: var(--ink-faint); }
 .wbx-sub { grid-column: 1 / -1; grid-row: 2; margin: 8px 0 0; font-size: 11.5px; line-height: 1.6; color: var(--ink-dim); }
 .wbx-error { margin: 0; font-size: 11px; color: var(--danger-bright); }
@@ -102,12 +103,14 @@ async function load() {
   display: flex; align-items: center; gap: 8px;
   min-height: 44px; margin: 0; padding: 10px 14px;
   font-size: 10.5px; color: var(--ink-faint);
-  background: var(--surface-1); border: 1px solid var(--line); border-radius: var(--r-1);
+  background: var(--surface-1); border: var(--edge-w, 2px) solid var(--edge);
+  box-shadow: var(--paper-shadow-sm); border-radius: var(--r-1);
 }
 .wbx-empty-page {
   display: flex; flex-direction: column; align-items: flex-start; gap: 12px;
   padding: 16px 14px;
-  background: var(--surface-1); border: 1px solid var(--line); border-radius: var(--r-2);
+  background: var(--surface-1); border: var(--edge-w, 2px) solid var(--edge);
+  box-shadow: var(--paper-shadow-sm); border-radius: var(--r-2);
 }
 .wbx-empty-page p { margin: 0; font-size: 11px; color: var(--ink-dim); }
 .zone-items-page :deep(.btn) { min-height: 44px !important; border-radius: var(--r-1); }

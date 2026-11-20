@@ -76,9 +76,11 @@ describe('工作台令牌层（③-1a 上移到 html 级；t47 换名 data-workb
     // 类上，417 处 var(--hy-*) / 别名引用会静默失效（掉色，不报错）。所以第 2 段必须是 html 级选择器。
     expect(theme).toContain('html[data-workbench] {')
     const block = theme.slice(theme.indexOf('html[data-workbench] {'))
-    expect(block).toContain('--hy-pool: #0f6f78')
-    expect(block).toContain('--hy-bg: #0a1719')
-    expect(block).toContain('--surface-0:#0a1719')
+    // 2026-11-20 贴纸皮肤：默认档从深墨改成暖纸底（#FFF7E8），深墨挪到
+    // [data-wb-theme="dark"] 那一段。这三条只证明「默认档确实在 html 级、且有真颜色」。
+    expect(block).toContain('--hy-pool: #137167')
+    expect(block).toContain('--hy-bg: #FFF7E8')
+    expect(block).toContain('--surface-0:#FFF7E8')
     // 兼容别名也要在同一个块里（现场页与 recipe 视图此刻还在用这些名字）
     expect(block).toMatch(/--bg:\s*var\(--hy-bg\)/)
     expect(block).toMatch(/--accent:\s*var\(--hy-mint\)/)

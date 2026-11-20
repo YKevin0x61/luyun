@@ -8,7 +8,6 @@ Does not hash passwords or issue staff sessions. Captures stay off SQLite WAL.
 from __future__ import annotations
 
 import asyncio
-import functools
 import hashlib
 import json
 import logging
@@ -19,6 +18,9 @@ from typing import Callable, Optional
 
 from database import CHINA_TZ
 from db_core.errors import is_integrity_violation
+# 写口只有一份实现（db_core/write_gate.py）；这个名字继续从本模块转出，
+# 20 多个既有 import 方与测试不用改。
+from db_core.write_gate import serialized_write, write_unit
 from services.business_day import shift_business_date, workbench_day_range
 from services.hygiene.accounts import (
     PERMISSION_ADMIN,
@@ -28,13 +30,21 @@ from services.hygiene.accounts import (
 )
 # 管理权限开关（2026-10-05）：判据从"是不是管理员这个档位"改成"有没有这一项开关"。
 # `PERMISSION_ADMIN` 还留着，但只在**显示与兼容**处用（见 `capabilities.py` 的说明）。
-from services.identity.capabilities import (
-    CAP_DAILY_REVIEW,
-    CAP_DEEP_REVIEW,
-    CAP_FIX,
-    has_cap,
-)
+#
+# 「谁能判这一份」只有 `judge` 一处实现（2026-11-18，ADR 0149 之后）：这里原来为
+# 日常、专项、整改各写了一套守卫，前端再各抄一份，四份判据已经开始打架（时限那条
+# 前后端就不一致）。现在写口只问判据，行上的结论也由判据挂给列表。
+from services.hygiene import captures_ledger, judge
+from services.hygiene.errors import HygieneWorkError
 from services.hygiene.images import GeneratedVariant, InvalidImageError
+from services.hygiene.status import (
+    OPENER_STAFF,
+    OPENER_SUPER,
+    STATUS_FIX_TODO,
+    STATUS_PASSED,
+    STATUS_PENDING,
+    STATUS_TODO,
+)
 from services.hygiene.archive import (
     ARCHIVE_DELETE_KINDS,
     KIND_DAILY,
@@ -50,13 +60,9 @@ from services.hygiene.archive import (
 logger = logging.getLogger(__name__)
 
 SEED_ZONE_NAMES = ("案板", "馅档", "熟笼", "肠粉", "西饼", "明档1", "明档2", "煎炸")
-STATUS_TODO = "待拍"
-STATUS_PENDING = "待验收"
-STATUS_PASSED = "已通过"
-STATUS_FIX_TODO = "待回拍"
+# 状态与开单人词表在 `services/hygiene/status.py`（上面按原名导入），判据与这里
+# 读的是同一份字面量；库里的存量值就是这些中文字符串，改名要连数据一起搬。
 FIX_TYPES = ("卫生", "摆放", "标签")
-OPENER_STAFF = "staff"
-OPENER_SUPER = "super"
 DAILY_SHIFTS = (SHIFT_DAY, SHIFT_NIGHT)
 # 隔夜补验下界：昨天交的照片今早还得能验，但再往前就是历史回看、不再允许改判。
 # 与「管理员最多回看 / 补验最近几天」是同一个数，`list_pending_daily` 也按它收口。
@@ -136,23 +142,6 @@ TEACHING_DEEP_CLEAN = "deep_clean"
 _HHMM_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
 
 
-def serialized_write(method):
-    @functools.wraps(method)
-    async def wrapper(self, *args, **kwargs):
-        async with self._write_lock:
-            try:
-                return await method(self, *args, **kwargs)
-            except Exception:
-                # 兜底回滚：aiosqlite 是隐式事务，方法里任何未处理异常（磁盘满、
-                # 外键冲突、图片解码失败…）都会把半截写留在连接上——下一个协程的
-                # commit 会把它一起提交，别人的 rollback 会回滚掉无关的写。
-                # 无事务时 rollback 是 no-op，所以这里无条件调用是安全的。
-                await self._conn.rollback()
-                raise
-
-    return wrapper
-
-
 def hygiene_week_start(now: datetime) -> datetime:
     """Monday 00:00 China of the hygiene week containing `now`."""
     # 先落到「现在所属的工作台日」（00:00 切的唯一实现在 services.business_day），
@@ -203,12 +192,6 @@ def _clean_reject_reason(reason) -> Optional[str]:
     return text[:MAX_REJECT_REASON_LENGTH]
 
 
-class HygieneWorkError(ValueError):
-    def __init__(self, code: str, message: str = ""):
-        self.code = code
-        super().__init__(message or code)
-
-
 class HygieneWork:
     def __init__(
         self,
@@ -234,7 +217,6 @@ class HygieneWork:
         self._image_variants = image_variants
         self._on_change = on_change
         self._write_lock_owner = conn_or_db
-        self._local_write_lock = None
         # capture 文件集合的 TTL 缓存，见 _readable_capture_ids。
         self._readable_capture_cache = None
         # 看板事件清理的上次执行时间（monotonic），见 _maybe_purge_board_events。
@@ -244,15 +226,6 @@ class HygieneWork:
         # 驳回原因不该跟着一起降级。
         self._has_event_reason: Optional[bool] = None
         self._has_event_ticket: Optional[bool] = None
-
-    @property
-    def _write_lock(self):
-        shared = getattr(self._write_lock_owner, "_write_lock", None)
-        if shared is not None:
-            return shared
-        if self._local_write_lock is None:
-            self._local_write_lock = asyncio.Lock()
-        return self._local_write_lock
 
     def _now_dt(self) -> datetime:
         value = self._now()
@@ -264,7 +237,7 @@ class HygieneWork:
         return self._now_dt().isoformat()
 
     def business_date(self) -> str:
-        """当前营业日（06:00 切）。
+        """当前的卫生的一天（工作台日，00:00 切；见 `services.hygiene.day`）。
 
         管理端要判断"某天是不是今天"时必须问这里，不要各自取一次 now：两处时钟一旦
         不同源（测试注入、将来的多店时钟），"今天"就会漂移，而漂移的后果是历史回看
@@ -582,7 +555,7 @@ class HygieneWork:
         """清掉引用被删检查项的卫生教材。
 
         教材的左右图就是这些检查项的 capture：留着行会让教材页 404，而且
-        ``_referenced_capture_ids`` 会把它们继续算作"被引用"，文件永远不回收。
+        ``captures_ledger.roots`` 会把它们继续算作"被引用"，文件永远不回收。
         capture 文件本身交给常规孤儿清理，避免误删仍被别处引用的图。
         """
         ids = [int(item_id) for item_id in item_ids if item_id is not None]
@@ -1108,70 +1081,40 @@ class HygieneWork:
     async def capture_bytes(self, capture_id: str) -> bytes:
         return await self._captures.get_async(capture_id)
 
-    async def _original_capture_meta(self, capture_id: str) -> dict:
-        cur = await self._conn.execute(
-            """SELECT capture_id, content_type, byte_size, content_sha256
-               FROM hygiene_standards WHERE capture_id = ?
-               UNION ALL
-               SELECT capture_id, content_type, NULL, NULL
-               FROM hygiene_daily_submissions WHERE capture_id = ?
-               UNION ALL
-               SELECT before_capture_id AS capture_id,
-                      before_content_type AS content_type, NULL, NULL
-               FROM hygiene_deep_clean_submissions WHERE before_capture_id = ?
-               UNION ALL
-               SELECT after_capture_id AS capture_id,
-                      after_content_type AS content_type, NULL, NULL
-               FROM hygiene_deep_clean_submissions WHERE after_capture_id = ?
-               UNION ALL
-               SELECT capture_id, content_type, NULL, NULL
-               FROM hygiene_fix_tickets WHERE capture_id = ?
-               UNION ALL
-               SELECT capture_id, content_type, NULL, NULL
-               FROM hygiene_fix_reshoots WHERE capture_id = ?
-               LIMIT 1""",
-            (capture_id, capture_id, capture_id, capture_id, capture_id, capture_id),
-        )
-        row = await cur.fetchone()
-        mapping = {} if row is None else dict(row)
-        return {
-            "capture_id": capture_id,
-            "content_type": mapping.get("content_type") or "image/jpeg",
-            "byte_size": (
-                int(mapping["byte_size"])
-                if mapping.get("byte_size") is not None
-                else None
-            ),
-            "sha256": mapping.get("content_sha256"),
-        }
-
     async def capture_view(self, capture_id: str, variant: str = "original") -> dict:
+        """这张图（或它的变体）该以什么类型、多大、什么摘要下发。
+
+        元数据与「谁持有它」都问 `captures_ledger`：以前这里只认六张表，教材与
+        仪容的图会被猜成 JPEG，也就没有摘要给 ETag 用。
+        """
         requested = (variant or "original").strip().lower()
         if requested not in {"original", *CAPTURE_VARIANTS}:
             raise HygieneWorkError("invalid_variant", "invalid_variant")
         if requested != "original":
-            cur = await self._conn.execute(
-                """SELECT capture_id, content_type, byte_size, content_sha256
-                   FROM hygiene_capture_variants
-                   WHERE source_capture_id = ? AND variant = ?""",
-                (capture_id, requested),
-            )
-            row = await cur.fetchone()
-            if row is not None:
-                mapping = dict(row)
-                if await self._captures.exists_async(mapping["capture_id"]):
-                    return {
-                        "capture_id": mapping["capture_id"],
-                        "content_type": mapping["content_type"],
-                        "byte_size": int(mapping["byte_size"]),
-                        "sha256": mapping["content_sha256"],
-                        "variant": requested,
-                        "fallback": False,
-                        "path": await self._captures.path_async(mapping["capture_id"]),
-                    }
+            variants = await captures_ledger.variants(self._conn, capture_id)
+            mapping = variants.get(requested)
+            if mapping is not None and await self._captures.exists_async(
+                mapping["capture_id"]
+            ):
+                return {
+                    "capture_id": mapping["capture_id"],
+                    "content_type": mapping["content_type"],
+                    "byte_size": int(mapping["byte_size"]),
+                    "sha256": mapping["content_sha256"],
+                    "variant": requested,
+                    "fallback": False,
+                    "path": await self._captures.path_async(mapping["capture_id"]),
+                }
         if not await self._captures.exists_async(capture_id):
             raise FileNotFoundError(capture_id)
-        meta = await self._original_capture_meta(capture_id)
+        meta = await captures_ledger.meta(
+            self._conn, capture_id, captures=self._captures
+        ) or {
+            "capture_id": capture_id,
+            "content_type": "image/jpeg",
+            "byte_size": None,
+            "sha256": None,
+        }
         return {
             **meta,
             "variant": "original",
@@ -1180,45 +1123,13 @@ class HygieneWork:
             "path": await self._captures.path_async(capture_id),
         }
 
-    async def _referenced_capture_ids(self) -> set[str]:
-        """Capture ids owned by hygiene business tables (roots of the variant tree)."""
-        cur = await self._conn.execute(
-            """SELECT capture_id FROM hygiene_standards
-               UNION
-               SELECT capture_id FROM hygiene_daily_submissions
-               UNION
-               SELECT before_capture_id FROM hygiene_deep_clean_submissions
-               UNION
-               SELECT after_capture_id FROM hygiene_deep_clean_submissions
-               UNION
-               SELECT capture_id FROM hygiene_fix_tickets
-               UNION
-               SELECT capture_id FROM hygiene_fix_reshoots
-               UNION
-               SELECT left_capture_id FROM hygiene_teaching_examples
-               UNION
-               SELECT right_capture_id FROM hygiene_teaching_examples
-               UNION
-               SELECT capture_id FROM hygiene_attire_shots
-               UNION
-               SELECT capture_id FROM hygiene_attire_standard"""
-        )
-        return {str(dict(row)["capture_id"]) for row in await cur.fetchall()}
-
-    async def _variant_capture_ids(self) -> set[str]:
-        """Derivative capture ids. These are never variant sources, or thumbs recurse."""
-        cur = await self._conn.execute(
-            "SELECT capture_id FROM hygiene_capture_variants"
-        )
-        return {str(dict(row)["capture_id"]) for row in await cur.fetchall()}
-
     async def backfill_capture_variants_once(self, batch_size: int = 20) -> int:
         if self._image_variants is None:
             return 0
-        derivatives = await self._variant_capture_ids()
+        derivatives = await captures_ledger.derivatives(self._conn)
         sources = sorted(
             capture_id
-            for capture_id in await self._referenced_capture_ids()
+            for capture_id in await captures_ledger.roots(self._conn)
             if capture_id not in derivatives
         )
         if not sources:
@@ -1289,9 +1200,9 @@ class HygieneWork:
         必须拿写锁：它会 ``commit()``，而在共享连接上无锁 commit 会把另一个协程
         写了一半的事务顺手提交掉（锁在这里就是事务边界）。
         """
-        referenced = await self._referenced_capture_ids()
+        referenced = await captures_ledger.roots(self._conn)
         await self._drop_unrooted_variant_rows(referenced)
-        keep = referenced | await self._variant_capture_ids()
+        keep = await captures_ledger.reachable(self._conn)
         now = self._now_dt().timestamp()
         removed = 0
         for capture_id in await self._captures.list_ids_async():
@@ -1871,15 +1782,17 @@ class HygieneWork:
         只是不再限定「待验收」——回看要能看见那天交没交、漏了哪些。
 
         ``pending_review_only``：**待我验收**这一档（2026-10-05 加）—— 给员工账号上的
-        「管理员」用。他的验收权是**全店**的（``_require_reviewer`` 判的是**传进去的那一项**
-        能力开关，不看区 —— 这一档传 ``daily_review``，专项卫生那两处传 ``deep_review``），
-        但他的待办队列被 ``_inbox_filter`` 锁在「本区 + 本班次」，于是今天**别的区**有人交了
-        他一条也看不到，验收权等于没有入口。这一档把范围放开到两个班次、全部区，只要
-        「待验收」且不是他自己交的那条 —— 与 ``_require_reviewer`` 的两条判据逐字对齐。
+        「管理员」用。他的验收权是**全店**的（``services.hygiene.judge`` 判的是**传进去的
+        那一类**能力开关，不看区 —— 这一档是 ``judge.DAILY``，专项卫生那两处是
+        ``judge.DEEP``），但他的待办队列被 ``_inbox_filter`` 锁在「本区 + 本班次」，
+        于是今天**别的区**有人交了他一条也看不到，验收权等于没有入口。这一档把范围放开到
+        两个班次、全部区，只要「待验收」。自己交的那条现在**留在列表里**、
+        ``review.allowed`` 为假（``cannot_self_accept``）—— 列表与写口给的是
+        同一个结论，不再靠「看不见」实现。
         """
         if pending_review_only:
             # 只有能验收的人才拿得到这一档；普通员工拿到的是 forbidden（前端也不会问他）。
-            self._require_reviewer(actor, 0, CAP_DAILY_REVIEW)
+            judge.require(judge.DAILY, actor, now=self._now_dt())
         target = business_date or hygiene_business_date(self._now_dt())
         if pending_review_only:
             shifts: tuple[str, ...] = DAILY_SHIFTS
@@ -1929,11 +1842,10 @@ class HygieneWork:
             if not self._zone_shift_enabled(mapping, mapping["shift"]):
                 continue
             if pending_review_only:
-                # 只要今天真有人交了、还没被判的；自己交的自己不能判
-                # （`_require_reviewer` 的 `cannot_self_accept`，在这里体现为直接不放进来）。
+                # 只要今天真有人交了、还没被判的。自己交的那条**留在列表里**：
+                # 判据给 `cannot_self_accept`，前端置灰并写明「你交的，等别人验收」。
+                # 以前是直接跳过 —— 同一个理由，列表说「没有」，写口说「不能」，两种表达。
                 if mapping.get("instance_status") != STATUS_PENDING:
-                    continue
-                if int(mapping.get("submitter_id") or 0) == int((actor or {}).get("id") or 0):
                     continue
             item = {
                 "id": mapping["item_id"],
@@ -1964,17 +1876,18 @@ class HygieneWork:
                     "captured_at": mapping["captured_at"],
                 }
             key = (int(mapping["item_id"]), mapping["shift"])
-            inbox.append(
-                self._inbox_from_parts(
-                    item,
-                    mapping["shift"],
-                    target,
-                    instance,
-                    submission,
-                    rejected=key in rejected_reasons,
-                    reject_reason=rejected_reasons.get(key),
-                )
+            row = self._inbox_from_parts(
+                item,
+                mapping["shift"],
+                target,
+                instance,
+                submission,
+                rejected=key in rejected_reasons,
+                reject_reason=rejected_reasons.get(key),
             )
+            # 这一行对**当前这个人**意味着什么，由判据给；前端不再自己算。
+            row["review"] = judge.review(judge.DAILY, actor, row, now=self._now_dt())
+            inbox.append(row)
         return inbox
 
     async def list_pending_daily(
@@ -2062,28 +1975,22 @@ class HygieneWork:
             "submitter_id": int(submission["submitter_id"]),
             "submitter_phone": submission["submitter_phone"],
             "zone_name": submission["zone_name"],
+            # 面板上的「通过 / 驳回」按它显隐，与写口同一张规则表。
+            "review": judge.review(
+                judge.DAILY,
+                actor,
+                {
+                    "status": instance["status"],
+                    "submitter_id": int(submission["submitter_id"]),
+                },
+                now=self._now_dt(),
+            ),
             "watermark": self._watermark(
                 submission["captured_at"],
                 submission["zone_name"],
                 submission["submitter_phone"],
             ),
         }
-
-    def _require_reviewer(self, actor: dict, submitter_id: int, cap: str) -> None:
-        """能不能判别人交的这一份。``cap`` 是要的那一项开关（日常 / 专项）。
-
-        2026-10-05 起由超级管理员逐项放权：以前是"是不是「管理员」这个档位"，
-        现在是"有没有这一项" —— 有的人只该判日常、不该判专项，档位表达不出来。
-        两条老规矩不变：本人不能判自己交的；超级管理员不受开关限制。
-        """
-        if not actor:
-            raise HygieneWorkError("forbidden", "forbidden")
-        if actor.get("kind") == "super":
-            return
-        if actor.get("kind") != "staff" or not has_cap(actor.get("caps"), cap):
-            raise HygieneWorkError("forbidden", "forbidden")
-        if int(actor.get("id") or 0) == int(submitter_id):
-            raise HygieneWorkError("cannot_self_accept", "cannot_self_accept")
 
     def _review_business_date(self, business_date: Optional[str]) -> str:
         """验收/驳回针对哪个营业日：不给就是今天，给了就往回补。
@@ -2238,7 +2145,12 @@ class HygieneWork:
         item_row = await self._fetch_item_with_zone(item_id)
         if item_row is not None:
             self._require_zone_access(actor, item_row["zone_id"])
-        self._require_reviewer(actor, submission["submitter_id"], CAP_DAILY_REVIEW)
+        judge.require(
+            judge.DAILY,
+            actor,
+            {"submitter_id": submission["submitter_id"]},
+            now=self._now_dt(),
+        )
         # 发到群里的那一行说明：哪个区、哪个检查项、什么时候验的（**不带员工姓名**）。
         # 先算好 —— 下面那个分支会把 item_row 换成只带 zone_id 的那一行。
         reviewed_item = {} if item_row is None else dict(item_row)
@@ -2309,7 +2221,7 @@ class HygieneWork:
         ``business_date`` 语义同 ``accept_daily``（不给就是今天；下界同样是可补验窗口）。
 
         权限与 ``accept_daily`` 同一条：区（``_require_zone_access``）+
-        ``_require_reviewer``（日常验收开关、不能判自己交的那条）。只认当前状态是
+        ``judge.require(judge.DAILY, …)``（日常验收开关、不能判自己交的那条）。只认当前状态是
         「已通过」的实例，别的状态报 ``not_pending`` —— 撤销不是「重开一条待办」。
 
         **提交不动**：``accept_daily`` 本来就不清 ``pending_submission_id``，所以撤销后
@@ -2334,13 +2246,18 @@ class HygieneWork:
             raise HygieneWorkError("not_pending", "not_pending")
         submission = await self._fetch_submission(instance.get("pending_submission_id"))
         if submission is None:
-            # 没有提交就看不出是谁交的，`_require_reviewer` 的「本人不能判自己」也就无从
-            # 判起；正常路径不会出现（验收本身就要求存在待验收提交），按没有可撤销处理。
+            # 没有提交就看不出是谁交的，`judge` 的「本人不能判自己」也就无从判起；
+            # 正常路径不会出现（验收本身就要求存在待验收提交），按没有可撤销处理。
             raise HygieneWorkError("not_pending", "not_pending")
         item_row = await self._fetch_item_with_zone(item_id)
         if item_row is not None:
             self._require_zone_access(actor, item_row["zone_id"])
-        self._require_reviewer(actor, submission["submitter_id"], CAP_DAILY_REVIEW)
+        judge.require(
+            judge.DAILY,
+            actor,
+            {"submitter_id": submission["submitter_id"]},
+            now=self._now_dt(),
+        )
         now = self._now_iso()
         cur = await self._conn.execute(
             """UPDATE hygiene_daily_instances
@@ -2395,7 +2312,12 @@ class HygieneWork:
         item_row = await self._fetch_item_with_zone(item_id)
         if item_row is not None:
             self._require_zone_access(actor, item_row["zone_id"])
-        self._require_reviewer(actor, submission["submitter_id"], CAP_DAILY_REVIEW)
+        judge.require(
+            judge.DAILY,
+            actor,
+            {"submitter_id": submission["submitter_id"]},
+            now=self._now_dt(),
+        )
         now = self._now_iso()
         cur = await self._conn.execute(
             """UPDATE hygiene_daily_instances
@@ -3584,7 +3506,8 @@ class HygieneWork:
         任何员工会话。要收紧就得先改产品口径、再给专项清单加"归谁 / 归哪个区"的列 ——
         在这里补一句 ``WHERE submitter_id = ?`` 只会让"全店一起干"的活变成谁都看不见。
         """
-        del actor  # shop-wide; 班次 does not gate 专项卫生
+        # 清单本身仍是全店的（班次不 gate 专项卫生），但「这一份我能不能判」按 actor 给：
+        # 每行带 review，与 accept_deep_clean_pair / reject_deep_clean_pair 同一张规则表。
         business_date = hygiene_business_date(self._now_dt())
         weekday = self._weekday_of(business_date)
         cur = await self._conn.execute(
@@ -3637,16 +3560,18 @@ class HygieneWork:
                     "before_captured_at": mapping["before_captured_at"],
                     "after_captured_at": mapping["after_captured_at"],
                 }
-            rows.append(
-                self._deep_clean_row(
-                    item,
-                    business_date,
-                    instance,
-                    submission,
-                    rejected=int(mapping["item_id"]) in rejected_reasons,
-                    reject_reason=rejected_reasons.get(int(mapping["item_id"])),
-                )
+            row = self._deep_clean_row(
+                item,
+                business_date,
+                instance,
+                submission,
+                rejected=int(mapping["item_id"]) in rejected_reasons,
+                reject_reason=rejected_reasons.get(int(mapping["item_id"])),
             )
+            row["review"] = judge.review(
+                judge.DEEP, actor, row, now=self._now_dt()
+            )
+            rows.append(row)
         status = CALENDAR_DONE if rows and all(
             row["status"] == STATUS_PASSED for row in rows
         ) else CALENDAR_TODO
@@ -3776,7 +3701,9 @@ class HygieneWork:
             raise HygieneWorkError("not_pending", "not_pending")
         return instance, submission
 
-    async def get_deep_clean_review(self, item_id: int) -> dict:
+    async def get_deep_clean_review(
+        self, item_id: int, actor: Optional[dict] = None
+    ) -> dict:
         instance, submission = await self._pending_deep_clean(item_id)
         item = await self._fetch_deep_clean_item(item_id)
         name = submission["item_name"] if item is None else item["name"]
@@ -3797,6 +3724,15 @@ class HygieneWork:
             "status": STATUS_PENDING,
             "submitter_id": int(submission["submitter_id"]),
             "submitter_phone": submission["submitter_phone"],
+            "review": judge.review(
+                judge.DEEP,
+                actor,
+                {
+                    "status": STATUS_PENDING,
+                    "submitter_id": int(submission["submitter_id"]),
+                },
+                now=self._now_dt(),
+            ),
             "before_capture_id": submission["before_capture_id"],
             "after_capture_id": submission["after_capture_id"],
             "before_content_type": submission["before_content_type"],
@@ -3809,7 +3745,12 @@ class HygieneWork:
     @serialized_write
     async def accept_deep_clean_pair(self, actor: dict, item_id: int) -> dict:
         instance, submission = await self._pending_deep_clean(item_id)
-        self._require_reviewer(actor, submission["submitter_id"], CAP_DEEP_REVIEW)
+        judge.require(
+            judge.DEEP,
+            actor,
+            {"submitter_id": submission["submitter_id"]},
+            now=self._now_dt(),
+        )
         # 专项一次提交两张图：capture_id 存「后」，extra 存「前」，发出去的是拼好的
         # 一张对照图（左前右后）—— 所以说明里要写清左右，图上也有标签。
         deep_clean_name = str(submission.get("item_name") or "").strip() or "专项卫生"
@@ -3854,7 +3795,12 @@ class HygieneWork:
         reason: Optional[str] = None,
     ) -> dict:
         instance, submission = await self._pending_deep_clean(item_id)
-        self._require_reviewer(actor, submission["submitter_id"], CAP_DEEP_REVIEW)
+        judge.require(
+            judge.DEEP,
+            actor,
+            {"submitter_id": submission["submitter_id"]},
+            now=self._now_dt(),
+        )
         now = self._now_iso()
         cur = await self._conn.execute(
             """UPDATE hygiene_deep_clean_instances
@@ -3906,57 +3852,6 @@ class HygieneWork:
             return f"{int(hours)} 小时"
         return f"{hours:g} 小时"
 
-    def _require_fix_opener(self, actor: dict) -> None:
-        """开整改单的**权限**判据：只看 `fix` 那一项能力开关，不看今天排没排到班。
-
-        员工端有执行点的能力只有三项，这是其中一处判据（另两处是 `_require_reviewer`
-        验收日常/专项、`_require_fix_reviewer` 验收整改单）。有「整改单」这一项的人就是
-        旧口径里的「管理员」——那一档现在**由开关派生**（`permission` 只是显示标签，见
-        `docs/adr/0093`）。他是"现场复核档"：他把活交出去、也能自己开单。开单跟日常拍摄
-        不是一回事 —— 班次只决定交哪一档日常，所以**"今天有没有班"不是这一档的前置条件**
-        （2026-10-05 审查 F-05：前端曾经复用日常那条 `needsAssignment` 拦开单，管理员被告知
-        "去找店长确认排班"，而他自己就是管理员）。
-
-        真正限制他开在哪里的，是 `open_fix` 里的 `_require_zone_access`：只认今天排给他的
-        那个卫生工作区（`_actor_zone_id`；今天一个区都没排到的员工 actor 带的是
-        ``zone_id=None``，那里会抛 `zone_required` → 前端说人话拒绝）。普通员工在这一步
-        就被 `forbidden` 挡下，**不会**走到工作区判断 —— 403 不能变成 200。
-        """
-        if actor and actor.get("kind") == "super":
-            return
-        if (
-            actor
-            and actor.get("kind") == "staff"
-            and has_cap(actor.get("caps"), CAP_FIX)
-        ):
-            return
-        raise HygieneWorkError("forbidden", "forbidden")
-
-    def _is_fix_opener(self, actor: dict, ticket: dict) -> bool:
-        if not actor:
-            return False
-        if ticket["opener_kind"] == OPENER_SUPER:
-            return actor.get("kind") == "super"
-        if actor.get("kind") != "staff":
-            return False
-        return int(actor.get("id") or 0) == int(ticket["opener_id"] or 0)
-
-    def _require_fix_reviewer(self, actor: dict, ticket: dict) -> None:
-        if self._is_fix_opener(actor, ticket):
-            return
-        deadline = self._parse_iso(ticket["deadline"])
-        if self._now_dt() < deadline:
-            raise HygieneWorkError("forbidden", "forbidden")
-        if actor and actor.get("kind") == "super":
-            return
-        if (
-            actor
-            and actor.get("kind") == "staff"
-            and has_cap(actor.get("caps"), CAP_FIX)
-        ):
-            return
-        raise HygieneWorkError("forbidden", "forbidden")
-
     def _fix_open_text(self, zone_name: str, ticket_type: str, body: str, seconds: int) -> str:
         return (
             f"【整改单】{zone_name} · {ticket_type}：{body}"
@@ -3976,6 +3871,7 @@ class HygieneWork:
         reshoot=None,
         rejected: bool = False,
         reject_reason=None,
+        actor: Optional[dict] = None,
     ) -> dict:
         opener_id = ticket.get("opener_id")
         open_watermark = self._watermark(
@@ -3992,7 +3888,7 @@ class HygieneWork:
                 reshoot["zone_name"],
                 reshoot["photographer_phone"],
             )
-        return {
+        row = {
             # 这张单被打回过：员工端要能区分"被打回"与"从没回拍过"。
             "rejected": bool(rejected),
             "reject_reason": reject_reason or None,
@@ -4013,6 +3909,13 @@ class HygieneWork:
             "open_watermark": open_watermark,
             "watermark": watermark,
         }
+        # 管理端看单子时要一眼知道「我能不能判」；员工端回拍结果不传 actor，
+        # 那里没有判定这回事（回拍不是判决）。
+        if actor is not None:
+            row["review"] = judge.review(
+                judge.FIX, actor, ticket, now=self._now_dt()
+            )
+        return row
 
     async def _fetch_fix_ticket(self, ticket_id: int):
         cur = await self._conn.execute(
@@ -4063,7 +3966,7 @@ class HygieneWork:
         live_capture,
         markup=None,
     ) -> dict:
-        self._require_fix_opener(actor)
+        judge.require(judge.FIX_OPEN, actor, now=self._now_dt())
         data = self._require_live_capture(live_capture)
         cleaned_type = (ticket_type or "").strip()
         if cleaned_type not in FIX_TYPES:
@@ -4075,7 +3978,7 @@ class HygieneWork:
         zone = await self._fetch_zone(zone_id)
         if zone is None:
             raise HygieneWorkError("zone_not_found", "zone_not_found")
-        # 权限另判（`_require_fix_opener`），这里判的是**开在哪个区**：今天排了区就只能开
+        # 权限另判（`judge.require(judge.FIX_OPEN, …)`），这里判的是**开在哪个区**：今天排了区就只能开
         # 在自己那个区上；今天一个区都没排到（actor 的 zone_id 是 None）会被判
         # `zone_required` 拒掉。班次不参与 —— 开整改单是复核动作，不落在班次上。
         self._require_zone_access(actor, zone_id)
@@ -4208,6 +4111,7 @@ class HygieneWork:
                     reshoot,
                     rejected=int(ticket["id"]) in rejected_reasons,
                     reject_reason=rejected_reasons.get(int(ticket["id"])),
+                    actor=actor,
                 )
             )
         return rows
@@ -4222,7 +4126,7 @@ class HygieneWork:
             raise HygieneWorkError("ticket_not_found", "ticket_not_found")
         self._require_zone_access_for(actor, ticket["zone_id"])
         reshoot = await self._fetch_fix_reshoot(ticket.get("pending_reshoot_id"))
-        return self._fix_row(ticket, reshoot)
+        return self._fix_row(ticket, reshoot, actor=actor)
 
     async def get_fix_review(
         self,
@@ -4238,7 +4142,7 @@ class HygieneWork:
         reshoot = await self._fetch_fix_reshoot(ticket.get("pending_reshoot_id"))
         if reshoot is None:
             raise HygieneWorkError("not_pending", "not_pending")
-        return self._fix_row(ticket, reshoot)
+        return self._fix_row(ticket, reshoot, actor=actor)
 
     async def reshoot_fix(self, actor: dict, ticket_id: int, live_capture) -> dict:
         """员工重拍一张回拍照片（覆盖待验收的那张）。
@@ -4306,7 +4210,7 @@ class HygieneWork:
         now = self._now_iso()
         # 待验收状态下的再次回拍＝同一张"待回拍"的重拍（员工嫌照片糊、弱网重传、
         # 误操作）。验收只看 pending_reshoot_id，被顶替的那行从此没人看得到，可它
-        # 仍在 hygiene_fix_reshoots 里，而 _referenced_capture_ids 把这张表整表
+        # 仍在 hygiene_fix_reshoots 里，而 captures_ledger 把这张表整表
         # 算作"被引用"——留着就是原图 + 变体的永久占盘。按 delete_fix_ticket 的
         # 顺序清掉旧行与旧变体行，旧文件交给锁外的调用方删。
         #
@@ -4385,7 +4289,7 @@ class HygieneWork:
     async def accept_fix(self, actor: dict, ticket_id: int) -> dict:
         ticket, reshoot = await self._pending_fix(ticket_id)
         self._require_zone_access(actor, ticket["zone_id"])
-        self._require_fix_reviewer(actor, ticket)
+        judge.require(judge.FIX, actor, ticket, now=self._now_dt())
         # 发群里的是**回拍**那张（整改后的结果）；开单原图不跟着发 —— 群里要的是
         # "改好了"，不是"当时有多脏"。
         ticket_label = str(ticket.get("ticket_type") or "").strip() or "整改"
@@ -4429,15 +4333,15 @@ class HygieneWork:
         caption: str = "",
         extra_capture_id: str = "",
     ) -> bool:
-        """**自己拿写锁**的分享登记入口。
+        """**自己开一个写单元**的分享登记入口。
 
-        给那些没有现成写事务的验收路径用 —— 仪容仪表就是那样：它的写路径自己
-        `commit()`，没有 `@serialized_write` 罩着。日常 / 专项 / 整改已经在写锁与
-        事务里，直接调 `self._sharer.enqueue()`，不走这里（那条路要的是"与验收同生共死"）。
+        给那些没有现成写事务的验收路径用 —— 仪容仪表就是那样：它的判定在自己
+        的写单元里结束，分享登记是另一笔。日常 / 专项 / 整改已经在写锁与事务里，
+        直接调 `self._sharer.enqueue()`，不走这里（那条路要的是"与验收同生共死"）。
         """
         if self._sharer is None:
             return False
-        async with self._write_lock:
+        async with write_unit(self._conn):
             created = await self._sharer.enqueue(
                 kind=kind,
                 ref_key=ref_key,
@@ -4445,7 +4349,6 @@ class HygieneWork:
                 caption=caption,
                 extra_capture_id=extra_capture_id,
             )
-            await self._conn.commit()
         return created
 
     @serialized_write
@@ -4457,7 +4360,7 @@ class HygieneWork:
     ) -> dict:
         ticket, reshoot = await self._pending_fix(ticket_id)
         self._require_zone_access(actor, ticket["zone_id"])
-        self._require_fix_reviewer(actor, ticket)
+        judge.require(judge.FIX, actor, ticket, now=self._now_dt())
         now_dt = self._now_dt()
         now = now_dt.isoformat()
         deadline = (now_dt + timedelta(seconds=int(ticket["duration_seconds"]))).isoformat()

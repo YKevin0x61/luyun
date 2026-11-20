@@ -10,7 +10,6 @@ import { useHygieneRealtime } from '../../composables/useHygieneRealtime'
 import { useImageUploadQueueStore } from '../../stores/imageUploadQueue'
 import {
   HYGIENE_FIX_TYPES,
-  canAcceptFixTicket,
   hasLiveCamera,
 } from '../../utils/hygieneCopy'
 import { chinaNowIso, createCircleMark, fixOriginalUrl, fixReshootUrl } from '../../utils/hygieneMarkup'
@@ -172,8 +171,20 @@ function selectRow(row) {
   review.value = row
 }
 
+// 能不能判由服务端给（行上的 `review`）：开单人、时限、`fix` 开关都收在
+// services/hygiene/judge.py 那张表里，这里不再自己算一遍 —— 算两遍就会漂
+// （旧文案曾写「到了超级管理员才能验别人开的单」，与后端判据不一致）。
 function canDecide(ticket) {
-  return canAcceptFixTicket({ kind: 'super' }, ticket)
+  return Boolean(ticket && ticket.review && ticket.review.allowed)
+}
+
+// 置灰时说明白「为什么还不能判」，文案跟着服务端给的 reason 走。
+function decideHint(ticket) {
+  const reason = ticket && ticket.review ? ticket.review.reason : ''
+  if (reason === 'before_deadline') return '时限还没到，只有开单人能验。'
+  if (reason === 'cannot_self_accept') return '这张单是你自己开的，等时限到了由别人验。'
+  if (reason === 'not_pending') return '这张单已经处理过了，刷新看看。'
+  return '你没有「整改单」这项权限，找超级管理员。'
 }
 
 // 驳回不可撤销：整改单回到"待回拍"，员工得重新回拍。按钮紧挨着"通过"，
@@ -412,7 +423,7 @@ async function confirmDelete() {
         <h2>{{ selected ? `${selected.zone_name} · ${selected.ticket_type}` : '对照验收' }}</h2>
         <span class="wbx-hint">左开单原图 · 右回拍</span>
       </header>
-      <div v-if="!selected" class="wbx-empty-bar">点一张单。时限未到只能由开单人验；到了超级管理员才能验别人开的单。</div>
+      <div v-if="!selected" class="wbx-empty-bar">点一张单。谁能判由服务端定：自己开的单自己能收；别人的单要等时限到了、并且开了「整改单」这项权限。</div>
       <div v-else class="review-body">
         <p class="review-meta">{{ selected.body_text }} · 时限 {{ deadlineLabel(selected.deadline) }}</p>
         <HygieneReviewPair
@@ -428,7 +439,7 @@ async function confirmDelete() {
           :left-watermark="selected.open_watermark"
           :watermark="selected.watermark"
         />
-        <p v-if="selected.status === '待验收' && !canDecide(selected)" class="wbx-lead">时限还没到，只有开单人能验。</p>
+        <p v-if="selected.status === '待验收' && !canDecide(selected)" class="wbx-lead">{{ decideHint(selected) }}</p>
         <div class="review-actions">
           <template v-if="canDecide(selected)">
             <button type="button" class="btn btn-primary" :disabled="busy" @click="decide('accept')">通过</button>
@@ -491,19 +502,20 @@ async function confirmDelete() {
 .wbx-readline {
   display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 26px;
   padding: 10px 14px;
-  background: var(--surface-1); border: 1px solid var(--line);
-  border-radius: var(--r-2); box-shadow: 0 1px 2px var(--wb-ink-a08);
+  background: var(--surface-1); border: var(--edge-w, 2px) solid var(--edge);
+  border-radius: var(--r-1); box-shadow: var(--paper-shadow-sm);
 }
 .wbx-read { display: inline-flex; align-items: baseline; gap: 6px; }
-.wbx-read span { font: 500 9.5px/1 var(--font-sans); letter-spacing: .18em; color: var(--ink-faint); }
-.wbx-read b { font: 500 20px/1 var(--font-mono); color: var(--ink); }
+.wbx-read span { font: 700 11px/1.2 var(--font-sans); letter-spacing: .01em; color: var(--ink-dim); }
+.wbx-read b { font: 500 20px/1 var(--font-display); color: var(--ink);
+  font-weight: 800;}
 .wbx-read b.is-bad { color: var(--danger-bright); }
 
 .wbx-cols { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); gap: 14px; align-items: stretch; }
 .wbx-panel {
   display: flex; flex-direction: column;
-  background: var(--surface-1); border: 1px solid var(--line);
-  border-radius: var(--r-2); box-shadow: 0 1px 2px var(--wb-ink-a08); overflow: hidden;
+  background: var(--surface-1); border: var(--edge-w, 2px) solid var(--edge);
+  border-radius: var(--r-2); box-shadow: var(--paper-shadow-sm); overflow: hidden;
 }
 .wbx-ph { display: flex; align-items: center; gap: 9px; padding: 11px 14px; border-bottom: 1px solid var(--line); }
 .wbx-ph h2 { margin: 0; font: 600 12.5px/1 var(--font-sans); letter-spacing: .06em; color: var(--ink); }

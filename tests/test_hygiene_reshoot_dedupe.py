@@ -4,8 +4,8 @@
 
 审查报告 DOC-07：``reshoot_fix`` 原来只挡"已通过"，待验收状态下再拍一次就 INSERT
 一行新的 ``hygiene_fix_reshoots`` 并把 ``pending_reshoot_id`` 覆盖成新行 id；旧行
-（连同 1 张原图 + 2 个变体）失去引用，却仍被 ``_referenced_capture_ids`` 的整表
-UNION 算作"被引用"→ 孤儿清理永远收不走，DB 与磁盘只增不减。
+（连同 1 张原图 + 2 个变体）失去引用，却仍被 ``captures_ledger`` 的整表 UNION
+算作"被引用"→ 孤儿清理永远收不走，DB 与磁盘只增不减。
 
 反方向的边界同样要守住：被打回的那张是驳回证据，下一轮回拍不能把它一起删掉。
 
@@ -211,7 +211,7 @@ class ReshootDedupeTest(unittest.IsolatedAsyncioTestCase):
         original = self.work._delete_capture_files
 
         async def probe(capture_ids):
-            observed.append((self.work._write_lock.locked(), list(capture_ids)))
+            observed.append((self.db._write_lock.locked(), list(capture_ids)))
             return await original(capture_ids)
 
         with mock.patch.object(self.work, "_delete_capture_files", probe):

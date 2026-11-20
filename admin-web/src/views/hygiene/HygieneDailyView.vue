@@ -339,7 +339,8 @@ function statusClass(status) {
   <div class="daily-page">
     <header class="roster-head">
       <div>
-        <p class="hy-eyebrow">Daily · 当日对照</p>
+        <!-- 2026-11-20：眉标「DAILY · 当日对照」删掉 —— 它在 390 宽下断成两行，
+             内容又与 H1「日常验收」同义；花名册页早就不用这条眉标了，这里跟上。 -->
         <h1>日常验收</h1>
         <p>对照提交当时的标准图验收员工实拍。</p>
         <details class="rule-help">
@@ -548,7 +549,7 @@ function statusClass(status) {
   border-radius: var(--r-full);
   font-size: 11px;
   font-style: normal;
-  border: 1px solid var(--line);
+  border: var(--edge-w, 2px) solid var(--edge);
   color: var(--ink-dim);
 }
 /* 状态 = 6px 圆点 + 小字；圆点取文字色，胶囊只做底色/边框。 */
@@ -712,7 +713,7 @@ function statusClass(status) {
 /* 空态在分组里也保持同一套留白（今天那一组空、漏验还有时用得上）。 */
 .daily-page .roster-empty { margin: 0; }
 
-/* 手机 390（审查实测）：页头左右分栏把说明挤成窄栏、眉标「DAILY · 当日对照」断成两行、
+/* 手机 390（审查实测）：页头左右分栏把说明挤成窄栏、
    日期与「今天/刷新」只有 35–38px。改成「标题独占一行 + 筛选条独占一行 + 控件 48px」。
    提示条仍然一行：窄屏只留动作按钮，项目名那截让位（行高固定，按钮不漂移）。 */
 @media (max-width: 720px) {
@@ -721,7 +722,6 @@ function statusClass(status) {
   .daily-page .daily-datebar .btn { min-height: 48px; }
   .daily-page .daily-datebar :deep(.dpx),
   .daily-page .daily-datebar :deep(input) { min-height: 48px; }
-  .daily-page .hy-eyebrow { white-space: nowrap; }
 }
 @media (max-width: 560px) {
   .daily-receipt-text { display: none; }

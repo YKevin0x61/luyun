@@ -308,19 +308,20 @@ function pickStandard(event) {
 .wbx-readline {
   display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 26px;
   padding: 10px 14px;
-  background: var(--surface-1); border: 1px solid var(--line);
-  border-radius: var(--r-2); box-shadow: 0 1px 2px var(--wb-ink-a08);
+  background: var(--surface-1); border: var(--edge-w, 2px) solid var(--edge);
+  border-radius: var(--r-1); box-shadow: var(--paper-shadow-sm);
 }
 .wbx-read { display: inline-flex; align-items: baseline; gap: 6px; }
-.wbx-read span { font: 500 9.5px/1 var(--font-sans); letter-spacing: .18em; color: var(--ink-faint); }
-.wbx-read b { font: 500 20px/1 var(--font-mono); color: var(--ink); }
+.wbx-read span { font: 700 11px/1.2 var(--font-sans); letter-spacing: .01em; color: var(--ink-dim); }
+.wbx-read b { font: 500 20px/1 var(--font-display); color: var(--ink);
+  font-weight: 800;}
 .wbx-read em { font-style: normal; font-size: 9.5px; color: var(--ink-faint); }
 
 .wbx-cols { display: grid; grid-template-columns: 320px minmax(0, 1fr); gap: 14px; align-items: stretch; }
 .wbx-panel {
   display: flex; flex-direction: column;
-  background: var(--surface-1); border: 1px solid var(--line);
-  border-radius: var(--r-2); box-shadow: 0 1px 2px var(--wb-ink-a08); overflow: hidden;
+  background: var(--surface-1); border: var(--edge-w, 2px) solid var(--edge);
+  border-radius: var(--r-2); box-shadow: var(--paper-shadow-sm); overflow: hidden;
 }
 .wbx-ph { display: flex; align-items: center; gap: 9px; padding: 11px 14px; border-bottom: 1px solid var(--line); }
 .wbx-ph h2 { margin: 0; font: 600 12.5px/1 var(--font-sans); letter-spacing: .06em; color: var(--ink); }
@@ -337,7 +338,7 @@ function pickStandard(event) {
 
 .standard-body { display: flex; flex-direction: column; gap: 10px; padding: 12px 14px 14px; }
 .standard-shot { display: flex; flex-direction: column; gap: 8px; }
-.standard-shot img { display: block; width: 100%; max-width: 220px; border-radius: var(--r-1); border: 1px solid var(--line); }
+.standard-shot img { display: block; width: 100%; max-width: 220px; border-radius: var(--r-1); border: var(--edge-w, 2px) solid var(--edge); }
 .standard-body .wbx-sub { margin: 0; font-size: 10.5px; }
 .standard-body .wbx-sub.standard-missing { color: var(--warn); }
 .standard-body .upload-btn { position: relative; overflow: hidden; cursor: pointer; align-self: flex-start; white-space: nowrap; }
@@ -350,7 +351,7 @@ function pickStandard(event) {
 }
 .attire-row:last-child { border-bottom: 0; }
 .attire-row:hover { background: var(--surface-2); }
-.shot-cell img { display: block; width: 56px; height: 56px; object-fit: cover; border-radius: var(--r-1); border: 1px solid var(--line); }
+.shot-cell img { display: block; width: 56px; height: 56px; object-fit: cover; border-radius: var(--r-1); border: var(--edge-w, 2px) solid var(--edge); }
 .shot-empty {
   display: grid; place-items: center; width: 56px; height: 56px;
   border: 1px dashed var(--line-strong); border-radius: var(--r-1);

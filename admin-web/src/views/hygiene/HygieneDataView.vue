@@ -5,6 +5,7 @@ import LuyunDatePicker from '../../components/ui/LuyunDatePicker.vue'
 import HygieneImageLightbox from '../../components/hygiene/HygieneImageLightbox.vue'
 import { api } from '../../api/client'
 import { useHygieneRealtime } from '../../composables/useHygieneRealtime'
+import { useHygieneDayStore } from '../../stores/hygieneDay'
 import { formatHygieneStamp } from '../../utils/hygieneTime'
 
 const KINDS = [
@@ -22,6 +23,9 @@ const PURGE_KINDS = KINDS.filter((kind) => kind.value !== 'fix')
 
 const PAGE_SIZE = 24
 
+// 日期区间的「今天」来自服务端（/api/hygiene/today，00:00 切）：这是 ADR 0125
+// 「没做的事」里的第一处，也是 00:00-06:00 页面算今天、存档算昨天的那条缝。
+const hygieneDay = useHygieneDayStore()
 const dateFrom = ref('')
 const dateTo = ref('')
 const selectedKinds = ref(KINDS.map((kind) => kind.value))
@@ -91,20 +95,20 @@ let pollTimer = null
 const pageCount = computed(() => Math.max(1, Math.ceil(total.value / PAGE_SIZE)))
 const canPurge = computed(() => purgeKinds.value.length > 0 && !busy.value)
 
-function isoDate(date) {
-  const year = date.getFullYear()
-  const month = String(date.getMonth() + 1).padStart(2, '0')
-  const day = String(date.getDate()).padStart(2, '0')
-  return `${year}-${month}-${day}`
+/** 纯日期加减：服务端给的 YYYY-MM-DD 加 n 天，仍返回 YYYY-MM-DD。走 UTC 是为了
+ *  不受本机时区/夏令时影响 —— 这里没有「几点」，只有日历日。 */
+function shiftIso(dayText, days) {
+  const [year, month, day] = String(dayText || '').split('-').map(Number)
+  if (!year || !month || !day) return ''
+  return new Date(Date.UTC(year, month - 1, day + days)).toISOString().slice(0, 10)
 }
 
 function defaultRange() {
-  const to = new Date()
-  const from = new Date(to.getTime() - 6 * 86400000)
-  return { from: isoDate(from), to: isoDate(to) }
+  return { from: shiftIso(hygieneDay.today, -6), to: hygieneDay.today }
 }
 
 onMounted(async () => {
+  await hygieneDay.load().catch(() => {})
   const range = defaultRange()
   dateFrom.value = range.from
   dateTo.value = range.to
@@ -119,14 +123,13 @@ useHygieneRealtime({
   id: 'hygiene-admin-data',
   resources: ['daily', 'deep', 'fix', 'teaching', 'zones'],
   // 只刷列表：存储概况要扫一遍照片目录，不该被别人的提交牵着反复扫。
-  pull: loadRecords,
+  // store 还没回来时 today 是空串，这时候取数等于用空范围查一遍，等 onMounted 再取。
+  pull: () => (hygieneDay.ready ? loadRecords() : Promise.resolve()),
 })
 
-/** 今天往前 n 天的 YYYY-MM-DD（本地日期，不走 toISOString 以免 UTC 偏移一天）。 */
+/** 服务端的今天往前 n 天（YYYY-MM-DD）。 */
 function daysAgoIso(days) {
-  const d = new Date()
-  d.setDate(d.getDate() - days)
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+  return shiftIso(hygieneDay.today, -days)
 }
 
 /** 「近一年」的最大跨度：后端 `MAX_RANGE_DAYS = 366`，再多就 400 `range_too_wide`
@@ -386,6 +389,8 @@ async function showAllTime() {
 
 /** 空态「清除筛选」：日期回最近 7 天、区回全部、类型回全选。 */
 async function clearFilters() {
+  // 重取一次今天：页面开着跨过零点时，「最近 7 天」得跟着新的一天走。
+  await hygieneDay.load().catch(() => {})
   const range = defaultRange()
   allTime.value = false
   dateFrom.value = range.from
@@ -729,15 +734,16 @@ function gotoPage(next) {
 .menu-trigger {
   display: inline-flex; align-items: center; justify-content: center;
   width: 44px; height: 44px;
-  border: 1px solid var(--line-strong); border-radius: var(--r-1);
+  border: var(--edge-w, 2px) solid var(--edge);
+  box-shadow: var(--paper-shadow-sm); border-radius: var(--r-1);
   background: var(--surface-1); color: var(--ink);
   font: 600 18px/1 var(--font-sans); cursor: pointer;
 }
 .menu-list {
   position: absolute; right: 0; top: calc(100% + 6px); z-index: var(--z-dialog);
   min-width: 200px; padding: 6px;
-  background: var(--surface-1); border: 1px solid var(--line-strong);
-  border-radius: var(--r-2); box-shadow: 0 6px 18px var(--wb-ink-a14);
+  background: var(--surface-1); border: var(--edge-w, 2px) solid var(--edge);
+  border-radius: var(--r-2); box-shadow: var(--paper-shadow);
   display: flex; flex-direction: column; gap: 2px;
 }
 .menu-item {
@@ -751,8 +757,8 @@ function gotoPage(next) {
 
 .wbx-panel {
   display: flex; flex-direction: column;
-  background: var(--surface-1); border: 1px solid var(--line);
-  border-radius: var(--r-2); box-shadow: 0 1px 2px var(--wb-ink-a08); overflow: hidden;
+  background: var(--surface-1); border: var(--edge-w, 2px) solid var(--edge);
+  border-radius: var(--r-2); box-shadow: var(--paper-shadow-sm); overflow: hidden;
 }
 .wbx-ph { display: flex; align-items: center; gap: 9px; padding: 11px 14px; border-bottom: 1px solid var(--line); }
 .wbx-ph h2 { margin: 0; font: 600 12.5px/1 var(--font-sans); letter-spacing: .06em; color: var(--ink); }
@@ -773,13 +779,14 @@ function gotoPage(next) {
 /* 存储概况：大读数 + 可点类型 chip */
 .storage-body { display: flex; flex-direction: column; gap: 10px; padding: 12px 14px 14px; }
 .storage-total { margin: 0; display: flex; align-items: baseline; gap: 6px; font-size: 11px; color: var(--ink-faint); }
-.storage-total b { font: 500 24px/1 var(--font-mono); color: var(--ink); }
+.storage-total b { font: 500 24px/1 var(--font-display); color: var(--ink);
+  font-weight: 800;}
 .storage-total b + b { font-size: 18px; }
 .kind-chips { display: flex; flex-wrap: wrap; gap: 6px; }
 .kind-chip {
   display: inline-flex; align-items: center; gap: 6px;
   min-height: 44px; padding: 0 10px;
-  border: 1px solid var(--line-strong); border-radius: var(--r-full);
+  border: var(--edge-w, 2px) solid var(--edge); border-radius: var(--r-1);
   background: var(--surface-2); color: var(--ink-dim);
   font: 500 10.5px/1 var(--font-sans); cursor: pointer;
 }
@@ -797,7 +804,7 @@ function gotoPage(next) {
   flex: 1 1 auto; min-width: 0;
   display: flex; align-items: center; justify-content: space-between; gap: 8px;
   min-height: 44px; padding: 0 12px;
-  border: 1px solid var(--line); border-radius: var(--r-1);
+  border: var(--edge-w, 2px) solid var(--edge); border-radius: var(--r-1);
   background: var(--surface-2); color: var(--ink-dim);
   font: 500 10.5px/1 var(--font-mono); text-align: left; cursor: pointer;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -814,7 +821,8 @@ function gotoPage(next) {
 .kind-fold { font-size: 10px; color: var(--ink-dim); }
 .kind-fold summary { min-height: 44px; display: flex; align-items: center; cursor: pointer; }
 .kind-field {
-  border: 1px solid var(--line); border-radius: var(--r-1);
+  background: var(--surface-1); box-shadow: var(--paper-shadow-sm);
+  border: var(--edge-w, 2px) solid var(--edge); border-radius: var(--r-1);
   padding: 6px 10px 8px; margin: 0; display: flex; flex-wrap: wrap; gap: 8px;
 }
 .kind-field legend { padding: 0 4px; font: 500 9.5px/1 var(--font-sans); letter-spacing: .12em; color: var(--ink-faint); }
@@ -832,7 +840,7 @@ function gotoPage(next) {
 .data-photos { display: flex; gap: 4px; align-items: center; }
 .data-thumb, .data-thumb-more {
   position: relative; display: block; padding: 0;
-  border: 1px solid var(--line); border-radius: var(--r-1);
+  border: var(--edge-w, 2px) solid var(--edge); border-radius: var(--r-1);
   background: none; cursor: pointer; overflow: hidden;
 }
 .data-thumb img { width: 56px; height: 42px; object-fit: cover; display: block; }
@@ -859,7 +867,8 @@ function gotoPage(next) {
 .row-menu-trigger {
   display: inline-flex; align-items: center; justify-content: center;
   width: 44px; height: 44px; list-style: none;
-  border: 1px solid var(--line); border-radius: var(--r-1);
+  border: var(--edge-w, 2px) solid var(--edge);
+  box-shadow: var(--paper-shadow-sm); border-radius: var(--r-1);
   background: var(--surface-1); color: var(--ink-dim);
   font: 600 16px/1 var(--font-sans); cursor: pointer;
 }
@@ -868,8 +877,8 @@ function gotoPage(next) {
 .row-menu-list {
   position: absolute; right: 0; top: calc(100% + 6px); z-index: var(--z-dialog);
   min-width: 170px; padding: 6px;
-  background: var(--surface-1); border: 1px solid var(--line-strong);
-  border-radius: var(--r-2); box-shadow: 0 6px 18px var(--wb-ink-a14);
+  background: var(--surface-1); border: var(--edge-w, 2px) solid var(--edge);
+  border-radius: var(--r-2); box-shadow: var(--paper-shadow);
   display: flex; flex-direction: column; gap: 2px;
 }
 .data-pager {
@@ -883,7 +892,8 @@ function gotoPage(next) {
 .photo-sheet { align-items: center; justify-content: center; padding: 16px; }
 .photo-sheet-box {
   width: min(720px, 100%); max-height: 80vh; overflow: auto;
-  background: var(--surface-1); border: 1px solid var(--line-strong);
+  background: var(--surface-1); border: var(--edge-w, 2px) solid var(--edge);
+  box-shadow: var(--paper-shadow-sm);
   border-radius: var(--r-2); padding: 14px;
 }
 .photo-sheet-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
@@ -892,7 +902,7 @@ function gotoPage(next) {
 .photo-sheet-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 8px; }
 .photo-sheet-thumb {
   display: flex; flex-direction: column; gap: 4px; padding: 0;
-  border: 1px solid var(--line); border-radius: var(--r-1);
+  border: var(--edge-w, 2px) solid var(--edge); border-radius: var(--r-1);
   background: var(--surface-2); cursor: pointer; overflow: hidden;
 }
 .photo-sheet-thumb img { width: 100%; aspect-ratio: 4 / 3; object-fit: cover; display: block; }

@@ -1,6 +1,5 @@
 /** Hygiene roster copy and permission helpers. Rules stay on the server. */
 
-import { hasCap } from './adminCaps'
 import { supportsNativeCameraCapture } from './cameraCapabilities'
 import { WORKBENCH_TITLE, workbenchDocumentTitle } from './workbenchCopy'
 
@@ -98,19 +97,9 @@ export function hasLiveCamera() {
   )
 }
 
-export function canAcceptFixTicket(actor, ticket, now = Date.now()) {
-  if (!ticket || ticket.status !== '待验收') return false
-  if (actor && actor.kind === 'super' && ticket.opener_kind === 'super') return true
-  if (actor && actor.id != null && Number(actor.id) === Number(ticket.opener_id)) return true
-  if (!actor) return false
-  // 验别人的整改单看的是「整改单」这一项开关，不是 `permission` 那个档位（2026-10-05）：
-  // 同一档的两个人可以一个开了整改单、一个没开，拿标签判就会把没开的那个人也放进来。
-  // 上面两条是例外、不看开关：自己开的单子自己收（时限到了），超级管理员开的单子他向来自收。
-  const canReviewFix = actor.kind === 'super' || hasCap(actor.admin_caps, 'fix')
-  if (!canReviewFix) return false
-  const deadline = Date.parse(ticket.deadline)
-  return Number.isFinite(deadline) && now >= deadline
-}
+// 整改单「能不能判」的判据**不在这里**（2026-11-18）：`services/hygiene/judge.py` 把
+// 开单人、时限、`fix` 开关收成一张规则表，列表与写口都给同一个结论；前端只读行上的
+// `review`（`{ allowed, reason, action }`），不再自己算一遍 —— 两份判据一定会漂。
 
 /** 花名册一行上的状态标签（2026-10-29：「停用」→「离职」）。
  *

@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
+import { createPinia } from 'pinia'
 import HygieneRosterView from '../HygieneRosterView.vue'
 import LuyunDatePicker from '../../../components/ui/LuyunDatePicker.vue'
 import { ADMIN_CAP_STAFF_DEFS } from '../../../utils/adminCaps'
@@ -100,6 +101,16 @@ beforeEach(() => {
       if (writeReply) return writeReply
       return jsonResponse({ employee: { ...李娜 } })
     }
+    if (path === '/api/hygiene/today') {
+      // 页面进来自问一次「卫生的一天」：离职日期默认值按它填。
+      return jsonResponse({
+        today: '2026-11-18',
+        day_end: '2026-11-19T00:00:00+08:00',
+        weekday: 2,
+        week_from: '2026-11-16',
+        week_to: '2026-11-22',
+      })
+    }
     if (path === '/api/hygiene/admin/roster') return jsonResponse({ employees: rows, zones: [] })
     if (path === '/api/hygiene/admin/roster-export.csv') {
       return jsonResponse({}, 200, { 'content-disposition': 'attachment; filename="roster-2026-10-07.csv"' })
@@ -114,7 +125,7 @@ afterEach(() => {
 })
 
 async function mountRoster() {
-  const wrapper = mount(HygieneRosterView)
+  const wrapper = mount(HygieneRosterView, { global: { plugins: [createPinia()] } })
   await flushPromises()
   await flushPromises()
   return wrapper

@@ -436,7 +436,8 @@ async function confirmDeleteZone() {
 .export-size { display: inline-flex; align-items: center; gap: 6px; font-size: 10px; color: var(--ink-dim); }
 .export-chip {
   min-height: 44px; padding: 0 12px; border-radius: var(--r-1);
-  background: var(--surface-1); border: 1px solid var(--line-strong); color: var(--ink);
+  background: var(--surface-1); border: var(--edge-w, 2px) solid var(--edge);
+  box-shadow: var(--paper-shadow-sm); color: var(--ink);
   font: inherit; font-size: 10.5px; cursor: pointer;
 }
 .export-chip.on {
@@ -455,19 +456,20 @@ async function confirmDeleteZone() {
 .wbx-readline {
   display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 26px;
   padding: 10px 14px;
-  background: var(--surface-1); border: 1px solid var(--line);
-  border-radius: var(--r-2); box-shadow: 0 1px 2px var(--wb-ink-a08);
+  background: var(--surface-1); border: var(--edge-w, 2px) solid var(--edge);
+  border-radius: var(--r-1); box-shadow: var(--paper-shadow-sm);
 }
 .wbx-read { display: inline-flex; align-items: baseline; gap: 6px; }
-.wbx-read span { font: 500 9.5px/1 var(--font-sans); letter-spacing: .18em; color: var(--ink-faint); }
-.wbx-read b { font: 500 20px/1 var(--font-mono); color: var(--ink); }
+.wbx-read span { font: 700 11px/1.2 var(--font-sans); letter-spacing: .01em; color: var(--ink-dim); }
+.wbx-read b { font: 500 20px/1 var(--font-display); color: var(--ink);
+  font-weight: 800;}
 .wbx-read b.is-clock { font-size: 16px; }
 .wbx-read em { font-style: normal; font-size: 9.5px; color: var(--ink-faint); }
 
 .wbx-panel {
   display: flex; flex-direction: column;
-  background: var(--surface-1); border: 1px solid var(--line);
-  border-radius: var(--r-2); box-shadow: 0 1px 2px var(--wb-ink-a08); overflow: hidden;
+  background: var(--surface-1); border: var(--edge-w, 2px) solid var(--edge);
+  border-radius: var(--r-2); box-shadow: var(--paper-shadow-sm); overflow: hidden;
 }
 .wbx-ph { display: flex; align-items: center; gap: 9px; padding: 11px 14px; border-bottom: 1px solid var(--line); }
 .wbx-ph h2 { margin: 0; font: 600 12.5px/1 var(--font-sans); letter-spacing: .06em; color: var(--ink); }
@@ -492,7 +494,7 @@ async function confirmDeleteZone() {
 .zone-btn {
   display: flex; flex-direction: column; align-items: flex-start; gap: 2px;
   min-height: 56px; padding: 8px 10px; text-align: left; cursor: pointer;
-  background: transparent; border: 1px solid transparent; border-radius: var(--r-1); color: var(--ink);
+  background: transparent; border: var(--edge-w, 2px) solid transparent; border-radius: var(--r-1); color: var(--ink);
 }
 .zone-btn:hover { background: var(--surface-2); }
 .zone-btn.active { background: var(--surface-2); border-color: var(--action); box-shadow: inset 3px 0 0 var(--action); }
@@ -521,7 +523,8 @@ async function confirmDeleteZone() {
   display: none;
   align-items: center; justify-content: center;
   min-height: 44px; padding: 0 12px;
-  border: 1px solid var(--line-strong); border-radius: var(--r-1);
+  border: var(--edge-w, 2px) solid var(--edge);
+  box-shadow: var(--paper-shadow-sm); border-radius: var(--r-1);
   background: var(--surface-1); color: var(--ink);
   font-size: 11px; text-decoration: none;
 }

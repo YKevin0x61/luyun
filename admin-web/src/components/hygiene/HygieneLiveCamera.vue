@@ -389,7 +389,6 @@ onBeforeUnmount(() => {
   height: 7px;
   border-radius: 50%;
   background: var(--hy-mint);
-  box-shadow: 0 0 8px var(--hy-mint);
   animation: hy-live-pulse 1.4s ease-in-out infinite;
 }
 .live-alert {
@@ -397,7 +396,7 @@ onBeforeUnmount(() => {
   padding: 11px 13px;
   border-radius: var(--hy-radius-sm);
   background: var(--hy-seal-soft);
-  border: 1px solid var(--hy-seal-line);
+  border: var(--edge-w, 2px) solid var(--hy-seal-line);
   color: var(--hy-seal-bright);
   font-size: 13px;
   line-height: 1.6;

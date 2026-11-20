@@ -10,7 +10,6 @@ import {
   HYGIENE_SHIFTS,
   HYGIENE_WEEKDAYS,
   HYGIENE_FIX_TYPES,
-  canAcceptFixTicket,
   hygieneDocumentTitle,
   hygienePermissionLabel,
   hygieneShiftLabel,
@@ -61,33 +60,10 @@ describe('hygieneCopy', () => {
     expect(hygieneWeekdayLabel(9)).toBe('')
   })
 
-  it('整改类型只有卫生摆放标签，时限未到只有开单人能验', () => {
+  it('整改类型只有卫生摆放标签', () => {
     expect(HYGIENE_FIX_TYPES).toEqual(['卫生', '摆放', '标签'])
-    const ticket = {
-      status: '待验收',
-      opener_id: 20,
-      opener_kind: 'staff',
-      deadline: '2026-09-13T12:00:00+08:00',
-    }
-    const before = Date.parse('2026-09-13T11:59:00+08:00')
-    const after = Date.parse('2026-09-13T12:00:00+08:00')
-    // 2026-10-05 改判据：验别人的整改单看的是**「整改单」那一项开关**（`admin_caps`），
-    // 不再是 `permission === '管理员'` 那个档位 —— 同一个标签下的两个人可以一个开了
-    // 这一项、一个没开，拿标签判会把没开的那个人也放进来。所以下面这几条从
-    // `permission: '管理员'` 改成了 `admin_caps: ['fix']`，并补一条"只有标签、没有开关
-    // 就不放行"的反例。
-    const fixer = { id: 21, permission: '管理员', admin_caps: ['fix'] }
-    const labelOnly = { id: 21, permission: '管理员', admin_caps: [] }
-    // 开单人自己收：不看他有没有那一项（服务端同口径）。
-    expect(canAcceptFixTicket({ id: 20, permission: '普通员工', admin_caps: [] }, ticket, before)).toBe(true)
-    expect(canAcceptFixTicket(fixer, ticket, before)).toBe(false)
-    expect(canAcceptFixTicket({ kind: 'super' }, ticket, before)).toBe(false)
-    expect(canAcceptFixTicket(fixer, ticket, after)).toBe(true)
-    expect(canAcceptFixTicket({ kind: 'super' }, ticket, after)).toBe(true)
-    // 只有「管理员」这个标签、没开那一项 → 不放行（旧行为会放行，这正是要改掉的那条）。
-    expect(canAcceptFixTicket(labelOnly, ticket, after)).toBe(false)
-    // 开了别的项也不顶替：这一件事只认 `fix`。
-    expect(canAcceptFixTicket({ id: 10, admin_caps: ['daily_review'] }, ticket, after)).toBe(false)
+    // 「时限未到只有开单人能验」已经不在这里算了：判据收进服务端
+    // `services/hygiene/judge.py`，前端只渲染行上的 `review`。
   })
 
   it('卫生九页合成一个板块，不把员工手机入口与人事页算进去', () => {

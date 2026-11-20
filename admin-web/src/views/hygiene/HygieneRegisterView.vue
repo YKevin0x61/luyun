@@ -1,7 +1,7 @@
 <script setup>
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import LuyunDatePicker from '../../components/ui/LuyunDatePicker.vue'
-import { chinaTodayDate } from '../../utils/hygieneTime'
+import { useHygieneDayStore } from '../../stores/hygieneDay'
 import { parseApiDetail, staffRequest } from '../../utils/hygieneStaff'
 
 const phone = ref('')
@@ -28,8 +28,11 @@ const confirmPassword = ref('')
 const submitting = ref(false)
 const errorText = ref('')
 const submitted = ref(false)
-/** 北京时的今天：日期框的上限（不得晚于今天），与提交前那条校验同一口径。 */
-const todayDate = chinaTodayDate()
+/** 今天由服务端下发（/api/hygiene/today，00:00 切）：日期框上限与提交前那条校验
+ *  同一口径，浏览器时区不再参与（ADR 0125「没做的事」里的第三处）。 */
+const hygieneDay = useHygieneDayStore()
+const todayDate = computed(() => hygieneDay.today)
+hygieneDay.load().catch(() => {})
 
 /** 中国大陆手机号（与服务端同一口径：`1` + 3-9 + 9 位数字）。 */
 const PHONE_RE = /^1[3-9]\d{9}$/
@@ -70,6 +73,7 @@ function validateRegistration({
   hireDate,
   password,
   confirmPassword,
+  today,
 }) {
   if (!String(name || '').trim()) return '请填写员工姓名'
   if (!PHONE_RE.test(String(phone || '').trim())) return '请输入有效的中国大陆手机号'
@@ -80,8 +84,9 @@ function validateRegistration({
   const certDate = String(healthCert || '').trim()
   // 健康证办理日期与「暂时没有健康证」是**两选一**（2026-10-13）：勾了后者就不是漏填。
   if (!certDate && !noHealthCert) return '请选择健康证办理日期'
-  // 北京时的今天：手机时区可能不在东八区，而服务端按北京时判「不能是将来」。
-  if (certDate > chinaTodayDate()) return '健康证办理日期不能是将来'
+  // 今天由服务端给（手机时区可能不在东八区）。取不到就不在这一侧判将来 ——
+  // 服务端仍然会按自己的今天拒掉，宁可少拦一次也不要凭错误的日子乱拦。
+  if (today && certDate > today) return '健康证办理日期不能是将来'
   // 入职日期**不判将来**：提前建档是常态（服务端同一口径，见 `profile.py` 的
   // `normalize_date` 与 `normalize_health_cert_date` 两条注释）。
   if (!String(hireDate || '').trim()) return '请选择入职日期'
@@ -100,7 +105,7 @@ function clearError() {
 
 async function submit() {
   errorText.value = ''
-  const invalid = validateRegistration({
+  const draft = {
     name: name.value,
     phone: phone.value,
     idCard: idCardNo.value,
@@ -109,10 +114,21 @@ async function submit() {
     hireDate: hireDate.value,
     password: password.value,
     confirmPassword: confirmPassword.value,
-  })
+  }
+  // 先用页面上已有的「今天」判一遍：挂载时那次请求通常已经回来；没回来也不为了
+  // 一条本来就不合法的输入多发一次请求（D12 的「不合法不发请求」说的就是这里）。
+  let invalid = validateRegistration({ ...draft, today: hygieneDay.today })
   if (invalid) {
     errorText.value = invalid
     return
+  }
+  if (!hygieneDay.ready) {
+    await hygieneDay.load().catch(() => {})
+    invalid = validateRegistration({ ...draft, today: hygieneDay.today })
+    if (invalid) {
+      errorText.value = invalid
+      return
+    }
   }
   submitting.value = true
   try {
@@ -310,9 +326,9 @@ async function submit() {
 .reg-sub { margin: 8px 0 0; font-size: 11px; line-height: 1.65; color: var(--ink-dim); }
 .reg-panel {
   background: var(--surface-1);
-  border: 1px solid var(--line);
+  border: var(--edge-w, 2px) solid var(--edge);
   border-radius: var(--r-2);
-  box-shadow: 0 1px 2px var(--wb-ink-a08);
+  box-shadow: var(--paper-shadow-sm);
   overflow: hidden;
 }
 .reg-ph { display: flex; align-items: center; gap: 9px; padding: 10px 12px; border-bottom: 1px solid var(--line); }

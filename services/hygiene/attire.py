@@ -28,7 +28,14 @@ from datetime import datetime
 from typing import Any, Optional
 
 from database import CHINA_TZ
-from services.business_day import business_date_of
+from db_core.write_gate import write_unit
+from services.hygiene.day import today as hygiene_today
+from services.hygiene.status import (
+    ATTIRE_STATUS_PASSED as STATUS_PASSED,
+    ATTIRE_STATUS_PENDING as STATUS_PENDING,
+    ATTIRE_STATUS_REJECTED as STATUS_REJECTED,
+    ATTIRE_STATUS_TODO as STATUS_TODO,
+)
 from services.hygiene.work import HygieneWork, HygieneWorkError
 from services.identity.duty import DutyRoster
 
@@ -37,10 +44,7 @@ __all__ = ["HygieneAttire", "STATUS_TODO", "STATUS_PENDING", "STATUS_PASSED", "S
 logger = logging.getLogger(__name__)
 
 # 一个人一个营业日一行；「还没拍」在库里是**没有行**，不是一行 `todo`。
-STATUS_TODO = "todo"
-STATUS_PENDING = "pending"
-STATUS_PASSED = "passed"
-STATUS_REJECTED = "rejected"
+# 词表与判据共用 services/hygiene/status.py 那一份（见文件头 import）。
 
 # 管理端列表的排序：要处理的排前面，已经落定的沉下去。
 _STATUS_ORDER = {STATUS_PENDING: 0, STATUS_TODO: 1, STATUS_REJECTED: 2, STATUS_PASSED: 3}
@@ -60,11 +64,17 @@ class HygieneAttire:
     # ── 时与日 ──────────────────────────────────────────────────────────
 
     def today(self) -> str:
-        """营业日（06:00 切）——跟卫生其它地方同一口径，不另起一套。"""
-        return business_date_of(self._now())
+        """卫生的一天（工作台日，00:00 切）——与存档、页面同一把尺子。"""
+        return hygiene_today(self._now())
 
     def _now_iso(self) -> str:
         return self._now().isoformat()
+
+    @staticmethod
+    def _refuse_accepted(shot: Optional[dict]) -> None:
+        """已经通过的那张不再接受重拍（跟日常 `already_accepted` 同一条口径）。"""
+        if shot is not None and shot["status"] == STATUS_PASSED:
+            raise HygieneWorkError("already_accepted", "already_accepted")
 
     # ── 判据：今天排到他了吗 ────────────────────────────────────────────
 
@@ -139,9 +149,7 @@ class HygieneAttire:
             # 说清楚是「管理员还没传标准图」，不是一句「参数不对」—— 员工照不了没有的东西拍。
             raise HygieneWorkError("attire_standard_required", "attire_standard_required")
 
-        existing = await self._shot(employee_id, day)
-        if existing is not None and existing["status"] == STATUS_PASSED:
-            raise HygieneWorkError("already_accepted", "already_accepted")
+        self._refuse_accepted(await self._shot(employee_id, day))
 
         data = self._work.require_live_capture(capture)
         content_type = (capture.get("content_type") or "image/jpeg").strip()
@@ -150,23 +158,27 @@ class HygieneAttire:
         )
 
         stamp = self._now_iso()
-        if existing is None:
-            await self._conn.execute(
-                """INSERT INTO hygiene_attire_shots
-                       (employee_id, business_date, shift_id, status,
-                        capture_id, content_type, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                (int(employee_id), day, shift_id, STATUS_PENDING, capture_id, content_type, stamp, stamp),
-            )
-        else:
-            await self._conn.execute(
-                """UPDATE hygiene_attire_shots
-                      SET shift_id = ?, status = ?, capture_id = ?, content_type = ?,
-                          note = NULL, updated_at = ?
-                    WHERE id = ?""",
-                (shift_id, STATUS_PENDING, capture_id, content_type, stamp, existing["id"]),
-            )
-        await self._conn.commit()
+        async with write_unit(self._conn):
+            # 落盘在单元外（文件不进事务），判定要贴着写入再做一遍：两个并发提交
+            # 一前一后进来时，后拿锁的那个必须看见先交的那张，不能再把已通过的盖掉。
+            current = await self._shot(employee_id, day)
+            self._refuse_accepted(current)
+            if current is None:
+                await self._conn.execute(
+                    """INSERT INTO hygiene_attire_shots
+                           (employee_id, business_date, shift_id, status,
+                            capture_id, content_type, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (int(employee_id), day, shift_id, STATUS_PENDING, capture_id, content_type, stamp, stamp),
+                )
+            else:
+                await self._conn.execute(
+                    """UPDATE hygiene_attire_shots
+                          SET shift_id = ?, status = ?, capture_id = ?, content_type = ?,
+                              note = NULL, updated_at = ?
+                        WHERE id = ?""",
+                    (shift_id, STATUS_PENDING, capture_id, content_type, stamp, current["id"]),
+                )
         return await self.staff_view(employee_id)
 
     async def pending_capture(self, employee_id: int, business_date: Optional[str] = None) -> Optional[str]:
@@ -259,19 +271,22 @@ class HygieneAttire:
         note: Optional[str],
     ) -> dict:
         day = str(business_date or self.today())
-        shot = await self._shot(int(employee_id), day)
-        if shot is None:
-            raise HygieneWorkError("attire_not_found", "attire_not_found")
-        if shot["status"] != STATUS_PENDING:
-            # 只剩「等验收」这一个状态能被处理：重复点一次、或者员工刚撤/刚重拍，
-            # 都该回一句人话而不是悄悄改掉。
-            raise HygieneWorkError("attire_not_pending", "attire_not_pending")
-        stamp = self._now_iso()
-        await self._conn.execute(
-            "UPDATE hygiene_attire_shots SET status = ?, note = ?, updated_at = ? WHERE id = ?",
-            (status, note, stamp, shot["id"]),
-        )
-        await self._conn.commit()
+        async with write_unit(self._conn):
+            shot = await self._shot(int(employee_id), day)
+            if shot is None:
+                raise HygieneWorkError("attire_not_found", "attire_not_found")
+            if shot["status"] != STATUS_PENDING:
+                # 只剩「等验收」这一个状态能被处理：重复点一次、或者员工刚撤/刚重拍，
+                # 都该回一句人话而不是悄悄改掉。两个人同时点「通过」时，第二个
+                # 在这里看见的已经是 passed（前一个的单元已提交）。
+                raise HygieneWorkError("attire_not_pending", "attire_not_pending")
+            stamp = self._now_iso()
+            await self._conn.execute(
+                "UPDATE hygiene_attire_shots SET status = ?, note = ?, updated_at = ? WHERE id = ?",
+                (status, note, stamp, shot["id"]),
+            )
+        # 分享登记在单元外：登记失败不该把「已通过」回滚掉；反过来，单元没提交就
+        # 外发会出现「群里发了、库里没通过」。
         if status == STATUS_PASSED and shot.get("capture_id"):
             # 说明里**不带**姓名 / 电话 / 职位：这是一张人脸自拍，群里只需要知道
             # 「这一项今天通过了」，是谁靠照片本身认（系统里也没有工号字段）。
@@ -320,11 +335,11 @@ class HygieneAttire:
             data, content_type, require_image=True
         )
         stamp = self._now_iso()
-        await self._conn.execute(
-            """INSERT INTO hygiene_attire_standard
-                   (capture_id, content_type, markup_json, created_at)
-               VALUES (?, ?, ?, ?)""",
-            (capture_id, content_type, self._work.markup_json_for(capture), stamp),
-        )
-        await self._conn.commit()
+        async with write_unit(self._conn):
+            await self._conn.execute(
+                """INSERT INTO hygiene_attire_standard
+                       (capture_id, content_type, markup_json, created_at)
+                   VALUES (?, ?, ?, ?)""",
+                (capture_id, content_type, self._work.markup_json_for(capture), stamp),
+            )
         return await self.current_standard()

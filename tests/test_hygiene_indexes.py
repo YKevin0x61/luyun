@@ -2,10 +2,10 @@
 # -*- coding: utf-8 -*-
 """原图路径与驳回判据必须有索引可用。
 
-审查报告 §3.3：``_original_capture_meta`` 用 6 路 ``UNION ALL`` 按 capture_id 反查
-来源，而这几张表都没有 capture_id 索引——计划里是全表扫描。而所有图片端点默认
-``variant="original"``，等于每个图片请求都做 6 次全表扫描，随提交量线性恶化
-（100 个检查项时每天新增约 200 行提交）。
+审查报告 §3.3：照片台账按 capture_id 反查来源（现在是 10 路 ``UNION ALL``，
+见 ``services/hygiene/captures_ledger.py``），早先这几张表都没有 capture_id 索引——
+计划里是全表扫描。而所有图片端点默认 ``variant="original"``，等于每个图片请求都
+做 10 次全表扫描，随提交量线性恶化（100 个检查项时每天新增约 200 行提交）。
 
 同一个文件里还有两条：``_daily_was_rejected``（accept_daily 每次都跑）与
 ``list_fix_tickets``（``status != 已通过`` + ``ORDER BY id``）。
@@ -44,6 +44,7 @@ import pytest
 from config import settings
 from database import CHINA_TZ, DatabaseManager
 from services.app_runtime import AppRuntime, set_runtime
+from services.hygiene import captures_ledger
 from services.hygiene.accounts import EmployeeAccounts
 from services.hygiene.captures import FakeCaptureStore
 from services.hygiene.images import ImageVariantGenerator
@@ -56,7 +57,26 @@ EXPECTED_INDEXES = {
     "idx_hygiene_deep_clean_sub_after": "hygiene_deep_clean_submissions",
     "idx_hygiene_fix_tickets_capture": "hygiene_fix_tickets",
     "idx_hygiene_fix_reshoots_capture": "hygiene_fix_reshoots",
+    "idx_hygiene_teaching_left_capture": "hygiene_teaching_examples",
+    "idx_hygiene_teaching_right_capture": "hygiene_teaching_examples",
+    "idx_hygiene_attire_shots_capture": "hygiene_attire_shots",
+    "idx_hygiene_attire_standard_capture": "hygiene_attire_standard",
     "idx_hygiene_board_events_reject": "hygiene_board_events",
+}
+
+# 台账每一路（表 + 列）都要有自己的索引；表与列直接取自 captures_ledger.SOURCES，
+# 台账加源而这里没跟上会红。
+CAPTURE_INDEXES = {
+    ("hygiene_standards", "capture_id"): "idx_hygiene_standards_capture",
+    ("hygiene_daily_submissions", "capture_id"): "idx_hygiene_daily_submissions_capture",
+    ("hygiene_deep_clean_submissions", "before_capture_id"): "idx_hygiene_deep_clean_sub_before",
+    ("hygiene_deep_clean_submissions", "after_capture_id"): "idx_hygiene_deep_clean_sub_after",
+    ("hygiene_fix_tickets", "capture_id"): "idx_hygiene_fix_tickets_capture",
+    ("hygiene_fix_reshoots", "capture_id"): "idx_hygiene_fix_reshoots_capture",
+    ("hygiene_teaching_examples", "left_capture_id"): "idx_hygiene_teaching_left_capture",
+    ("hygiene_teaching_examples", "right_capture_id"): "idx_hygiene_teaching_right_capture",
+    ("hygiene_attire_shots", "capture_id"): "idx_hygiene_attire_shots_capture",
+    ("hygiene_attire_standard", "capture_id"): "idx_hygiene_attire_standard_capture",
 }
 
 # 计划里最贵的那种节点：出现它就说明这个谓词没有索引可用。
@@ -142,33 +162,24 @@ def test_hardening_indexes_are_created(db):
 
 
 def test_original_capture_lookup_uses_indexes_not_scans(db):
-    """原图反查的六路 UNION ALL：每一路都要走自己的索引。"""
-    sql = """
-        SELECT capture_id FROM hygiene_standards WHERE capture_id = $1
-        UNION ALL
-        SELECT capture_id FROM hygiene_daily_submissions WHERE capture_id = $2
-        UNION ALL
-        SELECT before_capture_id FROM hygiene_deep_clean_submissions WHERE before_capture_id = $3
-        UNION ALL
-        SELECT after_capture_id FROM hygiene_deep_clean_submissions WHERE after_capture_id = $4
-        UNION ALL
-        SELECT capture_id FROM hygiene_fix_tickets WHERE capture_id = $5
-        UNION ALL
-        SELECT capture_id FROM hygiene_fix_reshoots WHERE capture_id = $6
-        LIMIT 1
-    """
+    """台账每一路反查都要走自己的索引 —— 少一路就是那个源全表扫描。"""
+    routes = list(captures_ledger.SOURCES)
+    columns = {(src.table, src.id_column) for src in routes}
+    assert columns == set(CAPTURE_INDEXES), (
+        f"台账源与索引断言不同步：多出 {sorted(columns - set(CAPTURE_INDEXES))}，"
+        f"少了 {sorted(set(CAPTURE_INDEXES) - columns)}"
+    )
+    # 手工拼这条 SQL（而不是调台账的读口）：这里要断言的是**计划**，
+    # 得让 EXPLAIN 看到与生产同形的 10 路 UNION ALL + LIMIT 1。
+    sql = " UNION ALL ".join(
+        f"SELECT {src.id_column} FROM {src.table} WHERE {src.id_column} = ${i}"
+        for i, src in enumerate(routes, start=1)
+    ) + " LIMIT 1"
     _assert_index_plan(
         db,
         sql,
-        ("x",) * 6,
-        (
-            "idx_hygiene_standards_capture",
-            "idx_hygiene_daily_submissions_capture",
-            "idx_hygiene_deep_clean_sub_before",
-            "idx_hygiene_deep_clean_sub_after",
-            "idx_hygiene_fix_tickets_capture",
-            "idx_hygiene_fix_reshoots_capture",
-        ),
+        ("x",) * len(routes),
+        tuple(CAPTURE_INDEXES[(src.table, src.id_column)] for src in routes),
     )
 
 

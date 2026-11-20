@@ -16,20 +16,20 @@
 同一张照片只投递一次：幂等键 = 内容类型 + 业务引用（业务类型 + 验收单引用 + 采集图 id）
 + 目标渠道 —— 重复点验收、弱网重传都不刷屏；员工重拍后再次通过是新的采集图，会再发一次。
 
-写锁契约（重要）：业务库只有一条共享连接，事务边界是全局的，所以这里的每个 DB 动作
-都必须落在 `DatabaseManager._write_lock` 里 —— 唯独**网络发送与读文件在锁外**。
-`enqueue()` 是例外：它由持有写锁的验收路径调用，自己绝不能再拿一次锁（asyncio 的锁
+写单元契约（重要）：业务库只有一条共享连接，事务边界是全局的，所以这里的每个 DB 动作
+都落在写单元（`async with write_unit(self._db)`）里 —— 唯独**网络发送与读文件在单元外**。
+`enqueue()` 是例外：它由已经开着单元的验收路径调用，自己不能再开单元（asyncio 的锁
 不可重入，会直接死锁），也**不 commit**（出站行跟着验收的事务一起落库）。
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from datetime import datetime
 from typing import Any, Dict, Mapping, Optional, Tuple
 
 from database import CHINA_TZ
+from services.hygiene import captures_ledger
 from services.wecom_outbox import RenderedDelivery, wecom_outbox
 from services.wecom_push_topics import TOPIC_HYGIENE_PHOTO, PushTrigger
 
@@ -75,19 +75,9 @@ class HygieneCaptureSharer:
         self._captures = captures
         self._outbox = outbox if outbox is not None else wecom_outbox
         self._now = now or (lambda: datetime.now(CHINA_TZ))
-        self._local_write_lock: Optional[asyncio.Lock] = None
         # 出站表是否存在（迁移 0016 可能还没应用）。与 HygieneWork 对
         # hygiene_board_events 扩展列的判据同一形状：缺表要**降级**，不能让验收跟着挂。
         self._outbox_ready: Optional[bool] = None
-
-    @property
-    def _write_lock(self):
-        shared = getattr(self._db, "_write_lock", None)
-        if shared is not None:
-            return shared
-        if self._local_write_lock is None:
-            self._local_write_lock = asyncio.Lock()
-        return self._local_write_lock
 
     # ── 登记（在验收的事务里，由调用方 commit） ────────────────────────────
 
@@ -212,14 +202,11 @@ class HygieneCaptureSharer:
         raise _image_too_large(len(raw), WECOM_IMAGE_BYTE_LIMIT)
 
     async def _variant_ids(self, source_capture_id: str) -> Dict[str, str]:
-        async with self._write_lock:
-            cur = await self._conn.execute(
-                """SELECT variant, capture_id FROM hygiene_capture_variants
-                    WHERE source_capture_id = ?""",
-                (source_capture_id,),
-            )
-            rows = await cur.fetchall()
-        return {str(dict(row)["variant"]): str(dict(row)["capture_id"]) for row in rows}
+        # 只读，但要在写者的事务之间读（否则可能读到半截变体登记）：用
+        # write_scope —— 取锁、异常回滚、**不提交**；在写单元里则是被动的。
+        async with self._conn.write_scope():
+            rows = await captures_ledger.variants(self._conn, source_capture_id)
+        return {variant: str(row["capture_id"]) for variant, row in rows.items()}
 
     # ── 出站表就位 ────────────────────────────────────────────────────────
 

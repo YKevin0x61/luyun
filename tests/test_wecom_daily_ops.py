@@ -9,6 +9,7 @@ None —— 那是**降级路径**，不是失败）；渲染器与出站的那�
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 from datetime import datetime
 
@@ -18,6 +19,7 @@ from db_core.utils import CHINA_TZ
 from services.wecom_daily_ops import (
     DEFAULT_MODULES,
     MODULE_DISHES,
+    MODULE_HYGIENE,
     MODULE_HOURLY,
     MODULE_ORDERS,
     MODULE_SCHEDULING,
@@ -27,6 +29,7 @@ from services.wecom_daily_ops import (
     render_png,
     render_text,
 )
+from services import wecom_daily_ops as daily_ops
 from services.wecom_outbox import freeze_business_date
 from services.wecom_push_topics import (
     CONTROL_CHECKBOX_GROUP,
@@ -72,6 +75,30 @@ def test_default_modules_are_all_ten():
     params = validate_params(TOPIC_DAILY_OPS_REPORT, {})
     assert params["modules"] == list(DEFAULT_MODULES)
     assert len(params["modules"]) == 10
+
+
+def test_collect_report_isolates_one_failed_module(monkeypatch):
+    """一块取数失败只让那一块变空，其他块照常出。"""
+
+    async def ok(_db, _business_date):
+        return {"orders": 3}
+
+    async def boom(_db, _business_date):
+        raise RuntimeError("订单表读不了")
+
+    monkeypatch.setattr(daily_ops, "_collect_orders", ok)
+    monkeypatch.setattr(daily_ops, "_collect_dishes", boom)
+
+    report = asyncio.run(
+        daily_ops.collect_report(
+            object(), business_date="2026-10-20", modules=[MODULE_ORDERS, MODULE_DISHES]
+        )
+    )
+
+    assert report.orders == {"orders": 3}
+    assert report.dishes is None
+    assert report.empty_reason[MODULE_DISHES] == "暂无菜品销量"
+    assert report.empty_reason[MODULE_HYGIENE] == "未勾选"
 
 
 def test_validate_params_rejects_unknown_module_and_empty_selection():

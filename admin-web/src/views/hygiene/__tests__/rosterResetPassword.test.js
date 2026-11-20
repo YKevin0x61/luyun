@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
+import { createPinia } from 'pinia'
 import HygieneRosterView from '../HygieneRosterView.vue'
 
 /**
@@ -71,7 +72,7 @@ afterEach(() => {
 })
 
 async function mountRoster() {
-  const wrapper = mount(HygieneRosterView)
+  const wrapper = mount(HygieneRosterView, { global: { plugins: [createPinia()] } })
   await flushPromises()
   await flushPromises()
   return wrapper

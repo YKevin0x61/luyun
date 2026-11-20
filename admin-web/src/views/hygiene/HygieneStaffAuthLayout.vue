@@ -53,9 +53,9 @@ watch(pageTitle, (title) => {
 .hy-staff-card.hy-staff-card {
   margin: 0 auto;
   background: var(--surface-1);
-  border: 1px solid var(--line);
+  border: var(--edge-w, 2px) solid var(--edge);
   border-radius: var(--r-2);
-  box-shadow: 0 1px 2px var(--wb-ink-a08);
+  box-shadow: var(--paper-shadow-sm);
   -webkit-backdrop-filter: none;
   backdrop-filter: none;
   overflow: visible;

@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
+import { createPinia } from 'pinia'
 import HygieneRosterView from '../HygieneRosterView.vue'
 import { STAFF_ENTRY_PATH } from '../../../utils/staffPaths'
 
@@ -33,7 +34,7 @@ afterEach(() => {
 
 describe('花名册页的员工入口（票 03 换新地址）', () => {
   it('入口卡片不再常驻：点开「邀请店员」才出现 origin + 员工入口常量', async () => {
-    const wrapper = mount(HygieneRosterView)
+    const wrapper = mount(HygieneRosterView, { global: { plugins: [createPinia()] } })
     await flushPromises()
     await flushPromises()
 

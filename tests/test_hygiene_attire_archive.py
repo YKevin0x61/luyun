@@ -5,7 +5,7 @@
 两件事都跟「照片的生命周期」有关：
 
 1. **不能被孤儿清理收走**（这条最要紧）。`HygieneWork.sweep_capture_orphans` 按
-   `_referenced_capture_ids` 判断「这张图还有没有人要」，不在集合里的**直接删文件**，
+   `captures_ledger.roots` 判断「这张图还有没有人要」，不在集合里的**直接删文件**，
    而 `capture_maintenance_loop` 每小时跑一次。仪容仪表的两张表（实拍 + 标准图）当初
    没进那个 UNION —— 员工刚交的那张，一个整点之后就没了，店长点开验收看到的是
    「图片不存在」。这里既钉住它，也**反方向钉一次**：清扫本身没坏，真孤儿照样收走。
@@ -35,6 +35,7 @@ from services.hygiene.archive import (
     write_ledger_zip,
 )
 from services.hygiene.attire import HygieneAttire
+from services.hygiene import captures_ledger
 from services.hygiene.captures import FileCaptureStore
 from services.hygiene.images import ImageVariantGenerator
 from services.hygiene.work import HygieneWork
@@ -119,7 +120,7 @@ class AttireCaptureLifecycleTest(unittest.IsolatedAsyncioTestCase):
         """
         standard_id, shot_id = await self._submit_one()
 
-        referenced = await self.work._referenced_capture_ids()
+        referenced = await captures_ledger.roots(self.work._conn)
         self.assertIn(standard_id, referenced)
         self.assertIn(shot_id, referenced)
 
@@ -195,7 +196,7 @@ class AttireCaptureLifecycleTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("张三", ledger)
 
     async def test_photo_path_knows_attire_captures(self):
-        """`photo_path` 靠 `_capture_meta` 认图：没接上就回 `capture_unknown`（导不出）。"""
+        """`photo_path` 靠 `captures_ledger.meta` 认图：没接上就回 `capture_unknown`（导不出）。"""
         standard_id, shot_id = await self._submit_one()
         for capture_id in (standard_id, shot_id):
             view = await self.archive.photo_path(capture_id, "original")

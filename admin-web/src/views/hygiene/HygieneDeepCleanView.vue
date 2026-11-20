@@ -6,6 +6,7 @@ import LuyunDatePicker from '../../components/ui/LuyunDatePicker.vue'
 import LuyunTimePicker from '../../components/ui/LuyunTimePicker.vue'
 import { api } from '../../api/client'
 import { useHygieneRealtime } from '../../composables/useHygieneRealtime'
+import { useHygieneDayStore } from '../../stores/hygieneDay'
 import { HYGIENE_WEEKDAYS, hygieneWeekdayLabel } from '../../utils/hygieneCopy'
 import { deepCleanShotUrl } from '../../utils/hygieneMarkup'
 import { deepQueueKey, nextAfterRemove } from '../../utils/hygieneWorkFlow'
@@ -29,47 +30,28 @@ const teachingHint = ref('')
 const fromDate = ref('')
 const toDate = ref('')
 const removeTarget = ref(null)
+const hygieneDay = useHygieneDayStore()
 
 const weekdayItems = computed(() => {
   return items.value.filter((item) => item.weekday === weekday.value)
 })
 
-onMounted(() => {
-  const range = currentWeekRange()
-  fromDate.value = range.from
-  toDate.value = range.to
-  weekday.value = pythonWeekday(new Date())
+// 周区间与「今天是周几」都由服务端算（/api/hygiene/today）：周一是哪一天、今天算
+// 哪一天，和存档用同一把尺子；浏览器只负责显示（ADR 0125「没做的事」第二处）。
+onMounted(async () => {
+  await hygieneDay.load().catch(() => {})
+  fromDate.value = hygieneDay.weekFrom
+  toDate.value = hygieneDay.weekTo
+  weekday.value = hygieneDay.weekday
   refreshPage()
 })
 
 useHygieneRealtime({
   id: 'hygiene-admin-deep',
   resources: ['deep', 'settings'],
-  pull: refreshPage,
+  // store 没就绪时 fromDate/toDate 还是空串，日历接口会 422；等 onMounted 取完再刷。
+  pull: () => (hygieneDay.ready ? refreshPage() : Promise.resolve()),
 })
-
-function toIsoDate(date) {
-  const year = date.getFullYear()
-  const month = String(date.getMonth() + 1).padStart(2, '0')
-  const day = String(date.getDate()).padStart(2, '0')
-  return `${year}-${month}-${day}`
-}
-
-function pythonWeekday(date) {
-  const day = date.getDay()
-  return day === 0 ? 6 : day - 1
-}
-
-function currentWeekRange() {
-  const now = new Date()
-  const mondayOffset = pythonWeekday(now) * -1
-  const monday = new Date(now)
-  monday.setHours(0, 0, 0, 0)
-  monday.setDate(now.getDate() + mondayOffset)
-  const sunday = new Date(monday)
-  sunday.setDate(monday.getDate() + 6)
-  return { from: toIsoDate(monday), to: toIsoDate(sunday) }
-}
 
 function toHhmm(raw) {
   const text = String(raw || '').trim()
@@ -99,6 +81,8 @@ async function loadClock() {
 }
 
 async function loadCalendar() {
+  // 日期还没填上就别问：空 from_date/to_date 会被后端判 422。
+  if (!fromDate.value || !toDate.value) return
   const data = await api.get('/api/hygiene/admin/deep-clean/calendar', {
     from_date: fromDate.value,
     to_date: toDate.value,
@@ -477,19 +461,20 @@ async function markTeaching() {
 .wbx-readline {
   display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 26px;
   padding: 10px 14px;
-  background: var(--surface-1); border: 1px solid var(--line);
-  border-radius: var(--r-2); box-shadow: 0 1px 2px var(--wb-ink-a08);
+  background: var(--surface-1); border: var(--edge-w, 2px) solid var(--edge);
+  border-radius: var(--r-1); box-shadow: var(--paper-shadow-sm);
 }
 .wbx-read { display: inline-flex; align-items: baseline; gap: 6px; }
-.wbx-read span { font: 500 9.5px/1 var(--font-sans); letter-spacing: .18em; color: var(--ink-faint); }
-.wbx-read b { font: 500 20px/1 var(--font-mono); color: var(--ink); }
+.wbx-read span { font: 700 11px/1.2 var(--font-sans); letter-spacing: .01em; color: var(--ink-dim); }
+.wbx-read b { font: 500 20px/1 var(--font-display); color: var(--ink);
+  font-weight: 800;}
 .wbx-read b.is-clock { font-size: 16px; }
 
 .wbx-toolbar {
   display: flex; flex-wrap: wrap; align-items: center; gap: 10px;
   padding: 8px 14px;
-  background: var(--surface-1); border: 1px solid var(--line);
-  border-radius: var(--r-2); box-shadow: 0 1px 2px var(--wb-ink-a08);
+  background: var(--surface-1); border: var(--edge-w, 2px) solid var(--edge);
+  border-radius: var(--r-1); box-shadow: var(--paper-shadow-sm);
 }
 .wbx-tool-label { font: 600 10px/1 var(--font-sans); letter-spacing: .12em; color: var(--ink); }
 .wbx-tool-hint { margin: 0; font: 500 9.5px/1.4 var(--font-mono); color: var(--ink-faint); }
@@ -501,8 +486,8 @@ async function markTeaching() {
 .wbx-cols { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, .9fr); gap: 14px; align-items: stretch; }
 .wbx-panel {
   display: flex; flex-direction: column;
-  background: var(--surface-1); border: 1px solid var(--line);
-  border-radius: var(--r-2); box-shadow: 0 1px 2px var(--wb-ink-a08); overflow: hidden;
+  background: var(--surface-1); border: var(--edge-w, 2px) solid var(--edge);
+  border-radius: var(--r-2); box-shadow: var(--paper-shadow-sm); overflow: hidden;
 }
 .wbx-ph { display: flex; align-items: center; gap: 9px; padding: 11px 14px; border-bottom: 1px solid var(--line); }
 .wbx-ph h2 { margin: 0; font: 600 12.5px/1 var(--font-sans); letter-spacing: .06em; color: var(--ink); }

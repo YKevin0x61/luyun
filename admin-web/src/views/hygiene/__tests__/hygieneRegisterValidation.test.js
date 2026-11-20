@@ -2,6 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import { createMemoryHistory, createRouter } from 'vue-router'
+import { createPinia } from 'pinia'
 
 import HygieneRegisterView from '../HygieneRegisterView.vue'
 import LuyunDatePicker from '../../../components/ui/LuyunDatePicker.vue'
@@ -40,8 +41,11 @@ async function mountRegister() {
   })
   await router.push('/register')
   await router.isReady()
-  const wrapper = mount(HygieneRegisterView, { global: { plugins: [router] } })
+  const wrapper = mount(HygieneRegisterView, { global: { plugins: [router, createPinia()] } })
   await flushPromises()
+  // 进页面会先问一次「卫生的一天」（健康证日期上限），这是挂载造成的、与本组用例
+  // 无关的请求。清掉它，下面「一个请求都没发」的断言仍只压用户动作发没发。
+  fetchMock.mockClear()
   return { wrapper, router }
 }
 
@@ -100,8 +104,20 @@ const VALID = {
 
 let fetchMock
 
+/** 服务端给的「今天」（/api/hygiene/today）：健康证办理日期的上限按它判。 */
+const TODAY_PAYLOAD = {
+  today: '2026-11-18',
+  day_end: '2026-11-19T00:00:00+08:00',
+  weekday: 2,
+  week_from: '2026-11-16',
+  week_to: '2026-11-22',
+}
+
 beforeEach(() => {
-  fetchMock = vi.fn(async () => jsonResponse({ ok: true }))
+  fetchMock = vi.fn(async (url) => {
+    if (String(url).includes('/api/hygiene/today')) return jsonResponse(TODAY_PAYLOAD)
+    return jsonResponse({ ok: true })
+  })
   vi.stubGlobal('fetch', fetchMock)
 })
 

@@ -82,15 +82,18 @@ export function nextDeepShootRow(rows, current) {
   return open.find((row) => Number(row.item_id) !== Number(current.item_id)) || null
 }
 
-export function nextFixWorkRow(rows, current, { isManager } = {}) {
+export function nextFixWorkRow(rows, current) {
   const list = rows || []
   const waiting = list.filter((row) => (
     row.status === STATUS_FIX_TODO && Number(row.id) !== Number(current && current.id)
   ))
   if (waiting.length) return waiting[0]
-  if (!isManager) return null
+  // 待验收的单只在"这一份能判"时接着开对照；判不了就不自动跳（那会把人带进一屏
+  // 没有决定按钮的面板，正是 2026-10-05 审查 F-04 那一类）。
   return list.find((row) => (
-    row.status === STATUS_PENDING && Number(row.id) !== Number(current && current.id)
+    row.status === STATUS_PENDING
+    && canJudgeRow(row)
+    && Number(row.id) !== Number(current && current.id)
   )) || null
 }
 
@@ -141,44 +144,54 @@ export function statusTone(status) {
 /** 这一项交过了、还在等验收（ADR 0071：待验收期间再交一张会替换上一张）。
  *
  *  它跟"谁能验收"是两个问题：**交这张的人**永远可以重拍自己那份待验收的提交，
- *  普通员工也一样。所以下面那三个 `*PrimaryAction` 收档位、这一条不收 —— 页面上
- *  那颗「重拍」按钮用它，别拿 `*PrimaryAction === 'review'` 去判，否则普通员工的
- *  重拍入口会跟着「对照」一起消失。 */
+ *  普通员工也一样。所以它不看服务端判据（`review`）—— 页面上那颗「重拍」按钮用它，
+ *  别拿 `*PrimaryAction === 'review'` 去判，否则普通员工的重拍入口会跟着「对照」一起消失。 */
 export function isPendingReview(row) {
   return Boolean(row) && row.status === STATUS_PENDING
 }
 
-/** 日常 / 专项那一行"这个人接下来该做什么"：**档位判据只有这一处**。
+/** 行上的服务端判据：`services/hygiene/judge.py` 给每一行挂的 `review`。
  *
- *  待验收那一档分两种人（`isManager`）：
- *  - 管理员 → `'review'`：打开对照，能通过 / 驳回；
- *  - 普通员工 → `'view'`：只能打开看（验收是管理员的事）。
+ *  形状 `{allowed, reason, action}` —— `allowed` 是"这个人、这一份，现在能不能判"，
+ *  `action` 是服务端替他挑好的主动作（行级只会是 `review` / `view` / `reshoot`）。
+ *  前端**不再自己算一遍**：开关、提交人、整改时限全在后端那张表里，算两遍就会漂
+ *  （旧版拿 `isManager` 在前端判，`HygieneFixView` 的文案就与后端判据分过叉）。
  *
- *  以前这两个函数不看 `isManager`，同一行于是在**两处**各判一次：任务卡按它们渲染
- *  「对照」按钮，而队列文案（`buildWorkQueue` 的 `primaryLabel`）自己又写了一遍
- *  `isManager`。两处一旦分叉，普通员工就会点到一个既没有决定按钮、也没有说明的空壳
- *  面板（2026-10-05 审查 F-04）。所以：**档位判据留在这里一处**，按钮文案也好、页面
- *  行为也好，全部从这里的返回值派生（`queueActionLabel` 查表、`HygieneHomeView` 的
- *  `dailyAction`/`deepAction` 转发）。
+ *  取不到 `review` 时一律按"不能判"处理（fail-closed）：老缓存的行、拼错的行都不该
+ *  凭空多出一颗能点的「验收」。 */
+function reviewOf(row) {
+  return row && row.review ? row.review : null
+}
+
+/** 这一行这个人能不能判（按钮显隐、队列文案、自动跳下一个都用它，只读服务端结论）。 */
+export function canJudgeRow(row) {
+  const verdict = reviewOf(row)
+  return Boolean(verdict && verdict.allowed)
+}
+
+/** 日常 / 专项那一行"这个人接下来该做什么"：**判据只有服务端那一处**。
  *
- *  `fixPrimaryAction` 是同一套形状，只是它没有 `'view'` 那一档：整改单对普通员工的
- *  主动作本来就是「回拍」，不需要再分一层。
- */
-export function dailyPrimaryAction(row, { isManager } = {}) {
+ *  待验收这一档读 `review.action`：能判 → `review`（打开对照，能通过 / 驳回），
+ *  不能判 → `view`（只能看，服务端在 `reason` 里说清了为什么）。没交的那一档照旧
+ *  是 `shoot`。
+ *
+ *  `fixPrimaryAction` 是同一套形状，只是它没有 `view` 那一档：判不了别人的整改单时，
+ *  主动作是「回拍」（这张单要的是一张新照片，不是一次判决）。 */
+export function dailyPrimaryAction(row) {
   if (!row || row.status === STATUS_PASSED) return 'none'
-  if (row.status === STATUS_PENDING) return isManager ? 'review' : 'view'
+  if (row.status === STATUS_PENDING) return canJudgeRow(row) ? 'review' : 'view'
   return 'shoot'
 }
 
-export function deepPrimaryAction(row, { isManager } = {}) {
+export function deepPrimaryAction(row) {
   if (!row || row.status === STATUS_PASSED) return 'none'
-  if (row.status === STATUS_PENDING) return isManager ? 'review' : 'view'
+  if (row.status === STATUS_PENDING) return canJudgeRow(row) ? 'review' : 'view'
   return 'shoot'
 }
 
-export function fixPrimaryAction(row, { isManager } = {}) {
+export function fixPrimaryAction(row) {
   if (!row) return 'none'
-  if (row.status === STATUS_PENDING && isManager) return 'review'
+  if (row.status === STATUS_PENDING && canJudgeRow(row)) return 'review'
   return 'reshoot'
 }
 
@@ -302,7 +315,6 @@ export function buildWorkQueue({
   shiftDue = '',
   deepDue = '',
   now = Date.now(),
-  isManager = false,
   pendingKeys = null,
 } = {}) {
   const tasks = []
@@ -324,8 +336,8 @@ export function buildWorkQueue({
       typeLabel: '日常',
       status: row.status,
       dueAt,
-      // 文案从判据的返回值派生，别在这里再写一遍 `isManager`（见 `dailyPrimaryAction`）。
-      primaryLabel: queueActionLabel('daily', dailyPrimaryAction(row, { isManager })),
+      // 文案从判据的返回值派生，别在这里再判一遍（见 `dailyPrimaryAction`）。
+      primaryLabel: queueActionLabel('daily', dailyPrimaryAction(row)),
       now,
       rejected: row.rejected,
       rejectReason: row.reject_reason,
@@ -345,7 +357,7 @@ export function buildWorkQueue({
       typeLabel: '专项',
       status: row.status,
       dueAt,
-      primaryLabel: queueActionLabel('deep', deepPrimaryAction(row, { isManager })),
+      primaryLabel: queueActionLabel('deep', deepPrimaryAction(row)),
       now,
       rejected: row.rejected,
       rejectReason: row.reject_reason,
@@ -364,7 +376,7 @@ export function buildWorkQueue({
       typeLabel: '整改',
       status: row.status,
       dueAt: row.deadline,
-      primaryLabel: queueActionLabel('fix', fixPrimaryAction(row, { isManager })),
+      primaryLabel: queueActionLabel('fix', fixPrimaryAction(row)),
       now,
       rejected: row.rejected,
       rejectReason: row.reject_reason,

@@ -107,7 +107,6 @@ function openLightbox(src, originalSrc, alt, markup = [], watermark = null) {
   width: 14px;
   height: 1px;
   background: var(--hy-mint);
-  box-shadow: 0 0 6px var(--hy-mint);
 }
 .capture-frame {
   position: relative;

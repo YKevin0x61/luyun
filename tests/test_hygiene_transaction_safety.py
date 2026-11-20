@@ -80,9 +80,10 @@ def _count(db, sql, params=()):
 
 def test_services_share_one_global_write_lock(runtime):
     db, accounts, work = runtime
-    assert db._write_lock is not None, "connect() 必须把全局写锁建出来"
-    assert work._write_lock is db._write_lock, "HygieneWork 必须用全局锁"
-    assert accounts._write_lock is db._write_lock, "EmployeeAccounts 必须用全局锁"
+    assert db._write_lock is not None, "全局写锁必须由连接所有者建出来"
+    assert db._write_lock is db._conn.write_lock, "门面与连接必须是同一把锁"
+    assert work._write_lock_owner is db, "HygieneWork 要把 DatabaseManager 当锁的主人"
+    assert accounts._write_lock_owner is db, "EmployeeAccounts 要把 DatabaseManager 当锁的主人"
 
 
 def test_failed_capture_leaves_no_open_transaction(runtime):
@@ -161,7 +162,7 @@ def test_capture_io_runs_outside_the_write_lock(runtime):
     original = work._store_capture
 
     async def probe(*args, **kwargs):
-        observed.append(work._write_lock.locked())
+        observed.append(db._write_lock.locked())
         return await original(*args, **kwargs)
 
     with mock.patch.object(work, "_store_capture", probe):
@@ -182,9 +183,8 @@ def test_serialized_write_rolls_back_on_any_exception(runtime):
     db, _accounts, work = runtime
 
     class _Writer:
-        def __init__(self, conn, lock):
+        def __init__(self, conn):
             self._conn = conn
-            self._write_lock = lock
 
         @serialized_write
         async def half_write(self):
@@ -195,7 +195,7 @@ def test_serialized_write_rolls_back_on_any_exception(runtime):
             )
             raise OSError(28, "No space left on device")
 
-    writer = _Writer(db._conn, work._write_lock)
+    writer = _Writer(db._conn)
     with pytest.raises(OSError):
         _run(writer.half_write())
 

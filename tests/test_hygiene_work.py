@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 
 from config import settings
 from database import CHINA_TZ, DatabaseManager
+from services.hygiene import judge
 from services.hygiene.captures import FakeCaptureStore
 from services.hygiene.notifier import FakeNotifier
 from services.hygiene.work import (
@@ -447,10 +448,14 @@ class HygieneDailySubmitTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rows[0]["status"], "待验收")
         self.assertEqual(rows[0]["zone_name"], "馅档")
 
-        # 自己交的不能自己验收：管理员在案板也交一条，它**不**出现在待验收那一档。
+        # 自己交的不能自己验收：管理员在案板也交一条。这一行**仍然出现**（队伍要完整），
+        # 但 review 说「不行」—— 列表与写口给的是同一个结论，不再靠「看不见」。
         await self.work.submit_daily(manager, anban["id"], self._live(SHOT_A))
         again = await self.work.list_daily_work(manager, pending_review_only=True)
-        self.assertNotIn(anban["id"], [row["item_id"] for row in again])
+        own = [row for row in again if row["item_id"] == anban["id"]]
+        self.assertEqual(len(own), 1)
+        self.assertFalse(own[0]["review"]["allowed"])
+        self.assertEqual(own[0]["review"]["reason"], "cannot_self_accept")
 
         # 普通员工拿不到这一档（前端也不会问他）。
         plain = dict(_staff(14, DAY_PHONE, "白班"), zone_id=anban_zone)
@@ -462,30 +467,31 @@ class HygieneDailySubmitTest(unittest.IsolatedAsyncioTestCase):
         """管理权限是**逐项开关**（2026-10-05 用户裁定）：只勾了「日常验收」的人判不了专项。
 
         升级前只有一个「管理员」档位 —— 勾上就是三项全给，表达不出"他该判日常、不该判专项"。
-        现在判据是 `_require_reviewer(actor, submitter_id, cap)`，这里直接压它：
+        判据现在收在 `services.hygiene.judge` 那张规则表里（写口与列表共用），这里直接压它：
         有那一项就放行、没有就 forbidden；自己交的仍然不能自己判（那条老规矩没动）。
         """
         mate_id = 12
         only_daily = _staff(
             13, OTHER_ADMIN_PHONE, "白班", permission="管理员", caps=("daily_review",)
         )
+        subject = {"submitter_id": mate_id}
         # 有这一项：放行（不抛就是过）。
-        self.work._require_reviewer(only_daily, mate_id, "daily_review")
+        judge.require(judge.DAILY, only_daily, subject)
         # 没有那一项：拒。
         with self.assertRaises(HygieneWorkError) as raised:
-            self.work._require_reviewer(only_daily, mate_id, "deep_review")
+            judge.require(judge.DEEP, only_daily, subject)
         self.assertEqual(raised.exception.code, "forbidden")
         # 自己交的不能自己判 —— 哪怕他有那一项。
         with self.assertRaises(HygieneWorkError) as raised_self:
-            self.work._require_reviewer(only_daily, 13, "daily_review")
+            judge.require(judge.DAILY, only_daily, {"submitter_id": 13})
         self.assertEqual(raised_self.exception.code, "cannot_self_accept")
         # 一个开关都没有 = 什么都判不了（普通员工那一档）。
         plain = _staff(14, DAY_PHONE, "白班")
         with self.assertRaises(HygieneWorkError) as raised_plain:
-            self.work._require_reviewer(plain, mate_id, "daily_review")
+            judge.require(judge.DAILY, plain, subject)
         self.assertEqual(raised_plain.exception.code, "forbidden")
         # 超级管理员不受开关限制（他没走员工会话这条路）。
-        self.work._require_reviewer({"kind": "super"}, mate_id, "deep_review")
+        judge.require(judge.DEEP, {"kind": "super"}, subject)
 
     async def test_my_score_reads_the_same_events_as_the_board(self):
         """「我的成绩」与红黑榜是**同一份记录**，不另起计数。
@@ -1450,10 +1456,12 @@ class HygieneFixTicketTest(unittest.IsolatedAsyncioTestCase):
         self.fixed_now = datetime(2026, 9, 13, 11, 59, tzinfo=CHINA_TZ)
         with self.assertRaises(HygieneWorkError) as too_soon:
             await self.work.accept_fix(other, opened["id"])
-        self.assertEqual(too_soon.exception.code, "forbidden")
+        # 时限未到是一个**独立理由**（before_deadline），不再与「没有权限」共用 forbidden：
+        # 前端要能说清「再等等」而不是「你不能判」。HTTP 仍是 403。
+        self.assertEqual(too_soon.exception.code, "before_deadline")
         with self.assertRaises(HygieneWorkError) as super_too_soon:
             await self.work.accept_fix(SUPER, opened["id"])
-        self.assertEqual(super_too_soon.exception.code, "forbidden")
+        self.assertEqual(super_too_soon.exception.code, "before_deadline")
         passed_by_opener = await self.work.accept_fix(opener, opened["id"])
         self.assertEqual(passed_by_opener["status"], "已通过")
 
@@ -1491,10 +1499,10 @@ class HygieneFixTicketTest(unittest.IsolatedAsyncioTestCase):
         self.fixed_now = datetime(2026, 9, 13, 11, 0, tzinfo=CHINA_TZ)
         with self.assertRaises(HygieneWorkError) as still_waiting:
             await self.work.accept_fix(other, opened["id"])
-        self.assertEqual(still_waiting.exception.code, "forbidden")
+        self.assertEqual(still_waiting.exception.code, "before_deadline")
         with self.assertRaises(HygieneWorkError) as super_waiting:
             await self.work.accept_fix(SUPER, opened["id"])
-        self.assertEqual(super_waiting.exception.code, "forbidden")
+        self.assertEqual(super_waiting.exception.code, "before_deadline")
 
         self.fixed_now = DEADLINE_AT
         passed = await self.work.accept_fix(other, opened["id"])

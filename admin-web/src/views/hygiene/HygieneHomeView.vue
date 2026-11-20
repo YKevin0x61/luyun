@@ -16,7 +16,6 @@ import { useStandardPhotoCacheStore } from '../../stores/standardPhotoCache'
 import { ADMIN_CAP_STAFF_DEFS, hasCap, normalizeCaps } from '../../utils/adminCaps'
 import {
   HYGIENE_FIX_TYPES,
-  canAcceptFixTicket,
   hasLiveCamera,
   hygieneDocumentTitle,
   hygieneShiftLabel,
@@ -91,7 +90,8 @@ const inbox = ref([])
  *  「已交」不另立分组（③-3b / F3，有意为之、不是漏做）：原型里画过一个独立的「已交」组，
  *  实现改用**组内状态标记**——自己交的那条留在它原来的那一组里，行上写「已交，等验收」。
  *  ADR 0067 的实质是「自己交的不能自己判」，那一条由两处守住：服务层已经把范围过滤成
- *  「不含自己交的」，页面上还有 `canDecide` 那道提交人比对（见 `reviewInbox` 渲染处）。
+ *  「不含自己交的」这一条由服务端 `judge` 给在行上的 `review.allowed` 表达（自己交的那行留
+ *  在组里、按钮置灰），页面不再另写一遍提交人比对。
  *  分不分组建的是**形式**，实质已经在了；将来要立独立组，先看这一句再决定。 */
 const reviewInbox = ref([])
 const deepInbox = ref([])
@@ -231,16 +231,14 @@ function notifySubmitFailed(label) {
 // 日常队列就是这一组：专项、整改各自成组，不再混进这条队列。
 // 它们仍照常加载（loadDeepClean / loadFixTickets 喂下面那两组），只是不参与这条队列。
 //
-// 文案要按**这一项自己的开关**重算一遍：`buildWorkQueue` 是按"一个档位"写的（只收一个
-// `isManager`），拿"有没有任意管理权限"去填，只开了整改单的人就会在日常那一行读到
-// 「验收」、点开却是个没有决定按钮的面板 —— 正是 2026-10-05 审查 F-04 那个分叉。
-// 判据仍是 `dailyAction` / `deepAction` / `fixAction`（与任务卡上的按钮同源），文案仍走
-// 队列自己的 `queueActionLabel` 查表，这里只是把"档位"换成"这一项"。
+// 文案从服务端判据派生（行上的 `review`）：`buildWorkQueue` 自己不再收"谁是管理员"这类
+// 档位参数 —— 它按行判，页面这边再用 `queueLabelFor` 把同一份结论翻成队列的词。
+// 2026-10-05 审查 F-04 那个分叉（队列写「验收」、点开却没有决定按钮）的根因就是判据
+// 有两份；现在两份都只是 `review` 的读取方。
 const workQueue = computed(() => buildWorkQueue({
   inbox: inbox.value,
   shiftDue: shiftDue.value,
   now: nowTick.value,
-  isManager: isManager.value,
   pendingKeys: pendingKeys.value,
 }).map((task) => ({ ...task, primaryLabel: queueLabelFor(task) })))
 const nextWork = computed(() => workQueue.value[0] || null)
@@ -253,6 +251,12 @@ const queueSummary = computed(() => ({
   soon: workQueue.value.filter((task) => task.bucket === 'soon').length,
   waiting: workQueue.value.filter((task) => task.bucket === 'waiting').length,
 }))
+/** 一个队列桶一共几件（含上方首件卡片拿走的那一件）。分组的标题按这个数写，
+ *  列表里则少掉卡片那一项 —— 两处数字不一样、却都叫「超时」，真机上会被当成
+ *  数据算错了（走查截图：卡片「工作台1」没拍，上面写超时 11、列表只有 10 行）。 */
+function queueBucketTotal(id) {
+  return workQueue.value.filter((task) => task.bucket === id).length
+}
 // 那条五格 tab 条撤掉之后，文档标题不再跟着"当前是哪一格"走：这一页整体就叫「卫生」
 // （页面清单里 `/workbench/staff/clean` 的 title 也是它），与外壳顶栏 / 底栏那一格同名。
 document.title = hygieneDocumentTitle('卫生')
@@ -767,24 +771,21 @@ async function openDutyNotice() {
  *  判据在页面这一侧只经手这里，模板里不再各写一遍 —— 之前正是两处各判一次，普通员工才会
  *  点到一个没有决定按钮的空壳验收面板（2026-10-05 审查 F-04）。
  *
- *  2026-10-05 起每一项喂的是**它自己那一项开关**：日常验收 → `daily_review`、专项验收 →
- *  `deep_review`、整改单 → `fix`。`hygieneWorkFlow` 那个参数名还叫 `isManager`（那份文件
- *  没动）：它问的其实是"这一项这个人能不能判"，现在由各个开关回答。
- *  日常与专项分开判是必须的 —— 只开了 `deep_review` 的人，日常那一行就该是「查看」。 */
+ *  2026-11-18 起三个函数都不再收"开关"：能判不能判由服务端给在行上（`review.allowed`，
+ *  规则表在 `services/hygiene/judge.py`）。页面只负责"打开哪一屏"。 */
 function dailyAction(row) {
-  return dailyPrimaryAction(row, { isManager: canDailyReview.value })
+  return dailyPrimaryAction(row)
 }
 
 function deepAction(row) {
-  return deepPrimaryAction(row, { isManager: canDeepReview.value })
+  return deepPrimaryAction(row)
 }
 
 function fixAction(row) {
-  return fixPrimaryAction(row, { isManager: canFix.value })
+  return fixPrimaryAction(row)
 }
 
-/** 队列里那条任务的按钮文案：按 kind 分派到上面同一个判据，再查队列那份文案表。
- *  （`buildWorkQueue` 只收一个布尔，算不出三种人各不相同的文案，见 `workQueue` 的注释。） */
+/** 队列里那条任务的按钮文案：按 kind 分派到上面同一个判据，再查队列那份文案表。 */
 function queueLabelFor(task) {
   if (!task) return ''
   if (task.kind === 'daily') return queueActionLabel('daily', dailyAction(task.row))
@@ -807,20 +808,32 @@ function isDeepSheet() {
   return Boolean(sheet.value && sheet.value.kind === 'deep')
 }
 
-/** 对照面板能不能出现「通过 / 驳回」。`cap` 是**这一项**的开关键：日常那一屏传
- *  `daily_review`、专项传 `deep_review` —— 同一个面板，两件事各判各的。
- *  另外自己交的那份不能自己验（与服务端 `_require_reviewer` 同口径）。 */
-function canDecide(review, cap) {
-  if (!hasCap(caps.value, cap) || !review || !employee.value) return false
-  return employee.value.id !== review.submitter_id
+/** 当前这一屏的判据：对照面板里「通过 / 驳回」出不出现，只看服务端给的那份结论。
+ *
+ *  三个面板的 `review` 落在不同位置 —— 整改单是 `/fix/{id}` 回来的整张单（行上有
+ *  `review`），日常与专项是 `/review` 回来的正文（`review` 嵌在正文里）。从前这里用
+ *  `canDecide` / `canDecideFix` 各算一遍开关、提交人与时限，那是判据的第二份。 */
+function sheetVerdict() {
+  const current = sheet.value
+  if (!current || current.mode !== 'review') return null
+  if (current.kind === 'fix') return (current.row && current.row.review) || null
+  return (current.review && current.review.review) || null
 }
 
-/** 整改单能不能判：判据在 `canAcceptFixTicket` 里，它收的同样是「整改单」那一项开关
- *  （外加两条例外：自己开的单子自己收、超级管理员开的单子他向来自收）。 */
-function canDecideFix(ticket) {
-  if (!ticket || !employee.value) return false
-  return canAcceptFixTicket(employee.value, ticket)
+/** 置灰时把服务端给的理由说成一句话（`reason` 的词表在 `judge.py`）。 */
+function sheetDecideHint() {
+  const verdict = sheetVerdict()
+  const reason = verdict ? verdict.reason : ''
+  if (reason === 'cannot_self_accept') return '自己交的不能自己验收：等别人看一眼。'
+  if (reason === 'before_deadline') return '时限还没到，只有开单人能验。'
+  if (reason === 'not_pending') return '这一份已经处理过了，刷新看看。'
+  return '等管理员验收：你没有这一项的验收权，这里只能看。'
 }
+
+const sheetCanDecide = computed(() => {
+  const verdict = sheetVerdict()
+  return Boolean(verdict && verdict.allowed)
+})
 
 function deadlineLabel(iso) {
   return formatStamp(iso)
@@ -837,9 +850,9 @@ function fixDueLabel(row) {
 }
 
 function runDailyPrimary(row) {
+  // 'view'（判不了这一份的）与 'review'（能判的）开的是同一个面板：
+  // 面板里「通过 / 驳回」出不出现由服务端那份结论（`sheetVerdict`）说了算，不是两个面板。
   const action = dailyAction(row)
-  // 'view'（没有「日常验收」那一项的人看自己那份待验收的）与 'review'（有那一项的验收）
-  // 开的是同一个面板：面板里能不能决定由 `canDecide` 说了算，不是两个面板。
   if (action === 'review' || action === 'view') return openReview(row)
   if (action === 'shoot') return openStandard(row)
   return undefined
@@ -1243,14 +1256,14 @@ function continueDeep(current) {
 }
 
 function continueFix(current) {
-  // 下一张挑哪张、挑到待验收的要不要直接开对照，两处都按「整改单」那一项开关判
-  // （`hygieneWorkFlow` 的 `nextFixWorkRow` 收的仍叫 `isManager`，问的是同一个问题）。
-  const next = nextFixWorkRow(fixInbox.value, current, { isManager: canFix.value })
+  // 下一张挑哪张、挑到的待验收要不要直接开对照：`nextFixWorkRow` 只挑"能判的"，
+  // 这里再按同一份结论（`review.allowed`）决定开哪一屏。
+  const next = nextFixWorkRow(fixInbox.value, current)
   if (!next) {
     closeSheet(true)
     return
   }
-  if (next.status === '待验收' && canFix.value) {
+  if (next.status === '待验收' && next.review && next.review.allowed) {
     openFixReview(next)
   } else {
     openFixOriginal(next)
@@ -1416,9 +1429,14 @@ async function decide(action, reason = '') {
       })
       closeSheet(true)
       await loadDeepClean()
-      const next = openDeep.value.find((item) => item.status === '待验收' && item.item_id !== row.item_id)
-      // 连着判下一项：只有还留着「专项验收」那一项的人才会被带进下一个对照面板。
-      if (next && canDeepReview.value) await openDeepReview(next)
+      // 连着判下一项：只把"这一份他能判"的人带进下一个对照面板（判不了的会被带进
+      // 一屏没有决定按钮的面板，正是 2026-10-05 审查 F-04 那一类）。
+      const next = openDeep.value.find((item) => (
+        item.status === '待验收'
+        && item.item_id !== row.item_id
+        && item.review && item.review.allowed
+      ))
+      if (next) await openDeepReview(next)
     } else if (sheet.value.kind === 'fix') {
       await staffRequest(`/api/hygiene/staff/fix/${row.id}/${action}`, {
         method: 'POST',
@@ -1426,9 +1444,9 @@ async function decide(action, reason = '') {
       })
       closeSheet(true)
       await loadFixTickets()
-      const next = nextFixWorkRow(fixInbox.value, row, { isManager: canFix.value })
+      const next = nextFixWorkRow(fixInbox.value, row)
       if (next) {
-        if (next.status === '待验收' && canFix.value) await openFixReview(next)
+        if (next.status === '待验收' && next.review && next.review.allowed) await openFixReview(next)
         else openFixOriginal(next)
         flashText.value = next.status === '待验收'
           ? `下一张对照：${next.zone_name}`
@@ -1442,9 +1460,11 @@ async function decide(action, reason = '') {
       closeSheet(true)
       await loadInbox()
       const next = inbox.value.find((item) => (
-        item.status === '待验收' && !(item.item_id === row.item_id && item.shift === row.shift)
+        item.status === '待验收'
+        && item.review && item.review.allowed
+        && !(item.item_id === row.item_id && item.shift === row.shift)
       ))
-      if (next && canDailyReview.value) await openReview(next)
+      if (next) await openReview(next)
     }
   } catch (err) {
     errorText.value = err.message || (action === 'accept' ? '验收失败' : '驳回失败')
@@ -1593,8 +1613,8 @@ async function decide(action, reason = '') {
         </template>
         <template v-else-if="employee">
           <div class="hy-work-facts">
-            <span>日常 {{ dailyStats.passed }}/{{ dailyStats.total }}</span>
-            <span v-if="queueSummary.overdue" class="is-overdue">超时 {{ queueSummary.overdue }}</span>
+            <span>日常 {{ dailyStats.passed }}/{{ dailyStats.total }}（已通过）</span>
+            <span v-if="queueSummary.overdue" class="is-overdue">已超时 {{ queueSummary.overdue }}</span>
             <span v-else-if="queueSummary.soon" class="is-soon">快到时 {{ queueSummary.soon }}</span>
             <span v-if="queueSummary.waiting">等验收 {{ queueSummary.waiting }}</span>
           </div>
@@ -1637,7 +1657,10 @@ async function decide(action, reason = '') {
           </div>
 
           <section v-for="group in restWorkGroups" :key="group.id" class="hy-queue-group hy-wb-panel">
-            <h2><i class="hy-wb-led sig"></i>{{ group.label }} <span>{{ group.rows.length }}</span></h2>
+            <!-- 标题里的条数按**这个桶一共几件**写（含上方那张首件卡片拿走的 1 件），与
+                 事实胶囊的「已超时 N」同一口径；卡片拿走的那 1 件在括号里说清，否则
+                 列表只有 N-1 行，看着像两个数对不上（真机走查截图）。 -->
+            <h2><i class="hy-wb-led sig"></i>{{ group.label }} <span>{{ queueBucketTotal(group.id) }}</span><span v-if="queueBucketTotal(group.id) > group.rows.length" class="hy-queue-more">（含上方卡片 {{ queueBucketTotal(group.id) - group.rows.length }} 项）</span></h2>
             <!-- 行 = 容器 + 主按钮 + 行尾独立动作：整行可点，但「重拍」不能嵌在 button 里
                  （button 里不能再套 button，键盘也聚不到它身上）。 -->
             <div v-for="task in group.rows" :key="task.key" class="hy-work-row-group">
@@ -1714,10 +1737,10 @@ async function decide(action, reason = '') {
             <p><span class="hy-status" :class="`is-${statusTone(row.status)}`">{{ row.status }}</span></p>
           </button>
           <div class="hy-task-actions">
-            <!-- 三颗按钮的判据都是同一个 `deepAction`（= `deepPrimaryAction(row, { isManager })`，
-                 那里喂的是**「专项验收」那一项开关**）：开了那一项的人在待验收那一档拿到
-                 'review'（对照 + 能通过 / 驳回），没开的拿到 'view'（查看：面板里没有决定
-                 按钮，也明说了等管理员验收）。「重拍」问的是另一件事
+            <!-- 三颗按钮的判据都是同一个 `deepAction`（= `deepPrimaryAction(row)`，读行上的
+                 服务端判据 `review`）：能判的人在待验收那一档拿到 'review'（对照 + 能通过 /
+                 驳回），判不了的拿到 'view'（查看：面板里没有决定按钮，也说明了为什么）。
+                 「重拍」问的是另一件事
                  —— 这一项是不是已经交了、还在等验收（ADR 0071 允许再交一张替换）—— 它跟谁
                  能验收无关，所以用 `isPendingReview` 判，别挂在 'review' 上（那样没开验收
                  的人的入口会跟着一起消失）。 -->
@@ -2116,8 +2139,8 @@ async function decide(action, reason = '') {
             :left-watermark="sheet.review.open_watermark"
             :watermark="sheet.review.watermark"
           />
-          <p v-if="canFix && !canDecideFix(sheet.row)" class="staff-lead">时限还没到，只有开单人能验。</p>
-          <div v-if="canDecideFix(sheet.row)" class="staff-decide">
+          <p v-if="!sheetCanDecide" class="staff-lead">{{ sheetDecideHint() }}</p>
+          <div v-if="sheetCanDecide" class="staff-decide">
             <button type="button" class="btn btn-primary btn-block staff-submit" :disabled="busy" @click="decide('accept')">通过</button>
             <button type="button" class="btn btn-block staff-submit" :disabled="busy" @click="askReject">驳回</button>
           </div>
@@ -2136,11 +2159,10 @@ async function decide(action, reason = '') {
             :capture-alt="'清理后'"
             :watermark="sheet.review.after_watermark || sheet.review.watermark"
           />
-          <p v-if="canDeepReview && !canDecide(sheet.review, 'deep_review')" class="staff-lead">交这一组的人不能自己验收。</p>
-          <!-- 没有「专项验收」那一项的人打开的是同一个对照面板，只是没有决定区：不说这一句，
-               面板看上去就是"空的"（2026-10-05 审查 F-04 的两张并排截图）。 -->
-          <p v-else-if="!canDeepReview" class="staff-lead">等管理员验收：你没有这一项的验收权，这里只能看。</p>
-          <div v-if="canDecide(sheet.review, 'deep_review')" class="staff-decide">
+          <p v-if="!sheetCanDecide" class="staff-lead">{{ sheetDecideHint() }}</p>
+          <!-- 判不了这一组的人打开的是同一个对照面板，只是没有决定区：不说清理由，
+               面板看上去就是"空的"。理由由服务端给（`review.reason`），见 `sheetDecideHint`。 -->
+          <div v-if="sheetCanDecide" class="staff-decide">
             <button type="button" class="btn btn-primary btn-block staff-submit" :disabled="busy" @click="decide('accept')">通过</button>
             <button type="button" class="btn btn-block staff-submit" :disabled="busy" @click="askReject">驳回</button>
           </div>
@@ -2157,10 +2179,10 @@ async function decide(action, reason = '') {
             :capture-alt="'实拍'"
             :watermark="sheet.review.watermark"
           />
-          <p v-if="canDailyReview && !canDecide(sheet.review, 'daily_review')" class="staff-lead">交这张的人不能自己验收。</p>
-          <!-- 同上：没有「日常验收」那一项的人从队列里点进来的就是这一屏。 -->
-          <p v-else-if="!canDailyReview" class="staff-lead">等管理员验收：你没有这一项的验收权，这里只能看。</p>
-          <div v-if="canDecide(sheet.review, 'daily_review')" class="staff-decide">
+          <p v-if="!sheetCanDecide" class="staff-lead">{{ sheetDecideHint() }}</p>
+          <!-- 判不了这一份的人从队列里点进来的也是这一屏：把服务端给的理由说清楚，
+               否则面板看上去就是"空的"（2026-10-05 审查 F-04 的两张并排截图）。 -->
+          <div v-if="sheetCanDecide" class="staff-decide">
             <button type="button" class="btn btn-primary btn-block staff-submit" :disabled="busy" @click="decide('accept')">通过</button>
             <button type="button" class="btn btn-block staff-submit" :disabled="busy" @click="askReject">驳回</button>
           </div>
@@ -2229,7 +2251,8 @@ async function decide(action, reason = '') {
 .hygiene-work .hy-work-shift {
   max-width: 100%;
   padding: 4px 9px;
-  border: 1px solid var(--line);
+  border: var(--edge-w, 2px) solid var(--edge);
+  box-shadow: var(--paper-shadow-sm);
   border-radius: var(--r-full);
   background: var(--surface-1);
   font: 500 10px/1.4 var(--font-mono);
@@ -2244,7 +2267,8 @@ async function decide(action, reason = '') {
 }
 .hygiene-work .hy-work-role {
   padding: 4px 9px;
-  border: 1px solid var(--line-strong);
+  border: var(--edge-w, 2px) solid var(--edge);
+  box-shadow: var(--paper-shadow-sm);
   border-radius: var(--r-full);
   background: var(--surface-1);
   font-size: 9.5px;
@@ -2254,7 +2278,8 @@ async function decide(action, reason = '') {
 .hy-wb-pill {
   display: inline-flex; align-items: center; gap: 6px;
   padding: 6px 10px;
-  border: 1px solid var(--line-strong);
+  border: var(--edge-w, 2px) solid var(--edge);
+  box-shadow: var(--paper-shadow-sm);
   border-radius: var(--r-1);
   background: var(--surface-1);
   color: var(--ink-dim);
@@ -2275,9 +2300,9 @@ async function decide(action, reason = '') {
   gap: 4px 14px;
   padding: 10px 14px;
   background: var(--surface-1);
-  border: 1px solid var(--line);
+  border: var(--edge-w, 2px) solid var(--edge);
   border-radius: var(--r-2);
-  box-shadow: 0 1px 2px var(--wb-ink-a08);
+  box-shadow: var(--paper-shadow-sm);
 }
 .hygiene-work .hy-wb-summary .hy-progress {
   margin: 0;
@@ -2290,11 +2315,11 @@ async function decide(action, reason = '') {
   color: var(--ink-dim);
 }
 .hygiene-work .hy-wb-summary .hy-progress .hy-wb-num {
-  font: 500 20px/1 var(--font-mono);
+  font: 500 20px/1 var(--font-display);
   letter-spacing: -.02em;
   color: var(--ink);
   margin: 0 2px;
-}
+  font-weight: 800;}
 .hygiene-work .hy-wb-summary .hy-progress .count {
   display: inline;
   margin: 0 0 0 6px;
@@ -2307,9 +2332,9 @@ async function decide(action, reason = '') {
   margin: 0 0 14px;
   padding: 0;
   background: var(--surface-1);
-  border: 1px solid var(--line);
+  border: var(--edge-w, 2px) solid var(--edge);
   border-radius: var(--r-2);
-  box-shadow: 0 1px 2px var(--wb-ink-a08);
+  box-shadow: var(--paper-shadow-sm);
   overflow: hidden;
 }
 /* 页「今天」带 `?group=deep|fix` 进来时高亮那一组；类由脚本在 1.6s 后摘掉。 */
@@ -2333,6 +2358,14 @@ async function decide(action, reason = '') {
   color: var(--ink-faint);
 }
 .hygiene-work .hy-queue-group.hy-wb-panel > h2 span + span { margin-left: 2px; }
+/* 分组标题里解释「差 1」的那句注（上方卡片拿走了一项）：跟条数同排，但用正文字体、
+   不用等宽读数，别读成第二个数字。 */
+.hygiene-work .hy-queue-group.hy-wb-panel > h2 span.hy-queue-more {
+  margin-left: 0;
+  font: 500 9.5px/1.2 var(--font-sans);
+  letter-spacing: 0;
+  color: var(--ink-faint);
+}
 /* 面板头 hint：只写口径，不占一行说明。用 `::after` 画出来，标题本身的 textContent
    不变（标题行的测试按 `h2.text()` 精确断言「日常 1」这类字符串）。 */
 .hygiene-work .hy-queue-group.hy-wb-panel > h2[data-hint]::after {
@@ -2522,7 +2555,7 @@ async function decide(action, reason = '') {
 .hygiene-work .hy-queue-group.hy-wb-panel .hy-next {
   margin: 12px 14px;
   padding: 13px 14px 12px;
-  border: 1px solid var(--line);
+  border: var(--edge-w, 2px) solid var(--edge);
   border-left: 3px solid var(--action);
   border-radius: var(--r-1);
   background: var(--surface-2);
@@ -2569,6 +2602,10 @@ async function decide(action, reason = '') {
 .hygiene-work :deep(.hy-work-row .btn.btn) { min-height: 44px !important; }
 /* 行尾那颗「重拍」在主按钮外面（不是 `.hy-work-row` 的后代）：按 44px 行内动作。 */
 .hygiene-work :deep(.hy-work-reshoot.btn) { min-height: 44px !important; }
+
+/* 标准图缓存那颗浮标固定在底栏上方（StandardPhotoCachePanel），滚动时必然盖住列表——
+   给它把同高度的空白留在页面底部，滚到底最后一行就落在浮标上面而不是被它压住。 */
+.hygiene-work { padding-bottom: calc(56px + var(--safe-b) + 58px); }
 
 @media (max-width: 720px) {
   .hygiene-work .hy-wb-title { font-size: 22px; }

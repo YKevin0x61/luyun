@@ -31,13 +31,13 @@ from services.hygiene.archive import HygieneDataArchive
 from services.hygiene.attire import HygieneAttire
 from services.hygiene.captures import FileCaptureStore
 from services.hygiene.images import ImageVariantGenerator
-from services.business_day import business_date_of
+from services.hygiene.day import today as hygiene_today
 from services.hygiene.work import HygieneWork
 from services.identity.accounts import EmployeeAccounts
 
-# 用**真实当下**：`scope=today` 那条路由由服务端按当下算营业日（06:00 切日），
+# 用**真实当下**：`scope=today` 那条路由由服务端按当下算「卫生的一天」（00:00 切），
 # 夹具写死一个过去的日期就会跟它差出十几天，导出来是空的。attire 与排班都注入
-# 同一个 NOW，所以「今天」在整份夹具里仍是同一个营业日。
+# 同一个 NOW，所以「今天」在整份夹具里仍是同一把尺子量出来的那天。
 NOW = datetime.now(CHINA_TZ)
 DAY_PHONE = "13800000001"
 
@@ -112,7 +112,7 @@ def _build(tmp_path):
                    (employee_id, business_date, shift_id, zone_id, source,
                     created_at, updated_at)
                VALUES (?, ?, ?, NULL, 'manual', ?, ?)""",
-            (ZHANGSAN, business_date_of(NOW), SHIFT_ID, now_iso, now_iso),
+            (ZHANGSAN, hygiene_today(NOW), SHIFT_ID, now_iso, now_iso),
         )
     )
     # 李四一行都不铺：今天没排到他 —— 员工侧整行不显示，交活也要被拒。
@@ -280,6 +280,12 @@ def test_admin_day_and_shot_image(attire_http):
     day = client.get(ADMIN_DAY).json()
     assert [p["employee_id"] for p in day["people"]] == [ZHANGSAN]
     assert day["counts"]["todo"] == 1
+    # 每行带判据（服务端唯一一份）：还没交的那一格是 not_pending，当然判不了。
+    assert day["people"][0]["review"] == {
+        "allowed": False,
+        "reason": "not_pending",
+        "action": "view",
+    }
 
     # 还没交：那一格没有图，取图就是 404（不是一张空白图）。
     assert client.get(f"{ADMIN_DAY}/{ZHANGSAN}/shot").status_code == 404
@@ -292,7 +298,11 @@ def test_admin_day_and_shot_image(attire_http):
     shot = client.get(f"{ADMIN_DAY}/{ZHANGSAN}/shot")
     assert shot.status_code == 200
     assert shot.headers["content-type"].startswith("image/")
-    assert client.get(ADMIN_DAY).json()["counts"]["pending"] == 1
+    pending_day = client.get(ADMIN_DAY).json()
+    assert pending_day["counts"]["pending"] == 1
+    # 交了以后同一行变成可判：super 全过（仪容那一行规则表里只有它）。
+    assert pending_day["people"][0]["review"]["allowed"] is True
+    assert pending_day["people"][0]["review"]["action"] == "review"
 
 
 def test_reject_requires_a_reason(attire_http):

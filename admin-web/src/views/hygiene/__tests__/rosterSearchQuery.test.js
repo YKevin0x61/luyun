@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
+import { createPinia } from 'pinia'
 import HygieneRosterView from '../HygieneRosterView.vue'
 
 /**
@@ -66,7 +67,7 @@ describe('花名册 · ?q= 预填搜索', () => {
   it('带着 ?q=王强 进来：搜索框预填、列表只剩王强', async () => {
     window.history.replaceState({}, '', '/workbench/hr/roster?q=王强')
 
-    const wrapper = mount(HygieneRosterView)
+    const wrapper = mount(HygieneRosterView, { global: { plugins: [createPinia()] } })
     await flushPromises()
 
     expect(wrapper.get('.roster-search input').element.value).toBe('王强')
@@ -81,7 +82,7 @@ describe('花名册 · ?q= 预填搜索', () => {
   it('没有 ?q= 时不预填，整份名单都在', async () => {
     window.history.replaceState({}, '', '/workbench/hr/roster')
 
-    const wrapper = mount(HygieneRosterView)
+    const wrapper = mount(HygieneRosterView, { global: { plugins: [createPinia()] } })
     await flushPromises()
 
     expect(wrapper.get('.roster-search input').element.value).toBe('')
@@ -93,7 +94,7 @@ describe('花名册 · ?q= 预填搜索', () => {
   })
 
   it('浏览器标签标题是「花名册 · 工作台」，不再只写后台名', async () => {
-    const wrapper = mount(HygieneRosterView)
+    const wrapper = mount(HygieneRosterView, { global: { plugins: [createPinia()] } })
     await flushPromises()
 
     expect(document.title).toBe('花名册 · 工作台')

@@ -43,9 +43,12 @@ describe('③-3b 单页三组结构 + 别人的活才进「待我验收」', () 
     expect(src).not.toMatch(/class="hy-tab\b/)
   })
 
-  it('自己交的那条不给自己判：决定权按提交人比对', () => {
+  it('自己交的那条不给自己判：判据只看服务端给的那条 review', () => {
     const src = read(HOME)
-    expect(src).toMatch(/employee\.value\.id !== review\.submitter_id/)
+    expect(src).toMatch(/sheetCanDecide/)
+    expect(src).toMatch(/sheetDecideHint/)
+    // 页内不再自己比对提交人/开关：那一份判据已经收进 services/hygiene/judge.py。
+    expect(src).not.toMatch(/employee\.value\.id !== review\.submitter_id/)
   })
 })
 
@@ -83,7 +86,10 @@ describe('③-3b 「已交」不另立分组：口径写在页内（F3）', () =
     const src = read(HOME)
     expect(src).toMatch(/有意为之、不是漏做/)
     expect(src).toMatch(/ADR 0067/)
-    expect(src).toMatch(/function canDecide\(review, cap\)/)
+    // 判据只有服务端一份（行上的 `review`）：页内不再写第二遍"提交人比对"或开关比对。
+    expect(src).toMatch(/function sheetVerdict\(\)/)
+    expect(src).not.toMatch(/function canDecide\(/)
+    expect(src).not.toMatch(/employee\.value\.id !== review\.submitter_id/)
     // 页面上确实没有独立的「已交」分组（有的只是行状态那几个字）
     expect(src).not.toMatch(/class="[^"]*"[^>]*>\s*已交\s*</)
   })

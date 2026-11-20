@@ -35,7 +35,8 @@ describe('hygiene data & photo admin (ADR-0087)', () => {
 
   it('默认查最近一周，不让首屏扫全表', () => {
     expect(view).toMatch(/const PAGE_SIZE = 24/)
-    expect(view).toMatch(/to\.getTime\(\) - 6 \* 86400000/)
+    // 最近 7 天 = 服务端给的今天往前 6 天（纯日历日加减，不再用 new Date()）。
+    expect(view).toMatch(/shiftIso\(hygieneDay\.today, -6\)/)
   })
 
   it('取图走按 capture_id 的管理端接口，缩略图用 thumb 变体', () => {
