@@ -265,4 +265,94 @@ describe('usePwaUpdate', () => {
     await Promise.resolve()
     expect(serviceWorker.register).toHaveBeenCalledTimes(2)
   })
+
+  it('新版本正在安装时先等它装完再激活，不先激活上一版 waiting（「点两次」的根因）', async () => {
+    const serviceWorker = new FakeServiceWorkerContainer()
+    serviceWorker.controller = {}
+    // 上一版点了「稍后」留下的 waiting，和本次发布正在安装的新 worker 同时存在。
+    const oldWaiting = { state: 'installed', postMessage: vi.fn() }
+    const newWorker = new FakeEventTarget()
+    newWorker.state = 'installing'
+    newWorker.postMessage = vi.fn(() => serviceWorker.emit('controllerchange'))
+    const registration = new FakeRegistration({ waiting: oldWaiting })
+    registration.installing = newWorker
+    serviceWorker.register.mockResolvedValue(registration)
+    const reload = vi.fn()
+    const controller = createPwaUpdateController({
+      serviceWorker,
+      locationRef: { protocol: 'https:', hostname: 'shop.example' },
+      enabled: true,
+      reload,
+    })
+
+    await controller.initialize()
+    expect(controller.visible.value).toBe(true)
+
+    const applying = controller.apply()
+    await Promise.resolve()
+    // 新版本还在装：不能先激活上一版，否则刷回去还是旧界面。
+    expect(oldWaiting.postMessage).not.toHaveBeenCalled()
+    expect(newWorker.postMessage).not.toHaveBeenCalled()
+
+    newWorker.state = 'installed'
+    newWorker.emit('statechange')
+    expect(await applying).toBe(true)
+    expect(newWorker.postMessage).toHaveBeenCalledWith({ type: 'SKIP_WAITING' })
+    expect(oldWaiting.postMessage).not.toHaveBeenCalled()
+    expect(reload).toHaveBeenCalledTimes(1)
+  })
+
+  it('等不到 controllerchange 时不盲目 reload，保留提示条并报错', async () => {
+    const serviceWorker = new FakeServiceWorkerContainer()
+    serviceWorker.controller = {}
+    const waitingWorker = { state: 'installed', postMessage: vi.fn() }
+    serviceWorker.register.mockResolvedValue(
+      new FakeRegistration({ waiting: waitingWorker }),
+    )
+    const reload = vi.fn()
+    const controller = createPwaUpdateController({
+      serviceWorker,
+      locationRef: { protocol: 'https:', hostname: 'shop.example' },
+      enabled: true,
+      reload,
+      controllerChangeTimeoutMs: 10,
+    })
+
+    await controller.initialize()
+    expect(await controller.apply()).toBe(false)
+    expect(reload).not.toHaveBeenCalled()
+    expect(controller.error.value).toContain('还没准备好')
+    expect(controller.visible.value).toBe(true)
+    expect(controller.applying.value).toBe(false)
+  })
+
+  it('新版本迟迟装不完时只报错，不回退激活上一版 waiting', async () => {
+    const serviceWorker = new FakeServiceWorkerContainer()
+    serviceWorker.controller = {}
+    const oldWaiting = { state: 'installed', postMessage: vi.fn() }
+    const newWorker = new FakeEventTarget()
+    newWorker.state = 'installing'
+    newWorker.postMessage = vi.fn()
+    const registration = new FakeRegistration({ waiting: oldWaiting })
+    registration.installing = newWorker
+    serviceWorker.register.mockResolvedValue(registration)
+    const reload = vi.fn()
+    const controller = createPwaUpdateController({
+      serviceWorker,
+      locationRef: { protocol: 'https:', hostname: 'shop.example' },
+      enabled: true,
+      reload,
+      installTimeoutMs: 10,
+    })
+
+    await controller.initialize()
+    expect(await controller.apply()).toBe(false)
+    // 装不完也不能拿上一版顶包，否则刷回去还是旧界面，用户还得点第二次。
+    expect(oldWaiting.postMessage).not.toHaveBeenCalled()
+    expect(newWorker.postMessage).not.toHaveBeenCalled()
+    expect(reload).not.toHaveBeenCalled()
+    expect(controller.error.value).toContain('还没准备好')
+    expect(controller.visible.value).toBe(true)
+    expect(controller.applying.value).toBe(false)
+  })
 })

@@ -20,6 +20,11 @@ export function createPwaUpdateController({
   confirmApply = (message) =>
     typeof globalThis.confirm === 'function' ? globalThis.confirm(message) : true,
   controllerChangeTimeoutMs = 3000,
+  // 点「立即更新」时本次发布的新版本可能还在安装（预缓存几十个文件要几秒）。
+  // 这时 registration.waiting 还是上一版（用户上次点「稍后」留下的），先激活
+  // 它只会刷回同一个旧页面，新版本装完提示条又出现 —— 用户看到的就是「点了
+  // 两次才更新」。等安装完成再发 SKIP_WAITING，一次点到位。
+  installTimeoutMs = 20000,
   setTimer = setTimeout,
   clearTimer = clearTimeout,
   // 开发环境（Vite dev server，:5173）不注册：那份 worker 只在构建时生成
@@ -103,25 +108,61 @@ export function createPwaUpdateController({
     }
   }
 
+  function waitForWorkerInstalled(worker, timeoutMs) {
+    if (!worker?.addEventListener) return Promise.resolve(worker)
+    if (worker.state && worker.state !== 'installing') return Promise.resolve(worker)
+    return new Promise((resolve) => {
+      let settled = false
+      let timer = null
+
+      function finish(value) {
+        if (settled) return
+        settled = true
+        if (timer) clearTimer(timer)
+        worker.removeEventListener?.('statechange', onChange)
+        resolve(value)
+      }
+
+      function onChange() {
+        if (worker.state === 'installed' || worker.state === 'activated') finish(worker)
+        else if (worker.state === 'redundant') finish(null)
+      }
+
+      timer = setTimer(() => finish(null), timeoutMs)
+      worker.addEventListener('statechange', onChange)
+    })
+  }
+
+  /** 等 controller 真正换过来。返回 true 才允许 reload —— 超时说明新 worker
+   *  还没接管，这时 reload 只会刷回旧页面（旧 SW 的 navigateFallback 还端着
+   *  旧 index.html），用户就得再点一次。 */
   function waitForControllerChange(waitingWorker) {
     return new Promise((resolve) => {
       let settled = false
       let timer = null
+      let changed = false
 
       function finish() {
         if (settled) return
         settled = true
         if (timer) clearTimer(timer)
-        resolve()
+        serviceWorker?.removeEventListener?.('controllerchange', onChange)
+        resolve(changed)
+      }
+
+      function onChange() {
+        changed = true
+        finish()
       }
 
       timer = setTimer(finish, controllerChangeTimeoutMs)
-      serviceWorker?.addEventListener?.('controllerchange', finish, { once: true })
+      serviceWorker?.addEventListener?.('controllerchange', onChange, { once: true })
       if (waitingWorker?.postMessage) {
         try {
           waitingWorker.postMessage({ type: 'SKIP_WAITING' })
         } catch (error) {
           if (timer) clearTimer(timer)
+          serviceWorker?.removeEventListener?.('controllerchange', onChange)
           throw error
         }
       } else {
@@ -141,7 +182,25 @@ export function createPwaUpdateController({
     applying.value = true
     error.value = ''
     try {
-      await waitForControllerChange(registration?.waiting)
+      // 先主动查一次最新版本：提示条可能来自上一版 waiting，而本次发布的新
+      // worker 还没被浏览器发现。查完再看 installing —— 它一定比 waiting 新。
+      await registration?.update?.().catch(() => {})
+      let worker = registration?.installing || registration?.waiting || null
+      if (worker && worker.state === 'installing') {
+        const installed = await waitForWorkerInstalled(worker, installTimeoutMs)
+        if (!installed) {
+          applying.value = false
+          error.value = '新版本还没准备好，请稍后再试'
+          return false
+        }
+        worker = installed
+      }
+      const applied = await waitForControllerChange(worker)
+      if (!applied) {
+        applying.value = false
+        error.value = '新版本还没准备好，请稍后再试'
+        return false
+      }
       reload()
       applying.value = false
       return true
