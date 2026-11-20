@@ -6,6 +6,7 @@ import { useAdminTable } from '../../composables/useAdminTable'
 import { useNudgePull } from '../../composables/useNudgePull'
 import { getCellLabel, getColumnLabel, getTableIcon, getTableLabel } from '../../utils/adminLabels'
 import { describeRow } from '../../utils/adminRowSummary'
+import { useStationsStore } from '../../stores/stations'
 import SvgIcon from '../SvgIcon.vue'
 import RowEditModal from './RowEditModal.vue'
 import ColumnManageModal from './ColumnManageModal.vue'
@@ -21,6 +22,8 @@ const {
   loadTables, loadRows, switchTable, sortBy, goToPage, createRow, updateRow, deleteRow, deleteRows, updateRows,
   addColumn, dropColumn, rowKey,
 } = useAdminTable()
+
+const stations = useStationsStore()
 
 const activePlugin = computed(() => resolveTablePlugin(currentTable.value))
 const activeTableMeta = computed(() => tableMeta.value[currentTable.value] || {})
@@ -166,6 +169,8 @@ async function handleDropColumn(columnName) {
 }
 
 onMounted(async () => {
+  // 档口中文名是另一个接口，慢一点也不该挡住表格首屏：先按 id 渲染，拿到再就地换名。
+  stations.load().catch(() => {})
   await loadTables()
   if (currentTable.value) await switchTable(currentTable.value)
   mobileSidebarMql = window.matchMedia(MOBILE_SIDEBAR_QUERY)
@@ -310,12 +315,22 @@ function formatDateTimeDisplay(text) {
   return match ? `${match[1]} ${match[2]}` : text
 }
 
+// 档口在库里存的是 id（shulong / mingdang2 / changfen …），中文名在 /api/stations 里配。
+// 这里不硬编码一张对照表：硬编码就会和 config.py 的 KITCHEN_STATIONS 漂移（stores/stations.js
+// 当初就是为消灭这类重复而建的）。只换**显示**，编辑弹窗与排序仍用 row 里的 id。
+const STATION_COLUMNS = new Set(['station', 'station_id'])
+
+function isStationColumn(col) {
+  return STATION_COLUMNS.has(String(col || '').toLowerCase())
+}
+
 function formatCellText(col, val) {
   if (val === null || val === undefined || val === '') return ''
   if (typeof val === 'object') return JSON.stringify(val)
   const mapped = getCellLabel(currentTable.value, col, val)
   const text = mapped === undefined || mapped === null ? String(val) : String(mapped)
-  return isDateTimeColumn(col) ? formatDateTimeDisplay(text) : text
+  const display = isDateTimeColumn(col) ? formatDateTimeDisplay(text) : text
+  return isStationColumn(col) ? stations.nameOf(display) : display
 }
 </script>
 

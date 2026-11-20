@@ -45,6 +45,14 @@ const tableState = {
 }
 
 vi.mock('../../../composables/useAdminTable', () => ({ useAdminTable: () => tableState }))
+// 档口中文名来自 /api/stations（真实 store 会发请求）。这里只验渲染：给了对照就换名，
+// 没给（未知档口 / 接口还没回来）就原样吐 id，不能变成空白。
+vi.mock('../../../stores/stations', () => ({
+  useStationsStore: () => ({
+    nameOf: (id) => ({ shulong: '熟笼档', mingdang2: '明档2' }[id] || id || '未分类'),
+    load: vi.fn(() => Promise.resolve()),
+  }),
+}))
 vi.mock('../../../composables/useNudgePull', () => ({ useNudgePull: () => {} }))
 vi.mock('vue-router', () => ({ useRouter: () => ({ push: vi.fn() }) }))
 
@@ -330,5 +338,26 @@ describe('DataTable 全选本页复选框', () => {
     expect(wrapper.find('thead input.dt-checkbox').exists()).toBe(false)
     expect(wrapper.find('td.dt-col-select').exists()).toBe(false)
     expect(wrapper.find('table.dt-has-select').exists()).toBe(false)
+  })
+})
+// 档口列（A10）：库里存 shulong / mingdang2 这类 id，表格里直接显示等于让店长读英文。
+// 中文名只来自 /api/stations，因此这里守两条：认识的换成名字，不认识的保留 id（不吞值）。
+describe('DataTable 档口列显示名', () => {
+  it('认识的档口 id 换成中文名', () => {
+    const wrapper = mountTable({
+      columns: ['dish_name', 'station'],
+      rows: [{ rowid: 1, dish_name: '虾饺', station: 'shulong' }],
+    })
+
+    expect(wrapper.find('tbody tr').text()).toContain('熟笼档')
+  })
+
+  it('接口里没有的档口 id 原样显示，不变成空白', () => {
+    const wrapper = mountTable({
+      columns: ['dish_name', 'station'],
+      rows: [{ rowid: 1, dish_name: '虾饺', station: 'new_station' }],
+    })
+
+    expect(wrapper.find('tbody tr').text()).toContain('new_station')
   })
 })
