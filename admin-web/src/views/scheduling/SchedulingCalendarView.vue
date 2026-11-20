@@ -23,7 +23,6 @@ import { SHIFT_COLOR_NEUTRAL, shiftColorClass } from '../../utils/shiftTable'
 // 天数的写法只有一份（`12 天` / `19.5 天` / `0 天`，负数带全角减号 = 欠班）：
 // 周表成员列那行存假与考勤表卡片写同一个字面，别在这里另起一套格式。
 import { formatDays } from '../../utils/attendanceSheet'
-import { eachDayInRange } from '../../utils/dateRange'
 // 「那一天要顶的档」的清单（票 02）：一行一条、`can_pen` / `blocked_reason` 全在那边算，
 // 这一页只渲染（票 03 的长按弹层与票 04 的名单面板那一节吃同一份输出）。
 import { BLOCKED_SHIFT_INACTIVE, BLOCKED_ZONE_DELETED, coverSlotsFor } from '../../utils/weekCoverSlots'
@@ -261,12 +260,23 @@ function formatTodayLabel() {
 
 // 每格的人数：第一个班次用 <b>，其余用 <i>，中间用 · 分隔（原型 B 的写法）。
 function cellCounts(day) {
-  return shifts.value.map((shift) => ({
-    id: shift.id,
-    // 月历色条用完整的 class（`tone-moss`），跟周表格子同一套 token。
-    tone: toneClass(shift.id),
-    count: day.counts[String(shift.id)] || 0,
-  }))
+  return shifts.value.map((shift) => {
+    const key = String(shift.id)
+    const target = (day.targets && day.targets[key]) || 0
+    const gap = day.gaps && typeof day.gaps[key] === 'number' ? day.gaps[key] : 0
+    const source = (day.sources && day.sources[key]) || 'none'
+    return {
+      id: shift.id,
+      // 月历色条用完整的 class（`tone-moss`），跟周表格子同一套 token。
+      tone: toneClass(shift.id),
+      count: day.counts[key] || 0,
+      target,
+      gap,
+      source,
+      // 只有「人配过的目标」没达标才标红；近 4 周参考值不标红（0061 的 configured / fallback）。
+      short: source === 'configured' && gap < 0,
+    }
+  })
 }
 
 // 读月在 board（ADR 0142 决策 5）；这一层只补页面自己的 URL 同步 —— 决策 4：
@@ -321,22 +331,56 @@ function pickDay(date) {
   loadDay(date)
 }
 
-/** 待批请假影响的日子：待批请假覆盖到的未来日子（每多一条请假，那天就可能少一个人）。
- *  后端没有「需求人数」这个字段，所以这里只报**已提申请**的缺口，口径写在面板提示里。 */
+/** 待批请假批了之后会缺几个人（0061）：用 inbox 每天带的「当前人数 / 目标人数」，
+ *  把每条待批请假的人从他那天那个班次里扣掉，再按班次缺口求和 —— 不再是「待批条数」。
+ *  目标来自人配过的值时是实打实的缺口；来自近 4 周参考值时同样算，但列表里标「参考」。 */
+const hasPendingLeave = computed(() => inboxRequests.value.some((request) => request.kind === 'leave'))
 const gapDays = computed(() => {
-  const counts = {}
+  // date -> { counts, targets, sources, people: Map<employee_id, shift_id|null> }
+  const days = new Map()
   for (const request of inboxRequests.value) {
     if (request.kind !== 'leave') continue
-    const days = eachDayInRange(request.start_date, request.end_date || request.start_date)
-    for (const day of days) {
-      if (today.value && day < today.value) continue
-      counts[day] = (counts[day] || 0) + 1
+    for (const entry of (request.days || [])) {
+      const date = entry && entry.business_date
+      if (!date || (today.value && date < today.value)) continue
+      let slot = days.get(date)
+      if (!slot) {
+        slot = {
+          counts: { ...(entry.counts || {}) },
+          targets: { ...(entry.targets || {}) },
+          sources: { ...(entry.sources || {}) },
+          people: new Map(),
+        }
+        days.set(date, slot)
+      }
+      // 同一个人同一天可能有多条待批申请：按人去重，只扣一次。
+      slot.people.set(request.employee_id, entry.current_shift_id)
     }
   }
-  return Object.entries(counts)
-    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+  const rows = []
+  for (const [date, slot] of days) {
+    const remaining = { ...slot.counts }
+    for (const shiftId of slot.people.values()) {
+      if (shiftId === null || shiftId === undefined) continue
+      const key = String(shiftId)
+      if (remaining[key] === undefined) continue
+      remaining[key] = Math.max(remaining[key] - 1, 0)
+    }
+    let short = 0
+    let configured = false
+    let fallback = false
+    for (const [key, target] of Object.entries(slot.targets)) {
+      const gap = (remaining[key] || 0) - (target || 0)
+      if (gap >= 0) continue
+      short += -gap
+      if (slot.sources[key] === 'configured') configured = true
+      else if (slot.sources[key] === 'fallback') fallback = true
+    }
+    if (short > 0) rows.push({ date, count: short, source: configured ? 'configured' : (fallback ? 'fallback' : 'none') })
+  }
+  return rows
+    .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0))
     .slice(0, 6)
-    .map(([date, count]) => ({ date, count }))
 })
 
 /** 本月空档：当月**所有班次都 0 人**的日子（月历窗口之外的不算 —— 那叫「还没铺到」）。 */
@@ -351,6 +395,97 @@ const monthEmptyDays = computed(() => {
     return shiftList.every((shift) => !(day.counts && day.counts[String(shift.id)]))
   })
 })
+
+/** 目标人数弹窗（0061）：平时 / 周末两套默认值，改完月历、周表、班次表一起刷新。
+ *  留空按 0 人存；某一天要单独改，在当天面板里改单日覆盖。 */
+const demandOpen = ref(false)
+const demandState = ref('idle')
+const demandError = ref('')
+const demandBusy = ref(false)
+const demandShifts = ref([])
+const demandWeekday = ref({})
+const demandWeekend = ref({})
+
+async function loadDemand() {
+  demandState.value = 'loading'
+  demandError.value = ''
+  try {
+    const data = await api.get('/api/scheduling/demand/defaults')
+    demandShifts.value = data.shifts || []
+    demandWeekday.value = { ...(data.weekday || {}) }
+    demandWeekend.value = { ...(data.weekend || {}) }
+    demandState.value = 'ready'
+  } catch (err) {
+    demandError.value = err.message || '目标人数读不出来'
+    demandState.value = 'error'
+  }
+}
+
+function openDemand() {
+  demandOpen.value = true
+  loadDemand()
+}
+
+/** 两组输入都读成整数：留空 = 0；不是 0~999 的整数就当场说清楚（不发请求）。 */
+function demandPayload() {
+  const groups = {}
+  for (const [kind, source] of [['weekday', demandWeekday.value], ['weekend', demandWeekend.value]]) {
+    const group = {}
+    for (const shift of demandShifts.value) {
+      const raw = source[String(shift.id)]
+      const text = String(raw === null || raw === undefined ? '' : raw).trim()
+      if (text === '') {
+        group[shift.id] = 0
+        continue
+      }
+      if (!/^\d+$/.test(text)) return { error: `「${shift.name}」的人数得是整数` }
+      const value = Number(text)
+      if (value > 999) return { error: `「${shift.name}」的人数最多 999` }
+      group[shift.id] = value
+    }
+    groups[kind] = group
+  }
+  return { groups }
+}
+
+async function saveDemand() {
+  if (demandBusy.value) return
+  const parsed = demandPayload()
+  if (parsed.error) {
+    demandError.value = parsed.error
+    return
+  }
+  demandBusy.value = true
+  demandError.value = ''
+  try {
+    await api.put('/api/scheduling/demand/defaults', parsed.groups)
+    demandOpen.value = false
+    // 目标人数改了，月历的参考值与缺口都要重算；周表开着也重读一次。
+    await loadCalendar(currentMonthValue())
+    if (panel.value === 'week') await loadWeek(weekStart.value || mondayOf(today.value))
+    if (selectedDate.value) await loadDay(selectedDate.value)
+  } catch (err) {
+    demandError.value = err.message || '没存上'
+  } finally {
+    demandBusy.value = false
+  }
+}
+
+/** 周表列头的缺口短提示：只标人配过的目标（参考值不标红），最多两条 —— 列头放不下更多。 */
+function weekDayShortHint(day) {
+  if (!day || !day.gaps || !day.sources) return ''
+  const parts = []
+  for (const shift of activeShifts.value) {
+    const key = String(shift.id)
+    if (day.sources[key] !== 'configured') continue
+    if ((day.gaps[key] || 0) >= 0) continue
+    const short = weekShortNames.value[shift.id] || String(shift.name || '班').slice(0, 1)
+    const count = day.counts ? (day.counts[key] || 0) : 0
+    const target = day.targets ? (day.targets[key] || 0) : 0
+    parts.push(`${short} ${count}/${target}`)
+  }
+  return parts.slice(0, 2).join(' · ')
+}
 
 /** 名单卡上的规则摘要：当前这一周的 7 格（周一起），跟周表同宽。
  *  只用于展示：相位按服务端的口径（营业日与起点之差取模）现算。 */
@@ -1565,6 +1700,7 @@ useNudgePull({
                 type="button"
                 @click="router.push('/workbench/hr/inbox')"
               ><b>待批 {{ inboxRequests.length }} 条</b> ›</button>
+              <button class="gBtn gLink" type="button" @click="openDemand()"><b>目标人数</b> ›</button>
               <button class="gBtn gLink" type="button" @click="router.push('/workbench/hr/shifts')"><b>班次表</b> ›</button>
             </div>
           </div>
@@ -1648,7 +1784,7 @@ useNudgePull({
                   v-for="item in cellCounts(day)"
                   :key="item.id"
                   class="cItem"
-                  :class="[item.tone, { 'is-empty': !item.count }]"
+                  :class="[item.tone, { 'is-empty': !item.count, 'is-short': item.short }]"
                 ><i class="cBar"></i>{{ item.count }}</span>
               </span>
               <!-- 待批角标（spec US 11）：这天有等着批的申请。票 07 定标记时特意把琥珀留给
@@ -1676,14 +1812,14 @@ useNudgePull({
               <div class="gGap">
                 <div class="gGap-hd">
                   <span>待批请假影响的日子</span>
-                  <em>待批请假 · 点一天看当天名单</em>
+                  <em>按目标人数算的缺口 · 点一天看当天名单</em>
                 </div>
-                <p v-if="!gapDays.length" class="gGap-empty">这个月没有待批请假。</p>
+                <p v-if="!gapDays.length" class="gGap-empty">{{ hasPendingLeave ? '待批的假批了也不会缺人。' : '这个月没有待批请假。' }}</p>
                 <ul v-else class="gGapList">
                   <li v-for="gap in gapDays" :key="gap.date">
                     <button type="button" class="gGapRow" @click="pickDay(gap.date)">
                       <b>{{ formatDayLabel(gap.date) }}</b>
-                      <span class="gGapN">缺 {{ gap.count }} 人</span>
+                      <span class="gGapN">批了会缺 {{ gap.count }} 人<em v-if="gap.source === 'fallback'" class="gGapRef">参考</em></span>
                       <span class="gGapGo">›</span>
                     </button>
                   </li>
@@ -1735,7 +1871,11 @@ useNudgePull({
             <template v-if="dayDetail">
               <div v-for="group in dayDetail.groups" :key="group.shift.id" class="gB-grp">
                 <div class="gB-grp-t" :class="toneClass(group.shift.id)">
-                  <span class="d"></span><b>{{ group.shift.name }}</b><i>{{ group.count }}</i>
+                  <span class="d"></span><b>{{ group.shift.name }}</b>
+                  <i :class="{ 'is-short': group.source === 'configured' && group.gap < 0 }">{{ group.count }}<template v-if="group.target > 0">/{{ group.target }}</template></i>
+                  <em v-if="group.source === 'configured' && group.gap < 0" class="gB-gap short">缺 {{ -group.gap }}</em>
+                  <em v-else-if="group.source === 'configured' && group.gap > 0" class="gB-gap ok">多 {{ group.gap }}</em>
+                  <em v-else-if="group.source === 'fallback' && group.target > 0" class="gB-gap ref">参考</em>
                 </div>
                 <div v-if="group.people.length" class="gB-names">
                   <button
@@ -2127,6 +2267,12 @@ useNudgePull({
                         class="pend"
                         :title="`${pendingMarks[day.business_date]} 条申请等着批`"
                       >{{ pendingMarks[day.business_date] }}</i>
+                      <!-- 排班录入时也提示缺口（0061）：只标人配过的目标，参考值不标红。 -->
+                      <span
+                        v-if="weekDayShortHint(day)"
+                        class="gW-demand"
+                        :title="`按目标人数：${weekDayShortHint(day)}`"
+                      >{{ weekDayShortHint(day) }}</span>
                     </th>
                   </tr>
                 </thead>
@@ -2453,6 +2599,54 @@ useNudgePull({
 
 
 
+      <!-- 目标人数（0061）：按「营业日 × 班次」配平时 / 周末两套默认值；某一天要单独改，
+           点开当天面板改单日覆盖。没有配置的日子按近 4 周同星期几的中位数参考，标「参考」。 -->
+      <template v-if="demandOpen">
+        <div class="gDrawerScrim gCoverScrim" @click="demandOpen = false"></div>
+        <section class="gCoverSheet gDemandSheet" role="dialog" aria-modal="true" aria-label="目标人数">
+          <div class="gCoverHd">
+            <b>目标人数</b>
+            <span class="gCoverHint">未设置时按近 4 周同星期几参考</span>
+            <button class="gDrawerClose" type="button" aria-label="收起目标人数" @click="demandOpen = false">收起</button>
+          </div>
+          <p v-if="demandError" class="gDemandErr" role="alert">{{ demandError }}</p>
+          <p v-else-if="demandState === 'loading'" class="gCoverEmpty">读取中……</p>
+          <template v-else>
+            <div class="gDemandGroup">
+              <h3>平时（周一至周五）</h3>
+              <div v-for="shift in demandShifts" :key="`weekday-${shift.id}`" class="gDemandRow">
+                <span class="gDemandName">{{ shift.name }}</span>
+                <input
+                  v-model="demandWeekday[String(shift.id)]"
+                  class="gDemandInput"
+                  inputmode="numeric"
+                  :aria-label="`平时${shift.name}目标人数`"
+                >
+                <span class="gDemandUnit">人</span>
+              </div>
+            </div>
+            <div class="gDemandGroup">
+              <h3>周末（周六、周日）</h3>
+              <div v-for="shift in demandShifts" :key="`weekend-${shift.id}`" class="gDemandRow">
+                <span class="gDemandName">{{ shift.name }}</span>
+                <input
+                  v-model="demandWeekend[String(shift.id)]"
+                  class="gDemandInput"
+                  inputmode="numeric"
+                  :aria-label="`周末${shift.name}目标人数`"
+                >
+                <span class="gDemandUnit">人</span>
+              </div>
+            </div>
+            <p class="gDemandTip">留空按 0 人。改完月历、周表、班次表会一起刷新；某一天要单独改，点开当天面板改单日覆盖。</p>
+            <div class="gDemandActs">
+              <button class="gBtn ghost" type="button" @click="demandOpen = false">取消</button>
+              <button class="gBtn on" type="button" :disabled="demandBusy" @click="saveDemand()">{{ demandBusy ? '保存中…' : '保存' }}</button>
+            </div>
+          </template>
+        </section>
+      </template>
+
       <!-- 选区里有过去的日子时，点应用弹**一次**确认并点名是哪几天（ADR 0108 决策 3）：
            不是每次应用都弹，也不是每格弹一次。 -->
       <ConfirmDialog
@@ -2530,8 +2724,8 @@ useNudgePull({
 }
 /* ── 面板（唯一卡片语言） ─────────────────────────────────────────────── */
 .gPanel {
-  background: var(--surface-1); border: 1px solid var(--line);
-  border-radius: var(--r-2); box-shadow: var(--hy-shadow-sm); overflow: hidden;
+  background: var(--surface-1); border: var(--edge-w, 2px) solid var(--edge);
+  border-radius: var(--r-2); box-shadow: var(--paper-shadow-sm); overflow: hidden;
 }
 .gPanel-hd {
   display: flex; align-items: center; gap: 9px;
@@ -2557,14 +2751,15 @@ useNudgePull({
 /* 右栏顶/底两条：与面板同宽、单行 44px。 */
 .gSide > .gPend {
   margin: 0; min-height: 44px; padding: 7px 12px;
-  border: 1px solid var(--line); border-radius: var(--r-2);
+  border: var(--edge-w, 2px) solid var(--edge);
+  box-shadow: var(--paper-shadow-sm); border-radius: var(--r-2);
   background: var(--surface-1);
 }
 .gSide > .gConfigGap { border-style: dashed; margin-top: auto; }
 .gB-card { display: flex; flex-direction: column; }
 /* 当天名单：固定高度内滚，头部不动。 */
 .gB-dayBody { max-height: 460px; overflow-y: auto; padding-bottom: 10px; }
-.gDrawerClose { display: none; margin-left: auto; min-height: var(--tap); padding: 0 10px; border: 1px solid var(--line-strong); border-radius: var(--r-1); background: transparent; color: var(--ink-dim); font: inherit; font-size: 10px; cursor: pointer; }
+.gDrawerClose { display: none; margin-left: auto; min-height: var(--tap); padding: 0 10px; border: var(--edge-w, 2px) solid var(--edge); border-radius: var(--r-1); background: transparent; color: var(--ink-dim); font: inherit; font-size: 10px; cursor: pointer; }
 /* 待批请假影响的日子：日卡/笔栏之外的一条段（不是第四块面板）。 */
 .gGap { margin-top: 12px; border-top: 1px solid var(--line); }
 .gGap-hd {
@@ -2572,7 +2767,7 @@ useNudgePull({
 }
 .gGap-hd span {
   font-family: var(--font-sans); font-size: 9px; font-weight: 600;
-  letter-spacing: .18em; color: var(--ink-faint);
+  letter-spacing: .01em; color: var(--ink-dim);
 }
 .gGap-hd em { margin-left: auto; font-style: normal; font-family: var(--font-mono); font-size: 9px; color: var(--ink-faint); }
 .gGap-empty { margin: 0; padding: 6px 14px 12px; font-size: 10.5px; color: var(--ink-faint); }
@@ -2592,18 +2787,20 @@ useNudgePull({
 .gB-head { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; padding: 12px 14px 6px; }
 .gB-head span {
   text-align: center; font-family: var(--font-sans); font-size: 8.5px;
-  line-height: 1; letter-spacing: .18em; color: var(--ink-faint);
+  line-height: 1; letter-spacing: .01em; color: var(--ink-dim);
 }
 .gB-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; padding: 0 14px; }
 /* 钢面方格：1px 线 + --r-1，日期 mono，班次在下面排成「色条 + 人数」。 */
 .gB-d {
   position: relative; min-height: 64px; min-width: 0; padding: 6px 5px 5px;
   display: flex; flex-direction: column; gap: 5px;
-  border: 1px solid var(--line); border-radius: var(--r-1);
+  /* 网格单元不是卡片：7 列 × 5 行都上 2px 深墨描边会密成一片，这里只留 1px 淡线，
+     选中 / 今天两个状态才用主色描边说话（2026-11-20 换皮时从「每格 2px」退回）。 */
+  border: 1px solid var(--line); border-radius: var(--r-0);
   background: var(--surface-1); color: var(--ink);
   font: inherit; text-align: left; cursor: pointer;
 }
-.gB-d:hover { border-color: var(--line-strong); }
+.gB-d:hover { border-color: var(--line-strong); box-shadow: 0 0 0 1px var(--line-strong); }
 .gB-d.mute { background: transparent; border-style: dashed; opacity: .35; }
 .gB-d .n { font-family: var(--font-mono); font-size: 11px; line-height: 1; color: var(--ink-dim); }
 .gB-d .c { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 7px; }
@@ -2618,7 +2815,7 @@ useNudgePull({
 /* 0 人的班次段：灰条 + 淡字（不是「有一个 0」那么醒目的数字）。 */
 .gB-d .cItem.is-empty { color: var(--ink-faint); opacity: .55; }
 .gB-d .cItem.is-empty .cBar { background: var(--line-strong); }
-.gB-d.today { border-color: var(--action); background: var(--action-soft); }
+.gB-d.today { border-color: var(--action); background: var(--action-soft); box-shadow: 0 0 0 1px var(--action); }
 .gB-d.today .n { color: var(--action); font-weight: 700; }
 /* 待批角标（spec US 11）：这天有等着批的申请。琥珀留给「待处理」、青点留给「这天被
    手改过」—— 两种记号各说各的事，不能混。 */
@@ -2663,7 +2860,8 @@ useNudgePull({
 .gB-note { margin: 10px 14px 0; font-size: 10px; line-height: 1.7; color: var(--ink-faint); }
 /* ── 当天名单（右侧面板） ─────────────────────────────────────────────── */
 .gB-card {
-  border: 1px solid var(--line); border-radius: var(--r-2);
+  border: var(--edge-w, 2px) solid var(--edge);
+  box-shadow: var(--paper-shadow-sm); border-radius: var(--r-2);
   background: var(--surface-1); overflow: hidden;
 }
 .gB-card-hd {
@@ -2741,7 +2939,8 @@ useNudgePull({
 /* ── 小控件 ───────────────────────────────────────────────────────────── */
 .gBtn {
   font: inherit; font-family: var(--font-sans); font-size: 10.5px; color: var(--ink-dim);
-  background: var(--surface-1); border: 1px solid var(--line-strong);
+  background: var(--surface-1); border: var(--edge-w, 2px) solid var(--edge);
+  box-shadow: var(--paper-shadow-sm);
   border-radius: var(--r-1); padding: 6px 12px; min-height: var(--tap);
   cursor: pointer;
 }
@@ -2751,8 +2950,8 @@ useNudgePull({
 .gSeg .gBtn.on { color: var(--action); border-color: var(--action); background: var(--action-soft); }
 .gAct {
   margin-left: auto; font: inherit; font-size: 10px; color: var(--action);
-  border: 1px solid var(--action); background: var(--action-soft);
-  border-radius: var(--r-full); padding: 4px 10px; cursor: pointer;
+  border: var(--edge-w, 2px) solid var(--action); background: var(--action-soft);
+  border-radius: var(--r-1); padding: 4px 10px; cursor: pointer;
 }
 /* ── 名单（规则 / 固定区） ───────────────────────────────────────────── */
 .gB-card-plain { margin-top: 0; }
@@ -2764,7 +2963,7 @@ useNudgePull({
 }
 .gR {
   display: flex; flex-direction: column; gap: 8px; min-width: 0;
-  padding: 8px 12px; border: 1px solid var(--line); border-radius: var(--r-2);
+  padding: 8px 12px; border: var(--edge-w, 2px) solid var(--edge); border-radius: var(--r-2);
   background: var(--surface-2);
 }
 /* 收起态：一行。名字占剩下的空间，右边依次是「这周怎么排 / 固定区 / 编辑」。 */
@@ -2808,7 +3007,7 @@ useNudgePull({
 .gZ-pick { display: inline-flex; align-items: center; gap: 6px; font-size: 10px; color: var(--ink-faint); }
 .gZ-sel {
   font: inherit; font-family: var(--font-mono); font-size: 10.5px; color: var(--ink);
-  background: var(--surface-2); border: 1px solid var(--line-strong);
+  background: var(--surface-2); border: var(--edge-w, 2px) solid var(--edge);
   border-radius: var(--r-1); padding: 6px; min-height: var(--tap); cursor: pointer;
   /* 下拉按内容定宽就够（区名最长四个字），撑满半行会跟旁边的控件抢注意力。 */
   max-width: 9em;
@@ -2818,17 +3017,18 @@ useNudgePull({
 /* 轮转周期编辑器（票 04）。原型 B 的名单行里没有这一块 —— 展开后长在那一行下面。 */
 .gC {
   margin-top: var(--sp-2); padding: 9px 10px; display: flex; flex-direction: column; gap: 7px;
-  border: 1px solid var(--line); border-radius: var(--r-2); background: var(--surface-2);
+  border: var(--edge-w, 2px) solid var(--edge); border-radius: var(--r-2); background: var(--surface-2);
 }
 .gC-in {
   font: inherit; font-family: var(--font-mono); font-size: 12px; color: var(--ink);
-  background: var(--surface-1); border: 1px solid var(--line-strong);
+  background: var(--surface-1); border: var(--edge-w, 2px) solid var(--edge);
+  box-shadow: var(--paper-shadow-sm);
   border-radius: var(--r-1); padding: 6px 8px; min-height: var(--tap); letter-spacing: .06em;
 }
 .gC-anchor { display: inline-flex; align-items: center; gap: 6px; font-size: 10px; color: var(--ink-faint); }
 .gC-anchor input {
   font: inherit; font-size: 10.5px; color: var(--ink); background: var(--surface-1);
-  border: 1px solid var(--line-strong); border-radius: var(--r-1); padding: 3px 6px;
+  border: var(--edge-w, 2px) solid var(--edge); border-radius: var(--r-1); padding: 3px 6px;
 }
 /* 日期组件替掉原生 date（2026-10-13）：`.gC-anchor input` 那几条对组件里那个
    `.dp--input` 不生效（scoped 样式够不进子组件），所以要补的只有**尺寸** ——
@@ -2869,14 +3069,14 @@ useNudgePull({
 .gW-help summary {
   display: inline-flex; align-items: center; justify-content: center;
   width: 20px; height: 20px; margin: 8px 14px; cursor: pointer;
-  border: 1px solid var(--line-strong); border-radius: 50%;
+  border: var(--edge-w, 2px) solid var(--edge); border-radius: 50%;
   font-size: 10px; color: var(--ink-faint);
 }
 .gW-help .gB-note { margin: 0 14px 10px; }
 .gW-find input {
   flex: 1; min-width: 0; min-height: var(--tap);
   font: inherit; font-family: var(--font-sans); font-size: 12px; color: var(--ink);
-  background: var(--surface-2); border: 1px solid var(--line-strong);
+  background: var(--surface-2); border: var(--edge-w, 2px) solid var(--edge);
   border-radius: var(--r-1); padding: 6px 12px;
 }
 .gW-find input::placeholder { color: var(--ink-faint); }
@@ -3042,8 +3242,8 @@ useNudgePull({
 .gChip {
   display: inline-flex; align-items: center;
   font: inherit; font-family: var(--font-sans); font-size: 12px; color: var(--ink);
-  background: var(--surface-2); border: 1px solid var(--line-strong);
-  border-radius: var(--r-full); padding: 7px 14px; cursor: pointer;
+  background: var(--surface-2); border: var(--edge-w, 2px) solid var(--edge);
+  border-radius: var(--r-1); padding: 7px 14px; cursor: pointer;
 }
 .gChip:disabled { opacity: .45; cursor: default; }
 .gChip.on { box-shadow: 0 0 0 2px var(--action); }
@@ -3071,10 +3271,10 @@ useNudgePull({
   width: 58px; height: 58px; padding: 0;
   display: inline-flex; flex-direction: column; align-items: center; justify-content: center; gap: 5px;
   border-radius: 50%;
-  border: 1px solid var(--line-strong);
+  border: var(--edge-w, 2px) solid var(--edge);
   background: var(--surface-1);
   color: var(--ink);
-  box-shadow: 0 10px 28px var(--wb-scrim);
+  box-shadow: var(--paper-shadow);
   font: inherit; cursor: pointer;
   -webkit-tap-highlight-color: transparent;
 }
@@ -3097,9 +3297,9 @@ useNudgePull({
   display: flex; align-items: center; gap: 8px;
   max-width: min(340px, calc(100vw - 36px));
   padding: 10px 12px;
-  border: 1px solid var(--line-strong); border-radius: var(--r-2);
+  border: var(--edge-w, 2px) solid var(--edge); border-radius: var(--r-2);
   background: var(--surface-1);
-  box-shadow: 0 10px 28px var(--wb-scrim);
+  box-shadow: var(--paper-shadow);
   font-size: 10.5px; color: var(--ink-dim);
 }
 
@@ -3115,9 +3315,9 @@ useNudgePull({
   gap: 6px;
   padding: 8px 14px;
   background: var(--surface-1);
-  border: 1px solid var(--line-strong);
+  border: var(--edge-w, 2px) solid var(--edge);
   border-radius: var(--r-2);
-  box-shadow: 0 18px 46px var(--wb-scrim);
+  box-shadow: var(--paper-shadow);
 }
 /* 展开 / 收起：从球的方向升起 8px，不缩放（缩放会让 44px 的棋子点起来抖）。 */
 .gPick-enter-active, .gPick-leave-active { transition: opacity .16s ease, transform .16s ease; }
@@ -3168,7 +3368,11 @@ useNudgePull({
    `.gDrawerScrim` 那份只写了手机档 —— 遮罩这里补一条同值的 base（`.gCoverScrim`），
    否则桌面上弹层是悬空的，点外面关不掉。
    零新增颜色引用：只用 `--surface-*` / `--ink-*` / `--line-*` / `--wb-scrim` 这些既有令牌。 */
+/* `display: block` 不能省：`.gDrawerScrim` 的 base 是 `display: none`（只在手机档点亮），
+   这里若只补 position/background，桌面上面板照样「悬空」——遮罩不渲染、点外面也关不掉
+   （2026-11-20 在 1440 实测：前后两帧像素完全相同）。 */
 .gCoverScrim {
+  display: block;
   position: fixed; inset: 0; z-index: var(--z-scrim);
   background: var(--wb-scrim);
 }
@@ -3181,7 +3385,7 @@ useNudgePull({
   background: var(--surface-0);
   border-top: 1px solid var(--line-strong);
   border-radius: var(--r-2) var(--r-2) 0 0;
-  box-shadow: 0 -18px 40px var(--wb-scrim);
+  box-shadow: 0 -4px 0 var(--shadow-ink);
 }
 .gCoverHd { display: flex; align-items: center; gap: 8px; }
 .gCoverHd b { font-family: var(--font-sans); font-size: 12.5px; font-weight: 600; letter-spacing: .04em; color: var(--ink); }
@@ -3196,7 +3400,8 @@ useNudgePull({
 .gCoverRow {
   width: 100%; min-height: var(--tap); padding: 9px 11px;
   display: flex; align-items: center; gap: 10px;
-  border: 1px solid var(--line-strong); border-radius: var(--r-1);
+  border: var(--edge-w, 2px) solid var(--edge);
+  box-shadow: var(--paper-shadow-sm); border-radius: var(--r-1);
   background: var(--surface-1); color: var(--ink);
   font: inherit; font-family: var(--font-sans); text-align: left; cursor: pointer;
 }
@@ -3215,7 +3420,7 @@ useNudgePull({
    「另一件事」，不是人名列表最上面的一列人。零新增颜色引用，仍只用既有令牌。 */
 .gCoverRoster {
   margin: 12px 14px 0; padding: 10px 12px;
-  border: 1px solid var(--line); border-radius: var(--r-2);
+  border: var(--edge-w, 2px) solid var(--edge); border-radius: var(--r-2);
   background: var(--surface-0);
 }
 .gCoverRoster-hd { display: flex; align-items: baseline; gap: 8px; }
@@ -3272,7 +3477,7 @@ useNudgePull({
     background: var(--surface-0);
     border-top: 1px solid var(--line-strong);
     border-radius: var(--r-2) var(--r-2) 0 0;
-    box-shadow: 0 -18px 40px var(--wb-scrim);
+    box-shadow: 0 -4px 0 var(--shadow-ink);
   }
   .gDash--drawer .gSide > .gPend { display: none; }
   .gDash--drawer .gSide > .gB-card { border-radius: var(--r-2) var(--r-2) 0 0; border-left: 0; border-right: 0; }
@@ -3293,4 +3498,52 @@ useNudgePull({
      ≤720px 那条栏 `display: none`，表头贴屏幕顶即可。 */
   .gW thead th { top: 55px; }
 }
+
+/* 目标人数（0061）：月历格子里「人配过的目标没达标」把数字换成警示色并加粗，格子宽高不变
+   （一格只有 ~39px 宽，塞不下第二行）。之前还在数字右上角挂过一个 3px 小三角 —— 1440 实测
+   它压在数字上，把「10 5 1」糊成「10^ 5^ 1^」，去掉；缺口多少由当天面板回答。
+   色条仍留班次色：三个班次一起缺时，连色条都变橙就分不清是哪一班了。 */
+.gB-d .cItem.is-short { color: var(--warn); font-weight: 700; }
+.gB-d .cItem.is-short .cBar { background: var(--shift-fill); }
+/* 当天面板组头：实到 / 目标 + 缺口。缺了用 warn、多了用 ok，参考值用淡字。 */
+.gB-grp-t i.is-short { color: var(--warn); font-weight: 700; }
+.gB-grp-t .gB-gap {
+  margin-left: auto; font-style: normal;
+  font-family: var(--font-mono); font-size: var(--fs-11);
+  color: var(--ink-faint);
+}
+.gB-grp-t .gB-gap.short { color: var(--warn); font-weight: 700; }
+.gB-grp-t .gB-gap.ok { color: var(--ok); }
+/* 待批段：缺口按目标人数算，参考值后面标一句「参考」。 */
+.gGapN .gGapRef { margin-left: 4px; font-style: normal; font-size: var(--fs-11); color: var(--ink-faint); }
+/* 周表列头：这一列哪个班缺人（只标人配过的目标，最多两条）。 */
+.gW-demand {
+  display: block; margin-top: 2px;
+  font-family: var(--font-mono); font-size: var(--fs-11); line-height: 1.2;
+  color: var(--warn); font-style: normal; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis;
+}
+/* 目标人数弹窗：两组默认值。 */
+.gDemandSheet { max-height: 84vh; }
+.gDemandGroup { margin-top: 12px; }
+.gDemandGroup h3 {
+  margin: 0 0 2px; font-family: var(--font-sans); font-size: var(--fs-12);
+  font-weight: 600; letter-spacing: .06em; color: var(--ink-dim);
+}
+.gDemandRow {
+  display: grid; grid-template-columns: minmax(0, 1fr) 84px 18px;
+  align-items: center; gap: 8px; padding: 5px 0;
+  border-top: 1px solid var(--wb-ink-a08);
+}
+.gDemandName { font-size: var(--fs-13); color: var(--ink); }
+.gDemandInput {
+  width: 100%; min-height: var(--tap); padding: 0 8px; text-align: right;
+  font-family: var(--font-mono); font-size: var(--fs-14); color: var(--ink);
+  background: var(--surface-1); border: var(--edge-w, 2px) solid var(--edge);
+  border-radius: var(--r-1);
+}
+.gDemandUnit { font-size: var(--fs-11); color: var(--ink-faint); }
+.gDemandTip { margin: 12px 0 0; font-size: var(--fs-11); line-height: 1.6; color: var(--ink-faint); }
+.gDemandErr { margin: 10px 0 0; font-size: var(--fs-12); color: var(--warn); }
+.gDemandActs { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
 </style>

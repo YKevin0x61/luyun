@@ -261,7 +261,9 @@ describe('店长端排班月历（原型 B）', () => {
     // 点进待办页才知道有几条在等他批。数据本来就够（`/inbox` 每条申请带
     // `start_date`/`end_date`），按天摊开数一遍就行，不用后端再出一个接口。
     // `/inbox` 的读取与按天摊开在 board（那里断言 `pendingMarks`）；页面只渲染角标。
-    expect(view).toMatch(/eachDayInRange\(/)
+    // 0061 起 `/inbox` 直接按天返回 `days`（每天带 counts/targets/sources），页面
+    // 读它算「批了会缺」；不再需要在页面里用 `eachDayInRange` 摊日期。
+    expect(view).toMatch(/for \(const entry of \(request\.days \|\| \[\]\)\)/)
     expect(view).toMatch(/v-if="pendingMarks\[day\.business_date\]"/)
     expect(view).toMatch(/class="pend"/)
     // 图例里那条记号只在真有角标时出现。
@@ -380,5 +382,36 @@ describe('当天名单遮罩与单日编辑卡（B 组 2026-11-09）', () => {
     expect(view).toMatch(/document\.querySelector\('\.gD'\)/)
     expect(view).toMatch(/scrollIntoView\(\{ block: 'nearest', behavior: 'smooth' \}\)/)
     expect(view).toMatch(/revealDayEditor\(\)/)
+  })
+})
+
+// 目标人数（0061 / 2026-11-20）：月历只对「人配过的目标」标缺口，参考值不标红；缺口多少
+// 交给当天面板与待批段回答。遮罩那条是集成时补的回归 —— `.gDrawerScrim` 的 base 是
+// `display:none`，`.gCoverScrim` 只补 position/background 的话，桌面（>720px 不在那条
+// 媒体查询里）遮罩根本不渲染：弹层悬空、点外面关不掉（1440 实测前后两帧像素完全相同）。
+describe('目标人数与缺口（0061）', () => {
+  it('月历格子只对配置过的目标标缺口，参考值不标红', () => {
+    expect(view).toMatch(/short:\s*source === 'configured' && gap < 0/)
+    expect(view).toMatch(/'is-short':\s*item\.short/)
+    // 三角标记删掉了：3px 压在数字右上，把「10 5 1」糊成「10^ 5^ 1^」。
+    expect(view).not.toMatch(/cShort/)
+  })
+
+  it('页头有目标人数入口，弹窗按平时 / 周末两组配', () => {
+    expect(view).toMatch(/目标人数<\/b>/)
+    expect(view).toMatch(/class="gCoverSheet gDemandSheet"/)
+    expect(view).toMatch(/平时\$\{shift\.name\}目标人数/)
+    expect(view).toMatch(/周末\$\{shift\.name\}目标人数/)
+  })
+
+  it('当天面板组头答「实到 / 目标」，缺了用 warn、多了用 ok、参考值用淡字', () => {
+    expect(view).toMatch(/group\.source === 'configured' && group\.gap < 0/)
+    expect(view).toMatch(/group\.count \}\}<template v-if="group\.target > 0">\//)
+    expect(view).toMatch(/\.gB-grp-t \.gB-gap\.short/)
+    expect(view).toMatch(/\.gB-grp-t \.gB-gap\.ok/)
+  })
+
+  it('遮罩在桌面档也要显形（否则弹层悬空、点外面关不掉）', () => {
+    expect(view).toMatch(/\.gCoverScrim\s*\{[^}]*display:\s*block/)
   })
 })

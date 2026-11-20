@@ -4203,6 +4203,10 @@ class SchedulingLayeringTest(unittest.TestCase):
             "/api/scheduling/inbox",
             "/api/scheduling/inbox/{request_id}/approve",
             "/api/scheduling/inbox/{request_id}/reject",
+            # 0061：目标人数（平时 / 周末两套默认 + 按天覆盖）。GET 与 PUT 同路径，
+            # 这里是路径集合，所以每个路径只列一次。配目标是店长的事，员工只被提示。
+            "/api/scheduling/demand/defaults",
+            "/api/scheduling/demand/day",
         }
         self.assertEqual(
             {route.path for route in router.routes}, staff_paths | manager_paths
@@ -4250,6 +4254,9 @@ class SchedulingLayeringTest(unittest.TestCase):
                 "scheduling_overrides",
                 # 票 08：请假申请（批准时才写上面那张覆盖表）。
                 "scheduling_requests",
+                # 0061：目标人数 —— 平时 / 周末两套默认 + 按天覆盖。
+                "scheduling_demand_defaults",
+                "scheduling_demand_days",
             },
         )
         for table in SCHEDULING_TABLES:

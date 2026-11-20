@@ -7,22 +7,18 @@
  *  展开（列→列＝整列区间、格→格＝矩形、行→行＝整行区间、混合手柄按行 / 列各自取区间）。
  *  点回锚点本身、或点表格外的空白，都是取消。
  *
- *  这一层只放能脱离视图单测的东西：选区展开、影响格数、跳过预判、批量请求体、撤销计划。
- *  写盘那条路是后端新增的批量端点（`POST /api/scheduling/overrides/batch`）——
- *  一次校验、一次写锁、一次提交，「哪一格不能刷」的权威判据在服务端手里（周表每格只有
- *  `scheduled/shift_id/shift_name/zone_id/zone_name/overridden/leave` 七个键，连「今天
- *  是几号」都要靠外面喂）。所以这里的预判只是**给店长先看一眼**，回执一律以服务端为准。
+ *  这一层只放能脱离视图单测的东西：选区展开、影响格数、批量请求体、撤销计划、过去日
+ *  确认。写盘那条路是后端新增的批量端点（`POST /api/scheduling/overrides/batch`）——
+ *  一次校验、一次写锁、一次提交。
  *
- *  两条日期口径跟着服务端走，前端只是镜像（镜错了会多说或少说一句，不会写坏数据）：
- *    · 过去只能补记 30 天（ADR 0108 决策 1）：`today - 30` 那天可改，再往前由服务端跳过；
- *    · 未来铺排窗口的末日由周表给（`week.window_end`），之后的日子还没铺。
+ *  **「哪一格不能刷」的判据只有服务端一份**（`services/scheduling/paint_gate.py`：在册 /
+ *  离职 / 可补记窗口 / 铺排窗口 / 已批的假 / 那天有没有班次），前端不再复刻一遍：会跳过
+ *  哪几格、为什么，看回执的 `skipped[]`。前端只留两件**数得清**的事 ——
+ *    · 一次最多几格、能倒着改几天：由 `/week` 下发的 `limits`（`max_cells` / `past_days`）
+ *      给出，那两个数只定义在落笔闸里，前端不写死；
+ *    · 这一笔里有过去的日子就弹**一次**确认并点名（ADR 0108 决策 3）—— 是「你确定吗」，
+ *      不是「能不能写」。
  */
-
-/** 一次最多 200 格（服务端上限，超了直接拒绝让你缩小选区）。 */
-export const PICK_MAX_CELLS = 200
-
-/** 过去可补记的天数（ADR 0108：30 天一处定义，这里只是同一口径的前端镜像）。 */
-export const PICK_PAST_DAYS = 30
 
 /** 五种动作，整批同一个。
  *
@@ -37,14 +33,20 @@ export const PICK_VOID = 'void'
 export const PICK_RESTORE = 'restore'
 export const PICK_HALF_REST = 'half_rest'
 
-/** 服务端 `skipped[].reason` 的词表 → 回执里那句人话（词表定死，见 ADR 0107 决策 6）。 */
+/** 服务端 `skipped[].reason` 的词表 → 回执里那句人话。
+ *
+ *  码本身定义在 `services/scheduling/paint_gate.py`（判据与词表同一处）；这里只是**怎么
+ *  说给店长听**，多一个码不认识就原样显示，不至于显示空白。
+ */
 export const PICK_SKIP_TEXT = {
-  past_day: '超出 30 天',
+  past_day: '超出可补记窗口',
   // 2026-10-18 起不再产生（过去的日子也能清除）；词条留着兼容老服务端的错误码。
   past_clear: '过去的日子只能改成某个班（旧口径）',
   beyond_window: '还没铺到',
   leave_approved: '已批的假',
   out_of_roster: '不在册',
+  // 离职（批量口）：离职日之后的日子不再排班，当天及以前仍可补记。
+  resigned_employee: '已离职',
   // 休 / 空白那格没有班次可标半天休（周表点「休半天」笔时本地就先拦下来，不会发请求）。
   half_rest_needs_shift: '那天没有班次，标不上休半天',
 }
@@ -156,9 +158,14 @@ export function pickRegion(selection, axes) {
   }
 }
 
-/** 一次刷的格数超过服务端上限：先让店长缩小选区，别发一个必然 400 的请求。 */
-export function overLimit(cells) {
-  return (cells || []).length > PICK_MAX_CELLS
+/** 一次刷的格数超过服务端上限：先让店长缩小选区，别发一个必然 400 的请求。
+ *
+ *  `maxCells` 由 `/week` 的 `limits` 给（服务端那一份常量）。拿不到（还没拉到周表）就
+ *  不挡 —— 宁可由服务端按自己的口径拒，也不在前端猜一个数。 */
+export function overLimit(cells, maxCells) {
+  const limit = Number(maxCells)
+  if (!(limit > 0)) return false
+  return (cells || []).length > limit
 }
 
 // ── 日期 ──────────────────────────────────────────────────────────────────
@@ -171,52 +178,27 @@ export function shiftDate(value, days) {
   return new Date(Date.UTC(year, month - 1, day + days)).toISOString().slice(0, 10)
 }
 
-/** 可补记窗口的最早一天（含）：比它更早的日子服务端按 `past_day` 跳过。 */
-export function pastFloor(today, pastDays = PICK_PAST_DAYS) {
-  return today ? shiftDate(today, -Math.abs(pastDays)) : ''
-}
-
-// ── 跳过预判（服务端仍是权威）────────────────────────────────────────────
-// 词表见 PICK_SKIP_TEXT。「人不在册」预判不了：周表只给在册的人（被过滤掉的人只有一个
-// 计数），所以那一类交给服务端说。
-
-/** 这一格会被跳过的原因；不会跳过就返回空串。
+/** 可补记窗口的最早一天（含）：比它更早的日子服务端按 `past_day` 跳过。
  *
- *  `ctx = { action, today, windowEnd, pastDays, cellOf(employeeId, date) }`——
- *  `cellOf` 取周表那一格（要它的 `leave`）。
+ *  `pastDays` 由 `/week` 的 `limits.past_days` 给；没给就返回空串（= 不下界）。
  */
-export function skipReason(cell, ctx) {
-  const { action, today, windowEnd } = ctx || {}
-  const pastDays = (ctx && ctx.pastDays) || PICK_PAST_DAYS
-  if (!cell) return ''
-  if (windowEnd && cell.date > windowEnd) return 'beyond_window'
-  const data = ctx && ctx.cellOf ? ctx.cellOf(cell.employeeId, cell.date) : null
-  if (data && data.leave) return 'leave_approved'
-  const floor = pastFloor(today, pastDays)
-  if (floor && cell.date < floor) return 'past_day'
-  return ''
+export function pastFloor(today, pastDays) {
+  const days = Number(pastDays)
+  if (!today || !(days > 0)) return ''
+  return shiftDate(today, -days)
 }
 
-/** 选区里**会被跳过**的格子（照 `cells` 的顺序逐格点名）。 */
-export function predictSkips(cells, ctx) {
-  const out = []
-  for (const cell of cells || []) {
-    const reason = skipReason(cell, ctx)
-    if (reason) out.push({ employeeId: cell.employeeId, date: cell.date, reason })
-  }
-  return out
-}
+// ── 过去日确认（是「你确定吗」，不是「能不能写」）──────────────────────────
 
 /** 选区里**已经过去、但还在可补记窗口内**的日子（升序去重）。
  *
  *  非空 = 点应用要先弹**一次**确认并点名是哪几天（ADR 0108 决策 3）——不是每格弹一次。
- *  超出窗口的日子不算在里面：它们根本不写，问也白问。
+ *  拿不到 `pastDays` 时下界为空：过去的日子**全部**要确认（宁可多问一句，也不静默写）。
  */
 export function pastDatesIn(cells, ctx) {
   const { today } = ctx || {}
   if (!today) return []
-  const pastDays = (ctx && ctx.pastDays) || PICK_PAST_DAYS
-  const floor = pastFloor(today, pastDays)
+  const floor = pastFloor(today, ctx && ctx.pastDays)
   const days = new Set()
   for (const cell of cells || []) {
     if (cell.date < today && cell.date >= floor) days.add(cell.date)

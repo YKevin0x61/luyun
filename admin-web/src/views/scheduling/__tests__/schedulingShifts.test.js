@@ -41,9 +41,11 @@ describe('店长端班次表（票 11）', () => {
     expect(view).toMatch(/api\.put\(`\/api\/scheduling\/shifts\/\$\{shift\.id\}`/)
     expect(view).toMatch(/api\.put\('\/api\/scheduling\/shifts\/order', \{ ids: next \}\)/)
     expect(view).toMatch(/api\.delete\(`\/api\/scheduling\/shifts\/\$\{target\.id\}`\)/)
-    // 页面上真正的请求就这五条，都在排班那扇门里（头注释里提到的别处接口不算）。
+    // 页面上真正的请求就这六条，都在排班那扇门里（头注释里提到的别处接口不算）。
+    // 0061 起多了「今日实到 / 目标」那一条：班次表在排班时就提示够不够，只读、只提示。
     const calls = [...view.matchAll(/api\.(?:get|post|put|delete)\(\s*[`']([^`']*)/g)].map((m) => m[1])
     expect([...new Set(calls)].sort()).toEqual([
+      '/api/scheduling/demand/day',
       '/api/scheduling/shifts',
       '/api/scheduling/shifts/${shift.id}',
       '/api/scheduling/shifts/${target.id}',

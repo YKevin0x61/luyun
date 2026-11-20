@@ -319,7 +319,8 @@ useNudgePull({ id: 'workbench-inbox', topics: ['scheduling'], pull: load })
   display: flex; flex-direction: column; gap: 12px; align-items: flex-start;
   padding: 16px 18px;
   background: var(--surface-1);
-  border: 1px solid var(--line);
+  border: var(--edge-w, 2px) solid var(--edge);
+  box-shadow: var(--paper-shadow-sm);
   border-radius: var(--r-2);
 }
 .inbox-page {
@@ -347,7 +348,8 @@ useNudgePull({ id: 'workbench-inbox', topics: ['scheduling'], pull: load })
 /* 页头胶囊：只放「要动手的未处理数」，零值不渲染。 */
 .iChip {
   grid-area: chip; margin-left: auto; display: inline-flex; align-items: center; gap: 6px;
-  padding: 7px 10px; border: 1px solid var(--line-strong); border-radius: var(--r-1);
+  padding: 7px 10px; border: var(--edge-w, 2px) solid var(--edge);
+  box-shadow: var(--paper-shadow-sm); border-radius: var(--r-1);
   background: var(--surface-1); color: var(--warn); cursor: pointer;
   font-family: var(--font-mono); font-size: 10px; line-height: 1;
 }
@@ -357,18 +359,18 @@ useNudgePull({ id: 'workbench-inbox', topics: ['scheduling'], pull: load })
 .iHint { margin: 0; font-size: 12.5px; color: var(--ink-dim); }
 .iErr {
   margin: 0; padding: 9px var(--sp-3); border-radius: var(--r-1);
-  border: 1px solid var(--wb-danger-a45); background: var(--danger-soft);
+  border: var(--edge-w, 2px) solid var(--wb-danger-a45); background: var(--danger-soft);
   font-size: 12.5px; color: var(--danger-bright);
 }
 .iOk {
   margin: 0; padding: 9px var(--sp-3); border-radius: var(--r-1);
-  border: 1px solid var(--line-strong); background: var(--ok-soft);
+  border: var(--edge-w, 2px) solid var(--edge); background: var(--ok-soft);
   font-size: 12.5px; color: var(--ok);
 }
 /* 唯一的主面板：头 + 行。 */
 .iCard {
-  background: var(--surface-1); border: 1px solid var(--line);
-  border-radius: var(--r-2); box-shadow: var(--hy-shadow-sm); overflow: hidden;
+  background: var(--surface-1); border: var(--edge-w, 2px) solid var(--edge);
+  border-radius: var(--r-2); box-shadow: var(--paper-shadow-sm); overflow: hidden;
 }
 .iCard-hd {
   display: flex; align-items: center; gap: 9px;
@@ -427,7 +429,8 @@ useNudgePull({ id: 'workbench-inbox', topics: ['scheduling'], pull: load })
 .iPrev li.none { color: var(--ink-dim); border-left-color: var(--line-strong); }
 /* 未配规则：一行折叠入口，展开才出名单。 */
 .iRuleless {
-  border: 1px solid var(--line); border-radius: var(--r-1); background: var(--surface-1);
+  border: var(--edge-w, 2px) solid var(--edge);
+  box-shadow: var(--paper-shadow-sm); border-radius: var(--r-1); background: var(--surface-1);
 }
 .iRuleless summary {
   display: flex; align-items: center; gap: 8px; min-height: 48px; padding: 0 14px;

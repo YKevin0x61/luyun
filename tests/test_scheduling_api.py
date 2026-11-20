@@ -1399,7 +1399,9 @@ def test_batch_skips_what_it_cannot_paint_and_names_every_reason(scheduling_http
         (employee_id, "2026-08-01", "past_day"),
         (employee_id, "2026-12-23", "beyond_window"),
         (leaver, "2026-09-25", "leave_approved"),
-        (stopped, "2026-09-25", "out_of_roster"),
+        # 离职与「查无此人」现在说得清了：批量口也按「离职日及以前可补记」判
+        # （paint_gate），离职日之后的那天给 resigned_employee，不再混在 out_of_roster 里。
+        (stopped, "2026-09-25", "resigned_employee"),
         (987654, "2026-09-25", "out_of_roster"),
     ]
     # 能写的那一格真写下去了。
@@ -1442,6 +1444,47 @@ def test_batch_skips_what_it_cannot_paint_and_names_every_reason(scheduling_http
     assert after["cells"]["2026-09-25"]["overridden"] is False
     # 9/10 没有被这次「清除」补写出一行上班（清除不是补记；补记走 set_override）。
     assert client.get("/api/scheduling/day", params={"date": "2026-09-10"}).json()["total"] == 0
+
+
+def test_batch_can_backfill_a_resigned_employee_up_to_the_last_day(scheduling_http):
+    """离职口径只有一条：**离职日及以前可补记，之后不再排班**（落笔闸统一后的行为）。
+
+    统一之前批量口用「在册」整块拒，于是离职的人连最后一天都补不了；单格口早就允许。
+    现在两口同一道门：9/10 是他最后一天 → 能写；9/11 起 → `resigned_employee`。
+    """
+    client, db, accounts = scheduling_http
+    employee_id = _employee_id(accounts)
+    leaver = _employee_id(accounts, "13800138002", "王五")
+    ids = _shift_ids(client)
+    _run(accounts.resign(leaver, "2026-09-10"))
+
+    resp = _batch(
+        client,
+        "shift",
+        [
+            {"employee_id": leaver, "business_date": "2026-09-10"},  # 最后一天：可补记
+            {"employee_id": leaver, "business_date": "2026-09-11"},  # 之后：不再排
+        ],
+        shift_id=ids["夜班"],
+    )
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["applied"] == 1
+    assert body["skipped"] == [
+        {"employee_id": leaver, "business_date": "2026-09-11", "reason": "resigned_employee"}
+    ]
+    # 「最后一天」真写下去了；9/11 那格没被顺手写上。周表只出在册的人（离职的人整块
+    # 不进 employees），所以这里直接看结果行。
+    cur = _run(
+        db._conn.execute(
+            "SELECT business_date, shift_id FROM staff_assignments"
+            " WHERE employee_id = ? AND business_date >= ? AND business_date <= ?",
+            (leaver, "2026-09-10", "2026-09-11"),
+        )
+    )
+    rows = {dict(row)["business_date"]: dict(row)["shift_id"] for row in _run(cur.fetchall())}
+    assert rows == {"2026-09-10": ids["夜班"]}
 
 
 def test_batch_reminds_about_pending_requests_but_still_paints(scheduling_http):

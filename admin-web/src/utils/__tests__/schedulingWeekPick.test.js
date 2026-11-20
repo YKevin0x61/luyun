@@ -3,7 +3,6 @@ import { describe, expect, it } from 'vitest'
 
 import {
   PICK_HALF_REST,
-  PICK_MAX_CELLS,
   PICK_REST,
   PICK_RESTORE,
   PICK_SHIFT,
@@ -19,7 +18,6 @@ import {
   pickAt,
   pickPending,
   pickRegion,
-  predictSkips,
   rowHandle,
   sameHandle,
   shiftDate,
@@ -164,58 +162,26 @@ describe('周表选区：两点式扩范围（ADR 0107 决策 1）', () => {
 })
 
 describe('周表选区：影响格数与上限', () => {
-  it('格数就是 cells 的长度；超过 200 格先拦下来', () => {
+  it('格数就是 cells 的长度；上限由服务端下发（拿不到就不拦）', () => {
     const big = { rows: Array.from({ length: 30 }, (_, i) => i + 1), cols: AXES.cols }
     const region = pickRegion(pickAt(null, colHandle('2026-10-14')), big)
     expect(region.count).toBe(30)
-    expect(overLimit(region.cells)).toBe(false)
-    const rows = Array.from({ length: PICK_MAX_CELLS + 1 }, (_, i) => i + 1)
-    expect(overLimit(rows.map((employeeId) => ({ employeeId, date: '2026-10-14' })))).toBe(true)
-    expect(overLimit(region.cells)).toBe(false)
+    expect(overLimit(region.cells, 200)).toBe(false)
+    const many = Array.from({ length: 201 }, (_, i) => ({ employeeId: i + 1, date: '2026-10-14' }))
+    expect(overLimit(many, 200)).toBe(true)
+    // 周表还没拉到时（没有 limits）不挡：服务端会按它自己的口径拒。
+    expect(overLimit(many, undefined)).toBe(false)
+    expect(overLimit(many, 0)).toBe(false)
   })
 })
 
-describe('周表选区：跳过预判（服务端仍是权威）', () => {
-  const ctx = {
-    action: PICK_SHIFT,
-    today: '2026-10-14',
-    windowEnd: '2026-12-31',
-    pastDays: 30,
-    cellOf: (employeeId, date) => (employeeId === 9 && date === '2026-10-13' ? { leave: true } : null),
-  }
-
-  it('超出 30 天 = past_day；窗口内（含第 30 天）不算', () => {
-    expect(pastFloor('2026-10-14')).toBe('2026-09-14')
+describe('周表选区：过去日确认（是「你确定吗」，不是「能不能写」）', () => {
+  it('可补记窗口的下界按服务端给的天数算', () => {
+    expect(pastFloor('2026-10-14', 30)).toBe('2026-09-14')
     expect(shiftDate('2026-10-14', -30)).toBe('2026-09-14')
-    expect(predictSkips([{ employeeId: 7, date: '2026-09-14' }], ctx)).toEqual([])
-    expect(predictSkips([{ employeeId: 7, date: '2026-09-13' }], ctx))
-      .toEqual([{ employeeId: 7, date: '2026-09-13', reason: 'past_day' }])
-  })
-
-  it('超出未来铺排窗口 = beyond_window', () => {
-    expect(predictSkips([{ employeeId: 7, date: '2027-01-01' }], ctx))
-      .toEqual([{ employeeId: 7, date: '2027-01-01', reason: 'beyond_window' }])
-  })
-
-  it('那天有已批的假 = leave_approved（照 `cells` 顺序逐格点名）', () => {
-    const items = predictSkips([
-      { employeeId: 7, date: '2026-10-13' },
-      { employeeId: 9, date: '2026-10-13' },
-    ], ctx)
-    expect(items).toEqual([{ employeeId: 9, date: '2026-10-13', reason: 'leave_approved' }])
-  })
-
-  it('过去的日子上执行清除**不再跳过**（2026-10-18 用户裁定：清也能清过去的）', () => {
-    // 放开 ADR 0108 决策 6 的「过去只能改成某个班」：清空与改班次同一条下界
-    // （可补记窗口），窗口内过去的日子照常写，超出窗口才是 past_day。
-    const clear = { ...ctx, action: PICK_VOID }
-    expect(predictSkips([{ employeeId: 7, date: '2026-10-13' }], clear)).toEqual([])
-    expect(predictSkips([{ employeeId: 7, date: '2026-10-13' }], ctx)).toEqual([])
-    // 今天清除照旧
-    expect(predictSkips([{ employeeId: 7, date: '2026-10-14' }], clear)).toEqual([])
-    // 超窗口仍然是 past_day（窗口是数据保留口径，不随这次放开）
-    expect(predictSkips([{ employeeId: 7, date: '2026-08-01' }], clear))
-      .toEqual([{ employeeId: 7, date: '2026-08-01', reason: 'past_day' }])
+    // 拿不到天数就没有下界（不猜一个 30）
+    expect(pastFloor('2026-10-14')).toBe('')
+    expect(pastFloor('', 30)).toBe('')
   })
 
   it('过去但还在窗口内的日子点出来（点应用要弹一次确认）', () => {
@@ -225,8 +191,11 @@ describe('周表选区：跳过预判（服务端仍是权威）', () => {
       { employeeId: 7, date: '2026-10-14' },
       { employeeId: 7, date: '2026-09-01' },
     ]
-    expect(pastDatesIn(cells, { today: '2026-10-14' })).toEqual(['2026-10-12'])
+    expect(pastDatesIn(cells, { today: '2026-10-14', pastDays: 30 })).toEqual(['2026-10-12'])
     expect(pastDatesIn(cells, { today: '' })).toEqual([])
+    // 没有下界时，过去的日子全部要确认
+    expect(pastDatesIn(cells, { today: '2026-10-14' }))
+      .toEqual(['2026-09-01', '2026-10-12'])
   })
 
   it('待批提醒从既有的待办接口取（按天粒度），照样刷', () => {

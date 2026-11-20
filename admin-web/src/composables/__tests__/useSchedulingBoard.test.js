@@ -494,6 +494,8 @@ function weekPayload(overrides = {}) {
     start: '2026-10-12',
     today: '2026-10-14',
     window_end: '2026-10-31',
+    // 上限与可补记天数由服务端下发（定义在 paint_gate），前端只照着用。
+    limits: { max_cells: 200, past_days: 30 },
     days: ['2026-10-12', '2026-10-13', '2026-10-14'].map((date) => ({
       business_date: date,
       weekday: 0,

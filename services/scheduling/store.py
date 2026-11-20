@@ -45,6 +45,7 @@ import asyncpg
 from db_core.utils import CHINA_TZ
 from services.business_day import current_workbench_date, shift_business_date
 from services.identity import EmployeeAccounts, ZoneDirectory, serialized_write
+from services.scheduling import paint_gate
 from services.scheduling.day_grid import (
     KIND_LEAVE,
     SOURCE_OVERRIDE,
@@ -77,6 +78,13 @@ def _needs_migration(method):
 __all__ = [
     "BACKFILL_DAYS",
     "DEFAULT_SHIFTS",
+    "DEMAND_FALLBACK_WEEKS",
+    "DEMAND_KINDS",
+    "DEMAND_SOURCE_CONFIGURED",
+    "DEMAND_SOURCE_FALLBACK",
+    "DEMAND_SOURCE_NONE",
+    "DEMAND_WEEKDAY",
+    "DEMAND_WEEKEND",
     "DUTY_SLOTS",
     "EXPANSION_DAYS",
     "HALF_REST_NEEDS_SHIFT",
@@ -86,6 +94,7 @@ __all__ = [
     "KIND_SWAP",
     "MAX_BATCH_CELLS",
     "MAX_CYCLE_DAYS",
+    "MAX_DEMAND_HEADCOUNT",
     "MAX_REQUEST_NOTE",
     "MAX_SHIFT_NAME",
     "REST",
@@ -106,20 +115,32 @@ __all__ = [
 # 排班窗口：从今天起铺这么多天（含今天）。
 EXPANSION_DAYS = 90
 
-# 可补记窗口：今天**往前**这么多天（含）以内，过去的日子还能补记 / 改（ADR 0108）。
-# **一处定义**：单日覆盖的 `past_day` 与批量端点的逐格跳过都读它。
-# 与 `EXPANSION_DAYS` 是两个方向的窗口，别并成一个数 —— 未来那头照旧只到展开窗口。
-BACKFILL_DAYS = 30
-
-# 一次批量落笔的上限（格）。超了**整批拒绝**：那不是「某一格刷不了」，是这次请求本身
-# 太大（前端照这个数把选区卡住，服务端这道才是权威）。
-MAX_BATCH_CELLS = 200
+# 可补记窗口（往前多少天）与一次批量落笔的上限（格）：都定义在落笔闸里，这里只转出。
+# 判据只有一道门（`services/scheduling/paint_gate.py`），两个数不能有第二份。
+BACKFILL_DAYS = paint_gate.BACKFILL_DAYS
+MAX_BATCH_CELLS = paint_gate.MAX_BATCH_CELLS
 
 # 单日覆盖是谁写的（`scheduling_overrides.kind`）：`manual` 是店长在月历上点着改的，
 # `leave` 是批准请假写下的（票 08）。票 09 的换班写 `swap` —— 它们进的是同一张表
 # （见 `migrations/pg/0007_scheduling_overrides.sql`），不用再出一次迁移。
 KIND_MANUAL = "manual"
 KIND_SWAP = "swap"
+
+# 每日需求人数（0061）：目标按「营业日 × 班次」配，缺省分平时 / 周末两套。
+#
+# 三层判据只在 `SchedulingStore._demand_block` 一处实现（月历 / 周表 / 当日名单 /
+# 待办预览共用）：按天覆盖 → 平时/周末默认值 → 近 `DEMAND_FALLBACK_WEEKS` 周同星期几
+# 的中位数。前两层是店长配过的（source='configured'），第三层只是参考
+# （source='fallback'），连历史都没有的新店给 0（source='none'）。
+DEMAND_WEEKDAY = "weekday"
+DEMAND_WEEKEND = "weekend"
+DEMAND_KINDS = (DEMAND_WEEKDAY, DEMAND_WEEKEND)
+DEMAND_FALLBACK_WEEKS = 4
+# 一个班次一天的目标人数上限：误输入 99999 会让「缺 N 人」写成没边的数，这里兜一下。
+MAX_DEMAND_HEADCOUNT = 999
+DEMAND_SOURCE_CONFIGURED = "configured"
+DEMAND_SOURCE_FALLBACK = "fallback"
+DEMAND_SOURCE_NONE = "none"
 
 # 批量落笔（`POST /overrides/batch`）的动作：整批同一个。
 #
@@ -147,12 +168,22 @@ BATCH_ACTIONS = (
     BATCH_HALF_REST,
 )
 
+# 传输词 → 落笔动作（判据按「写什么」分，不按哪个端点来的分）。`restore` 与 `clear`
+# 是同一件事（都写回规则 / 空白），只是前端历史上发过两个词。
+_PAINT_ACTION = {
+    BATCH_SHIFT: paint_gate.PAINT_SHIFT,
+    BATCH_REST: paint_gate.PAINT_REST,
+    BATCH_CLEAR: paint_gate.PAINT_CLEAR,
+    BATCH_RESTORE: paint_gate.PAINT_CLEAR,
+    BATCH_VOID: paint_gate.PAINT_VOID,
+    BATCH_HALF_REST: paint_gate.PAINT_HALF_REST,
+}
+
 # 「休半天」写口的那一个拒绝理由与它的中文（ADR 0143）：reason 是稳定标识，考勤 /
 # 排班两张错误表都从这里取文案 —— 同一个事实不该在两张页面上说成两句不同的话。
-HALF_REST_NEEDS_SHIFT = "half_rest_needs_shift"
-HALF_REST_NEEDS_SHIFT_MESSAGE = (
-    "那天没有班次（休 / 还没排到），标不上「休半天」：先给那天排一个班次"
-)
+# 理由词表定义在落笔闸，这里只转出（api 层还从 store 取）。
+HALF_REST_NEEDS_SHIFT = paint_gate.HALF_REST_NEEDS_SHIFT
+HALF_REST_NEEDS_SHIFT_MESSAGE = paint_gate.HALF_REST_NEEDS_SHIFT_MESSAGE
 
 # 批量回执里「这个人这天有申请等着批」那一条的 kind（前端照它渲染提醒）。
 # 提醒**不阻断**写入：申请批下来会把那天换成请假 / 对调（`_write_override_row` 的既有
@@ -407,6 +438,21 @@ def _each_day_between(first: str, last: str) -> list[str]:
     return out
 
 
+def _median_round(values: list[int]) -> Optional[int]:
+    """一组人数的中位数（取整，.5 进一）。
+
+    fallback 目标就是「近 4 周同星期几的中位数」。偶数个样本取中间两个的平均，
+    `.5 进一` 与四舍五入同向 —— 目标宁可略高，免得把「刚好够」算成缺口。
+    """
+    ordered = sorted(int(value) for value in values)
+    if not ordered:
+        return None
+    middle = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[middle]
+    return (ordered[middle - 1] + ordered[middle] + 1) // 2
+
+
 def _clean_note(note: Any) -> Optional[str]:
     """事由：去掉两端空白；空串就是「没写」（存 NULL，不存一个空字符串）。"""
     text = str(note or "").strip()
@@ -498,19 +544,9 @@ class SchedulingStore:
         self._conn = conn
         self._now = now or (lambda: datetime.now(CHINA_TZ))
         self._write_lock_owner = conn_or_db
-        self._local_write_lock = None
         # 读申请时先按「有换班那一列」（0009）读；缺列就退一步、记住这一次降级，
         # 别每读一次都白撞一回（半迁移时请假要照常能用，见 `_select_request_rows`）。
         self._requests_have_peer = True
-
-    @property
-    def _write_lock(self):
-        shared = getattr(self._write_lock_owner, "_write_lock", None)
-        if shared is not None:
-            return shared
-        if self._local_write_lock is None:
-            self._local_write_lock = asyncio.Lock()
-        return self._local_write_lock
 
     def _now_dt(self) -> datetime:
         value = self._now()
@@ -547,10 +583,48 @@ class SchedulingStore:
     def _backfill_floor(today: str) -> str:
         """可补记窗口的第一天：``today - BACKFILL_DAYS``（含这一天）。
 
-        只有这一处算它 —— 单日覆盖的 `past_day` 与批量端点的逐格跳过读的是同一个数、
-        同一种算法；`BACKFILL_DAYS` 一改，两处一起跟着走。
+        算法在落笔闸里（`paint_gate.backfill_floor`）—— 判据与这里读的是同一个数。
         """
-        return shift_business_date(today, -BACKFILL_DAYS)
+        return paint_gate.backfill_floor(today)
+
+    # ── 落笔闸的三个入口（判据只在一处：`paint_gate`）──────────────
+    def _paint_limits(self) -> paint_gate.Limits:
+        """今天、最早可补记、最晚已铺到 —— 一次读齐。
+
+        写路径每一段都拿这**同一份**去判：各步各读一次钟的话，请求跨过 06:00 的切日点
+        时「太旧」与「还没铺到」会按两个不同的营业日算（同 `_window_from` 的理由）。
+        """
+        today = self.today()
+        return paint_gate.limits_for(today, self._window_from(today)[1])
+
+    async def _paint_reads(
+        self, cells: list[tuple[int, str]], *, need_shift: bool = False
+    ) -> paint_gate.Reads:
+        """把这一批格要用的花名册 / 请假 / 班次行一次读齐（锁外、锁内都能用）。"""
+        return await paint_gate.read(
+            self._write_lock_owner, cells, need_shift=need_shift, now=self._now
+        )
+
+    async def _judge_paint(
+        self, action: str, cells: list[tuple[int, str]], *, need_shift: bool = False
+    ) -> list[Optional[paint_gate.Skip]]:
+        """逐格判，结论与 cells 同序：None 才是可写。"""
+        limits = self._paint_limits()
+        reads = await self._paint_reads(cells, need_shift=need_shift)
+        return paint_gate.judge_all(action, cells, reads, limits)
+
+    async def _gate_paint(
+        self, action: str, cells: list[tuple[int, str]], *, need_shift: bool = False
+    ) -> None:
+        """单格口的闸：第一格被挡住就按它的理由抛（一个字节都不写）。"""
+        for skip in await self._judge_paint(action, cells, need_shift=need_shift):
+            if skip is not None:
+                self._raise_skip(skip)
+
+    @staticmethod
+    def _raise_skip(skip: paint_gate.Skip) -> None:
+        """判据的结论 → 单格口的异常（理由词表与错误码都在 `paint_gate` 里）。"""
+        raise SchedulingError(*paint_gate.single_error(skip))
 
     # ── 申请的截止（2026-10-29 用户裁定）──────────────────────────────────
     @staticmethod
@@ -1265,7 +1339,7 @@ class SchedulingStore:
         # 离职的人不再配轮转规则（2026-10-29）：登记离职时规则已经被停掉了，这里挡住
         # 「又重新配一条」—— 否则下次铺排班又会长出离职日之后的行。
         if person.get("resigned_at") is not None:
-            raise SchedulingError("resigned_employee", "")
+            raise SchedulingError(paint_gate.RESIGNED_EMPLOYEE, "")
         await self._require_shifts_usable(normalized)
         today = self.today()
         anchor = today if anchor_date in (None, "") else _require_business_date(anchor_date)
@@ -1430,9 +1504,9 @@ class SchedulingStore:
 
         **那天有已批的假就不写**（2026-10-18）：请假批下来就是一条 `kind=leave` 的覆盖
         记录，覆盖记录本身就是那条假；再写一次会把它的 `kind` 换成 `manual`，审批记录与
-        排班事实就对不上了。判据与批量端点逐字相同 —— ``set_overrides_batch`` 的
-        ``leave_approved`` 用的也是 ``_leave_ids([employee_id], day)``：命中就抛
-        ``SchedulingError("leave_approved", ...)``，一个字节都不写。先撤掉那条假，再改班。
+        排班事实就对不上了。在册 / 离职 / 窗口 / 请假四道判据都在 `paint_gate` 里，
+        与批量、清除、半天休**同一道门**：命中就抛 ``SchedulingError``，一个字节都不写。
+        先撤掉那条假，再改班。
 
         **今天与窗口末日只在这里读一次**：两次各读一次钟，请求正好跨过 06:00 的切日点时
         「超出可补记窗口」和「还没排到」会按两个不同的营业日判（`beyond_window` 那句文案
@@ -1441,9 +1515,6 @@ class SchedulingStore:
         employee_id, day, shift, zone = await self._resolve_override(
             employee_id, business_date, is_rest, shift_id, zone_id
         )
-        leave_ids = await self._leave_ids([employee_id], day)
-        if employee_id in leave_ids:
-            raise SchedulingError("leave_approved", "leave_approved")
         await self._apply_override(employee_id, day, shift, zone)
         return {
             "employee_id": employee_id,
@@ -1466,35 +1537,16 @@ class SchedulingStore:
         **一个字节都不写**（全是读）—— 晚一步的那道闸（`set_day_override` 要查的未决申请）
         走的就是「先把这一天算明白 → 再查闸 → 最后才落笔」这个次序，所以校验必须能单独
         走一遍。返回 `(员工号, 营业日, 班次 id, 工作区 id)`；班次 id 为空就是「那天休」。
+
+        「能不能写这一天」（在册 / 离职 / 窗口 / 请假）归 `paint_gate` 判 —— 这里只把它
+        接到「班次 / 工作区的定值」前面，不自己再判一遍。
         """
         employee_id = int(employee_id)
         day = _require_business_date(business_date)
-        today = self.today()
-        first_day = self._backfill_floor(today)
-        _, last_day = self._window_from(today)
-        if day < first_day:
-            # 超出可补记窗口：太旧的日子不再改写。第二参填进那句提示的 `{}`：报**真实的
-            # 窗口第一天**，别把「30 天」这个数写死在文案里（那个数一改，店长看到的就是
-            # 假话 —— 同 `beyond_window` 的理由）。
-            raise SchedulingError("past_day", first_day)
-        if day > last_day:
-            # 窗口尽头之后是「还没铺到」。在那里写一行，月历上就会出现一个
-            # 「规则还没算到、却已经有人上班」的格子 —— 那是另一件事（先配规则）。
-            # 第二参填进那句提示的 `{}`：报**真实的窗口末日**，别把 `EXPANSION_DAYS`
-            # 写死在文案里（那个数一改，店长看到的就是假话）。
-            raise SchedulingError("beyond_window", last_day)
-        roster = await EmployeeAccounts(self._write_lock_owner).list_roster()
-        person = next((row for row in roster if row["id"] == employee_id), None)
-        if person is None:
-            raise SchedulingError("unknown_employee", "unknown_employee")
-        # 离职的人不能再排班（2026-10-29）：离职日**之后**的日子一律拒 —— 那些行在登记
-        # 离职时已经删了，这里挡住的是「后来手滑又给他补一天」。空串（已离职、日期待补）
-        # 当场算离职：任何日子都拒。批量端点逐格走这条，所以也一起被拦。
-        resigned_at = person.get("resigned_at")
-        if resigned_at is not None:
-            left = str(resigned_at)[:10]
-            if left == "" or day > left:
-                raise SchedulingError("resigned_employee", left)
+        await self._gate_paint(
+            paint_gate.PAINT_REST if is_rest else paint_gate.PAINT_SHIFT,
+            [(employee_id, day)],
+        )
 
         shift: Optional[int] = None
         zone: Optional[int] = None
@@ -1658,8 +1710,8 @@ class SchedulingStore:
 
         **那天有已批准的假就整笔拒绝**（`leave_approved`）：覆盖记录 `kind=leave` 就是
         那条被批的假，删掉它等于把假抹掉，而申请表里那条仍然是 `approved`。判据与
-        批量清除的 `skipped: leave_approved` 是同一处（`_leave_ids`）、同一个词 ——
-        「清除班次」不许动已批的假，单格与批量不能两套。
+        批量清除是同一道门（`paint_gate`）、同一个词 —— 「清除班次」不许动已批的假，
+        单格与批量不能两套。
 
         **那天什么都没有就是 no-op**：既没有覆盖记录、也没有结果行时 `_restore_day`
         不补写（见那里）—— 「清除」不该在从没铺过的过去日子里凭空造出一行上班。
@@ -1672,10 +1724,9 @@ class SchedulingStore:
         day = _require_business_date(business_date)
         today = self.today()
         # 2026-10-18 用户裁定：过去的日子也能「清除班次」（退回到规则铺出来的样子）。
-        # 下界与「改班次」同一条：可补记窗口的第一天（`_backfill_floor`），更早的仍是
-        # `past_day` —— 窗口是数据保留口径，不是这一次的交互取舍。
-        if day < self._backfill_floor(today):
-            raise SchedulingError("past_day", "past_day")
+        # 下界与「改班次」同一条：落笔闸里那份可补记窗口，更早的仍是 past_day ——
+        # 窗口是数据保留口径，不是这一次的交互取舍。
+        await self._gate_paint(paint_gate.PAINT_CLEAR, [(employee_id, day)])
         await self._clear_override(employee_id, day, today)
         return {"employee_id": employee_id, "business_date": day}
 
@@ -1683,9 +1734,9 @@ class SchedulingStore:
     async def _clear_override(self, employee_id: int, day: str, today: str) -> None:
         """单格「撤销覆盖」：删覆盖记录 + 按现在的规则重算那天。
 
-        **删之前先问一句「那天批过假没有」**（`_leave_ids`），命中就拒绝 —— 与批量清除
-        的 `skipped: leave_approved` 同一处判据、同一个错误码。判据放在锁里而不是
-        `clear_override` 那道锁外：判完到删之间正好有人批下那天的假，锁外会漏掉。
+        **删之前再过一次闸**（`paint_gate`），命中就拒绝 —— 与批量清除同一处判据、
+        同一个错误码。判据放在锁里而不是 `clear_override` 那道锁外：判完到删之间正好
+        有人批下那天的假，锁外会漏掉。
 
         **清空过的那天（`voided=1`）要按规则重新铺回来**：`void` 已经把结果行删了，
         「退回规则」若照 `_restore_day` 的「没有结果行就 no-op」走，店长点了「退回规则」
@@ -1693,8 +1744,7 @@ class SchedulingStore:
         是不是 void 行，再让 `_restore_day` 强制按规则重算那一天 —— 判据是**这行证据**
         在，而不是「结果行还在」（那正是被 void 删掉的东西）。
         """
-        if employee_id in await self._leave_ids([employee_id], day):
-            raise SchedulingError("leave_approved", "leave_approved")
+        await self._gate_paint(paint_gate.PAINT_CLEAR, [(employee_id, day)])
         voided = await self._override_voided(employee_id, day)
         await self._delete_override_row(employee_id, day)
         await self._restore_day(employee_id, day, today, force=voided)
@@ -1855,15 +1905,21 @@ class SchedulingStore:
         （`source`）与那天是不是单日覆盖**一个字都不动** —— 半天休不是第二个班次，
         也不是一次「跟规则不一样」的改写。
 
-        **不做**在册 / 窗口 / 请假 / 封账 / 月份检查：那些闸留在各自入口——考勤表
-        路由（`api/attendance.py:set_attendance_day`）在分派前调
-        `AttendanceStore.ensure_day_editable`；周表批量口由 `set_overrides_batch`
-        的 cells 筛格先挡在册 / 窗口 / 过去日 / 已批请假。
+        **在册 / 窗口 / 请假 / 那天有没有班次四道判据走 `paint_gate`**（跟改班、清除、
+        批量同一道门）：前三种在这里按单格口的语义抛错（跟月历单格报同一个码），
+        只有「那天没有班次」按 ADR 0143 的老口径**返回**理由、不抛。
+        **封账 / 月份**不在这里：那是考勤表自己的闸，留在
+        `api/attendance.py:set_attendance_day` 分派前（`ensure_day_editable`）。
         """
         day = _require_business_date(business_date)
         employee_id = int(employee_id)
-        ready = await self._half_rest_ready_by_day([day])
-        if employee_id not in ready.get(day, set()):
+        skips = await self._judge_paint(
+            paint_gate.PAINT_HALF_REST, [(employee_id, day)], need_shift=True
+        )
+        skip = skips[0]
+        if skip is not None:
+            if skip.reason != paint_gate.HALF_REST_NEEDS_SHIFT:
+                self._raise_skip(skip)
             return HALF_REST_NEEDS_SHIFT
         await self._write_half_rest_rows(
             [(employee_id, day)], bool(half_rest), self._now_iso()
@@ -1874,30 +1930,13 @@ class SchedulingStore:
         )
         return None
 
-    async def _half_rest_ready_by_day(self, days: list[str]) -> dict[str, set[int]]:
-        """按天查「那天真有班次」的人：``{营业日: {员工号}}``（ADR 0143 的唯一判据）。
-
-        「有结果行且 `shift_id` 非空」只在这里判：单日口传一天，周表批量口传整批涉及的
-        天。清空过的天（void）没有结果行，休的那天班次为空 —— 两种都不在集合里，都标
-        不上半天休。先按天去重再各查一次：200 格别逐格打一条 SQL。
-        """
-        ready: dict[str, set[int]] = {}
-        for day in dict.fromkeys(days):
-            cur = await self._conn.execute(
-                """SELECT employee_id FROM staff_assignments
-                   WHERE business_date = ? AND shift_id IS NOT NULL""",
-                (day,),
-            )
-            ready[day] = {int(dict(row)["employee_id"]) for row in await cur.fetchall()}
-        return ready
-
     async def _write_half_rest_rows(
         self, cells: list[tuple[int, str]], half_rest: bool, stamp: str
     ) -> None:
         """逐格改 `half_rest` 与 `updated_at`：只写、不加锁、不提交（ADR 0143）。
 
         单日口与周表批量口共用这一句 `UPDATE`，由调用方各自持锁、各自提交。能走到这里
-        的格子都已确认「那天有结果行且班次非空」（`_half_rest_ready_by_day`），所以
+        的格子都已确认「那天有结果行且班次非空」（`paint_gate` 的 `shift_on_day`），所以
         `UPDATE` 一定命中。
         """
         for employee_id, day in cells:
@@ -1928,9 +1967,9 @@ class SchedulingStore:
         其它动作带着 `shift_id` / `zone_id` / `half_rest` 也不报错（客户端把当前选中的
         班次一起发过来是常态，那些值在别的动作里没有意义）。
 
-        **部分成功是预期语义**：`skipped` 逐格说清谁、哪天、为什么（词表定死在
-        `past_day` / `past_clear` / `beyond_window` / `leave_approved` / `out_of_roster` /
-        `half_rest_needs_shift`），不接受「一格里有人请假、整片白刷」。整批拒绝的只有
+        **部分成功是预期语义**：`skipped` 逐格说清谁、哪天、为什么（理由词表定义在
+        `paint_gate`：不在册 / 已离职 / 超出可补记窗口 / 还没铺到 / 那天有已批的假 /
+        那天没有班次），不接受「一格里有人请假、整片白刷」。整批拒绝的只有
         三类：格数超上限（`MAX_BATCH_CELLS`）、动作不认识、输入本身写错（日期 / 人员
         编号 / 班次 / 工作区 / `half_rest` 的布尔值）—— 那些不是「某一格刷不了」，
         是这次请求不成立。
@@ -1957,13 +1996,7 @@ class SchedulingStore:
             raise SchedulingError("batch_too_large", str(MAX_BATCH_CELLS))
 
         today = self.today()
-        first_day = self._backfill_floor(today)
-        last_day = self._window_from(today)[1]
         cells = [self._batch_cell(item) for item in items]
-
-        # 「不在册」= 花名册里没有这个人，或他停用 / 还没批准 —— 判据与周表、月历、
-        # 当日名单共用一份（`_on_roster_ids`），别在这里再拼一遍。
-        known = await self._on_roster_ids()
 
         shift: Optional[int] = None
         zone: Optional[int] = None
@@ -1975,40 +2008,16 @@ class SchedulingStore:
         elif action == BATCH_HALF_REST:
             flag = self._batch_half_rest(half_rest)
 
-        # 一格一格判「能不能刷」，判完还留在场上的才去查请假 —— 那天有已批的假的一格
-        # 都不许动（连「清除」也不行：覆盖记录就是那条假，删了等于把批过的假抹掉）。
-        reasons: list[Optional[str]] = [None] * len(cells)
-        for index, (employee_id, day) in enumerate(cells):
-            if employee_id not in known:
-                reasons[index] = "out_of_roster"
-            elif day > last_day:
-                reasons[index] = "beyond_window"
-            elif day < first_day:
-                # 2026-10-18 用户裁定：`clear` 在过去的日子上**也生效**（放开 ADR 0108
-                # 决策 6 的「过去只能改成某个班」）；这里只剩可补记窗口这一条下界。
-                reasons[index] = "past_day"
-
-        leave_days: dict[str, set[int]] = {}
-        for index, (_, day) in enumerate(cells):
-            if reasons[index] is not None or day in leave_days:
-                continue
-            leave_days[day] = await self._leave_ids(
-                [
-                    employee_id
-                    for other, (employee_id, item_day) in enumerate(cells)
-                    if item_day == day and reasons[other] is None
-                ],
-                day,
-            )
-        for index, (employee_id, day) in enumerate(cells):
-            if reasons[index] is None and employee_id in leave_days[day]:
-                reasons[index] = "leave_approved"
-
-        if action == BATCH_HALF_REST:
-            # 「休半天」只认**那一天真有班次**的结果行（休 / 空白都标不上）：与单日写口
-            # 同一道闸（`_half_rest_ready_by_day` / `HALF_REST_NEEDS_SHIFT`，ADR 0143），
-            # 只是这里逐格跳过而不是整笔拒绝。
-            reasons = await self._half_rest_reasons(cells, reasons)
+        # 逐格判「能不能刷」：在册 / 离职 / 窗口 / 请假（半休再加「那天有班次」）与
+        # 单格、清除、半天休是同一道门（`paint_gate`），只是这里逐格记理由、不整笔
+        # 拒绝。那天有已批的假的一格都不许动 —— 连「清除」也不行：覆盖记录就是那条假，
+        # 删了等于把批过的假抹掉。
+        skips = await self._judge_paint(
+            _PAINT_ACTION[action], cells, need_shift=(action == BATCH_HALF_REST)
+        )
+        reasons: list[Optional[str]] = [
+            None if skip is None else skip.reason for skip in skips
+        ]
 
         written = [cell for cell, reason in zip(cells, reasons) if reason is None]
         if action in (BATCH_CLEAR, BATCH_RESTORE):
@@ -2060,27 +2069,6 @@ class SchedulingStore:
         if not isinstance(value, bool):
             raise SchedulingError("invalid_half_rest", "invalid_half_rest")
         return value
-
-    async def _half_rest_reasons(
-        self, cells: list[tuple[int, str]], reasons: list[Optional[str]]
-    ) -> list[Optional[str]]:
-        """把「那天没有班次」的格子记为 `HALF_REST_NEEDS_SHIFT`（其余照旧）。
-
-        判据只有一份：`_half_rest_ready_by_day`（单日写口也调它，ADR 0143）—— 那天
-        **必须有结果行、且 `shift_id` 非空**。清空过的天（void）没有结果行，休的那天
-        班次为空 —— 两种都标不上半天休，逐格跳过。只查还没被别的闸挡掉的格子涉及的天，
-        200 格上别逐格打一条 SQL。
-        """
-        ready = await self._half_rest_ready_by_day(
-            [day for index, (_, day) in enumerate(cells) if reasons[index] is None]
-        )
-        gated = list(reasons)
-        for index, (employee_id, day) in enumerate(cells):
-            if gated[index] is not None:
-                continue
-            if employee_id not in ready.get(day, set()):
-                gated[index] = HALF_REST_NEEDS_SHIFT
-        return gated
 
     @staticmethod
     def _batch_cell(item: Any) -> tuple[int, str]:
@@ -2184,7 +2172,7 @@ class SchedulingStore:
         班次 / 工作区 / 来源（`source`）与那一天是不是单日覆盖**一个字都不动** —— 与单日
         写口 `set_half_rest` 同一口径、同一句 `UPDATE`（`_write_half_rest_rows`）：半天休
         不是第二个班次，也不是一次「跟规则不一样」的改写。能走到这里的格子都已确认
-        「那天有结果行且班次非空」（见 `_half_rest_reasons`），所以 UPDATE 一定命中。
+        「那天有结果行且班次非空」（见 `paint_gate` 的 `shift_on_day`），所以 UPDATE 一定命中。
         """
         await self._write_half_rest_rows(cells, half_rest, stamp)
         await self._conn.commit()
@@ -2426,6 +2414,320 @@ class SchedulingStore:
         """
         return await DayGrid(self._write_lock_owner, now=self._now).on_roster_ids()
 
+    # ── 每日需求人数（0061）─────────────────────────────────────────────
+    #
+    # 「人够不够」以前只把数字摊开（见 inbox 的注释）。目标按「营业日 × 班次」配，
+    # 三层判据只在 _demand_block 一处实现：按天覆盖 → 平时/周末默认值 → 近 4 周
+    # 同星期几的中位数。月历、周表、当日名单、待办预览都从这里取，不许各自算第二份。
+
+    @staticmethod
+    def _demand_kind(business_date: str) -> str:
+        """这一天算「平时」还是「周末」。周六 / 周日 = weekend（与周表 is_weekend 同口径）。"""
+        return (
+            DEMAND_WEEKEND
+            if date.fromisoformat(business_date).weekday() >= 5
+            else DEMAND_WEEKDAY
+        )
+
+    @staticmethod
+    def _demand_headcount(value: Any) -> int:
+        """校验一个人数：0..MAX_DEMAND_HEADCOUNT 的整数。
+
+        bool 在 Python 里是 int 的子类（True == 1），前端不会发，但别让
+        {"1": True} 悄悄变成 1 人。
+        """
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise SchedulingError("invalid_headcount", str(MAX_DEMAND_HEADCOUNT))
+        if value < 0 or value > MAX_DEMAND_HEADCOUNT:
+            raise SchedulingError("invalid_headcount", str(MAX_DEMAND_HEADCOUNT))
+        return value
+
+    def _demand_mapping(self, payload: Optional[dict], shift_ids: set) -> dict:
+        """把 API 来的 {shift_id: 人数} 收成 {int: int}，顺带校验。
+
+        None = 这一组没配（整组清掉）。班次 id 必须是现有**启用**班次，人数走同一道闸。
+        """
+        if payload is None:
+            return {}
+        if not isinstance(payload, dict):
+            raise SchedulingError("invalid_headcount", str(MAX_DEMAND_HEADCOUNT))
+        out: dict = {}
+        for raw_shift, raw_count in payload.items():
+            try:
+                shift_id = int(raw_shift)
+            except (TypeError, ValueError):
+                raise SchedulingError("unknown_shift_id", str(raw_shift))
+            if shift_id not in shift_ids:
+                raise SchedulingError("unknown_shift_id", str(shift_id))
+            out[shift_id] = self._demand_headcount(raw_count)
+        return out
+
+    async def _demand_shift_ids(self) -> set:
+        return {int(shift["id"]) for shift in await self.list_shifts()}
+
+    async def _demand_day_rows(self, first: str, last: str) -> dict:
+        """一段日期里的按天覆盖：{日期: {班次: 人}}。"""
+        rows = await (await self._conn.execute(
+            """SELECT business_date, shift_id, headcount FROM scheduling_demand_days
+               WHERE business_date >= ? AND business_date <= ?""",
+            (first, last),
+        )).fetchall()
+        out: dict = {}
+        for row in rows:
+            mapping = dict(row)
+            out.setdefault(mapping["business_date"], {})[int(mapping["shift_id"])] = int(
+                mapping["headcount"]
+            )
+        return out
+
+    async def _demand_defaults_map(self) -> dict:
+        """平时 / 周末两套默认值：{kind: {班次: 人}}。"""
+        rows = await (await self._conn.execute(
+            "SELECT kind, shift_id, headcount FROM scheduling_demand_defaults"
+        )).fetchall()
+        out: dict = {}
+        for row in rows:
+            mapping = dict(row)
+            out.setdefault(mapping["kind"], {})[int(mapping["shift_id"])] = int(
+                mapping["headcount"]
+            )
+        return out
+
+    async def _demand_fallback_targets(self, shift_ids: list) -> dict:
+        """近 4 周每个星期几的参考人数：{weekday(0=周一): {班次: 人} | None}。
+
+        None = 那个星期几在近 4 周里一天排班都没有（新店 / 刚上线）—— 上游据此给
+        source='none'，前端显示 0 而不是编一个数。样本锚在**今天**（不含今天）：
+        未来日子没有历史；某天自己配了按天覆盖 / 默认值时，参考值用不上。
+        """
+        today = date.fromisoformat(self.today())
+        first = today - timedelta(days=DEMAND_FALLBACK_WEEKS * 7)
+        last = today - timedelta(days=1)
+        counts: dict = {}
+        present: set = set()
+        if last >= first:
+            cells = await DayGrid(self._write_lock_owner, now=self._now).cells(
+                first.isoformat(), last.isoformat(), roster_only=True
+            )
+            for cell in cells:
+                present.add(cell.business_date)
+                if cell.shift_id is not None:
+                    per_shift = counts.setdefault(cell.business_date, {})
+                    per_shift[cell.shift_id] = per_shift.get(cell.shift_id, 0) + 1
+        out: dict = {}
+        for weekday in range(7):
+            delta = (today.weekday() - weekday) % 7 or 7
+            samples = [
+                today - timedelta(days=delta + 7 * step)
+                for step in range(DEMAND_FALLBACK_WEEKS)
+            ]
+            seen = [sample.isoformat() for sample in samples if sample.isoformat() in present]
+            if not seen:
+                out[weekday] = None
+                continue
+            out[weekday] = {
+                shift_id: _median_round([counts.get(day, {}).get(shift_id, 0) for day in seen])
+                for shift_id in shift_ids
+            }
+        return out
+
+    async def _demand_block(self, days: list, shift_ids: list) -> dict:
+        """一批日期的目标人数与来源（月历 / 周表 / 当日名单 / 待办共用）。
+
+        优先级：按天覆盖 → 平时/周末默认值 → 近 4 周同星期几中位数。
+        返回 {日期: {...}}：
+        - targets / sources：按班次给（int 键）；
+        - overrides：只放**按天覆盖**那几格（/demand/day 回显用）；
+        - source：这一天的整体口径。有一个班次靠参考 → fallback；没有参考、但有
+          班次配过 → configured（另一部分班次是新店、连历史都没有，按 none 每班给）；
+          一个都没配过、也没历史 → none。
+          前端整体措辞据此决定，标红仍按每班自己的 source 走（fallback 一律不标红）。
+        """
+        ordered = sorted({_require_business_date(day) for day in days})
+        if not ordered or not shift_ids:
+            return {
+                day: {
+                    "weekend": self._demand_kind(day) == DEMAND_WEEKEND,
+                    "targets": {},
+                    "sources": {},
+                    "overrides": {},
+                    "source": DEMAND_SOURCE_NONE,
+                }
+                for day in ordered
+            }
+        first, last = ordered[0], ordered[-1]
+        overrides = await self._demand_day_rows(first, last)
+        defaults = await self._demand_defaults_map()
+        fallback = await self._demand_fallback_targets(shift_ids)
+        out: dict = {}
+        for day in ordered:
+            kind = self._demand_kind(day)
+            day_overrides = overrides.get(day, {})
+            day_defaults = defaults.get(kind, {})
+            reference = fallback.get(date.fromisoformat(day).weekday())
+            targets: dict = {}
+            sources: dict = {}
+            for shift_id in shift_ids:
+                if shift_id in day_overrides:
+                    target, source = day_overrides[shift_id], DEMAND_SOURCE_CONFIGURED
+                elif shift_id in day_defaults:
+                    target, source = day_defaults[shift_id], DEMAND_SOURCE_CONFIGURED
+                elif reference is None:
+                    target, source = 0, DEMAND_SOURCE_NONE
+                else:
+                    target, source = int(reference.get(shift_id, 0)), DEMAND_SOURCE_FALLBACK
+                targets[shift_id] = target
+                sources[shift_id] = source
+            values = set(sources.values())
+            if DEMAND_SOURCE_FALLBACK in values:
+                overall = DEMAND_SOURCE_FALLBACK
+            elif DEMAND_SOURCE_CONFIGURED in values:
+                overall = DEMAND_SOURCE_CONFIGURED
+            else:
+                overall = DEMAND_SOURCE_NONE
+            out[day] = {
+                "weekend": kind == DEMAND_WEEKEND,
+                "targets": targets,
+                "sources": sources,
+                "overrides": dict(day_overrides),
+                "source": overall,
+            }
+        return out
+
+    @_needs_migration
+    async def demand_defaults(self) -> dict:
+        """平时 / 周末两套默认值（「目标人数」弹窗读这一条）。"""
+        shifts = await self.list_shifts()
+        defaults = await self._demand_defaults_map()
+        return {
+            "shifts": shifts,
+            "weekday": {
+                str(shift_id): headcount
+                for shift_id, headcount in sorted(defaults.get(DEMAND_WEEKDAY, {}).items())
+            },
+            "weekend": {
+                str(shift_id): headcount
+                for shift_id, headcount in sorted(defaults.get(DEMAND_WEEKEND, {}).items())
+            },
+            "fallback_weeks": DEMAND_FALLBACK_WEEKS,
+            "max_headcount": MAX_DEMAND_HEADCOUNT,
+        }
+
+    @_needs_migration
+    async def set_demand_defaults(
+        self, weekday: Optional[dict] = None, weekend: Optional[dict] = None
+    ) -> dict:
+        """整组替换默认值：请求里没出现的班次 = 这一组不配（回落参考值）。"""
+        shift_ids = await self._demand_shift_ids()
+        groups = {
+            DEMAND_WEEKDAY: self._demand_mapping(weekday, shift_ids),
+            DEMAND_WEEKEND: self._demand_mapping(weekend, shift_ids),
+        }
+        await self._apply_demand_defaults(groups)
+        return await self.demand_defaults()
+
+    @serialized_write
+    async def _apply_demand_defaults(self, groups: dict) -> None:
+        await self._conn.execute("DELETE FROM scheduling_demand_defaults")
+        for kind in DEMAND_KINDS:
+            for shift_id, headcount in sorted(groups.get(kind, {}).items()):
+                await self._conn.execute(
+                    """INSERT INTO scheduling_demand_defaults (kind, shift_id, headcount)
+                       VALUES (?, ?, ?)""",
+                    (kind, shift_id, headcount),
+                )
+        await self._conn.commit()
+
+    @_needs_migration
+    async def demand_target(self, business_date: Optional[str] = None) -> dict:
+        """某一天的「目标人数」快照（只读；不数实到）。"""
+        day = _require_business_date(business_date or self.today())
+        shifts = await self._shifts_for_display(set())
+        shift_ids = [int(shift["id"]) for shift in shifts]
+        block = (await self._demand_block([day], shift_ids))[day]
+        return {
+            "business_date": day,
+            "weekend": block["weekend"],
+            "source": block["source"],
+            "targets": {str(shift_id): value for shift_id, value in block["targets"].items()},
+            "sources": {str(shift_id): source for shift_id, source in block["sources"].items()},
+            "overrides": {
+                str(shift_id): value for shift_id, value in block["overrides"].items()
+            },
+        }
+
+    @_needs_migration
+    async def demand_day(self, business_date: Optional[str] = None) -> dict:
+        """某一天：每个班次实到 / 目标 / 缺口（班次表「今日实到/目标」与单日编辑用）。"""
+        day = _require_business_date(business_date or self.today())
+        cells = await DayGrid(self._write_lock_owner, now=self._now).cells(
+            day, day, roster_only=True
+        )
+        counted: dict = {}
+        for cell in cells:
+            if cell.shift_id is not None:
+                counted[cell.shift_id] = counted.get(cell.shift_id, 0) + 1
+        shifts = await self._shifts_for_display(set(counted))
+        shift_ids = [int(shift["id"]) for shift in shifts]
+        block = (await self._demand_block([day], shift_ids))[day]
+        rows = []
+        for shift in shifts:
+            shift_id = int(shift["id"])
+            count = counted.get(shift_id, 0)
+            target = block["targets"].get(shift_id, 0)
+            rows.append({
+                **shift,
+                "count": count,
+                "target": target,
+                "gap": count - target,
+                "source": block["sources"].get(shift_id, DEMAND_SOURCE_NONE),
+            })
+        return {
+            "business_date": day,
+            "weekend": block["weekend"],
+            "source": block["source"],
+            "total": sum(row["count"] for row in rows),
+            "target_total": sum(row["target"] for row in rows),
+            "overrides": {
+                str(shift_id): value for shift_id, value in block["overrides"].items()
+            },
+            "shifts": rows,
+        }
+
+    @_needs_migration
+    async def set_demand_day(
+        self, business_date: Any, headcounts: Optional[dict] = None
+    ) -> dict:
+        """按天覆盖：headcounts 为 None / 空 = 删掉这一天的覆盖（回默认值）。"""
+        day = _require_business_date(business_date)
+        if not headcounts:
+            await self._clear_demand_day(day)
+        else:
+            shift_ids = await self._demand_shift_ids()
+            await self._apply_demand_day(day, self._demand_mapping(headcounts, shift_ids))
+        return await self.demand_day(day)
+
+    @serialized_write
+    async def _clear_demand_day(self, day: str) -> None:
+        await self._conn.execute(
+            "DELETE FROM scheduling_demand_days WHERE business_date = ?", (day,)
+        )
+        await self._conn.commit()
+
+    @serialized_write
+    async def _apply_demand_day(self, day: str, mapping: dict) -> None:
+        await self._conn.execute(
+            "DELETE FROM scheduling_demand_days WHERE business_date = ?", (day,)
+        )
+        for shift_id, headcount in sorted(mapping.items()):
+            await self._conn.execute(
+                """INSERT INTO scheduling_demand_days (business_date, shift_id, headcount)
+                   VALUES (?, ?, ?)""",
+                (day, shift_id, headcount),
+            )
+        await self._conn.commit()
+
+
     @_needs_migration
     async def month_calendar(self, month: str) -> dict:
         """一个月的月历：每天各班的**人数**（票 02 的验收项）。
@@ -2464,12 +2766,21 @@ class SchedulingStore:
                 half_rest[key] = half_rest.get(key, 0) + 1
         used = {shift_id for per_shift in counted.values() for shift_id in per_shift}
         shifts = await self._shifts_for_display(used)
+        shift_ids = [int(shift["id"]) for shift in shifts]
+
+        # 整月的目标人数一次取齐（0061）：优先级判据只在 _demand_block 一处。
+        # 响应里多加 targets / gaps / sources / target_source，旧字段（counts /
+        # total / overridden / half_rest）一字不动 —— 前端照旧先读旧字段。
+        demand = await self._demand_block(_each_day_between(first, last), shift_ids)
 
         today = self.today()
         days = []
         for day in _each_day(start, next_month):
             key = day.isoformat()
             per_shift = counted.get(key, {})
+            target_block = demand.get(key, {})
+            targets = target_block.get("targets", {})
+            sources = target_block.get("sources", {})
             days.append({
                 "business_date": key,
                 "day": day.day,
@@ -2479,6 +2790,16 @@ class SchedulingStore:
                 "overridden": overridden.get(key, 0),
                 # 那天几个人「休半天」（票 07）；0 = 没有（月历不画这个标记）。
                 "half_rest": half_rest.get(key, 0),
+                # 目标人数（0061）：缺不缺口看 gaps 的符号，targets 与 counts 同键。
+                "targets": {str(s["id"]): targets.get(s["id"], 0) for s in shifts},
+                "gaps": {
+                    str(s["id"]): per_shift.get(s["id"], 0) - targets.get(s["id"], 0)
+                    for s in shifts
+                },
+                "sources": {
+                    str(s["id"]): sources.get(s["id"], DEMAND_SOURCE_NONE) for s in shifts
+                },
+                "target_source": target_block.get("source", DEMAND_SOURCE_NONE),
             })
 
         return {**self._month_frame(start, today, days), "shifts": shifts}
@@ -2550,15 +2871,25 @@ class SchedulingStore:
             }
 
         shifts = await self._shifts_for_display({key for key in by_shift if key is not REST})
+        # 目标人数（0061）：当天每一组「实到 / 目标 / 缺口 / 来源」，面板显示
+        # 「夜班 5/6 缺 1」；source=fallback 时目标数字是参考值，前端标「参考」。
+        demand = (await self._demand_block([day], [int(shift["id"]) for shift in shifts]))[day]
+        targets = demand["targets"]
+        sources = demand["sources"]
         groups = []
         for shift in shifts:
             people = sorted(
                 by_shift.get(shift["id"], []),
                 key=lambda item: names.get(item[0], ""),
             )
+            shift_id = int(shift["id"])
+            count = len(people)
             groups.append({
                 "shift": shift,
-                "count": len(people),
+                "count": count,
+                "target": targets.get(shift_id, 0),
+                "gap": count - targets.get(shift_id, 0),
+                "source": sources.get(shift_id, DEMAND_SOURCE_NONE),
                 "people": [person(*item) for item in people],
             })
         rest_ids = sorted(by_shift.get(REST, []), key=lambda item: names.get(item[0], ""))
@@ -2566,6 +2897,8 @@ class SchedulingStore:
             "business_date": day,
             "groups": groups,
             "total": sum(group["count"] for group in groups),
+            "target_total": sum(group["target"] for group in groups),
+            "target_source": demand["source"],
             "off_count": len(rest_ids),
             # 「休」这一组里谁是请假：每格自带 `leave`（cells 已经一次批量查完），
             # 不再按人重查一遍覆盖表。
@@ -2643,6 +2976,21 @@ class SchedulingStore:
                 "leave": cell.leave,
             }
 
+        # 名单提前读（原来在 employees 循环前）：既列人，也给「实到」人数做在册过滤。
+        # 停用 / 待批准的人名下可能还留结果行（停用不删行），他们不算实到 —— 与月历
+        # 的 `_on_roster_ids`、当日名单是同一份判据，一格都不多查。
+        roster = await EmployeeAccounts(self._write_lock_owner).list_roster()
+        on_roster = {
+            employee["id"]
+            for employee in roster
+            if employee["approved"] and not employee["resigned"]
+        }
+        shift_counts: dict[str, dict[int, int]] = {}
+        for cell in cells:
+            if cell.shift_id is not None and cell.employee_id in on_roster:
+                per_shift = shift_counts.setdefault(cell.business_date, {})
+                per_shift[cell.shift_id] = per_shift.get(cell.shift_id, 0) + 1
+
         days = []
         for offset in range(7):
             day = first + timedelta(days=offset)
@@ -2679,6 +3027,36 @@ class SchedulingStore:
         # 抽屉要拿它当班次选择列，所以启用的一个不少。
         shifts = await self._shifts_for_display(used)
         shift_names = {int(shift["id"]): shift["name"] for shift in shifts}
+
+        # 目标人数（0061）：给 7 天各补 counts / targets / gaps / sources —— 周表表头
+        # 就写「夜 5/6」，排班时当场看得见缺口。**只提示、不拦**：笔照旧能落，店长
+        # 自己决定要不要补人（与员工端待办页的既有原则同一句）。
+        shift_ids = [int(shift["id"]) for shift in shifts]
+        demand = await self._demand_block(
+            [day["business_date"] for day in days], shift_ids
+        )
+        for day in days:
+            key = day["business_date"]
+            blocked = demand.get(key, {})
+            targets = blocked.get("targets", {})
+            sources = blocked.get("sources", {})
+            counted = shift_counts.get(key, {})
+            day["counts"] = {
+                str(shift_id): counted.get(shift_id, 0) for shift_id in shift_ids
+            }
+            day["targets"] = {
+                str(shift_id): targets.get(shift_id, 0) for shift_id in shift_ids
+            }
+            day["gaps"] = {
+                str(shift_id): counted.get(shift_id, 0) - targets.get(shift_id, 0)
+                for shift_id in shift_ids
+            }
+            day["sources"] = {
+                str(shift_id): sources.get(shift_id, DEMAND_SOURCE_NONE)
+                for shift_id in shift_ids
+            }
+            day["target_source"] = blocked.get("source", DEMAND_SOURCE_NONE)
+
         rules = await self._rule_rows()
         # 行序（票 14）：有规则的人按**规则起点班次**分片 —— `cycle` 里第一个不是「休」的
         # 班次（整轮全是休 / 规则读不出来都当没规则，见 `_cycle_lead_shift`）。
@@ -2714,7 +3092,6 @@ class SchedulingStore:
         employees = []
         # 被过滤掉的人也要说一句（§3.7）：静默丢人正是「以为漏排」的来源。
         excluded = {"resigned": 0, "pending": 0}
-        roster = await EmployeeAccounts(self._write_lock_owner).list_roster()
         for employee in sorted(roster, key=row_order):
             if employee["resigned"]:
                 excluded["resigned"] += 1
@@ -3181,8 +3558,9 @@ class SchedulingStore:
         批了就是对调，没有人数可算。两种卡都带 `peer_employee_id` / `peer_name`（请假是空），
         前端少一处分支。
 
-        人手够不够只把数字摊开 —— 服务层没有「最少几个人」这个配置，也就没有阈值可判，
-        「只提示、不阻止」在实现上就是**根本没有那道闸**（票面的口径）。
+        人手够不够以前只把数字摊开；现在（0061）有「每日需求人数」了，请假卡每天还带
+        counts / targets（按班次），前端据此算「批了会缺几人」。仍然是「只提示、不阻止」：
+        批准不看缺口，服务层没有那道闸（票面的口径）。
 
         `days` 是申请区间的每一天（两端都算；换班就一天），`past=True` 的那几天批了也
         不会动（批准只写今天与以后 —— 跟店长手改排班那条 30 天回溯窗口不是同一条），
@@ -3207,6 +3585,17 @@ class SchedulingStore:
         # 而 `list_rules()` 那条解码路会让整页待办跟着 400（它的口径见那个 docstring）。
         rules = await self._rule_rows()
         roster = await EmployeeAccounts(self._write_lock_owner).list_roster()
+
+        # 目标人数（0061）：请假卡要回答「批了会缺几人」，判据就是按班次的目标人数。
+        # 只算请假申请盖到的日子；换班不改人数，不用算。
+        shift_ids = [int(shift["id"]) for shift in shifts]
+        leave_days = sorted({
+            day
+            for row in rows
+            if row["kind"] != KIND_SWAP
+            for day in _each_day_between(row["start_date"], row["end_date"])
+        })
+        demand = await self._demand_block(leave_days, shift_ids)
 
         # 一天只查一次：同一批申请常指着同几天（一个人请的那几天，别人也可能请）。
         on_duty: dict[str, dict[int, Optional[int]]] = {}
@@ -3256,15 +3645,32 @@ class SchedulingStore:
                         "shift_name": shift["name"],
                         "count": max(left, 0),
                     })
+                blocked = demand.get(day, {})
+                blocked_targets = blocked.get("targets", {})
+                blocked_sources = blocked.get("sources", {})
                 days.append({
                     "business_date": day,
                     "past": day < today,
-                    # 那天她原本在哪：`scheduled=False` 是「那天还没排到」，
-                    # `scheduled=True` 而 `current_shift_id` 空是「本来就休」。
+                    # 那天她原本在哪：scheduled=False 是「那天还没排到」，
+                    # scheduled=True 而 current_shift_id 空是「本来就休」。
                     "scheduled": employee_id in people,
                     "current_shift_id": mine,
                     "current_shift_name": None if mine is None else shift_names.get(mine),
                     "after": after,
+                    # 那天各班现在几个人 / 目标几个人（0061）：前端把当天所有待批请假
+                    # 叠加起来，算「都批了会缺几人」。仍然是只提示，不拦批准。
+                    "counts": {
+                        str(shift_id): counts.get(shift_id, 0) for shift_id in shift_ids
+                    },
+                    "targets": {
+                        str(shift_id): blocked_targets.get(shift_id, 0)
+                        for shift_id in shift_ids
+                    },
+                    "sources": {
+                        str(shift_id): blocked_sources.get(shift_id, DEMAND_SOURCE_NONE)
+                        for shift_id in shift_ids
+                    },
+                    "target_source": blocked.get("source", DEMAND_SOURCE_NONE),
                 })
             requests.append({
                 "id": int(row["id"]),
@@ -3670,8 +4076,9 @@ class SchedulingStore:
 
         **任何一方那天有已批准的假就整笔拒绝**（`leave_approved`）：写下去会用
         `kind=swap` 把那条 `kind=leave` 的覆盖记录盖掉，对方从「请假」变成来上申请人的班，
-        而申请表里那条假仍是 `approved` —— 审批记录与排班事实互相矛盾。判据与批量清除、
-        单格撤销同一处（`_leave_ids`）、同一个词。拒绝时 `_claim_request` 那次 UPDATE 被
+        而申请表里那条假仍是 `approved` —— 审批记录与排班事实互相矛盾。判据是与批量
+        清除、单格撤销同一个（`paint_gate` 的 `leave` 那道）、同一个词。拒绝时
+        `_claim_request` 那次 UPDATE 被
         `serialized_write` 回滚，申请仍是「等店长批」，店长可以驳回它。
         """
         employee_id = int(row["employee_id"])
@@ -3688,7 +4095,9 @@ class SchedulingStore:
             # 过去 / 窗口外那天本来就不写：不在这里拦请假（拦了也没东西可盖）。
             skipped.append(day)
         elif await self._leave_ids([employee_id, peer_id], day):
-            raise SchedulingError("leave_approved", "leave_approved")
+            raise SchedulingError(
+                *paint_gate.single_error(paint_gate.Skip(paint_gate.LEAVE_APPROVED))
+            )
         else:
             _, mine_now = await self._day_shift(employee_id, day)
             _, theirs_now = await self._day_shift(peer_id, day)

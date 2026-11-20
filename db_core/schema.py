@@ -85,9 +85,15 @@ HYGIENE_TABLES = (
 # requests waiting on the manager; approving one writes `scheduling_overrides` rows),
 # and `scheduling_zone_defaults` is "who × which shift →
 # which zone" (the zone names themselves stay in `hygiene_zones`, read through the
-# public layer). All six are written only through `services/scheduling/store.py`;
-# the Admin data browser lists them read-only through its separate catalog, and the
-# generic business-table write paths must not touch them.
+# public layer). `scheduling_demand_defaults` / `scheduling_demand_days`
+# (migration 0061) hold "business day × shift → how many people the day needs": the
+# weekday / weekend defaults, plus the per-day override a holiday or an event writes.
+# A day nobody configured is *not* stored — the store computes it from the last four
+# same-weekday medians and marks it `source='fallback'`, so an empty table means
+# "nothing configured yet", not "zero people needed". All of them are written only
+# through `services/scheduling/store.py`; the Admin data browser lists them read-only
+# through its separate catalog, and the generic business-table write paths must not
+# touch them.
 SCHEDULING_TABLES = (
     "staff_shifts",
     "staff_assignments",
@@ -95,6 +101,8 @@ SCHEDULING_TABLES = (
     "scheduling_overrides",
     "scheduling_requests",
     "scheduling_zone_defaults",
+    "scheduling_demand_defaults",
+    "scheduling_demand_days",
 )
 
 AUTH_PHYSICAL_TABLES = ("admin_user", "sessions", "api_tokens")

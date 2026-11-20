@@ -3,7 +3,6 @@ import { api } from '../api/client'
 import { eachDayInRange } from '../utils/dateRange'
 import {
   PICK_HALF_REST,
-  PICK_MAX_CELLS,
   PICK_REST,
   PICK_RESTORE,
   PICK_SHIFT,
@@ -14,7 +13,6 @@ import {
   overLimit,
   pastDatesIn,
   pickPending,
-  predictSkips,
   snapshotCells,
   undoPlan,
 } from '../utils/schedulingWeekPick'
@@ -322,15 +320,6 @@ export function useSchedulingBoard() {
     }).join('、')
   }
 
-  function skipContext(action) {
-    return {
-      action: action || PICK_SHIFT,
-      today: week.value ? week.value.today : '',
-      windowEnd: week.value ? week.value.window_end : '',
-      cellOf: cellAt,
-    }
-  }
-
   // 待批提醒的数据来源：周表每格没有「待批」这个字段，只有既有的待办那一份（按天粒度）。
   const pendingCells = computed(() => {
     const map = {}
@@ -409,22 +398,20 @@ export function useSchedulingBoard() {
     }
   }
 
-  /** 真写一格（paintCell 与队列共用）：跳过预判 → requestPaint。 */
+  /** 真写一格（paintCell 与队列共用）：直接交给 requestPaint。
+   *
+   *  **不再本地预判**「这一格会不会被跳过」：那一套判据（在册 / 离职 / 窗口 / 请假）在
+   *  服务端的落笔闸里只有一份，前端复刻一份的结果是两处各说各的（判据一改就对不上）。
+   *  会不会跳过、为什么，以回执的 `skipped[]` 为准 —— 与整片刷同一句话。 */
   async function executePaint(employee, day, action, options) {
-    const cells = [{ employeeId: employee.id, date: day.business_date }]
-    const [skip] = predictSkips(cells, skipContext(action))
-    if (skip) {
-      sayNotice(`跳过：${skipText([skip])}`)
-      return
-    }
-    await requestPaint(action, options, cells)
+    await requestPaint(action, options, [{ employeeId: employee.id, date: day.business_date }])
   }
 
   /** 点一格 = 立刻用当前笔写这一格（票 14 修订口径 2）：不选区、不点「应用」，一步。
    *
-   *  会被跳过的那种格子**不发请求**：超 30 天、已批的假（词表与回执同一套 `PICK_SKIP_TEXT`）。
-   *  「休半天」还有一条本地闸：休 / 空白那格没有班次可挂，直接说一句、不发请求。
-   *  整片刷的时候跳过由服务端回执点名（它才是权威），这里只是省掉一次注定被跳过的往返。
+   *  「休半天」留了一条**本地**闸：休 / 空白那格没有班次可挂，直接说一句、不发请求
+   *  （周表已经把班次给到这一层，看得见就不必往返一次）。其余「能不能写这一天」全归
+   *  服务端的落笔闸：会跳过哪几格、为什么，看回执的 `skipped[]`。
    *  **上一笔还在写时不再静默丢弃**：进队列，写完这一笔按顺序补（见上面 `queuePaint`）。 */
   async function paintCell(employee, day, action, options) {
     if (action === PICK_HALF_REST && !cellHasShift(employee, day)) {
@@ -438,19 +425,29 @@ export function useSchedulingBoard() {
     await executePaint(employee, day, action, options)
   }
 
-  /** 落笔前的三道闸（有没有格子 / 超没超 200 格 / 请求体全不全）；这一笔里有过去的日子
-   *  再弹**一次**确认并点名是哪几天（ADR 0108 决策 3），确认之后才真写。 */
+  /** 落笔前的三道闸（有没有格子 / 超没超上限 / 请求体全不全）；这一笔里有过去的日子
+   *  再弹**一次**确认并点名是哪几天（ADR 0108 决策 3），确认之后才真写。
+   *
+   *  **上限与可补记天数都来自 `/week` 的 `limits`**（`max_cells` / `past_days`）：
+   *  那两个数只定义在服务端的落笔闸里，前端不再写死一份 —— 服务端调了数，这里跟着变。
+   *  拿不到（还没拉到周表）就不挡，让服务端按它自己的口径拒。 */
   async function requestPaint(action, options, cells, who = '') {
     if (!cells.length) return
-    if (overLimit(cells)) {
-      sayNotice(`一次最多 ${PICK_MAX_CELLS} 格，现在选了 ${cells.length} 格：缩小选区再刷。`, [], true)
+    const limits = (week.value && week.value.limits) || {}
+    if (overLimit(cells, limits.max_cells)) {
+      sayNotice(
+        `一次最多 ${limits.max_cells} 格，现在选了 ${cells.length} 格：缩小选区再刷。`, [], true,
+      )
       return
     }
     if (!batchPayload(action, options, cells)) {
       sayNotice('这一笔没有班次可写：先在笔栏上选一个班次。', [], true)
       return
     }
-    const dates = pastDatesIn(cells, { today: week.value ? week.value.today : '' })
+    const dates = pastDatesIn(cells, {
+      today: week.value ? week.value.today : '',
+      pastDays: limits.past_days,
+    })
     if (dates.length) {
       pastConfirm.value = { action, options, cells, dates, voiding: action === PICK_VOID, who }
       return

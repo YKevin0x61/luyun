@@ -71,6 +71,39 @@ const addBusy = ref(false)
 const editingId = ref(0)
 const editName = ref('')
 const deleteTarget = ref(null)
+// 今日「实到 / 目标」（0061）：班次表在排班时就提示够不够，只提示、不拦任何操作。
+// 读失败就整行不提示（这不是这一页的主数据；主数据读不出来才是 errorText 的事）。
+const demand = ref(null)
+const demandByShift = computed(() => {
+  const map = new Map()
+  for (const item of (demand.value && demand.value.shifts) || []) map.set(item.id, item)
+  return map
+})
+
+function demandItem(shift) {
+  return demandByShift.value.get(shift.id) || null
+}
+
+/** 「今日 5/6」；人配过的目标缺了补一句「缺 N」，参考值补「（参考）」。没配过就不占行。 */
+function demandLine(shift) {
+  const item = demandItem(shift)
+  if (!item || !item.target || item.source === 'none') return ''
+  const tail = item.source === 'fallback' ? '（参考）' : item.gap < 0 ? ` · 缺 ${-item.gap}` : ''
+  return `今日 ${item.count}/${item.target}${tail}`
+}
+
+function demandShort(shift) {
+  const item = demandItem(shift)
+  return !!item && item.source === 'configured' && item.gap < 0
+}
+
+async function loadDemand() {
+  try {
+    demand.value = await api.get('/api/scheduling/demand/day')
+  } catch {
+    demand.value = null
+  }
+}
 
 const addPlaceholder = computed(() =>
   maxName.value ? `新班次的名字（最多 ${maxName.value} 个字）` : '新班次的名字'
@@ -87,6 +120,7 @@ async function load() {
     if (data.max_name) maxName.value = data.max_name
     activeCount.value = data.active_count || 0
     state.value = 'ready'
+    await loadDemand()
   } catch (err) {
     errorText.value = err.message || '班次表读不出来'
     state.value = 'error'
@@ -352,6 +386,7 @@ onMounted(() => {
                 <span class="sMain">
                   <b class="sName">{{ shift.name }}</b>
                   <span class="sUsage">{{ usageLine(shift) }}</span>
+                  <span v-if="demandLine(shift)" class="sDemand" :class="{ short: demandShort(shift) }">{{ demandLine(shift) }}</span>
                   <!-- 班次色（0043）：8 档 + 中性。被别人占着的那档不可点，title 里点名谁在用；
                        停用的班次保留自己的色，所以它的色块也照常显示选中态。 -->
                   <span class="sSw" role="group" :aria-label="`「${shift.name}」的班次颜色`">
@@ -490,18 +525,18 @@ onMounted(() => {
 .sHint { margin: 0; font-size: 12.5px; color: var(--ink-dim); }
 .sErr {
   margin: 0; padding: 9px var(--sp-3); border-radius: var(--r-1);
-  border: 1px solid var(--wb-danger-a45); background: var(--danger-soft);
+  border: var(--edge-w, 2px) solid var(--wb-danger-a45); background: var(--danger-soft);
   color: var(--danger-bright); font-size: 12.5px; line-height: 1.7;
 }
 .sOk {
   margin: 0; padding: 9px var(--sp-3); border-radius: var(--r-1);
-  border: 1px solid var(--line-strong); background: var(--ok-soft);
+  border: var(--edge-w, 2px) solid var(--edge); background: var(--ok-soft);
   color: var(--ok); font-size: 12.5px; line-height: 1.7;
 }
 /* 面板（唯一卡片语言）。 */
 .sCard {
-  background: var(--surface-1); border: 1px solid var(--line);
-  border-radius: var(--r-2); box-shadow: var(--hy-shadow-sm); overflow: hidden;
+  background: var(--surface-1); border: var(--edge-w, 2px) solid var(--edge);
+  border-radius: var(--r-2); box-shadow: var(--paper-shadow-sm); overflow: hidden;
 }
 .sCard-hd { display: flex; align-items: center; gap: 9px; padding: 11px 14px; border-bottom: 1px solid var(--line); }
 .sCard-hd h2 {
@@ -548,6 +583,9 @@ onMounted(() => {
 .sMain { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
 .sName { font-size: 12.5px; font-weight: 600; color: var(--ink); }
 .sUsage { font-family: var(--font-mono); font-size: 9.5px; line-height: 1.3; color: var(--ink-faint); }
+/* 今日实到 / 目标（0061）：排班录入时提示够不够，只提示不拦。参考值标「（参考）」不标红。 */
+.sDemand { font-family: var(--font-mono); font-size: var(--fs-12); line-height: 1.3; color: var(--ink-faint); }
+.sDemand.short { color: var(--warn); font-weight: 700; }
 .sNameInput { grid-column: 2 / 4; }
 /* 状态 = 6px LED + 9px 小字（不再做胶囊底色）。 */
 .sTag {
@@ -563,7 +601,7 @@ onMounted(() => {
 .sDutySel {
   min-height: var(--tap); padding-top: 2px; padding-bottom: 2px;
   font-family: var(--font-sans); font-size: 11px; color: var(--ink);
-  background: var(--surface-2); border: 1px solid var(--line-strong);
+  background: var(--surface-2); border: var(--edge-w, 2px) solid var(--edge);
   border-radius: var(--r-1);
 }
 .sActs { display: flex; gap: 4px; justify-content: flex-end; }

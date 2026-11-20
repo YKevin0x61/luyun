@@ -827,7 +827,7 @@ useNudgePull({
 .ds-note {
   margin: 0;
   padding: 7px 10px;
-  border: 1px solid var(--action);
+  border: var(--edge-w, 2px) solid var(--action);
   border-radius: var(--r-1);
   background: var(--action-soft);
   color: var(--ok);
@@ -871,7 +871,7 @@ useNudgePull({
   flex-direction: column;
   gap: 7px;
   padding: 9px 10px;
-  border: 1px solid var(--warn);
+  border: var(--edge-w, 2px) solid var(--warn);
   border-radius: var(--r-1);
   background: var(--warn-soft);
 }
@@ -998,7 +998,7 @@ useNudgePull({
   text-align: left;
   color: inherit;
   background: var(--surface-2);
-  border: 1px solid var(--line);
+  border: var(--edge-w, 2px) solid var(--edge);
   border-radius: var(--r-1);
   cursor: pointer;
 }
@@ -1145,7 +1145,7 @@ useNudgePull({
   min-width: 44px;
   min-height: 44px;
   padding: 0 10px;
-  border: 1px solid var(--line-strong);
+  border: var(--edge-w, 2px) solid var(--edge);
   border-radius: var(--r-1);
   background: transparent;
   color: var(--action);

@@ -17,12 +17,15 @@ from api.workbench_boundary import (
     staff_actor,
 )
 from database import get_db
+from services.realtime.hub import realtime_hub
 from services.realtime.workbench import nudge_scheduling as _scheduling_nudge
 from services.scheduling import MAX_CYCLE_DAYS, MAX_REQUEST_NOTE, MAX_SHIFT_NAME
 from services.scheduling.store import (
+    BACKFILL_DAYS,
     HALF_REST_NEEDS_SHIFT,
     HALF_REST_NEEDS_SHIFT_MESSAGE,
     KIND_LEAVE,
+    MAX_BATCH_CELLS,
     SchedulingError,
     SchedulingStore,
 )
@@ -149,6 +152,8 @@ _ERROR_DETAILS = {
         "名字里带了就永远写不进周期。请去掉「{}」再试"
     ),
     "invalid_shift_order": "显示顺序得是个整数",
+    # 每日需求人数（0061）：0..999 的整数。带一个 {}，服务层把上限放 args[0]。
+    "invalid_headcount": "需求人数得是 0 到 {} 之间的整数：请重新填一次",
     # 卫生档位（票 10）：只能是不出日常 / 白班档 / 夜班档 三种。
     "invalid_duty_slot": "卫生档位只能选白班档、夜班档，或者不出日常：请重新选一次",
     # 班次颜色（0043）：只能从 8 个色键里挑，或者选中性。
@@ -173,7 +178,8 @@ _ERROR_DETAILS = {
         "0009_scheduling_swap.sql、0010_shift_duty_slot.sql、"
         "0028_staff_assignments_half_rest.sql、"
         "0040_scheduling_overrides_voided.sql、"
-        "0043_shift_color.sql 与 0044_scheduling_request_decisions.sql，然后刷新本页"
+        "0043_shift_color.sql、0044_scheduling_request_decisions.sql 与 "
+        "0061_scheduling_demand.sql，然后刷新本页"
     ),
 }
 
@@ -343,6 +349,28 @@ class SwapRequest(BaseModel):
     peer_employee_id: Optional[int] = None
     business_date: Optional[str] = None
     note: Optional[str] = None
+
+
+class DemandDefaultsRequest(BaseModel):
+    """平时 / 周末两套默认人数（0061）。
+
+    两组都是「班次 id → 人数」；缺字段 = 这一组不配（回落「近 4 周同星期几」参考值）。
+    人数不在这里限定范围 —— 服务层那道闸会说清「0 到多少」，pydantic 的英文 422
+    不是给店长看的（同本文件其他模型的取舍）。
+    """
+
+    weekday: Optional[dict[str, int]] = None
+    weekend: Optional[dict[str, int]] = None
+
+
+class DemandDayRequest(BaseModel):
+    """按天覆盖（0061）：headcounts 为 null / 空 = 删掉这一天的覆盖。
+
+    business_date 不是必填：缺字段、空串落到服务层，回中文 400，而不是 422。
+    """
+
+    business_date: Optional[str] = None
+    headcounts: Optional[dict[str, int]] = None
 
 
 # 管理面（19 条）共用的一道门：管理端会话，**或**员工会话加「人事管理」（`schedule`）
@@ -718,6 +746,83 @@ async def delete_shift(
         raise _SCHEDULING_ERRORS.http(exc) from exc
 
 
+# ── 每日需求人数（0061）──────────────────────────────────────────────────
+#
+# 目标按「营业日 × 班次」配：默认值分平时 / 周末两套，特殊日子按天覆盖。没配过的
+# 日子由服务层回落「近 4 周同星期几的中位数」，响应里 source = fallback —— 前端
+# 据此显示「参考」（灰字），不是硬数字。四条路由都走管理面那道门：员工只被提示，
+# 不配目标。
+
+
+@router.get("/demand/defaults")
+async def demand_defaults(
+    db=Depends(get_db), _actor: WorkbenchActor = Depends(_schedule_edit)
+) -> dict:
+    """平时 / 周末两套默认人数 + 现有班次（「目标人数」弹窗读这一条）。"""
+    store = SchedulingStore(db)
+    try:
+        return await store.demand_defaults()
+    except SchedulingError as exc:
+        raise _SCHEDULING_ERRORS.http(exc) from exc
+
+
+@router.put("/demand/defaults")
+async def set_demand_defaults(
+    payload: DemandDefaultsRequest,
+    db=Depends(get_db),
+    _actor: WorkbenchActor = Depends(_schedule_edit),
+) -> dict:
+    """整组替换默认值：请求里没出现的班次 = 这一组不配，回落参考值。
+
+    改的是全店配置、不是某个人某天的班，所以**广播全店**（scope 不带 employee_id，
+    见 services/realtime/hub.py）：订了排班的页面收到后各自重拉。
+    """
+    store = SchedulingStore(db)
+    try:
+        result = await store.set_demand_defaults(payload.weekday, payload.weekend)
+    except SchedulingError as exc:
+        raise _SCHEDULING_ERRORS.http(exc) from exc
+    await realtime_hub.broadcast_nudge("scheduling", {"reason": "demand_updated"})
+    return result
+
+
+@router.get("/demand/day")
+async def demand_day(
+    date: Optional[str] = Query(None, alias="date", description="YYYY-MM-DD，缺省今天"),
+    db=Depends(get_db),
+    _actor: WorkbenchActor = Depends(_schedule_edit),
+) -> dict:
+    """某一天每班「实到 / 目标 / 缺口」（班次表的「今日实到/目标」读这一条）。
+
+    缺省 date = 今天。目标里 source = fallback 的那些是参考值（近 4 周同星期几），
+    前端要标「参考」，不能当硬指标去卡人。
+    """
+    store = SchedulingStore(db)
+    try:
+        return await store.demand_day(date)
+    except SchedulingError as exc:
+        raise _SCHEDULING_ERRORS.http(exc) from exc
+
+
+@router.put("/demand/day")
+async def set_demand_day(
+    payload: DemandDayRequest,
+    db=Depends(get_db),
+    _actor: WorkbenchActor = Depends(_schedule_edit),
+) -> dict:
+    """按天覆盖某天各班的目人数；headcounts 为 null / 空 = 删掉这一天的覆盖。
+
+    跟默认值一样是全店配置，写完广播一次全店 nudge（同 set_demand_defaults）。
+    """
+    store = SchedulingStore(db)
+    try:
+        result = await store.set_demand_day(payload.business_date, payload.headcounts)
+    except SchedulingError as exc:
+        raise _SCHEDULING_ERRORS.http(exc) from exc
+    await realtime_hub.broadcast_nudge("scheduling", {"reason": "demand_updated"})
+    return result
+
+
 @router.get("/calendar")
 async def month_calendar(
     month: str = Query(..., description="YYYY-MM"),
@@ -761,13 +866,22 @@ async def week(
 
     `start` 归一化到那一周的周一，缺省 = 今天所在那周；日期格式坏是 400。
     **读路径不广播 nudge**（见 `services/realtime/workbench.py` 的 `nudge_scheduling`）。
+
+    顶层多给一份 `limits`（`max_cells` / `past_days`）：一次能刷几格、能倒着改几天由
+    `paint_gate` 的常量说了算，前端照这个数先挡，别在浏览器里再写死一份（同
+    `/roster` 的 `max_cycle_days`）。真正的判据仍在服务端的落笔闸里。
     """
     store = SchedulingStore(db)
     try:
         await store.expand()
-        return await store.week_grid(start)
+        data = await store.week_grid(start)
     except SchedulingError as exc:
         raise _SCHEDULING_ERRORS.http(exc) from exc
+    data["limits"] = {
+        "max_cells": MAX_BATCH_CELLS,
+        "past_days": BACKFILL_DAYS,
+    }
+    return data
 
 
 @router.get("/roster")
