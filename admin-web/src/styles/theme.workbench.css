@@ -1,14 +1,17 @@
 /* 工作台主题（批次 ③-1a · t44）—— 唯一的工作台令牌层。
  *
+ * 2026-11-20 换皮：默认档从「深青墨」换成**贴纸风暖底**（风格卡：粗描边 / 硬阴影 / 贴纸感）。
+ * 深色是同族深墨档，挂在 `html[data-workbench][data-wb-theme="dark"]` 上（由
+ * `utils/workbenchTheme.js` 挂/摘）；默认段（不挂属性）= 浅色，是工作台的主皮。
+ *
  * 为什么在这一层：--hy-* 的定义与那 13 个通用别名原先都住在 .hygiene-admin,.hygiene-staff
  * 这个**子树 class** 里（原 public/hygiene-admin.css:8-77）。现场 8 页（/workbench/floor/*）的
  * 页面根**不带**这两个 class，令牌全靠壳祖先继承 —— 作用域一旦收窄，417 处 --hy-* 引用与别名
  * 引用会**静默失效**（不是报错，是掉色）。所以两者必须**一起**上移到 html 级：
  * 选择器 = html[data-workbench]，覆盖整棵文档树，与页面里套了哪层壳无关。
  *
- * 三层：① 基础层 + 语义层，与 .scratch/workbench-redesign/prototype/tokens.css 逐声明相等（74 条），
- * 组件层只写语义名；② 兼容层：--hy-* 本体 + 13 个通用别名，值一个字节没改（现场页与 recipe 视图
- * 此刻还在用这些名字）；③ 布局刻度 --tap/--head-h/--rail-w/--tab-h/--bw/--cell/--shutter/--safe-*。
+ * 三层：① 基础层 + 语义层；② 兼容层：--hy-* 本体 + 13 个通用别名（页面与共享样式表还在用
+ * 这些名字，换皮只换值）；③ 布局刻度 --tap/--head-h/--rail-w/--tab-h/--bw/--cell/--shutter/--safe-*。
  *
  * 为什么是 data-workbench 而不是 data-theme：**配方阅读面（/workbench/kitchen/recipe*）已经在用
  * `documentElement` 的 `data-theme` 存自己的阅读主题**（打印页打印前强制 `light`、详情页与岗位页按用户
@@ -17,11 +20,28 @@
  * 派生色一律写死 rgba，不用 color-mix()（老 WebView 不支持时是静默透明，比不写还糟）。
  * 后台页面（/admin、/sales-report…）的 html 上没有 data-workbench，继续吃 theme.css 的 :root。
  */
+
+/* ── 贴纸风的四根度量（2026-11-20）──────────────────────────────────────────
+   ① 描边：卡片 / 按钮一律 2px 深墨（`--edge-w`）。能用 border 的地方不要用 1px 灰线 ——
+      1px 灰线是旧「钢面·仪」的写法，贴纸风靠**实心深墨框**立住形。
+   ② 硬阴影：`4px 4px 0` 无模糊（`--paper-shadow`），与描边同色；不要用模糊投影。
+   ③ 圆角：卡片 20px（--r-2），大面板 24px（--r-3），小件 12px（--r-1）。
+   ④ 颜色只用三种：暖纸白 / 深墨 / 主橙，青绿只作点缀与链接。信号色（ok/warn/danger）
+      从这三色的深档里选，不引入第四种色相。 */
 html[data-workbench] {
-  --surface-0:#0a1719; --surface-1:#112529; --surface-2:#0c1d20; --surface-3:#16303a;
-  --chrome:#0c1d20;
-  --ink:#e4f0ee; --ink-dim:#85aaa7; --ink-faint:#739d98;
-  --line:rgba(133,205,198,.13); --line-strong:rgba(133,205,198,.28);
+  --edge:#1D1B3A;
+  --edge-w:2px;
+  /* 影色单独一门（--shadow-ink），不跟描边共用 --edge：深色档的描边是米白，若阴影也取
+     --edge，卡片右下会拖出一条亮边，看着像没对齐。 */
+  --shadow-ink:var(--edge);
+  --paper-shadow:4px 4px 0 var(--shadow-ink);
+  --paper-shadow-sm:3px 3px 0 var(--shadow-ink);
+
+  --surface-0:#FFF7E8; --surface-1:#FFFFFF; --surface-2:#FFEFD9; --surface-3:#FFE4C4;
+  --chrome:#FFF7E8;
+  --ink:#1D1B3A; --ink-dim:#5D5A82; --ink-faint:#6B6788;
+  /* 两档线：描边用 --edge（深墨 2px）；分隔/轨道用 --line 的半透明墨。换皮时把两个名字分开了 —— */
+  --line:rgba(29,27,58,.16); --line-strong:var(--edge);
 
   /* ── 班次色（0043，`migrations/pg/0043_shift_color.sql`）──────────────────
      店长在班次表页给每个班次选一档，周表/月历的格子按它上色。8 档 = 6 主色 +
@@ -48,22 +68,25 @@ html[data-workbench] {
   /* 中性档：不参与调色板（可重复），第 9 个启用班次与「迁移还没应用」都走它。 */
   --shift-neutral:var(--surface-2); --shift-neutral-ink:var(--ink-dim);
   /* 8 档都是亮底，所以边界统一用一根深发丝，不按档重复定义。 */
-  --shift-edge:rgba(10,16,20,.18);
+  --shift-edge:rgba(29,27,58,.28);
   /* 这两个是**局部钩子**：`.tone-<色键>` 在元素上把它们覆盖成那一档的底色/字色，
      页面样式统一引用它们（周表格子、月历色条、当天名单分组头都在用）。声明在这里
      是为了让「引用了未定义的自定义属性」那道检查能看见 —— 它们不是全局主题值。 */
   --shift-fill:var(--shift-neutral);
   --shift-ink:var(--ink-dim);
-  --line-control:rgba(133,205,198,.55);
-  --action:#3fe0b0; --action-ink:#052018; --action-soft:rgba(63,224,176,.12);
-  --ok:#79e9c4; --warn:#e3a44a; --danger:#d9482f; --danger-bright:#ef6a4f; --info:#5fd6e6;
-  --accent-alt:#f07ab0; --focus-ring:rgba(63,224,176,.55);
-  --ok-soft:rgba(121,233,196,.14); --warn-soft:rgba(227,164,74,.14);
-  --danger-soft:rgba(217,72,47,.16); --info-soft:rgba(95,214,230,.14);
-  --scrim:rgba(10,23,25,.82);
+  --line-control:rgba(29,27,58,.32);
+  --action:#FF6A3D; --action-ink:#1D1B3A; --action-soft:#FFE0D4;
+  --ok:#137167; --warn:#B24A16; --danger:#C22C1B; --danger-bright:#A81F10; --info:#137167;
+  --accent-alt:#1F9E92; --focus-ring:#FF6A3D;
+  /* 「请假」专用（票 08 的五态色）：--info 与 --ok 在三色上限下同值，请假再挂 --info 就会
+     和「上班」撞成一块，所以给它自己的语义名。值取紫，色相上与绿/青/灰/橙红都分得开。 */
+  --state-leave:#6B5BD6;
+  --ok-soft:#DFF3EE; --warn-soft:#FFEBD9;
+  --danger-soft:#FBE3DE; --info-soft:#DFF3EE;
+  --scrim:rgba(29,27,58,.45);
   --sp-1:4px; --sp-2:8px; --sp-3:12px; --sp-4:16px; --sp-6:24px; --sp-8:32px;
   --fs-11:11px; --fs-12:12px; --fs-13:13px; --fs-14:14px; --fs-16:16px; --fs-20:20px; --fs-24:24px;
-  --r-0:2px; --r-1:8px; --r-2:12px; --r-3:16px; --r-full:999px;
+  --r-0:6px; --r-1:12px; --r-2:20px; --r-3:24px; --r-full:999px;
   --z-shell:20; --z-scrim:40; --z-dialog:55; --z-toast:100; --z-queue:200;
   /* 页内底栏（`.wb-tabbar` / 共享表里的 `.hy-tabbar`）——**比 `--z-shell` 低一档**，不是另一档
      语义：它固定在视口底、属于**内容区**而不是壳 chrome，要排在壳的顶栏 / 手机页头之下。
@@ -77,100 +100,103 @@ html[data-workbench] {
   --dur-1:120ms; --dur-2:200ms; --dur-3:320ms; --ease:cubic-bezier(.22,1,.36,1);
   --ls-1:.04em; --ls-2:.08em; --ls-3:.12em; --ls-4:.16em;
   --dot:7px; --icon-tab:21px;
-  --font-sans:"PingFang SC","Hiragino Sans GB","Microsoft YaHei","Noto Sans SC",system-ui,sans-serif;
+  /* 标题用圆体、正文用黑体（风格卡：标题 800 + SF Pro Rounded 优先）。
+     SF Pro Rounded 只有 Apple 平台自带，落到 PingFang SC 时靠 800 字重撑住。
+     字体名里的空格与逗号必须按 CSS 规矩加引号。 */
+  --font-display:"SF Pro Rounded","PingFang SC","HarmonyOS Sans SC",system-ui,sans-serif;
+  --font-sans:"PingFang SC","HarmonyOS Sans SC","Microsoft YaHei","Hiragino Sans GB","Noto Sans SC",system-ui,sans-serif;
   --font-song:"Noto Serif SC","Songti SC","STSongti-SC-Regular","STSong","SimSun",serif;
   --font-mono:ui-monospace,"SF Mono","SFMono-Regular",Menlo,Consolas,"Liberation Mono",monospace;
-  --tap:44px; --head-h:56px; --rail-w:238px; --tab-h:56px; --bw:1px;
+  --tap:44px; --head-h:56px; --rail-w:238px; --tab-h:56px; --bw:2px;
   --cell:54px; --shutter:72px; --h-row:calc(var(--tap) + var(--sp-3));
   --safe-t:env(safe-area-inset-top,0px); --safe-b:env(safe-area-inset-bottom,0px);
   --safe-l:env(safe-area-inset-left,0px); --safe-r:env(safe-area-inset-right,0px);
 
-  /* ── 兼容层：--hy-* 本体 + 通用别名（原样从 public/hygiene-admin.css 上移，值未改）── */
+  /* ── 兼容层：--hy-* 本体 + 通用别名（页面里 417 处引用，换皮只换值、不改名）── */
   /* 字体 */
-  --font-sans: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC", system-ui, sans-serif;
+  --font-sans: "PingFang SC", "HarmonyOS Sans SC", "Microsoft YaHei", "Hiragino Sans GB", "Noto Sans SC", system-ui, sans-serif;
+  --font-display: "SF Pro Rounded", "PingFang SC", "HarmonyOS Sans SC", system-ui, sans-serif;
   --font-song: "Noto Serif SC", "Songti SC", "STSongti-SC-Regular", "STSong", "SimSun", serif;
   --font-mono: ui-monospace, "SF Mono", "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace;
 
-  /* 深青墨色阶 */
-  --hy-night: #060f11;
-  --hy-pool: #0f6f78;
-  --hy-bg: #0a1719;
-  --hy-surface: #112529;
-  --hy-surface-2: #0c1d20;
-  --hy-surface-3: #16303a;
-  --hy-line: rgba(133, 205, 198, .13);
-  --hy-line-strong: rgba(133, 205, 198, .28);
-  --hy-ink: #e4f0ee;
-  --hy-muted: #85aaa7;
-  /* 原来的 #5d7e7b 对 --hy-surface 只有 3.59:1，用在底部 tab 未选中标签和
-     「已停用」状态胶囊这类小字上不满足 AA（需 4.5:1）。#739d98 对 --hy-surface
-     是 5.30:1，对叠了 rgba(133,170,167,.08) 的胶囊底也是 4.64:1。 */
-  --hy-faint: #739d98;
+  /* 纸白 + 墨色阶 */
+  --hy-night: #1D1B3A;
+  --hy-pool: #137167;
+  --hy-bg: #FFF7E8;
+  --hy-surface: #FFFFFF;
+  --hy-surface-2: #FFEFD9;
+  --hy-surface-3: #FFE4C4;
+  --hy-line: #1D1B3A;
+  --hy-line-strong: #1D1B3A;
+  --hy-ink: #1D1B3A;
+  --hy-muted: #5D5A82;
+  /* faint 比 muted 再淡一点仍要 ≥4.5:1：#6B6788 对白 5.1:1、对 --hy-bg #FFF7E8 4.8:1。 */
+  --hy-faint: #6B6788;
 
-  /* 信号色 */
-  --hy-mint: #3fe0b0;
-  --hy-mint-bright: #63efc5;
-  --hy-mint-ink: #052018;
-  --hy-mint-soft: rgba(63, 224, 176, .12);
-  --hy-mint-line: rgba(63, 224, 176, .34);
-  --hy-jade: #79e9c4;
-  --hy-seal: #d9482f;
-  --hy-seal-bright: #ef6a4f;
-  --hy-seal-soft: rgba(217, 72, 47, .13);
-  --hy-seal-line: rgba(217, 72, 47, .42);
-  --hy-amber: #e3a44a;
-  --hy-amber-bright: #f4bb5f;
-  --hy-amber-soft: rgba(227, 164, 74, .12);
-  --hy-amber-line: rgba(227, 164, 74, .4);
-  --hy-aqua: #5fd6e6;
-  --hy-coral: #ff7a5c;
-  --hy-paper: #f4e9db;
+  /* 信号色：主橙是「强调」，青绿是「完成 / 链接」，深橙与砖红是「该看一眼 / 出事了」 */
+  --hy-mint: #FF6A3D;
+  --hy-mint-bright: #E8582C;
+  --hy-mint-ink: #1D1B3A;
+  --hy-mint-soft: #FFE0D4;
+  --hy-mint-line: #FF6A3D;
+  --hy-jade: #137167;
+  --hy-seal: #C22C1B;
+  --hy-seal-bright: #A81F10;
+  --hy-seal-soft: #FBE3DE;
+  --hy-seal-line: #D08A7E;
+  --hy-amber: #B24A16;
+  --hy-amber-bright: #8F3708;
+  --hy-amber-soft: #FFEBD9;
+  --hy-amber-line: #E0A877;
+  --hy-aqua: #1F9E92;
+  --hy-coral: #FF6A3D;
+  --hy-paper: #FFF7E8;
   /* 第 5、6 个班次的颜色：排班的 `SHIFT_TONES` 按排序位取色，门店可以配 5 个班次
      （A/B/C + 主管A两头班 + 主管B两头班）。只有 4 个 tone 时第 5 个与第 1 个撞色，
      周表的格子与图例就分不出「A班」和「主管B两头班」。 */
-  --hy-violet: #b18cf0;
-  --hy-rose: #f07ab0;
+  --hy-violet: #6B5BD6;
+  --hy-rose: #B23A73;
 
-  --hy-radius-sm: 8px;
-  --hy-radius-md: 12px;
-  --hy-radius-lg: 16px;
-  --hy-shadow-sm: 0 1px 2px rgba(2, 10, 9, .5);
-  --hy-shadow-md: 0 18px 44px -18px rgba(1, 8, 7, .85);
-  --hy-glow-mint: 0 8px 26px -8px rgba(63, 224, 176, .42);
+  --hy-radius-sm: 12px;
+  --hy-radius-md: 20px;
+  --hy-radius-lg: 24px;
+  /* 贴纸风只有硬阴影：不模糊、与描边同色、偏移 3–4px（`--paper-shadow`）。 */
+  --hy-shadow-sm: var(--paper-shadow-sm);
+  --hy-shadow-md: var(--paper-shadow);
+  --hy-glow-mint: 0 0 0 3px var(--wb-tint-22);
   --hy-ease: cubic-bezier(.22, 1, .36, 1);
   --hy-page: clamp(.85rem, 2vw, 1.5rem);
 
-  /* ── 效果令牌（2026-10-17 双主题收口）：共享样式表与存量页面里那些半透明 rgba 的归并 ──
-     为什么要有这一层：旧皮是暗色，`public/hygiene-admin.css` 与 30 个页面里写死了 60 多种
-     rgba（薄荷光晕、半透明深面板、深遮罩、发丝线）。只切 --hy-* 的值，这些 rgba 会原样留在
-     浅色页上 —— 光晕变成绿斑、半透明深面板变成黑块。这里按**语义 + 透明度档**归并成 26 根，
-     深色与浅色主题各给一组值；共享表与页面改色只改这一处，不再写裸 rgba。 */
-  --wb-tint-04: rgba(63,224,176,.06);
-  --wb-tint-08: rgba(63,224,176,.10);
-  --wb-tint-14: rgba(63,224,176,.16);
-  --wb-tint-22: rgba(63,224,176,.24);
-  --wb-tint-45: rgba(63,224,176,.45);
-  --wb-tint-60: rgba(63,224,176,.60);
-  --wb-ink-a04: rgba(228,240,238,.04);
-  --wb-ink-a08: rgba(228,240,238,.08);
-  --wb-ink-a14: rgba(228,240,238,.14);
-  --wb-ink-a22: rgba(228,240,238,.22);
-  --wb-ink-a45: rgba(228,240,238,.45);
-  --wb-ink-a60: rgba(228,240,238,.60);
-  --wb-panel-a: rgba(17,37,41,.70);
-  --wb-scrim: rgba(6,15,17,.55);
-  --wb-scrim-strong: rgba(6,15,17,.72);
-  --wb-danger-a10: rgba(217,72,47,.12);
-  --wb-danger-a16: rgba(217,72,47,.18);
-  --wb-danger-a45: rgba(217,72,47,.45);
-  --wb-warn-a10: rgba(227,164,74,.12);
-  --wb-warn-a16: rgba(227,164,74,.18);
-  --wb-warn-a45: rgba(227,164,74,.45);
-  --wb-ok-a10: rgba(121,233,196,.12);
-  --wb-ok-a16: rgba(121,233,196,.18);
-  --wb-ok-a45: rgba(121,233,196,.45);
-  --wb-paper-a: rgba(244,233,219,.42);
-  --wb-highlight: rgba(255,255,255,.16);
+  /* ── 效果令牌：共享样式表与存量页面里那些半透明 rgba 的归并 ──
+     旧皮是暗色，`public/hygiene-admin.css` 与 30 个页面里写死了 60 多种 rgba（薄荷光晕、
+     半透明深面板、深遮罩、发丝线）。只切 --hy-* 的值，这些 rgba 会原样留在浅色页上 ——
+     光晕变成绿斑、半透明深面板变成黑块。这里按**语义 + 透明度档**归并，换皮只改这一处。 */
+  --wb-tint-04: rgba(255,106,61,.06);
+  --wb-tint-08: rgba(255,106,61,.10);
+  --wb-tint-14: rgba(255,106,61,.16);
+  --wb-tint-22: rgba(255,106,61,.26);
+  --wb-tint-45: rgba(255,106,61,.45);
+  --wb-tint-60: rgba(255,106,61,.60);
+  --wb-ink-a04: rgba(29,27,58,.04);
+  --wb-ink-a08: rgba(29,27,58,.08);
+  --wb-ink-a14: rgba(29,27,58,.14);
+  --wb-ink-a22: rgba(29,27,58,.22);
+  --wb-ink-a45: rgba(29,27,58,.45);
+  --wb-ink-a60: rgba(29,27,58,.60);
+  --wb-panel-a: rgba(255,255,255,.82);
+  --wb-scrim: rgba(29,27,58,.35);
+  --wb-scrim-strong: rgba(29,27,58,.52);
+  --wb-danger-a10: rgba(194,44,27,.10);
+  --wb-danger-a16: rgba(194,44,27,.18);
+  --wb-danger-a45: rgba(194,44,27,.45);
+  --wb-warn-a10: rgba(178,74,22,.10);
+  --wb-warn-a16: rgba(178,74,22,.18);
+  --wb-warn-a45: rgba(178,74,22,.45);
+  --wb-ok-a10: rgba(19,113,103,.10);
+  --wb-ok-a16: rgba(19,113,103,.18);
+  --wb-ok-a45: rgba(19,113,103,.45);
+  --wb-paper-a: rgba(255,247,232,.72);
+  --wb-highlight: rgba(255,255,255,.55);
 
   /* 回退给各视图 scoped 样式用的通用别名 */
   --bg: var(--hy-bg);
@@ -183,9 +209,20 @@ html[data-workbench] {
   --green: var(--hy-jade);
   --red: var(--hy-seal-bright);
   --yellow: var(--hy-amber);
-  --cyan: var(--hy-mint);
-  --blue: var(--hy-mint);
-  --pink: var(--hy-seal-bright);
+  --cyan: var(--hy-aqua);
+  --blue: var(--hy-aqua);
+  --pink: var(--hy-rose);
+}
+
+/* 标题一律圆体 + 800（风格卡）。页面 scoped 里写了 `font:` 简写的会盖掉族名，
+   所以再给一条 `font-weight` 兜底 —— 权重是最影响「像不像贴纸标题」的那一项。 */
+html[data-workbench] h1,
+html[data-workbench] h2,
+html[data-workbench] h3,
+html[data-workbench] .hy-page-title {
+  font-family: var(--font-display);
+  font-weight: 800;
+  letter-spacing: -.01em;
 }
 
 /* 班次色（0043）的 `tone-<色键>` 工具类：**只声明两个局部变量**，怎么用由各处自己决定
@@ -205,100 +242,103 @@ html[data-workbench] {
 .tone-neutral { --shift-fill: var(--shift-neutral); --shift-ink: var(--shift-neutral-ink); }
 
 /* ════════════════════════════════════════════════════════════════════════════
-   浅色主题（B 案「钢面 · 仪」· 日间档）—— 2026-10-17 新增，深色仍是默认
-   开关是 `html[data-workbench][data-wb-theme="light"]`，由 `utils/workbenchTheme.js`
-   挂/摘（用户选「浅色」或「跟随系统 + 系统是浅色」时挂）。
+   深色档（同族：暖墨底 + 同样的 2px 描边与硬阴影）—— 2026-11-20 随换皮重做
+   开关是 `html[data-workbench][data-wb-theme="dark"]`，由 `utils/workbenchTheme.js`
+   挂/摘（用户选「深色」或「跟随系统 + 系统是深色」时挂）。
    **只覆盖颜色相关的名字**：布局刻度、字体栈、层级、时长与语义结构全部沿用上面那一段 ——
    两套主题的差异只在调色，在结构上分叉就等于每加一页要维护两套版式。
-   语义名与深色一一声明对应（--surface-* / --ink* / --line* / --action* / 信号色 / --hy-*）；
+   深底上的描边不能再用 --edge（深墨压在深底上看不见），改成暖纸白；硬阴影同色。
+   语义名与浅色一一声明对应（--surface-* / --ink* / --line* / --action* / 信号色 / --hy-*）；
    13 个通用别名不必重复：别名在元素上解析，主色阶梯已被这一段覆盖。
-   浅底实测：--hy-ink 对白 15.6:1、--hy-muted 5.6:1、--hy-faint 5.0:1、
-   主色 #0d7ea6 4.7:1（可以当文字色）、--danger-bright 6.0:1、--hy-amber 5.0:1、--hy-jade 4.6:1。
+   实测：--hy-ink #F6F1E7 对 --hy-surface #241F45 是 13.9:1、
+   --hy-muted #B8B2D4 是 7.3:1、--hy-faint #A9A3C6 是 6.2:1、主色 #FF7A4D 对深卡 5.2:1。
    ════════════════════════════════════════════════════════════════════════════ */
-html[data-workbench][data-wb-theme="light"] {
-  --surface-0:#edeff3; --surface-1:#ffffff; --surface-2:#f6f8fa; --surface-3:#eef1f4;
-  --chrome:#ffffff;
-  --ink:#0f1b24; --ink-dim:#5b6b78; --ink-faint:#5f6d79;
-  --line:#d6dee6; --line-strong:#c2cdd7;
-  --line-control:#7f909f;
-  --action:#0d7ea6; --action-ink:#ffffff; --action-soft:#e6f4fa;
-  --ok:#16855a; --warn:#a86400; --danger:#c9342a; --danger-bright:#a8281f; --info:#0b6b8f;
-  --accent-alt:#a33d74; --focus-ring:#0d7ea6;
-  --ok-soft:#e8f7ef; --warn-soft:#fdf3e0;
-  --danger-soft:#fdecea; --info-soft:#e6f4fa;
-  --scrim:rgba(15,27,36,.48);
+html[data-workbench][data-wb-theme="dark"] {
+  --edge:#F6F1E7;
+  /* 深底上的硬阴影要压到近黑：紫底 + 深紫阴影等于没有阴影，卡片立不住。
+     底色同时再暗一档、卡面再亮一档，让 2px 米白描边与 4px 黑阴影之间留出层次。 */
+  --shadow-ink:#05030E;
+  --paper-shadow:4px 4px 0 var(--shadow-ink);
+  --paper-shadow-sm:3px 3px 0 var(--shadow-ink);
 
-  /* B 案是方角语言：面板 4px、小件 2px；--r-full 只留给胶囊类（徽章 / 圆点）。 */
-  --r-0:2px; --r-1:4px; --r-2:6px; --r-3:8px;
+  --surface-0:#120F28; --surface-1:#2A2450; --surface-2:#352D62; --surface-3:#463A7A;
+  --chrome:#1B1838;
+  --ink:#F6F1E7; --ink-dim:#B8B2D4; --ink-faint:#A9A3C6;
+  --line:rgba(246,241,231,.16); --line-strong:var(--edge);
+  --shift-edge:rgba(246,241,231,.30);
+  --line-control:rgba(246,241,231,.34);
+  --action:#FF7A4D; --action-ink:#1D1B3A; --action-soft:#3A2A44;
+  --ok:#5FD5C1; --warn:#FFB05C; --danger:#FF6B5A; --danger-bright:#FF8A7A; --info:#5FD5C1;
+  --state-leave:#A99BFF;
+  --accent-alt:#5FD5C1; --focus-ring:#FFB05C;
+  --ok-soft:rgba(95,213,193,.16); --warn-soft:rgba(255,176,92,.16);
+  --danger-soft:rgba(255,107,90,.16); --info-soft:rgba(95,213,193,.16);
+  --scrim:rgba(10,8,20,.62);
 
-  --wb-tint-04: rgba(13,126,166,.04);
-  --wb-tint-08: rgba(13,126,166,.08);
-  --wb-tint-14: rgba(13,126,166,.14);
-  --wb-tint-22: rgba(13,126,166,.22);
-  --wb-tint-45: rgba(13,126,166,.45);
-  --wb-tint-60: rgba(13,126,166,.60);
-  --wb-ink-a04: rgba(15,27,36,.04);
-  --wb-ink-a08: rgba(15,27,36,.08);
-  --wb-ink-a14: rgba(15,27,36,.14);
-  --wb-ink-a22: rgba(15,27,36,.22);
-  --wb-ink-a45: rgba(15,27,36,.45);
-  --wb-ink-a60: rgba(15,27,36,.60);
-  --wb-panel-a: rgba(255,255,255,.78);
-  --wb-scrim: rgba(15,27,36,.48);
-  --wb-scrim-strong: rgba(15,27,36,.66);
-  --wb-danger-a10: rgba(201,52,42,.10);
-  --wb-danger-a16: rgba(201,52,42,.16);
-  --wb-danger-a45: rgba(201,52,42,.45);
-  --wb-warn-a10: rgba(168,100,0,.10);
-  --wb-warn-a16: rgba(168,100,0,.16);
-  --wb-warn-a45: rgba(168,100,0,.45);
-  --wb-ok-a10: rgba(22,133,90,.10);
-  --wb-ok-a16: rgba(22,133,90,.16);
-  --wb-ok-a45: rgba(22,133,90,.45);
-  --wb-paper-a: rgba(255,255,255,.62);
-  --wb-highlight: rgba(15,27,36,.04);
+  --wb-tint-04: rgba(255,122,77,.06);
+  --wb-tint-08: rgba(255,122,77,.10);
+  --wb-tint-14: rgba(255,122,77,.16);
+  --wb-tint-22: rgba(255,122,77,.26);
+  --wb-tint-45: rgba(255,122,77,.45);
+  --wb-tint-60: rgba(255,122,77,.60);
+  --wb-ink-a04: rgba(246,241,231,.04);
+  --wb-ink-a08: rgba(246,241,231,.08);
+  --wb-ink-a14: rgba(246,241,231,.14);
+  --wb-ink-a22: rgba(246,241,231,.22);
+  --wb-ink-a45: rgba(246,241,231,.45);
+  --wb-ink-a60: rgba(246,241,231,.60);
+  --wb-panel-a: rgba(36,31,69,.86);
+  --wb-scrim: rgba(10,8,20,.45);
+  --wb-scrim-strong: rgba(10,8,20,.66);
+  --wb-danger-a10: rgba(255,107,90,.10);
+  --wb-danger-a16: rgba(255,107,90,.18);
+  --wb-danger-a45: rgba(255,107,90,.45);
+  --wb-warn-a10: rgba(255,176,92,.10);
+  --wb-warn-a16: rgba(255,176,92,.18);
+  --wb-warn-a45: rgba(255,176,92,.45);
+  --wb-ok-a10: rgba(95,213,193,.10);
+  --wb-ok-a16: rgba(95,213,193,.18);
+  --wb-ok-a45: rgba(95,213,193,.45);
+  --wb-paper-a: rgba(255,247,232,.10);
+  --wb-highlight: rgba(246,241,231,.10);
 
-  /* 冷钢白色阶 */
-  --hy-night: #e3e8ee;
-  --hy-pool: #0b6b8f;
-  --hy-bg: #edeff3;
-  --hy-surface: #ffffff;
-  --hy-surface-2: #f6f8fa;
-  --hy-surface-3: #eef1f4;
-  --hy-line: #d6dee6;
-  --hy-line-strong: #c2cdd7;
-  --hy-ink: #0f1b24;
-  --hy-muted: #5b6b78;
-  /* #5f6d79 对 --hy-surface 白 5.0:1、对 --hy-bg #edeff3 4.6:1，AA 过线。 */
-  --hy-faint: #5f6d79;
+  /* 暖墨色阶 */
+  --hy-night: #100D26;
+  --hy-pool: #5FD5C1;
+  --hy-bg: #171432;
+  --hy-surface: #241F45;
+  --hy-surface-2: #2E2757;
+  --hy-surface-3: #3A3169;
+  --hy-line: #F6F1E7;
+  --hy-line-strong: #F6F1E7;
+  --hy-ink: #F6F1E7;
+  --hy-muted: #B8B2D4;
+  --hy-faint: #A9A3C6;
 
-  /* 信号色：浅底上深一档，全部可以当文字色用 */
-  --hy-mint: #0d7ea6;
-  --hy-mint-bright: #0a6a8c;
-  --hy-mint-ink: #ffffff;
-  --hy-mint-soft: #e6f4fa;
-  --hy-mint-line: #9ccde0;
-  --hy-jade: #16855a;
-  --hy-seal: #c9342a;
-  --hy-seal-bright: #a8281f;
-  --hy-seal-soft: #fdecea;
-  --hy-seal-line: #e6a9a3;
-  --hy-amber: #a86400;
-  --hy-amber-bright: #8a5200;
-  --hy-amber-soft: #fdf3e0;
-  --hy-amber-line: #e2c69a;
-  --hy-aqua: #0b6b8f;
-  --hy-coral: #b5452e;
-  --hy-paper: #ffffff;
-  --hy-violet: #6b4fa8;
-  --hy-rose: #a33d74;
+  /* 信号色：深底上提亮一档，全部可以当文字色用 */
+  --hy-mint: #FF7A4D;
+  --hy-mint-bright: #FF956F;
+  --hy-mint-ink: #1D1B3A;
+  --hy-mint-soft: #3A2A44;
+  --hy-mint-line: #FF7A4D;
+  --hy-jade: #5FD5C1;
+  --hy-seal: #FF6B5A;
+  --hy-seal-bright: #FF8A7A;
+  --hy-seal-soft: rgba(255,107,90,.14);
+  --hy-seal-line: rgba(255,107,90,.42);
+  --hy-amber: #FFB05C;
+  --hy-amber-bright: #FFC583;
+  --hy-amber-soft: rgba(255,176,92,.14);
+  --hy-amber-line: rgba(255,176,92,.42);
+  --hy-aqua: #5FD5C1;
+  --hy-coral: #FF956F;
+  --hy-paper: #F6F1E7;
+  --hy-violet: #A99BFF;
+  --hy-rose: #F07AB0;
 
-  --hy-radius-sm: 4px;
-  --hy-radius-md: 6px;
-  --hy-radius-lg: 8px;
-  --hy-shadow-sm: 0 1px 2px rgba(15, 27, 36, .05);
-  --hy-shadow-md: 0 10px 30px -14px rgba(15, 27, 36, .22);
-  --hy-glow-mint: 0 0 0 3px rgba(13, 126, 166, .12);
+  --hy-shadow-sm: var(--paper-shadow-sm);
+  --hy-shadow-md: var(--paper-shadow);
+  --hy-glow-mint: 0 0 0 3px var(--wb-tint-22);
 }
 
 /* ════════════════════════════════════════════════════════════════════════════
@@ -316,13 +356,16 @@ html[data-workbench][data-wb-theme="light"] {
    只刷 --surface-* 的话 body 的 background:var(--bg) 还是深色）；② 关背景图与颗粒层。 */
 @media print{
   html[data-workbench],
-  html[data-workbench][data-wb-theme="light"]{
+  html[data-workbench][data-wb-theme="dark"]{
+    --edge:#000;
+    --paper-shadow:none; --paper-shadow-sm:none;
     --surface-0:#fff; --surface-1:#fff; --surface-2:#fff; --surface-3:#fff; --chrome:#fff;
     --ink:#000; --ink-dim:#333; --ink-faint:#555;
     --line:#d8d8d8; --line-strong:#b4b4b4; --line-control:#8a8a8a;
     --hy-bg:#fff; --hy-surface:#fff; --hy-surface-2:#fff; --hy-surface-3:#fff;
     --hy-ink:#000; --hy-muted:#333; --hy-faint:#555;
     --hy-line:#d8d8d8; --hy-line-strong:#b4b4b4;
+    --hy-shadow-sm:none; --hy-shadow-md:none;
     --bg:#fff; --card:#fff; --card2:#fff; --sidebar-bg:#fff;
     --text:#000; --text-dim:#333; --border:#d8d8d8;
   }

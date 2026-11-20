@@ -11,6 +11,8 @@
 //   * z    = 裸 `z-index` **数字**（含负数）的条数（票 05）。层级只准写那五个语义名
 //            （`--z-shell/--z-scrim/--z-dialog/--z-toast/--z-queue`）；数之前**先剥掉注释**，
 //            否则「注释里提到 z-index: 30」会把这条棘轮弄红（t46 在 color-mix 上踩过同款）。
+//   * fs   = 写死 px 的 `font-size` 处数（`var(--fs-…)` 不算 —— 引用令牌正是出口，不是债务）
+//   * fs_small = 其中 <12px 的处数（11px 只许密集数据格；白名单在 designGuard.test.js）
 // **只减不增**：测试拿这份快照当上界。跑 `node src/styles/__tests__/makeTokenDebt.mjs` 重出。
 //
 // ⚠ 排他提醒：`tokenDebt.json` 同时被别的在途工作流当棘轮用（令牌降债那条线在改 hy 计数）。
@@ -51,6 +53,8 @@ for (const p of walk(ROOT).sort()) {
   const bare = stripComments(s)   // 注释里的 z-index / var(--x) 不算
   const bps = [...s.matchAll(/@media[^{]*max-width:\s*([0-9]+)px/g)].map((m) => m[1]).filter((v) => !BP_OK.has(v))
   const undef = [...new Set([...bare.matchAll(/var\(\s*(--[a-z0-9-]+)/g)].map((m) => m[1]).filter((n) => !DEF.has(n)))].sort()
+  // 字号：只数写死的 px。`var(--fs-11)` 这类引用不数 —— 七档令牌才是目标写法。
+  const fs = [...s.matchAll(/font-size:\s*([0-9.]+)px/g)].map((m) => Number(m[1]))
   const rec = {
     hy: count(s, /var\(\s*--hy-/g),
     hex: count(s, /#[0-9a-fA-F]{3,8}\b/g),
@@ -64,6 +68,9 @@ for (const p of walk(ROOT).sort()) {
     // 层级的存量（票 05）：裸 z-index 数字。归零之后这一列恒为 0，留着它当上界——
     // 新增一处裸数字就是 `1 > 0`，测试当场红。
     z: count(bare, BARE_Z),
+    // 字号的存量（2026-11-20）：裸 px 字号处数，与其中 <12px 的处数（只减不增）。
+    fs: fs.length,
+    fs_small: fs.filter((v) => v < 12).length,
   }
   if (bps.length) rec.bp_values = [...new Set(bps)].sort()
   if (undef.length) rec.undef = undef
@@ -82,5 +89,7 @@ const tot = Object.values(files).reduce((a, r) => ({
   hy: a.hy + r.hy, hex: a.hex + r.hex, rgba: a.rgba + r.rgba, style: a.style + (r['style='] || 0), bp: a.bp + r.bp,
 }), { hy: 0, hex: 0, rgba: 0, style: 0, bp: 0 })
 console.log('文件数', Object.keys(files).length, '｜合计', JSON.stringify(tot))
+const totFs = Object.values(files).reduce((a, r) => ({ fs: a.fs + (r.fs || 0), fs_small: a.fs_small + (r.fs_small || 0) }), { fs: 0, fs_small: 0 })
+console.log('字号合计', JSON.stringify(totFs))
 console.log('未定义令牌的文件：')
 for (const [p, r] of Object.entries(files)) if (r.undef) console.log('  ', p, r.undef.join(' '))

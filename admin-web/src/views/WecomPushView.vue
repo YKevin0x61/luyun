@@ -800,7 +800,7 @@ onMounted(async () => {
           <div class="panel-title" style="display:flex;justify-content:space-between">
             <span>渠道</span>
             <!-- 数据没回来时说「加载中…」，不说「0 个」——后者是"确实一个都没有"（U4）。 -->
-            <span style="color:var(--text-dim);font-size:12px">
+            <span style="color:var(--text-dim);font-size:var(--fs-12)">
               {{ channelsLoading ? '加载中…' : `${channels.length} 个` }}
             </span>
           </div>
@@ -823,7 +823,7 @@ onMounted(async () => {
             </div>
             <div class="form-row">
               <label>所属群组（可多选）</label>
-              <div v-if="!groups.length" style="color:var(--text-dim);font-size:12px">还没有群组，可在「渠道群组」卡片里新建</div>
+              <div v-if="!groups.length" style="color:var(--text-dim);font-size:var(--fs-12)">还没有群组，可在「渠道群组」卡片里新建</div>
               <label v-for="g in groups" :key="g.id" class="luyun-check-row">
                 <LuyunCheckbox
                   :model-value="channelForm.group_ids.includes(g.id)"
@@ -860,12 +860,12 @@ onMounted(async () => {
                   <span v-if="(item.topics || []).length === 0" class="badge" style="color:var(--yellow);border-color:var(--yellow)">未订阅</span>
                 </span>
               </div>
-              <div style="color:var(--text-dim);font-size:12px;word-break:break-all">{{ item.webhook_url_masked }}</div>
-              <div v-if="item.notes" style="color:var(--text-dim);font-size:12px">{{ item.notes }}</div>
-              <div style="color:var(--text-dim);font-size:12px">
+              <div style="color:var(--text-dim);font-size:var(--fs-12);word-break:break-all">{{ item.webhook_url_masked }}</div>
+              <div v-if="item.notes" style="color:var(--text-dim);font-size:var(--fs-12)">{{ item.notes }}</div>
+              <div style="color:var(--text-dim);font-size:var(--fs-12)">
                 群组：{{ channelGroupNames(item) || '未分组' }}
               </div>
-              <div style="color:var(--text-dim);font-size:12px">
+              <div style="color:var(--text-dim);font-size:var(--fs-12)">
                 订阅内容：{{ channelTopicNames(item) || '未订阅任何内容' }}
                 <!-- 票 08：这枚徽章点得开 —— 说出是哪个群组带来了哪几类订阅。 -->
                 <span
@@ -880,8 +880,8 @@ onMounted(async () => {
                   @keydown.space.prevent="handleChannelGroupBadge(item)"
                 >含群组订阅</span>
               </div>
-              <div style="color:var(--text-dim);font-size:12px">最近一次发送成功：{{ formatSentAt(item) }}</div>
-              <div v-if="item.job_count" style="color:var(--text-dim);font-size:12px">被 {{ item.job_count }} 条推送任务引用</div>
+              <div style="color:var(--text-dim);font-size:var(--fs-12)">最近一次发送成功：{{ formatSentAt(item) }}</div>
+              <div v-if="item.job_count" style="color:var(--text-dim);font-size:var(--fs-12)">被 {{ item.job_count }} 条推送任务引用</div>
               <div style="display:flex;gap:6px;margin-top:8px">
                 <button class="btn btn-sm" @click="editChannel(item)">编辑</button>
                 <button class="btn btn-sm" @click="handleToggleChannel(item)">{{ item.enabled ? '停用' : '启用' }}</button>
@@ -898,11 +898,11 @@ onMounted(async () => {
         <div class="card">
           <div class="panel-title" style="display:flex;justify-content:space-between">
             <span>渠道群组</span>
-            <span style="color:var(--text-dim);font-size:12px">
+            <span style="color:var(--text-dim);font-size:var(--fs-12)">
               {{ groupsLoading ? '加载中…' : `${groups.length} 个` }}
             </span>
           </div>
-          <p style="color:var(--text-dim);font-size:12px;margin:0 0 8px">
+          <p style="color:var(--text-dim);font-size:var(--fs-12);margin:0 0 8px">
             群组是可以整体订阅的一组渠道；一个渠道可以同时属于多个群组。停用群组只暂停这一组的订阅，
             不影响成员自己的订阅。
           </p>
@@ -942,7 +942,7 @@ onMounted(async () => {
                   <span class="badge">{{ (item.member_channel_ids || []).length }} 个成员</span>
                 </span>
               </div>
-              <div v-if="item.notes" style="color:var(--text-dim);font-size:12px">{{ item.notes }}</div>
+              <div v-if="item.notes" style="color:var(--text-dim);font-size:var(--fs-12)">{{ item.notes }}</div>
               <!-- 成员列表只列已勾选的渠道（U15），其余折进下面那个「展开全部 N 个渠道」。
                    3 群组 × 10 渠道全平铺时整页 2588px，「这个群有哪些渠道」要一行行读。 -->
               <div style="display:flex;flex-direction:column;gap:4px;margin-top:6px">
@@ -955,7 +955,7 @@ onMounted(async () => {
                 </label>
                 <div
                   v-if="channels.length && !groupMemberChannels(item).length"
-                  style="color:var(--text-dim);font-size:12px"
+                  style="color:var(--text-dim);font-size:var(--fs-12)"
                 >未勾选任何渠道</div>
               </div>
               <button
@@ -966,7 +966,7 @@ onMounted(async () => {
                 :aria-expanded="isGroupExpanded(item.id)"
                 @click="toggleGroupExpand(item.id)"
               >{{ isGroupExpanded(item.id) ? '收起' : `展开全部 ${channels.length} 个渠道` }}</button>
-              <div v-if="!channels.length" style="color:var(--text-dim);font-size:12px;margin-top:6px">还没有渠道可加入</div>
+              <div v-if="!channels.length" style="color:var(--text-dim);font-size:var(--fs-12);margin-top:6px">还没有渠道可加入</div>
               <div style="display:flex;gap:6px;margin-top:8px">
                 <button class="btn btn-sm" @click="editChannelGroup(item)">编辑</button>
                 <button class="btn btn-sm btn-danger" @click="handleDeleteChannelGroup(item)">删除</button>
@@ -982,7 +982,7 @@ onMounted(async () => {
       <div class="card">
         <div class="panel-title" style="display:flex;justify-content:space-between;align-items:center">
           <span>订阅：哪类内容发给哪些渠道</span>
-          <span style="color:var(--text-dim);font-size:12px">
+          <span style="color:var(--text-dim);font-size:var(--fs-12)">
             {{ subscriptionsLoading ? '加载中…' : `${matrixColumns.length} 个渠道 · ${matrixRows.length} 类内容` }}
           </span>
         </div>
@@ -1016,7 +1016,7 @@ onMounted(async () => {
                       <span v-if="topicHasPhotos(row)" class="badge" style="margin-left:6px;color:var(--cyan);border-color:var(--cyan)">含员工实拍照片</span>
                       <!-- 票 07：这类内容是「什么时候发」的——多数只有事件触发，任务覆盖不到。 -->
                       <div v-if="topicTriggerLabel(row)" class="wp-topic-trigger">{{ topicTriggerLabel(row) }}</div>
-                      <div v-if="zeroTopicIds.includes(row.id)" style="color:var(--yellow);font-size:11px">零订阅：当前不会发出</div>
+                      <div v-if="zeroTopicIds.includes(row.id)" style="color:var(--yellow);font-size:var(--fs-11)">零订阅：当前不会发出</div>
                     </td>
                     <!-- 整格都是热区（U3）：原来只有 16×16 的勾选框可点，矩阵 64 格实测 192 次
                          点空。格子里留一个 ≥44×44 的命中区，点击由整格接管；勾选框自己是
@@ -1064,7 +1064,7 @@ onMounted(async () => {
             注册表里还没有内容类型，暂无可订阅的内容。
           </p>
           <template v-else>
-            <p style="color:var(--text-dim);font-size:12px;margin:0 0 8px">
+            <p style="color:var(--text-dim);font-size:var(--fs-12);margin:0 0 8px">
               渠道已有 {{ matrixColumns.length }} 个（超过 {{ MATRIX_CHANNEL_LIMIT }} 个），
               改为「先选内容类型、再勾渠道」—— 手机上更好点。
             </p>
@@ -1085,7 +1085,7 @@ onMounted(async () => {
               </button>
             </div>
             <div v-if="multiSelect.topicId" style="margin-top:12px;display:flex;flex-direction:column;gap:6px">
-              <div style="font-size:13px">
+              <div style="font-size:var(--fs-13)">
                 勾选要接收「{{ (matrixRows.find((r) => r.id === multiSelect.topicId) || {}).name }}」的渠道：
               </div>
               <!-- 票 04：停用渠道在多选列表里同样是只读的（同一份状态，另一种渲染）。 -->
@@ -1120,7 +1120,7 @@ onMounted(async () => {
                 <button class="btn" type="button" @click="multiSelect.channelIds = []">全不选</button>
               </div>
             </div>
-            <p v-else style="color:var(--text-dim);font-size:12px;margin-top:12px">先选一类内容，再勾渠道。</p>
+            <p v-else style="color:var(--text-dim);font-size:var(--fs-12);margin-top:12px">先选一类内容，再勾渠道。</p>
           </template>
         </template>
 
@@ -1129,7 +1129,7 @@ onMounted(async () => {
         <div v-if="matrixGroupRows.length" class="wp-group-block">
           <div class="panel-title" style="margin-top:16px">
             <span>群组整体订阅</span>
-            <span style="color:var(--text-dim);font-size:12px">
+            <span style="color:var(--text-dim);font-size:var(--fs-12)">
               {{ matrixGroupRows.length }} 个群组 · 勾一次，这个组里的渠道一起订
             </span>
           </div>
@@ -1146,7 +1146,7 @@ onMounted(async () => {
                   <td>
                     <strong>{{ group.name }}</strong>
                     <span v-if="!group.enabled" class="badge" style="margin-left:6px;color:var(--yellow);border-color:var(--yellow)">群组停用</span>
-                    <div style="color:var(--text-dim);font-size:11px">{{ groupMemberIds(group).length }} 个渠道</div>
+                    <div style="color:var(--text-dim);font-size:var(--fs-11)">{{ groupMemberIds(group).length }} 个渠道</div>
                   </td>
                   <td
                     v-for="row in matrixRows"
@@ -1176,7 +1176,7 @@ onMounted(async () => {
               </tbody>
             </table>
           </div>
-          <p style="color:var(--text-dim);font-size:12px;margin:8px 0 0">
+          <p style="color:var(--text-dim);font-size:var(--fs-12);margin:8px 0 0">
             群组里只有一部分渠道被单独订阅时，这一格是半选：勾一次把整组补齐。
             群组停用时订阅还在、投递暂停，到「渠道」tab 启用这个群组即可恢复。
           </p>
@@ -1184,7 +1184,7 @@ onMounted(async () => {
 
         <!-- 票 04：这段原来写「渠道停用时订阅保留、投递跳过」，但停用渠道那几格看起来
              就是未勾 —— 文案与画面互相打脸。现在停用格是只读标记，文案照实说。 -->
-        <p style="color:var(--text-dim);font-size:12px;margin:10px 0 0">
+        <p style="color:var(--text-dim);font-size:var(--fs-12);margin:10px 0 0">
           取消勾选是停用那条订阅（保留配置，重新勾上不用重配）；保存后下一次触发即按新订阅投递。
           渠道停用时对应格子变成「已停用（订阅保留）」的只读标记：订阅还在，到「渠道」tab
           启用后自动恢复投递，不用重新勾。
@@ -1203,7 +1203,7 @@ onMounted(async () => {
         <div class="card">
           <div class="panel-title" style="display:flex;justify-content:space-between">
             <span>推送任务</span>
-            <span style="color:var(--text-dim);font-size:12px">{{ jobs.length }} 个</span>
+            <span style="color:var(--text-dim);font-size:var(--fs-12)">{{ jobs.length }} 个</span>
           </div>
           <form @submit.prevent="handleSaveJob" style="display:flex;flex-direction:column;gap:10px">
             <div class="form-row">
@@ -1288,16 +1288,16 @@ onMounted(async () => {
               @click="selectedJobId = item.id"
             >
               <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
-                <strong style="font-size:13px">{{ item.name }}</strong>
+                <strong style="font-size:var(--fs-13)">{{ item.name }}</strong>
                 <span class="badge" :style="item.enabled ? 'color:var(--green);border-color:var(--green)' : ''">{{ item.enabled ? (item.schedule_text || item.schedule_time) : '停用' }}</span>
               </div>
-              <div style="color:var(--text-dim);font-size:12px">内容类型：{{ item.topic_name || item.topic_id }}</div>
+              <div style="color:var(--text-dim);font-size:var(--fs-12)">内容类型：{{ item.topic_name || item.topic_id }}</div>
               <!-- 收件人来自订阅（票 08）：卡片说清这类内容当前有几个群会收到，而不是某个群名。
                    一个都没有时直接写出来 —— 否则店长会以为任务照发。 -->
-              <div style="color:var(--text-dim);font-size:12px">
+              <div style="color:var(--text-dim);font-size:var(--fs-12)">
                 订阅目标：{{ item.target_count ? `${item.target_count} 个群` : '暂无群订阅，不会投递' }}
               </div>
-              <div style="color:var(--text-dim);font-size:12px;display:flex;align-items:center;gap:6px">
+              <div style="color:var(--text-dim);font-size:var(--fs-12);display:flex;align-items:center;gap:6px">
                 <span>上次定时发送日期：{{ item.last_sent_date || '未发送' }}</span>
                 <!-- 今天这一次到点了没发（票 10）：调度器在那一分钟没跑到，当天就漏了，
                      第二天才自动恢复。只看「上次发送日期」时，今天还没到点与今天漏了
@@ -1342,7 +1342,7 @@ onMounted(async () => {
               >复制</button>
             </div>
           </div>
-          <div style="display:flex;justify-content:space-between;color:var(--text-dim);font-size:12px;margin-bottom:8px">
+          <div style="display:flex;justify-content:space-between;color:var(--text-dim);font-size:var(--fs-12);margin-bottom:8px">
             <span>{{ selectedJob ? `当前任务：${selectedJob.name}` : '请选择任务' }}</span>
             <span :style="previewMeta.chunkCount > 1 ? 'color:var(--yellow)' : ''">
               <template v-if="previewIsImage">{{ previewMeta.bytes }} / {{ previewMeta.limit }} 字节 · 一条图片消息</template>
@@ -1425,7 +1425,7 @@ onMounted(async () => {
       <div class="panel-title" style="display:flex;justify-content:space-between">
         <span>发送记录</span>
         <span style="display:flex;gap:8px;align-items:center">
-          <span style="color:var(--text-dim);font-size:12px">共 {{ deliveries.total }} 条</span>
+          <span style="color:var(--text-dim);font-size:var(--fs-12)">共 {{ deliveries.total }} 条</span>
           <button class="btn btn-sm" @click="handleRefreshDeliveries">刷新</button>
         </span>
       </div>
@@ -1498,7 +1498,7 @@ onMounted(async () => {
                      内联的 nowrap 在 ≤700px 的卡片式里会把这一格顶出横向滚动。 -->
                 <td data-label="时间">
                   {{ formatDeliveryTime(item.finished_at || item.created_at) }}
-                  <span v-if="!item.finished_at" style="color:var(--text-dim);font-size:11px">（未完成，这是入队时间）</span>
+                  <span v-if="!item.finished_at" style="color:var(--text-dim);font-size:var(--fs-11)">（未完成，这是入队时间）</span>
                 </td>
                 <td data-label="目标渠道">{{ item.channel_name || (item.channel_id ? `#${item.channel_id}` : '渠道已删除') }}</td>
                 <!-- 内容类型 + 正文首行：同一个内容类型可以有完全不同的几封信
@@ -1519,7 +1519,7 @@ onMounted(async () => {
                 <td data-label="任务">
                   <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
                     <span>{{ deliveryTaskLabel(item) }}</span>
-                    <span class="badge" style="font-size:11px">{{ deliveryTriggerLabel(item.trigger) }}</span>
+                    <span class="badge" style="font-size:var(--fs-11)">{{ deliveryTriggerLabel(item.trigger) }}</span>
                     <button
                       v-if="item.status === 'failed' && item.schedule_id"
                       class="btn btn-sm"
@@ -1579,7 +1579,7 @@ onMounted(async () => {
           :disabled="deliveries.page <= 1"
           @click="handleDeliveryPage(deliveries.page - 1)"
         >上一页</button>
-        <span style="color:var(--text-dim);font-size:12px">
+        <span style="color:var(--text-dim);font-size:var(--fs-12)">
           第 {{ deliveries.page }} / {{ Math.max(deliveries.pages, 1) }} 页
         </span>
         <button
@@ -1588,7 +1588,7 @@ onMounted(async () => {
           :disabled="deliveries.page >= deliveries.pages"
           @click="handleDeliveryPage(deliveries.page + 1)"
         >下一页</button>
-        <span style="color:var(--text-dim);font-size:11px">
+        <span style="color:var(--text-dim);font-size:var(--fs-11)">
           超过保留天数的记录会被自动清理；待发与发送中的行不会被清理。
         </span>
       </div>
@@ -1598,11 +1598,11 @@ onMounted(async () => {
       <div class="panel-title" style="display:flex;justify-content:space-between">
         <span>变更历史</span>
         <span style="display:flex;gap:8px;align-items:center">
-          <span style="color:var(--text-dim);font-size:12px">共 {{ audit.total }} 条</span>
+          <span style="color:var(--text-dim);font-size:var(--fs-12)">共 {{ audit.total }} 条</span>
           <button class="btn btn-sm" @click="handleRefreshAudit">刷新</button>
         </span>
       </div>
-      <p style="color:var(--text-dim);font-size:12px;margin:0 0 8px">
+      <p style="color:var(--text-dim);font-size:var(--fs-12);margin:0 0 8px">
         渠道、群组与成员、订阅、任务的每一次变更都留一条记录：谁、什么时候、改了什么。
         与「发送记录」不同，变更历史**长期保留**，不会被自动清理。
       </p>
@@ -1660,15 +1660,15 @@ onMounted(async () => {
               </td>
               <td data-label="对象">
                 <div>{{ auditObjectLabel(item.object_type) }}</div>
-                <div style="color:var(--text-dim);font-size:12px">{{ item.object_name }}</div>
+                <div style="color:var(--text-dim);font-size:var(--fs-12)">{{ item.object_name }}</div>
               </td>
               <td data-label="变更内容">
                 <div
                   v-for="(line, index) in auditChanges(item)"
                   :key="index"
-                  style="font-size:12px"
+                  style="font-size:var(--fs-12)"
                 >{{ line }}</div>
-                <span v-if="!auditChanges(item).length" style="color:var(--text-dim);font-size:12px">
+                <span v-if="!auditChanges(item).length" style="color:var(--text-dim);font-size:var(--fs-12)">
                   未改动任何字段
                 </span>
               </td>
@@ -1685,7 +1685,7 @@ onMounted(async () => {
           :disabled="audit.page <= 1"
           @click="handleAuditPage(audit.page - 1)"
         >上一页</button>
-        <span style="color:var(--text-dim);font-size:12px">
+        <span style="color:var(--text-dim);font-size:var(--fs-12)">
           第 {{ audit.page }} / {{ Math.max(audit.pages, 1) }} 页
         </span>
         <button
@@ -1694,7 +1694,7 @@ onMounted(async () => {
           :disabled="audit.page >= audit.pages"
           @click="handleAuditPage(audit.page + 1)"
         >下一页</button>
-        <span style="color:var(--text-dim);font-size:11px">
+        <span style="color:var(--text-dim);font-size:var(--fs-11)">
           变更历史长期保留，不随发送记录的保留天数清理。
         </span>
       </div>
@@ -1723,7 +1723,7 @@ onMounted(async () => {
   flex: 0 0 auto;
   white-space: nowrap;
   color: var(--text-dim);
-  font-size: 11px;
+  font-size: var(--fs-11);
 }
 @media (max-width: 700px) {
   .wp-api-version { display: none; }
@@ -1752,7 +1752,7 @@ onMounted(async () => {
   flex-wrap: wrap;
   margin-bottom: 6px;
 }
-.wp-hook-name { font-size: 13px; min-width: 0; overflow-wrap: anywhere; }
+.wp-hook-name { font-size: var(--fs-13); min-width: 0; overflow-wrap: anywhere; }
 .wp-hook-badges { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
 
 /* 窄屏直接把徽章换到名称下一行，不再和名称抢同一行的宽度。 */
@@ -1771,7 +1771,7 @@ onMounted(async () => {
    矩阵首列与多选行共用；首列外层是 nowrap（横滑表格的规矩），这里显式允许折行，
    否则「自动触发，不用建任务」会把冻结列顶宽。 */
 .wp-topic-trigger {
-  font-size: 11px;
+  font-size: var(--fs-11);
   line-height: 1.4;
   color: var(--text-dim);
   white-space: normal;
@@ -1784,7 +1784,7 @@ onMounted(async () => {
   justify-content: center;
   min-height: 26px;
   padding: 0 6px;
-  font-size: 11px;
+  font-size: var(--fs-11);
   line-height: 1.3;
   color: var(--text-dim);
   border: 1px dashed var(--border);
@@ -1816,26 +1816,26 @@ onMounted(async () => {
 
 /* 未选内容类型时参数区的占位：它说明"这块地方是什么"，不是错误提示。 */
 .wp-job-hint {
-  font-size: 11px;
+  font-size: var(--fs-11);
   line-height: 1.5;
   color: var(--text-dim);
 }
 
 /* 预览失效的原因（票 01）：与「字节数」同一处视线里，说清「立即发送」为什么变灰。 */
 .wp-preview-stale {
-  font-size: 12px;
+  font-size: var(--fs-12);
   color: var(--yellow);
   margin-bottom: 8px;
 }
 
 /* 「本次发送」（票 05）：发送后不离开当前 tab 就能看到这几条投递的具体状态。 */
 .wp-send-result__head {
-  font-size: 12px;
+  font-size: var(--fs-12);
   color: var(--text-dim);
   margin-bottom: 8px;
 }
 .wp-send-result__error {
-  font-size: 12px;
+  font-size: var(--fs-12);
   color: var(--red);
   word-break: break-word;
 }
@@ -1846,7 +1846,7 @@ onMounted(async () => {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  font-size: 12px;
+  font-size: var(--fs-12);
 }
 .wp-send-result__rows li {
   display: flex;
@@ -1930,7 +1930,7 @@ onMounted(async () => {
    人话（`error`）在明面上、技术原文折叠在「详情」里，旁边一个「重试」。 */
 .wp-load-error { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .wp-load-error__text { flex: 1 1 220px; }
-.wp-load-error__detail { flex: 1 1 100%; font-size: 11px; }
+.wp-load-error__detail { flex: 1 1 100%; font-size: var(--fs-11); }
 .wp-load-error__detail summary { cursor: pointer; color: var(--text-dim); }
 .wp-load-error__detail pre {
   margin: 6px 0 0;
@@ -1938,7 +1938,7 @@ onMounted(async () => {
   border-radius: 6px;
   background: var(--card2);
   color: var(--text-dim);
-  font-size: 11px;
+  font-size: var(--fs-11);
   white-space: pre-wrap;
   word-break: break-all;
 }
@@ -2044,24 +2044,24 @@ onMounted(async () => {
   -webkit-box-orient: vertical;
   overflow: hidden;
   margin-top: 2px;
-  font-size: 11px;
+  font-size: var(--fs-11);
   line-height: 1.35;
   color: var(--text-dim);
   min-width: 0;
   overflow-wrap: anywhere;
 }
-.wp-error-full__title { color: var(--text-dim); font-size: 11px; margin-bottom: 4px; }
+.wp-error-full__title { color: var(--text-dim); font-size: var(--fs-11); margin-bottom: 4px; }
 .wp-error-full__raw {
   margin: 0;
   padding: 6px 8px;
   border-radius: 6px;
   background: var(--card2);
   color: var(--text);
-  font-size: 11px;
+  font-size: var(--fs-11);
   white-space: pre-wrap;
   word-break: break-all;
 }
-.wp-error-full__meta { color: var(--text-dim); font-size: 11px; margin-top: 4px; }
+.wp-error-full__meta { color: var(--text-dim); font-size: var(--fs-11); margin-top: 4px; }
 :deep(.data-table tr.wp-delivery-detail td) { background: rgba(17, 24, 39, 0.6); }
 
 /* ══ U11 · 触屏档（≤700px）把控件放大到能点 ═══════════════════════════════
@@ -2069,7 +2069,7 @@ onMounted(async () => {
    仍是桌面尺寸。桌面档维持现状，只在窄屏这一档放大。 */
 @media (max-width: 700px) {
   :deep(.btn) { min-height: 44px; }
-  :deep(.btn-sm) { min-height: 44px; padding: 8px 12px; font-size: 12px; }
+  :deep(.btn-sm) { min-height: 44px; padding: 8px 12px; font-size: var(--fs-12); }
   .wp-tabbar .view-tab { min-height: 44px; padding: 10px 14px; }
   :deep(.input), :deep(.select) { min-height: 44px; }
   .wp-matrix-hit { min-width: 44px; min-height: 44px; }
@@ -2107,7 +2107,7 @@ onMounted(async () => {
   .wp-card-table td:not([data-label])::before { display: none; }
   .wp-card-table tr td.empty-state { display: block; }
   .wp-card-table tr.wp-delivery-detail { padding: 0 8px 6px; }
-  .wp-scroll-hint { display: block; color: var(--text-dim); font-size: 11px; margin: 0 0 6px; }
+  .wp-scroll-hint { display: block; color: var(--text-dim); font-size: var(--fs-11); margin: 0 0 6px; }
 }
 /* 图片预览（下周排班表）：浅色底 + 撑满面板宽。深色背景套一张白底排班图会像贴纸，
    这里给容器白底；高度封顶，长表在面板内滚动而不是把整页顶长。 */

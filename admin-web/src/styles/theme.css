@@ -36,6 +36,13 @@
      （它属于内容区，为什么不能与壳同档见令牌层那条注释）；档位口径写在
      `src/styles/__tests__/designGuard.test.js`。 */
   --z-tabbar: 15; --z-shell: 20; --z-scrim: 40; --z-dialog: 55; --z-toast: 100; --z-queue: 200;
+  /* 字号阶梯（2026-11-20）：7 档，值同工作台令牌层（`theme.workbench.css` 的
+     `html[data-workbench]` 块）。后台页面**没有** `data-workbench` —— 那个属性只由
+     `utils/workbenchDocument.js` 按路由 meta 挂到工作台页上，所以这一份必须定义在
+     `:root`：少了它，后台页的 `font-size: var(--fs-12)` 会在计算值阶段失效、退回继承字号。
+     口径：正文 / 状态 / 按钮 ≥ `--fs-12`；`--fs-11` 只留给密集数据格（月历数字、
+     图表轴、表格表头），白名单与存量棘轮见 `__tests__/designGuard.test.js`。 */
+  --fs-11: 11px; --fs-12: 12px; --fs-13: 13px; --fs-14: 14px; --fs-16: 16px; --fs-20: 20px; --fs-24: 24px;
 }
 
 * { box-sizing: border-box; }

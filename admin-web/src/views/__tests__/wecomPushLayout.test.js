@@ -50,8 +50,9 @@ describe('企微推送页的窄屏布局', () => {
     const src = compact(view)
     expect(src).toContain('.wp-hook-head{')
     expect(src).toContain('flex-wrap:wrap')
-    // 名称必须能收缩，否则它会先占满整行
-    expect(src).toContain('.wp-hook-name{font-size:13px;min-width:0;')
+    // 名称必须能收缩，否则它会先占满整行。字号由 designGuard 的字号棘轮守，
+    // 这里只锁同一条规则里的布局契约（min-width:0），避免两个测试守同一件事。
+    expect(src).toMatch(/\.wp-hook-name\{[^}]*min-width:0;/)
     expect(src).toContain('.wp-hook-badges{')
   })
 

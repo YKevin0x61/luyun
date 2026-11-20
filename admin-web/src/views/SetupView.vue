@@ -340,24 +340,24 @@ onMounted(() => {
   min-height: 44px;
   margin-bottom: 14px; padding: 7px 14px;
   background: var(--card2); border: 1px solid var(--border); border-radius: 7px;
-  color: var(--text-dim); font-size: 13px; font-weight: 600;
+  color: var(--text-dim); font-size: var(--fs-13); font-weight: 600;
   cursor: pointer; font-family: inherit; transition: all 0.15s;
 }
 .back-btn:hover { color: var(--text); border-color: var(--accent); }
 
-h1 { font-size: 20px; margin-bottom: 6px; display: flex; align-items: center; gap: 10px; }
+h1 { font-size: var(--fs-20); margin-bottom: 6px; display: flex; align-items: center; gap: 10px; }
 
 /* 页头一行状态摘要：采集状态 · 版本 · 上次备份（拿不到的那项不渲染）。 */
 .status-summary {
   display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px;
-  color: var(--text-dim); font-size: 13px; margin-bottom: 18px; line-height: 1.6;
+  color: var(--text-dim); font-size: var(--fs-13); margin-bottom: 18px; line-height: 1.6;
 }
 .status-summary__sep { color: var(--border); }
 .status-summary__item { font-variant-numeric: tabular-nums; }
 .status-summary__item.is-warn { color: var(--yellow); }
 
 .alert {
-  padding: 10px 14px; border-radius: 8px; font-size: 13px; margin-bottom: 16px;
+  padding: 10px 14px; border-radius: 8px; font-size: var(--fs-13); margin-bottom: 16px;
 }
 .alert.success { background: rgba(34, 197, 94, 0.12); border: 1px solid rgba(34, 197, 94, 0.3); color: #86efac; }
 .alert.error { background: rgba(239, 68, 68, 0.12); border: 1px solid rgba(239, 68, 68, 0.3); color: #fca5a5; }
@@ -367,7 +367,7 @@ h1 { font-size: 20px; margin-bottom: 6px; display: flex; align-items: center; ga
 .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px 14px; }
 .grid .full { grid-column: 1 / -1; }
 .grid .input { width: 100%; }
-label { display: block; font-size: 12px; color: var(--text-dim); margin-bottom: 5px; font-weight: 600; }
+label { display: block; font-size: var(--fs-12); color: var(--text-dim); margin-bottom: 5px; font-weight: 600; }
 .actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 8px; flex-wrap: wrap; }
 .import-block { margin-top: 12px; }
 .grid .luyun-check-row { display: flex; }
@@ -378,7 +378,7 @@ label { display: block; font-size: 12px; color: var(--text-dim); margin-bottom: 
 .password-row .toggle {
   position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
   background: transparent; border: none; color: var(--text-dim);
-  font-size: 11px; cursor: pointer; padding: 4px 8px;
+  font-size: var(--fs-11); cursor: pointer; padding: 4px 8px;
 }
 .password-row .toggle:hover { color: var(--text); }
 
@@ -391,7 +391,7 @@ label { display: block; font-size: 12px; color: var(--text-dim); margin-bottom: 
   display: inline-flex; align-items: center; gap: 8px;
   text-align: left; padding: 10px 14px; background: transparent;
   border: 1px solid transparent; border-radius: 8px;
-  color: var(--text-dim); font-size: 13px; font-weight: 600;
+  color: var(--text-dim); font-size: var(--fs-13); font-weight: 600;
   cursor: pointer; font-family: inherit; transition: all 0.15s;
   /* 触控高度地板值 44px（桌面把侧栏一项撑高一截也没坏处，鼠标点起来更稳）。 */
   min-height: 44px;
@@ -413,17 +413,17 @@ label { display: block; font-size: 12px; color: var(--text-dim); margin-bottom: 
   background: var(--card); border: 1px solid var(--border); border-radius: 12px;
   padding: 24px; max-width: 520px; width: 100%;
 }
-.modal-box h3 { font-size: 16px; margin-bottom: 10px; }
-.modal-box p { font-size: 13px; color: var(--text-dim); margin-bottom: 14px; line-height: 1.6; }
+.modal-box h3 { font-size: var(--fs-16); margin-bottom: 10px; }
+.modal-box p { font-size: var(--fs-13); color: var(--text-dim); margin-bottom: 14px; line-height: 1.6; }
 .token-display {
   background: var(--card2); border: 1px solid var(--border); border-radius: 8px;
   padding: 12px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 13px; word-break: break-all; margin-bottom: 16px; user-select: all;
+  font-size: var(--fs-13); word-break: break-all; margin-bottom: 16px; user-select: all;
 }
 
 .confirm-details {
   margin: 0 0 8px; padding-left: 18px;
-  font-size: 12px; color: var(--text-dim); line-height: 1.7;
+  font-size: var(--fs-12); color: var(--text-dim); line-height: 1.7;
 }
 .confirm-details li { margin-bottom: 2px; }
 

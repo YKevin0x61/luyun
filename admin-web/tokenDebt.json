@@ -12,6 +12,8 @@
       "small_tap": 0,
       "danger_text": 0,
       "z": 0,
+      "fs": 1,
+      "fs_small": 1,
       "undef": [
         "--icp-footer-ink",
         "--icp-footer-ink-hover"
@@ -20,12 +22,14 @@
     "src/components/ImageUploadQueuePanel.vue": {
       "hy": 0,
       "hex": 0,
-      "rgba": 5,
+      "rgba": 0,
       "style=": 1,
       "bp": 0,
-      "small_tap": 2,
+      "small_tap": 0,
       "danger_text": 0,
-      "z": 0
+      "z": 0,
+      "fs": 5,
+      "fs_small": 3
     },
     "src/components/PwaUpdateBanner.vue": {
       "hy": 0,
@@ -36,6 +40,8 @@
       "small_tap": 1,
       "danger_text": 0,
       "z": 0,
+      "fs": 3,
+      "fs_small": 1,
       "bp_values": [
         "640"
       ]
@@ -48,7 +54,21 @@
       "bp": 0,
       "small_tap": 0,
       "danger_text": 0,
-      "z": 0
+      "z": 0,
+      "fs": 0,
+      "fs_small": 0
+    },
+    "src/components/SystemMaintenanceBanner.vue": {
+      "hy": 0,
+      "hex": 0,
+      "rgba": 0,
+      "style=": 0,
+      "bp": 0,
+      "small_tap": 0,
+      "danger_text": 0,
+      "z": 0,
+      "fs": 3,
+      "fs_small": 1
     },
     "src/components/admin/BatchEditModal.vue": {
       "hy": 0,
@@ -58,7 +78,9 @@
       "bp": 0,
       "small_tap": 0,
       "danger_text": 0,
-      "z": 0
+      "z": 0,
+      "fs": 2,
+      "fs_small": 0
     },
     "src/components/admin/ClassifyDishesModal.vue": {
       "hy": 0,
@@ -68,7 +90,9 @@
       "bp": 0,
       "small_tap": 0,
       "danger_text": 0,
-      "z": 0
+      "z": 0,
+      "fs": 4,
+      "fs_small": 2
     },
     "src/components/admin/ColumnManageModal.vue": {
       "hy": 0,
@@ -78,7 +102,9 @@
       "bp": 0,
       "small_tap": 0,
       "danger_text": 0,
-      "z": 0
+      "z": 0,
+      "fs": 4,
+      "fs_small": 0
     },
     "src/components/admin/ConfirmDialog.vue": {
       "hy": 0,
@@ -89,6 +115,8 @@
       "small_tap": 0,
       "danger_text": 0,
       "z": 0,
+      "fs": 4,
+      "fs_small": 1,
       "undef": [
         "--border-color",
         "--text-muted",
@@ -103,7 +131,9 @@
       "bp": 0,
       "small_tap": 0,
       "danger_text": 0,
-      "z": 0
+      "z": 0,
+      "fs": 6,
+      "fs_small": 1
     },
     "src/components/admin/DataTable.vue": {
       "hy": 0,
@@ -114,6 +144,8 @@
       "small_tap": 0,
       "danger_text": 0,
       "z": 0,
+      "fs": 8,
+      "fs_small": 6,
       "bp_values": [
         "700",
         "899"
@@ -127,7 +159,9 @@
       "bp": 0,
       "small_tap": 0,
       "danger_text": 0,
-      "z": 0
+      "z": 0,
+      "fs": 7,
+      "fs_small": 2
     },
     "src/components/admin/RowEditModal.vue": {
       "hy": 0,
@@ -137,7 +171,9 @@
       "bp": 0,
       "small_tap": 0,
       "danger_text": 0,
-      "z": 0
+      "z": 0,
+      "fs": 0,
+      "fs_small": 0
     },
     "src/components/backup/BackupOverview.vue": {
       "hy": 0,
@@ -147,7 +183,9 @@
       "bp": 0,
       "small_tap": 1,
       "danger_text": 0,
-      "z": 0
+      "z": 0,
+      "fs": 5,
+      "fs_small": 0
     },
     "src/components/backup/BackupPointList.vue": {
       "hy": 0,
@@ -157,7 +195,9 @@
       "bp": 0,
       "small_tap": 6,
       "danger_text": 0,
-      "z": 0
+      "z": 0,
+      "fs": 10,
+      "fs_small": 6
     },
     "src/components/dashboard/HotDishesPanel.vue": {
       "hy": 0,
@@ -167,7 +207,9 @@
       "bp": 0,
       "small_tap": 0,
       "danger_text": 0,
-      "z": 0
+      "z": 0,
+      "fs": 0,
+      "fs_small": 0
     },
     "src/components/dashboard/KdsBacklogPanel.vue": {
       "hy": 0,
@@ -177,7 +219,9 @@
       "bp": 0,
       "small_tap": 0,
       "danger_text": 0,
-      "z": 0
+      "z": 0,
+      "fs": 4,
+      "fs_small": 2
     },
     "src/components/dashboard/RecentOrdersPanel.vue": {
       "hy": 0,
@@ -187,7 +231,9 @@
       "bp": 0,
       "small_tap": 0,
       "danger_text": 0,
-      "z": 0
+      "z": 0,
+      "fs": 2,
+      "fs_small": 1
     },
     "src/components/dashboard/RevenueTrendChart.vue": {
       "hy": 0,
@@ -197,7 +243,9 @@
       "bp": 0,
       "small_tap": 0,
       "danger_text": 0,
-      "z": 0
+      "z": 0,
+      "fs": 0,
+      "fs_small": 0
     },
     "src/components/dashboard/StatCards.vue": {
       "hy": 0,
@@ -207,17 +255,21 @@
       "bp": 0,
       "small_tap": 0,
       "danger_text": 0,
-      "z": 0
+      "z": 0,
+      "fs": 2,
+      "fs_small": 1
     },
     "src/components/dashboard/StationSpeedChart.vue": {
       "hy": 0,
       "hex": 26,
       "rgba": 2,
-      "style=": 16,
+      "style=": 15,
       "bp": 1,
       "small_tap": 0,
       "danger_text": 0,
       "z": 0,
+      "fs": 7,
+      "fs_small": 5,
       "bp_values": [
         "700"
       ]
@@ -230,7 +282,9 @@
       "bp": 0,
       "small_tap": 0,
       "danger_text": 0,
-      "z": 0
+      "z": 0,
+      "fs": 3,
+      "fs_small": 1
     },
     "src/components/dashboard/SystemStatusPanel.vue": {
       "hy": 0,
@@ -240,7 +294,9 @@
       "bp": 0,
       "small_tap": 0,
       "danger_text": 0,
-      "z": 0
+      "z": 0,
+      "fs": 1,
+      "fs_small": 0
     },
     "src/components/dashboard/TableLivePanel.vue": {
       "hy": 0,
@@ -250,7 +306,9 @@
       "bp": 0,
       "small_tap": 0,
       "danger_text": 0,
-      "z": 0
+      "z": 0,
+      "fs": 2,
+      "fs_small": 1
     },
     "src/components/hygiene/HygieneImageLightbox.vue": {
       "hy": 2,
@@ -260,17 +318,33 @@
       "bp": 0,
       "small_tap": 0,
       "danger_text": 0,
-      "z": 0
+      "z": 0,
+      "fs": 0,
+      "fs_small": 0
     },
-    "src/components/hygiene/HygieneLiveCamera.vue": {
-      "hy": 13,
+    "src/components/hygiene/HygieneItemEditor.vue": {
+      "hy": 0,
       "hex": 0,
       "rgba": 0,
       "style=": 0,
       "bp": 0,
       "small_tap": 0,
       "danger_text": 0,
-      "z": 0
+      "z": 0,
+      "fs": 5,
+      "fs_small": 5
+    },
+    "src/components/hygiene/HygieneLiveCamera.vue": {
+      "hy": 12,
+      "hex": 0,
+      "rgba": 0,
+      "style=": 0,
+      "bp": 0,
+      "small_tap": 0,
+      "danger_text": 0,
+      "z": 0,
+      "fs": 3,
+      "fs_small": 0
     },
     "src/components/hygiene/HygieneMarkupOverlay.vue": {
       "hy": 3,
@@ -280,17 +354,21 @@
       "bp": 0,
       "small_tap": 0,
       "danger_text": 0,
-      "z": 0
+      "z": 0,
+      "fs": 0,
+      "fs_small": 0
     },
     "src/components/hygiene/HygieneReviewPair.vue": {
-      "hy": 7,
+      "hy": 6,
       "hex": 0,
       "rgba": 0,
       "style=": 0,
       "bp": 0,
       "small_tap": 0,
       "danger_text": 0,
-      "z": 0
+      "z": 0,
+      "fs": 2,
+      "fs_small": 1
     },
     "src/components/hygiene/HygieneStandardOverlay.vue": {
       "hy": 8,
@@ -300,7 +378,9 @@
       "bp": 0,
       "small_tap": 0,
       "danger_text": 0,
-      "z": 0
+      "z": 0,
+      "fs": 1,
+      "fs_small": 0
     },
     "src/components/hygiene/HygieneWatermarkOverlay.vue": {
       "hy": 3,
@@ -310,17 +390,33 @@
       "bp": 0,
       "small_tap": 0,
       "danger_text": 0,
-      "z": 0
+      "z": 0,
+      "fs": 1,
+      "fs_small": 1
+    },
+    "src/components/hygiene/HygieneZoneItemsPanel.vue": {
+      "hy": 0,
+      "hex": 0,
+      "rgba": 0,
+      "style=": 0,
+      "bp": 0,
+      "small_tap": 0,
+      "danger_text": 0,
+      "z": 0,
+      "fs": 3,
+      "fs_small": 3
     },
     "src/components/hygiene/StandardPhotoCachePanel.vue": {
-      "hy": 17,
+      "hy": 15,
       "hex": 0,
       "rgba": 1,
       "style=": 0,
       "bp": 0,
       "small_tap": 0,
       "danger_text": 0,
-      "z": 0
+      "z": 0,
+      "fs": 5,
+      "fs_small": 1
     },
     "src/components/recipe/RecipeExitButton.vue": {
       "hy": 0,
@@ -331,6 +427,8 @@
       "small_tap": 0,
       "danger_text": 0,
       "z": 0,
+      "fs": 0,
+      "fs_small": 0,
       "bp_values": [
         "640"
       ],
@@ -349,6 +447,8 @@
       "small_tap": 0,
       "danger_text": 0,
       "z": 0,
+      "fs": 0,
+      "fs_small": 0,
       "undef": [
         "--muted"
       ]
@@ -357,11 +457,25 @@
       "hy": 0,
       "hex": 0,
       "rgba": 0,
-      "style=": 10,
+      "style=": 9,
       "bp": 0,
       "small_tap": 0,
       "danger_text": 0,
-      "z": 0
+      "z": 0,
+      "fs": 1,
+      "fs_small": 1
+    },
+    "src/components/salesreport/RefundDetailTable.vue": {
+      "hy": 0,
+      "hex": 0,
+      "rgba": 0,
+      "style=": 0,
+      "bp": 0,
+      "small_tap": 0,
+      "danger_text": 0,
+      "z": 0,
+      "fs": 2,
+      "fs_small": 2
     },
     "src/components/salesreport/RefundModal.vue": {
       "hy": 0,
@@ -371,7 +485,9 @@
       "bp": 0,
       "small_tap": 0,
       "danger_text": 0,
-      "z": 0
+      "z": 0,
+      "fs": 2,
+      "fs_small": 0
     },
     "src/components/salesreport/ReportDishSettingsModal.vue": {
       "hy": 0,
@@ -381,37 +497,33 @@
       "bp": 0,
       "small_tap": 0,
       "danger_text": 0,
-      "z": 0
+      "z": 0,
+      "fs": 4,
+      "fs_small": 0
     },
-    "src/components/salesreport/RuleFormModal.vue": {
+    "src/components/salesreport/RulesReadonlyTable.vue": {
       "hy": 0,
       "hex": 0,
       "rgba": 0,
-      "style=": 6,
+      "style=": 0,
       "bp": 0,
       "small_tap": 0,
       "danger_text": 0,
-      "z": 0
-    },
-    "src/components/salesreport/RulesTab.vue": {
-      "hy": 0,
-      "hex": 1,
-      "rgba": 0,
-      "style=": 27,
-      "bp": 0,
-      "small_tap": 0,
-      "danger_text": 0,
-      "z": 0
+      "z": 0,
+      "fs": 8,
+      "fs_small": 4
     },
     "src/components/salesreport/SemiFinishedTable.vue": {
       "hy": 0,
       "hex": 0,
       "rgba": 0,
-      "style=": 4,
+      "style=": 3,
       "bp": 0,
       "small_tap": 0,
       "danger_text": 0,
-      "z": 0
+      "z": 0,
+      "fs": 2,
+      "fs_small": 1
     },
     "src/components/salesreport/StationShareChart.vue": {
       "hy": 0,
@@ -421,7 +533,9 @@
       "bp": 0,
       "small_tap": 0,
       "danger_text": 0,
-      "z": 0
+      "z": 0,
+      "fs": 0,
+      "fs_small": 0
     },
     "src/components/salesreport/TextExportModal.vue": {
       "hy": 0,
@@ -431,17 +545,21 @@
       "bp": 0,
       "small_tap": 0,
       "danger_text": 0,
-      "z": 0
+      "z": 0,
+      "fs": 1,
+      "fs_small": 0
     },
     "src/components/salesreport/TimePeriodCards.vue": {
       "hy": 0,
       "hex": 0,
       "rgba": 0,
-      "style=": 1,
+      "style=": 0,
       "bp": 0,
       "small_tap": 0,
       "danger_text": 0,
-      "z": 0
+      "z": 0,
+      "fs": 1,
+      "fs_small": 1
     },
     "src/components/salesreport/TrendChart.vue": {
       "hy": 0,
@@ -451,7 +569,9 @@
       "bp": 0,
       "small_tap": 0,
       "danger_text": 0,
-      "z": 0
+      "z": 0,
+      "fs": 0,
+      "fs_small": 0
     },
     "src/components/salesreport/WecomPushModal.vue": {
       "hy": 0,
@@ -461,17 +581,45 @@
       "bp": 0,
       "small_tap": 0,
       "danger_text": 0,
-      "z": 0
+      "z": 0,
+      "fs": 2,
+      "fs_small": 0
     },
-    "src/components/staff/StaffHygieneCard.vue": {
-      "hy": 1,
+    "src/components/scheduling/StaffDaySheet.vue": {
+      "hy": 0,
       "hex": 0,
       "rgba": 0,
       "style=": 0,
       "bp": 0,
       "small_tap": 0,
       "danger_text": 0,
-      "z": 0
+      "z": 0,
+      "fs": 25,
+      "fs_small": 13
+    },
+    "src/components/staff/StaffExitButton.vue": {
+      "hy": 0,
+      "hex": 0,
+      "rgba": 0,
+      "style=": 0,
+      "bp": 0,
+      "small_tap": 0,
+      "danger_text": 0,
+      "z": 0,
+      "fs": 1,
+      "fs_small": 1
+    },
+    "src/components/staff/StaffHygieneCard.vue": {
+      "hy": 0,
+      "hex": 0,
+      "rgba": 0,
+      "style=": 0,
+      "bp": 0,
+      "small_tap": 0,
+      "danger_text": 0,
+      "z": 0,
+      "fs": 8,
+      "fs_small": 4
     },
     "src/components/system/BulletGauge.vue": {
       "hy": 0,
@@ -481,7 +629,9 @@
       "bp": 0,
       "small_tap": 0,
       "danger_text": 0,
-      "z": 0
+      "z": 0,
+      "fs": 5,
+      "fs_small": 3
     },
     "src/components/system/HealthSummary.vue": {
       "hy": 0,
@@ -491,7 +641,9 @@
       "bp": 0,
       "small_tap": 0,
       "danger_text": 0,
-      "z": 0
+      "z": 0,
+      "fs": 5,
+      "fs_small": 0
     },
     "src/components/system/ReadinessGrid.vue": {
       "hy": 0,
@@ -501,7 +653,9 @@
       "bp": 0,
       "small_tap": 1,
       "danger_text": 0,
-      "z": 0
+      "z": 0,
+      "fs": 3,
+      "fs_small": 1
     },
     "src/components/system/ReconcileProgress.vue": {
       "hy": 0,
@@ -511,7 +665,9 @@
       "bp": 0,
       "small_tap": 0,
       "danger_text": 0,
-      "z": 0
+      "z": 0,
+      "fs": 2,
+      "fs_small": 0
     },
     "src/components/system/UsageBar.vue": {
       "hy": 0,
@@ -521,7 +677,57 @@
       "bp": 0,
       "small_tap": 1,
       "danger_text": 0,
-      "z": 0
+      "z": 0,
+      "fs": 1,
+      "fs_small": 0
+    },
+    "src/components/tasks/TaskCard.vue": {
+      "hy": 0,
+      "hex": 0,
+      "rgba": 0,
+      "style=": 0,
+      "bp": 0,
+      "small_tap": 0,
+      "danger_text": 0,
+      "z": 0,
+      "fs": 6,
+      "fs_small": 1
+    },
+    "src/components/tasks/TaskDetailDialog.vue": {
+      "hy": 0,
+      "hex": 0,
+      "rgba": 0,
+      "style=": 0,
+      "bp": 0,
+      "small_tap": 0,
+      "danger_text": 0,
+      "z": 0,
+      "fs": 18,
+      "fs_small": 2
+    },
+    "src/components/tasks/TaskPublishDialog.vue": {
+      "hy": 0,
+      "hex": 0,
+      "rgba": 0,
+      "style=": 0,
+      "bp": 0,
+      "small_tap": 0,
+      "danger_text": 0,
+      "z": 0,
+      "fs": 8,
+      "fs_small": 1
+    },
+    "src/components/tasks/TaskWorkSheet.vue": {
+      "hy": 0,
+      "hex": 0,
+      "rgba": 0,
+      "style=": 0,
+      "bp": 0,
+      "small_tap": 0,
+      "danger_text": 0,
+      "z": 0,
+      "fs": 7,
+      "fs_small": 1
     },
     "src/components/ui/CheckList.vue": {
       "hy": 0,
@@ -531,7 +737,9 @@
       "bp": 0,
       "small_tap": 0,
       "danger_text": 0,
-      "z": 0
+      "z": 0,
+      "fs": 3,
+      "fs_small": 1
     },
     "src/components/ui/PanelHeader.vue": {
       "hy": 0,
@@ -541,7 +749,9 @@
       "bp": 0,
       "small_tap": 1,
       "danger_text": 0,
-      "z": 0
+      "z": 0,
+      "fs": 4,
+      "fs_small": 0
     },
     "src/components/ui/StatusPill.vue": {
       "hy": 0,
@@ -551,7 +761,9 @@
       "bp": 0,
       "small_tap": 0,
       "danger_text": 0,
-      "z": 0
+      "z": 0,
+      "fs": 1,
+      "fs_small": 1
     },
     "src/components/update/DatabaseMigrations.vue": {
       "hy": 0,
@@ -561,7 +773,9 @@
       "bp": 0,
       "small_tap": 1,
       "danger_text": 0,
-      "z": 0
+      "z": 0,
+      "fs": 4,
+      "fs_small": 2
     },
     "src/components/update/UpdateOverview.vue": {
       "hy": 0,
@@ -571,7 +785,9 @@
       "bp": 0,
       "small_tap": 1,
       "danger_text": 0,
-      "z": 0
+      "z": 0,
+      "fs": 4,
+      "fs_small": 0
     },
     "src/components/update/UpdateStageProgress.vue": {
       "hy": 0,
@@ -581,17 +797,24 @@
       "bp": 0,
       "small_tap": 0,
       "danger_text": 0,
-      "z": 0
+      "z": 0,
+      "fs": 7,
+      "fs_small": 2
     },
     "src/components/workbench/WorkbenchExitButton.vue": {
       "hy": 5,
       "hex": 0,
       "rgba": 0,
       "style=": 0,
-      "bp": 0,
+      "bp": 1,
       "small_tap": 0,
       "danger_text": 0,
-      "z": 0
+      "z": 0,
+      "fs": 1,
+      "fs_small": 1,
+      "bp_values": [
+        "1024"
+      ]
     },
     "src/components/workbench/WorkbenchIdentitySwitcher.vue": {
       "hy": 16,
@@ -601,47 +824,60 @@
       "bp": 0,
       "small_tap": 1,
       "danger_text": 0,
-      "z": 0
+      "z": 0,
+      "fs": 7,
+      "fs_small": 2
     },
     "src/components/workbench/WorkbenchMobileHead.vue": {
-      "hy": 19,
+      "hy": 18,
       "hex": 0,
       "rgba": 1,
       "style=": 0,
       "bp": 0,
       "small_tap": 0,
       "danger_text": 0,
-      "z": 0
+      "z": 0,
+      "fs": 3,
+      "fs_small": 2
     },
     "src/components/workbench/WorkbenchNav.vue": {
-      "hy": 7,
+      "hy": 6,
       "hex": 0,
       "rgba": 0,
       "style=": 0,
-      "bp": 0,
+      "bp": 1,
       "small_tap": 1,
       "danger_text": 0,
-      "z": 0
+      "z": 0,
+      "fs": 3,
+      "fs_small": 1,
+      "bp_values": [
+        "1024"
+      ]
     },
     "src/components/workbench/WorkbenchRail.vue": {
-      "hy": 4,
+      "hy": 3,
       "hex": 0,
       "rgba": 0,
       "style=": 0,
       "bp": 0,
       "small_tap": 1,
       "danger_text": 0,
-      "z": 0
+      "z": 0,
+      "fs": 1,
+      "fs_small": 0
     },
     "src/components/workbench/WorkbenchTabBar.vue": {
-      "hy": 3,
+      "hy": 2,
       "hex": 0,
       "rgba": 0,
       "style=": 0,
       "bp": 0,
       "small_tap": 0,
       "danger_text": 0,
-      "z": 0
+      "z": 0,
+      "fs": 2,
+      "fs_small": 2
     },
     "src/stores/stations.js": {
       "hy": 0,
@@ -651,7 +887,21 @@
       "bp": 0,
       "small_tap": 0,
       "danger_text": 0,
-      "z": 0
+      "z": 0,
+      "fs": 0,
+      "fs_small": 0
+    },
+    "src/styles/jsonforms.css": {
+      "hy": 0,
+      "hex": 0,
+      "rgba": 0,
+      "style=": 0,
+      "bp": 0,
+      "small_tap": 0,
+      "danger_text": 0,
+      "z": 0,
+      "fs": 4,
+      "fs_small": 3
     },
     "src/styles/theme.css": {
       "hy": 0,
@@ -659,9 +909,11 @@
       "rgba": 23,
       "style=": 0,
       "bp": 3,
-      "small_tap": 7,
+      "small_tap": 6,
       "danger_text": 0,
       "z": 0,
+      "fs": 44,
+      "fs_small": 18,
       "bp_values": [
         "1100",
         "960"
@@ -669,13 +921,15 @@
     },
     "src/styles/theme.workbench.css": {
       "hy": 13,
-      "hex": 143,
-      "rgba": 79,
+      "hex": 154,
+      "rgba": 68,
       "style=": 0,
       "bp": 0,
       "small_tap": 0,
       "danger_text": 0,
-      "z": 0
+      "z": 0,
+      "fs": 0,
+      "fs_small": 0
     },
     "src/utils/pwaManifest.js": {
       "hy": 0,
@@ -685,7 +939,9 @@
       "bp": 0,
       "small_tap": 0,
       "danger_text": 0,
-      "z": 0
+      "z": 0,
+      "fs": 0,
+      "fs_small": 0
     },
     "src/utils/staffPaths.js": {
       "hy": 0,
@@ -695,7 +951,9 @@
       "bp": 0,
       "small_tap": 0,
       "danger_text": 0,
-      "z": 0
+      "z": 0,
+      "fs": 0,
+      "fs_small": 0
     },
     "src/utils/workbenchInsets.js": {
       "hy": 4,
@@ -705,7 +963,21 @@
       "bp": 0,
       "small_tap": 0,
       "danger_text": 0,
-      "z": 0
+      "z": 0,
+      "fs": 0,
+      "fs_small": 0
+    },
+    "src/utils/workbenchTheme.js": {
+      "hy": 0,
+      "hex": 3,
+      "rgba": 0,
+      "style=": 0,
+      "bp": 0,
+      "small_tap": 0,
+      "danger_text": 0,
+      "z": 0,
+      "fs": 0,
+      "fs_small": 0
     },
     "src/views/AdminView.vue": {
       "hy": 0,
@@ -715,7 +987,9 @@
       "bp": 0,
       "small_tap": 0,
       "danger_text": 0,
-      "z": 0
+      "z": 0,
+      "fs": 0,
+      "fs_small": 0
     },
     "src/views/DashboardView.vue": {
       "hy": 0,
@@ -725,7 +999,9 @@
       "bp": 0,
       "small_tap": 0,
       "danger_text": 0,
-      "z": 0
+      "z": 0,
+      "fs": 0,
+      "fs_small": 0
     },
     "src/views/LoginView.vue": {
       "hy": 0,
@@ -736,6 +1012,8 @@
       "small_tap": 0,
       "danger_text": 0,
       "z": 0,
+      "fs": 12,
+      "fs_small": 1,
       "bp_values": [
         "480"
       ],
@@ -767,19 +1045,11 @@
       "small_tap": 2,
       "danger_text": 0,
       "z": 0,
+      "fs": 19,
+      "fs_small": 16,
       "bp_values": [
         "760"
       ]
-    },
-    "src/views/PrepPlanView.vue": {
-      "hy": 1,
-      "hex": 0,
-      "rgba": 0,
-      "style=": 0,
-      "bp": 0,
-      "small_tap": 0,
-      "danger_text": 0,
-      "z": 0
     },
     "src/views/SalesReportView.vue": {
       "hy": 0,
@@ -789,7 +1059,9 @@
       "bp": 0,
       "small_tap": 0,
       "danger_text": 0,
-      "z": 0
+      "z": 0,
+      "fs": 6,
+      "fs_small": 2
     },
     "src/views/SetupView.vue": {
       "hy": 0,
@@ -800,6 +1072,8 @@
       "small_tap": 1,
       "danger_text": 0,
       "z": 0,
+      "fs": 0,
+      "fs_small": 0,
       "bp_values": [
         "700"
       ]
@@ -808,25 +1082,89 @@
       "hy": 0,
       "hex": 6,
       "rgba": 12,
-      "style=": 119,
+      "style=": 114,
       "bp": 3,
-      "small_tap": 2,
+      "small_tap": 1,
       "danger_text": 0,
       "z": 0,
+      "fs": 0,
+      "fs_small": 0,
       "bp_values": [
         "700",
         "980"
       ]
     },
-    "src/views/hr/HrRemindersView.vue": {
-      "hy": 1,
+    "src/views/attendance/AttendanceSheetView.vue": {
+      "hy": 0,
       "hex": 0,
       "rgba": 0,
       "style=": 0,
       "bp": 0,
       "small_tap": 0,
       "danger_text": 0,
-      "z": 0
+      "z": 0,
+      "fs": 28,
+      "fs_small": 20
+    },
+    "src/views/hr/HolidayCalendarView.vue": {
+      "hy": 0,
+      "hex": 0,
+      "rgba": 0,
+      "style=": 0,
+      "bp": 0,
+      "small_tap": 0,
+      "danger_text": 0,
+      "z": 0,
+      "fs": 24,
+      "fs_small": 14
+    },
+    "src/views/hr/HrRemindersView.vue": {
+      "hy": 0,
+      "hex": 0,
+      "rgba": 0,
+      "style=": 0,
+      "bp": 0,
+      "small_tap": 0,
+      "danger_text": 0,
+      "z": 0,
+      "fs": 26,
+      "fs_small": 18
+    },
+    "src/views/hygiene/HygieneAdminLayout.vue": {
+      "hy": 0,
+      "hex": 0,
+      "rgba": 0,
+      "style=": 0,
+      "bp": 0,
+      "small_tap": 0,
+      "danger_text": 0,
+      "z": 0,
+      "fs": 1,
+      "fs_small": 1
+    },
+    "src/views/hygiene/HygieneAttireView.vue": {
+      "hy": 0,
+      "hex": 0,
+      "rgba": 0,
+      "style=": 0,
+      "bp": 0,
+      "small_tap": 0,
+      "danger_text": 0,
+      "z": 0,
+      "fs": 12,
+      "fs_small": 10
+    },
+    "src/views/hygiene/HygieneBoardsView.vue": {
+      "hy": 0,
+      "hex": 0,
+      "rgba": 0,
+      "style=": 0,
+      "bp": 0,
+      "small_tap": 0,
+      "danger_text": 0,
+      "z": 0,
+      "fs": 8,
+      "fs_small": 6
     },
     "src/views/hygiene/HygieneDailyView.vue": {
       "hy": 3,
@@ -836,27 +1174,105 @@
       "bp": 0,
       "small_tap": 0,
       "danger_text": 0,
-      "z": 0
+      "z": 0,
+      "fs": 7,
+      "fs_small": 2
+    },
+    "src/views/hygiene/HygieneDataView.vue": {
+      "hy": 0,
+      "hex": 0,
+      "rgba": 0,
+      "style=": 0,
+      "bp": 0,
+      "small_tap": 0,
+      "danger_text": 0,
+      "z": 0,
+      "fs": 16,
+      "fs_small": 14
+    },
+    "src/views/hygiene/HygieneDeepCleanView.vue": {
+      "hy": 0,
+      "hex": 0,
+      "rgba": 0,
+      "style=": 0,
+      "bp": 0,
+      "small_tap": 0,
+      "danger_text": 0,
+      "z": 0,
+      "fs": 11,
+      "fs_small": 9
+    },
+    "src/views/hygiene/HygieneFixView.vue": {
+      "hy": 0,
+      "hex": 0,
+      "rgba": 0,
+      "style=": 0,
+      "bp": 0,
+      "small_tap": 0,
+      "danger_text": 0,
+      "z": 0,
+      "fs": 10,
+      "fs_small": 9
+    },
+    "src/views/hygiene/HygieneHomeView.vue": {
+      "hy": 0,
+      "hex": 0,
+      "rgba": 0,
+      "style=": 0,
+      "bp": 0,
+      "small_tap": 0,
+      "danger_text": 0,
+      "z": 0,
+      "fs": 11,
+      "fs_small": 7
+    },
+    "src/views/hygiene/HygieneRegisterView.vue": {
+      "hy": 0,
+      "hex": 0,
+      "rgba": 0,
+      "style=": 0,
+      "bp": 0,
+      "small_tap": 0,
+      "danger_text": 0,
+      "z": 0,
+      "fs": 6,
+      "fs_small": 5
     },
     "src/views/hygiene/HygieneRosterView.vue": {
-      "hy": 5,
+      "hy": 4,
       "hex": 0,
       "rgba": 0,
       "style=": 0,
       "bp": 0,
       "small_tap": 5,
       "danger_text": 0,
-      "z": 0
+      "z": 0,
+      "fs": 12,
+      "fs_small": 6
     },
     "src/views/hygiene/HygieneTrendView.vue": {
-      "hy": 1,
+      "hy": 0,
       "hex": 0,
       "rgba": 0,
       "style=": 1,
       "bp": 0,
       "small_tap": 0,
       "danger_text": 0,
-      "z": 0
+      "z": 0,
+      "fs": 13,
+      "fs_small": 11
+    },
+    "src/views/hygiene/HygieneZoneItemsView.vue": {
+      "hy": 0,
+      "hex": 0,
+      "rgba": 0,
+      "style=": 0,
+      "bp": 0,
+      "small_tap": 0,
+      "danger_text": 0,
+      "z": 0,
+      "fs": 6,
+      "fs_small": 5
     },
     "src/views/hygiene/HygieneZonesView.vue": {
       "hy": 0,
@@ -866,19 +1282,83 @@
       "bp": 0,
       "small_tap": 0,
       "danger_text": 0,
-      "z": 0
+      "z": 0,
+      "fs": 13,
+      "fs_small": 11
     },
-    "src/views/overtime/HrOvertimeView.vue": {
-      "hy": 42,
+    "src/views/overtime/MeOvertimeView.vue": {
+      "hy": 0,
       "hex": 0,
-      "rgba": 1,
+      "rgba": 0,
       "style=": 0,
       "bp": 0,
       "small_tap": 0,
       "danger_text": 0,
-      "z": 0
+      "z": 0,
+      "fs": 20,
+      "fs_small": 12
     },
-    "src/views/overtime/MeOvertimeView.vue": {
+    "src/views/overtime/OvertimeReviewView.vue": {
+      "hy": 0,
+      "hex": 0,
+      "rgba": 0,
+      "style=": 0,
+      "bp": 0,
+      "small_tap": 0,
+      "danger_text": 0,
+      "z": 0,
+      "fs": 29,
+      "fs_small": 9
+    },
+    "src/views/prep/PrepPlanShell.vue": {
+      "hy": 0,
+      "hex": 0,
+      "rgba": 0,
+      "style=": 0,
+      "bp": 0,
+      "small_tap": 0,
+      "danger_text": 0,
+      "z": 0,
+      "fs": 2,
+      "fs_small": 0
+    },
+    "src/views/prep/PrepRulesView.vue": {
+      "hy": 0,
+      "hex": 0,
+      "rgba": 0,
+      "style=": 0,
+      "bp": 0,
+      "small_tap": 0,
+      "danger_text": 0,
+      "z": 0,
+      "fs": 4,
+      "fs_small": 3
+    },
+    "src/views/recipe/RecipeDetailView.vue": {
+      "hy": 0,
+      "hex": 0,
+      "rgba": 0,
+      "style=": 1,
+      "bp": 0,
+      "small_tap": 0,
+      "danger_text": 0,
+      "z": 0,
+      "fs": 7,
+      "fs_small": 3
+    },
+    "src/views/recipe/RecipeManageView.vue": {
+      "hy": 2,
+      "hex": 0,
+      "rgba": 0,
+      "style=": 0,
+      "bp": 0,
+      "small_tap": 0,
+      "danger_text": 0,
+      "z": 0,
+      "fs": 6,
+      "fs_small": 3
+    },
+    "src/views/recipe/RecipePrintView.vue": {
       "hy": 1,
       "hex": 0,
       "rgba": 0,
@@ -887,37 +1367,8 @@
       "small_tap": 0,
       "danger_text": 0,
       "z": 0,
-      "undef": []
-    },
-    "src/views/recipe/RecipeDetailView.vue": {
-      "hy": 5,
-      "hex": 0,
-      "rgba": 0,
-      "style=": 1,
-      "bp": 0,
-      "small_tap": 0,
-      "danger_text": 0,
-      "z": 0
-    },
-    "src/views/recipe/RecipeManageView.vue": {
-      "hy": 3,
-      "hex": 0,
-      "rgba": 0,
-      "style=": 0,
-      "bp": 0,
-      "small_tap": 0,
-      "danger_text": 0,
-      "z": 0
-    },
-    "src/views/recipe/RecipePrintView.vue": {
-      "hy": 2,
-      "hex": 0,
-      "rgba": 0,
-      "style=": 0,
-      "bp": 0,
-      "small_tap": 0,
-      "danger_text": 0,
-      "z": 0
+      "fs": 1,
+      "fs_small": 0
     },
     "src/views/recipe/RecipeQrView.vue": {
       "hy": 1,
@@ -927,39 +1378,35 @@
       "bp": 0,
       "small_tap": 0,
       "danger_text": 0,
-      "z": 0
+      "z": 0,
+      "fs": 1,
+      "fs_small": 0
     },
     "src/views/recipe/RecipeStationsView.vue": {
-      "hy": 4,
+      "hy": 1,
       "hex": 0,
       "rgba": 1,
       "style=": 0,
       "bp": 0,
       "small_tap": 0,
       "danger_text": 0,
-      "z": 0
+      "z": 0,
+      "fs": 5,
+      "fs_small": 3
     },
     "src/views/scheduling/SchedulingCalendarView.vue": {
-      "hy": 29,
+      "hy": 9,
       "hex": 0,
       "rgba": 0,
       "style=": 0,
       "bp": 0,
       "small_tap": 0,
       "danger_text": 0,
-      "z": 0
+      "z": 0,
+      "fs": 98,
+      "fs_small": 78
     },
     "src/views/scheduling/SchedulingInboxView.vue": {
-      "hy": 2,
-      "hex": 0,
-      "rgba": 0,
-      "style=": 0,
-      "bp": 0,
-      "small_tap": 0,
-      "danger_text": 0,
-      "z": 0
-    },
-    "src/views/scheduling/SchedulingShiftsView.vue": {
       "hy": 1,
       "hex": 0,
       "rgba": 0,
@@ -967,7 +1414,33 @@
       "bp": 0,
       "small_tap": 0,
       "danger_text": 0,
-      "z": 0
+      "z": 0,
+      "fs": 25,
+      "fs_small": 15
+    },
+    "src/views/scheduling/SchedulingLayout.vue": {
+      "hy": 0,
+      "hex": 0,
+      "rgba": 0,
+      "style=": 0,
+      "bp": 0,
+      "small_tap": 0,
+      "danger_text": 0,
+      "z": 0,
+      "fs": 2,
+      "fs_small": 2
+    },
+    "src/views/scheduling/SchedulingShiftsView.vue": {
+      "hy": 0,
+      "hex": 0,
+      "rgba": 0,
+      "style=": 0,
+      "bp": 0,
+      "small_tap": 0,
+      "danger_text": 0,
+      "z": 0,
+      "fs": 28,
+      "fs_small": 15
     },
     "src/views/settings/AccountSection.vue": {
       "hy": 0,
@@ -978,6 +1451,8 @@
       "small_tap": 0,
       "danger_text": 0,
       "z": 0,
+      "fs": 5,
+      "fs_small": 1,
       "bp_values": [
         "700"
       ]
@@ -991,6 +1466,8 @@
       "small_tap": 2,
       "danger_text": 0,
       "z": 0,
+      "fs": 9,
+      "fs_small": 3,
       "bp_values": [
         "700"
       ]
@@ -1004,6 +1481,8 @@
       "small_tap": 1,
       "danger_text": 0,
       "z": 0,
+      "fs": 10,
+      "fs_small": 4,
       "bp_values": [
         "700"
       ]
@@ -1017,6 +1496,8 @@
       "small_tap": 1,
       "danger_text": 0,
       "z": 0,
+      "fs": 6,
+      "fs_small": 4,
       "bp_values": [
         "700"
       ]
@@ -1030,19 +1511,95 @@
       "small_tap": 3,
       "danger_text": 0,
       "z": 0,
+      "fs": 0,
+      "fs_small": 0,
       "bp_values": [
         "700"
       ]
     },
-    "src/views/today/TodayView.vue": {
-      "hy": 1,
+    "src/views/tasks/MyTasksView.vue": {
+      "hy": 0,
       "hex": 0,
       "rgba": 0,
       "style=": 0,
       "bp": 0,
       "small_tap": 0,
       "danger_text": 0,
-      "z": 0
+      "z": 0,
+      "fs": 2,
+      "fs_small": 0
+    },
+    "src/views/tasks/TasksBoardView.vue": {
+      "hy": 0,
+      "hex": 0,
+      "rgba": 0,
+      "style=": 0,
+      "bp": 0,
+      "small_tap": 0,
+      "danger_text": 0,
+      "z": 0,
+      "fs": 2,
+      "fs_small": 0
+    },
+    "src/views/tasks/TasksRecurringView.vue": {
+      "hy": 0,
+      "hex": 0,
+      "rgba": 0,
+      "style=": 0,
+      "bp": 0,
+      "small_tap": 0,
+      "danger_text": 0,
+      "z": 0,
+      "fs": 1,
+      "fs_small": 0
+    },
+    "src/views/today/TodayMonthView.vue": {
+      "hy": 0,
+      "hex": 0,
+      "rgba": 0,
+      "style=": 0,
+      "bp": 0,
+      "small_tap": 0,
+      "danger_text": 0,
+      "z": 0,
+      "fs": 21,
+      "fs_small": 17
+    },
+    "src/views/today/TodayView.vue": {
+      "hy": 0,
+      "hex": 0,
+      "rgba": 0,
+      "style=": 0,
+      "bp": 0,
+      "small_tap": 0,
+      "danger_text": 0,
+      "z": 0,
+      "fs": 33,
+      "fs_small": 25
+    },
+    "src/views/wastage/WastageAnalysisView.vue": {
+      "hy": 0,
+      "hex": 0,
+      "rgba": 0,
+      "style=": 0,
+      "bp": 0,
+      "small_tap": 0,
+      "danger_text": 0,
+      "z": 0,
+      "fs": 29,
+      "fs_small": 13
+    },
+    "src/views/wastage/WastageRegisterView.vue": {
+      "hy": 0,
+      "hex": 0,
+      "rgba": 0,
+      "style=": 0,
+      "bp": 0,
+      "small_tap": 0,
+      "danger_text": 0,
+      "z": 0,
+      "fs": 45,
+      "fs_small": 8
     },
     "src/views/workbench/ForbiddenView.vue": {
       "hy": 12,
@@ -1052,27 +1609,48 @@
       "bp": 0,
       "small_tap": 0,
       "danger_text": 0,
-      "z": 0
+      "z": 0,
+      "fs": 5,
+      "fs_small": 0
     },
-    "src/views/workbench/WorkbenchHomeView.vue": {
-      "hy": 4,
+    "src/views/workbench/StaffMealView.vue": {
+      "hy": 0,
       "hex": 0,
       "rgba": 0,
       "style=": 0,
       "bp": 0,
       "small_tap": 0,
       "danger_text": 0,
-      "z": 0
+      "z": 0,
+      "fs": 40,
+      "fs_small": 10
     },
-    "src/views/workbench/WorkbenchShell.vue": {
-      "hy": 8,
+    "src/views/workbench/WorkbenchHomeView.vue": {
+      "hy": 0,
       "hex": 0,
       "rgba": 0,
-      "style=": 1,
+      "style=": 0,
       "bp": 0,
       "small_tap": 0,
       "danger_text": 0,
       "z": 0,
+      "fs": 35,
+      "fs_small": 22
+    },
+    "src/views/workbench/WorkbenchShell.vue": {
+      "hy": 7,
+      "hex": 0,
+      "rgba": 0,
+      "style=": 1,
+      "bp": 1,
+      "small_tap": 0,
+      "danger_text": 0,
+      "z": 0,
+      "fs": 2,
+      "fs_small": 0,
+      "bp_values": [
+        "1024"
+      ],
       "undef": [
         "--wb-inset-bottom",
         "--wb-inset-inline",

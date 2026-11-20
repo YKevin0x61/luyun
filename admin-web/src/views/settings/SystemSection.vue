@@ -732,7 +732,7 @@ watch(
 
 <style scoped>
 .alert {
-  padding: 10px 14px; border-radius: 8px; font-size: 13px; margin-bottom: 16px;
+  padding: 10px 14px; border-radius: 8px; font-size: var(--fs-13); margin-bottom: 16px;
 }
 .alert.success { background: rgba(34, 197, 94, 0.12); border: 1px solid rgba(34, 197, 94, 0.3); color: #86efac; }
 .alert.error { background: rgba(239, 68, 68, 0.12); border: 1px solid rgba(239, 68, 68, 0.3); color: #fca5a5; }
@@ -745,8 +745,8 @@ fieldset {
   padding: 16px 18px 18px; margin-bottom: 16px;
   background: rgba(10, 13, 22, 0.5);
 }
-legend { font-size: 12px; font-weight: 700; color: var(--text-dim); padding: 0 8px; letter-spacing: 0.5px; }
-.hint { font-size: 11px; color: var(--text-dim); margin-top: 4px; line-height: 1.5; opacity: 0.85; }
+legend { font-size: var(--fs-12); font-weight: 700; color: var(--text-dim); padding: 0 8px; letter-spacing: 0.5px; }
+.hint { font-size: var(--fs-11); color: var(--text-dim); margin-top: 4px; line-height: 1.5; opacity: 0.85; }
 .hint.is-warn { color: var(--yellow); opacity: 1; }
 .hint.is-error { color: #fca5a5; opacity: 1; }
 .section-lead { margin: 0 0 12px; }
@@ -769,7 +769,7 @@ legend { font-size: 12px; font-weight: 700; color: var(--text-dim); padding: 0 8
 .release-more { margin-top: 10px; }
 .release-more > summary {
   display: flex; align-items: center; gap: 6px; min-height: 36px;
-  cursor: pointer; font-size: 12px; font-weight: 600; color: var(--text-dim);
+  cursor: pointer; font-size: var(--fs-12); font-weight: 600; color: var(--text-dim);
   list-style: none;
 }
 .release-more > summary::-webkit-details-marker { display: none; }
@@ -785,7 +785,7 @@ legend { font-size: 12px; font-weight: 700; color: var(--text-dim); padding: 0 8
 .section-help { margin-top: 10px; }
 .section-help > summary {
   display: flex; align-items: center; gap: 6px; min-height: 32px;
-  cursor: pointer; font-size: 12px; font-weight: 600; color: var(--text-dim);
+  cursor: pointer; font-size: var(--fs-12); font-weight: 600; color: var(--text-dim);
   list-style: none;
 }
 .section-help > summary::-webkit-details-marker { display: none; }
@@ -807,7 +807,7 @@ legend { font-size: 12px; font-weight: 700; color: var(--text-dim); padding: 0 8
 .job-log pre {
   max-height: 220px; overflow: auto; margin: 6px 0 0; padding: 10px;
   white-space: pre-wrap; word-break: break-word;
-  background: rgba(0, 0, 0, 0.25); border-radius: 8px; font-size: 12px;
+  background: rgba(0, 0, 0, 0.25); border-radius: 8px; font-size: var(--fs-12);
 }
 
 /* 更新历史的结果单元格：失败原因可能是几千字符的 systemd 输出（多行、单行 500+ 字符），
@@ -829,7 +829,7 @@ legend { font-size: 12px; font-weight: 700; color: var(--text-dim); padding: 0 8
 .history-error__raw { margin-top: 2px; }
 .history-error__raw > summary {
   display: inline-flex; align-items: center; gap: 4px; min-height: 22px;
-  cursor: pointer; font-size: 11px; color: var(--text-dim); list-style: none;
+  cursor: pointer; font-size: var(--fs-11); color: var(--text-dim); list-style: none;
 }
 .history-error__raw > summary::-webkit-details-marker { display: none; }
 .history-error__raw > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
@@ -838,7 +838,7 @@ legend { font-size: 12px; font-weight: 700; color: var(--text-dim); padding: 0 8
 .history-error__raw pre {
   max-height: 220px; overflow: auto; margin: 4px 0 0; padding: 8px;
   white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere;
-  background: rgba(0, 0, 0, 0.25); border-radius: 6px; font-size: 11px;
+  background: rgba(0, 0, 0, 0.25); border-radius: 6px; font-size: var(--fs-11);
 }
 .github-panel {
   border: 1px solid var(--border); border-radius: 10px;
@@ -847,7 +847,7 @@ legend { font-size: 12px; font-weight: 700; color: var(--text-dim); padding: 0 8
 .github-panel > summary {
   display: flex; align-items: center; gap: 6px; min-height: 44px;
   padding: 0 18px; cursor: pointer;
-  font-size: 12px; font-weight: 700; color: var(--text-dim); letter-spacing: 0.5px;
+  font-size: var(--fs-12); font-weight: 700; color: var(--text-dim); letter-spacing: 0.5px;
 }
 .github-panel__icon { color: var(--text-dim); transition: transform 0.15s ease; }
 .github-panel[open] > summary,
@@ -858,13 +858,13 @@ legend { font-size: 12px; font-weight: 700; color: var(--text-dim); padding: 0 8
 .meta-grid {
   display: grid; grid-template-columns: 1fr 1fr; gap: 6px 18px;
   background: rgba(10, 13, 22, 0.6); border-radius: 8px; padding: 10px 14px;
-  font-size: 12px;
+  font-size: var(--fs-12);
 }
 .meta-grid div { display: flex; justify-content: space-between; gap: 10px; }
 .meta-grid .k { color: var(--text-dim); opacity: 0.85; }
 .meta-grid .v { color: var(--text); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 
-.token-list { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 12px; }
+.token-list { width: 100%; border-collapse: collapse; font-size: var(--fs-12); margin-top: 12px; }
 .token-list th, .token-list td { padding: 8px 10px; text-align: left; border-bottom: 1px solid var(--border); }
 /* Token 表格：撤销列贴右，状态列不折行。 */
 .token-table th:last-child, .token-table td:last-child { width: 1%; text-align: right; white-space: nowrap; }

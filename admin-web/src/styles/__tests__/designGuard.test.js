@@ -196,6 +196,112 @@ describe('设计护栏 · 令牌层', () => {
 })
 
 // ══════════════════════════════════════════════════════════════════════════════
+// 设计护栏 · 字号令牌与 <12px 小字的棘轮（2026-11-20）
+//
+// 背景：工作台令牌层（`html[data-workbench]`）一直有 7 档字号，**后台页面一档都没有** ——
+// `theme.workbench.css` 那份只在工作台页生效，而 `html` 上没有 `data-workbench` 的页面
+// （配置页 / 企微推送 / 数据管理…）只吃 `theme.css`。所以 7 档在 `:root` 也定义了一份（同值）。
+//
+// 三条判据（都是源码能判定的事实）：
+//   1. 7 档在两套主题里都定义、同值 —— 少一份，那套主题里写 var() 的地方会在计算值阶段失效；
+//   2. 写死的 `font-size: Npx` 只减不增（`var(--fs-…)` 不算 —— 引用令牌正是出口）；
+//   3. <12px 只许出现在密集数据格白名单：一格只有几十像素的地方才用 11px，
+//      正文 / 状态 / 按钮一律 ≥12px（从 `--fs-12` 起）。
+// 口径的局限：第 2、3 条只数裸 px，`var(--fs-11)` 不数 —— 它们管「新写的小字别再造裸值」，
+// 不负责把已经令牌化的小字逐个清掉（那要靠迁移）。
+const FS_PX = /font-size:\s*([0-9.]+)px/g
+const fsPx = (s) => [...s.matchAll(FS_PX)].map((m) => Number(m[1]))
+const FS_TIERS = [['--fs-11', 11], ['--fs-12', 12], ['--fs-13', 13], ['--fs-14', 14],
+                  ['--fs-16', 16], ['--fs-20', 20], ['--fs-24', 24]]
+
+// 取某个选择器后面的规则体（按花括号配对；令牌层没有嵌套规则）。
+// 不复用下面的 ruleOf：那个只认到第一个 `}`，而 `:root` 可能先在文件头注释里被提到。
+const cssBlockAfter = (css, selector) => {
+  const at = css.indexOf(selector)
+  if (at === -1) return ''
+  const open = css.indexOf('{', at)
+  if (open === -1) return ''
+  let depth = 0
+  for (let i = open; i < css.length; i += 1) {
+    if (css[i] === '{') depth += 1
+    else if (css[i] === '}') {
+      depth -= 1
+      if (depth === 0) return css.slice(open + 1, i)
+    }
+  }
+  return ''
+}
+// 读规则体里某个令牌的 px 值（`--fs-12:12px` 与 `--fs-12: 12px` 都认）。
+const declaredPx = (block, name) => {
+  const at = block.indexOf(name + ':')
+  if (at === -1) return null
+  const rest = block.slice(at + name.length + 1).trimStart()
+  const num = rest.match(/^-?[0-9]+/)
+  if (!num || !rest.startsWith('px', num[0].length)) return null
+  return Number(num[0])
+}
+
+// 密集数据格白名单 —— 为什么是这几个文件（别处只引用这一份）：
+//   · SchedulingCalendarView：七列月历平分下来一格 ~39px 宽，日期数字与班次角标只能
+//     8.5–11.5px，放大就撑破格子（见该文件 542、2979 行附近的注释）。
+//   · DataTable：共享数据表，表头列名（`.dt-sidebar-header` 11px）与紧凑徽标 9–10px；
+//     列宽由表头决定，字号一抬窄表就挤变形。
+//   · theme.css / theme.workbench.css：两套令牌层自己的通用小字（`.badge` / `.btn-sm`
+//     11px、`.axis-label` 10px）。豁免只到这两个文件本身，不牵连引用它们的页面。
+//   · src/components/dashboard/：图表组件目录，坐标轴刻度 / 柱标数字天然是密集小字。
+// 白名单外：`fs_small` 只能往下降（没列进快照的新文件必须为 0）。
+const FS_SMALL_FILES = new Set([
+  'src/views/scheduling/SchedulingCalendarView.vue',
+  'src/components/admin/DataTable.vue',
+  'src/styles/theme.css',
+  'src/styles/theme.workbench.css',
+])
+const FS_SMALL_DIRS = ['src/components/dashboard/']
+const fsSmallAllowed = (path) => FS_SMALL_FILES.has(path) || FS_SMALL_DIRS.some((d) => path.startsWith(d))
+
+describe('设计护栏 · 字号令牌与 <12px 小字棘轮', () => {
+  it('7 档字号令牌在两套主题里都定义、同值（后台页没有 data-workbench，必须落在 :root）', () => {
+    expect(THEME_ADMIN, '后台页的令牌全在 theme.css 的 :root 里').toContain(':root')
+    const adminRoot = cssBlockAfter(THEME_ADMIN, ':root')
+    expect(adminRoot, '没取到 theme.css 的 :root 规则体').toContain('--z-tabbar')
+    const workbench = cssBlockAfter(THEME, 'html[data-workbench]')
+    expect(workbench, '没取到 theme.workbench.css 的 html[data-workbench] 规则体').toContain('--edge')
+    for (const [name, px] of FS_TIERS) {
+      expect(declaredPx(adminRoot, name), 'theme.css 的 :root 缺 ' + name + '（后台页写 var(' + name + ') 会失效）').toBe(px)
+      expect(declaredPx(workbench, name), 'theme.workbench.css 的 html[data-workbench] 缺 ' + name).toBe(px)
+    }
+    expect(FS_TIERS.map(([, px]) => px), '档位固定为 11/12/13/14/16/20/24；改档要同时改 theme.css 与 theme.workbench.css').toEqual([11, 12, 13, 14, 16, 20, 24])
+  })
+
+  it('写死的 px 字号只减不增：未列进快照的文件必须为 0', () => {
+    const over = []
+    for (const [path, src] of SOURCES) {
+      const now = fsPx(src).length
+      const pinned = (DEBT.files[path] && DEBT.files[path].fs) || 0
+      if (now > pinned) over.push(path + ' 的 fs：' + now + ' > 快照 ' + pinned + (DEBT.files[path] ? '' : '（未列进 tokenDebt.json，按 strict 必须为 0）'))
+    }
+    expect(over, '字号一律写 var(--fs-…)，7 档是 11/12/13/14/16/20/24；重出快照：node src/styles/__tests__/makeTokenDebt.mjs').toEqual([])
+  })
+
+  it('<12px 的小字只许出现在密集格白名单；白名单外只减不增', () => {
+    const over = []
+    for (const [path, src] of SOURCES) {
+      const now = fsPx(src).filter((v) => v < 12).length
+      if (!now || fsSmallAllowed(path)) continue
+      const pinned = (DEBT.files[path] && DEBT.files[path].fs_small) || 0
+      if (now > pinned) over.push(path + ' 的 fs_small：' + now + ' > 快照 ' + pinned)
+    }
+    expect(over, '11px 只给密集数据格（月历数字 / 图表轴 / 表格表头）；正文 / 状态 / 按钮一律 ≥12px。白名单见本文件的 FS_SMALL_FILES / FS_SMALL_DIRS').toEqual([])
+  })
+
+  it('白名单里的条目都还在（文件改名后要回来改白名单，别让豁免静默失效）', () => {
+    const paths = SOURCES.map(([p]) => p)
+    for (const file of FS_SMALL_FILES) expect(paths, file + ' 不在 src/ 里，白名单过期了').toContain(file)
+    for (const dir of FS_SMALL_DIRS) expect(paths.some((p) => p.startsWith(dir)), dir + ' 下没有源码文件，白名单过期了').toBe(true)
+  })
+})
+
+// ══════════════════════════════════════════════════════════════════════════════
 // 设计护栏 · 层级（票 05 / ADR 0106 决策 6）
 //
 // 本节的两条「不许出现 X」都是**源码断言**（文本判定即结论），不是拿文本去断行为：
