@@ -236,9 +236,20 @@ class _ReportsMixin:
     KDS_BACKLOG_HIGH = 15
     KDS_OVERDUE_MINUTES = 20
     KDS_EXCLUDED_STATION = "loumian"
+    # 数据源健康阈值：营业日窗口内「已制作待上菜」行数占全部菜品行数 >= 2% 才算 KDS
+    # 真正在用。库里 30 万行只有 0.36% 回写过出餐状态，若不判断这个，待出/超时数字
+    # 恒满恒红，告警等于没有（前端据此降级成「KDS 未启用」）。
+    KDS_ACTIVE_MIN_RATIO = 0.02
 
     async def aggregate_kds_backlog(self) -> Dict[str, Any]:
-        """当前营业日（06:00 切）各档口待出餐队列，口径与 KDS pendingCount / load level 一致；排除楼面。"""
+        """当前营业日（06:00 切）各档口待出餐队列 + KDS 数据源健康；口径与 KDS pendingCount / load level 一致，排除楼面。
+
+        除待出队列外还回 ``kds_active`` / ``kds_active_ratio``：KDS（厨房显示）要靠
+        ``dish_status`` 回写出餐进度，若几乎没人维护（历史上 30 万单只有 0.36% 是
+        「已制作待上菜」），待出/超时/档口负载就是失真的告警，前端应降级展示。
+        判据与待出队列**同一营业日窗口、同一批过滤条件**（quantity>0、非退菜、非退款、
+        排除楼面），只看全表会把历史存量算进分母、永远判不活跃。
+        """
         now = datetime.now(CHINA_TZ)
         # 票 25：窗口 = 当前营业日 [06:00, 次日 06:00)，右端开区间；
         # 旧的自然日 [今日 00:00, 现在] 会在 00:00–06:00 丢掉前一夜 06:00 之后入单的待出餐项。
@@ -267,6 +278,29 @@ class _ReportsMixin:
                 (overdue_cutoff, start_iso, end_iso, self.KDS_EXCLUDED_STATION),
             )
             rows = [dict(r) for r in await cursor.fetchall()]
+            # 数据源健康：同一营业日窗口内 KDS 回写的「已制作待上菜」占全部菜品行的比例。
+            # 与上面的队列查询用同一批过滤条件（quantity>0、非退菜、非退款、排除楼面），
+            # 只是不限制 dish_status；不能拿全表当分母——30 万行历史存量会把比例稀释到
+            # 永远判不活跃，KDS 真正开启后也翻不了身。
+            await cursor.execute(
+                """SELECT COUNT(*) AS total_lines,
+                          SUM(CASE WHEN dish_status = '已制作待上菜' THEN 1 ELSE 0 END) AS kds_lines
+                   FROM orders
+                   WHERE quantity > 0
+                     AND status != '退菜'
+                     AND business_flow_id NOT LIKE '%_refund_%'
+                     AND order_time >= ?
+                     AND order_time < ?
+                     AND station != ?""",
+                (start_iso, end_iso, self.KDS_EXCLUDED_STATION),
+            )
+            health_row = await cursor.fetchone()
+
+        total_lines = int(health_row[0] or 0) if health_row else 0
+        kds_lines = int(health_row[1] or 0) if health_row else 0
+        # 4 位小数：排查时能直接看出「0.0036 = 0.36%」这种量级。
+        kds_active_ratio = round(kds_lines / total_lines, 4) if total_lines else 0.0
+        kds_active = kds_active_ratio >= self.KDS_ACTIVE_MIN_RATIO
 
         stations: List[Dict[str, Any]] = []
         total_pending = 0
@@ -316,6 +350,10 @@ class _ReportsMixin:
             "overdue_count": overdue_count,
             "busiest_station": busiest_station,
             "stations": stations,
+            # 数据源健康（新增，旧字段全部保留）：kds_active=false 时前端把待出/超时/
+            # 档口负载降级成非告警展示，并给出「去开启 KDS」的入口。
+            "kds_active": kds_active,
+            "kds_active_ratio": kds_active_ratio,
         }
 
     async def aggregate_dashboard_extras(self) -> Dict[str, Any]:

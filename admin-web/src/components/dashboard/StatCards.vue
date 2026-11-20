@@ -52,6 +52,17 @@ const kitchenHealth = computed(() => {
       : '—',
   }
 })
+
+// KDS 数据源健康（后端 kds_backlog.kds_active）：营业日窗口内「已制作待上菜」行数占比
+// 不足 2% 说明 dish_status 没人回写，待出/超时数字全是失真告警，卡片降级成「KDS 未启用」。
+// 旧接口没有该字段时按 true 处理，保持原有红色告警行为。
+const kdsActive = computed(() => props.summary?.kds_backlog?.kds_active !== false)
+
+// KDS 未启用时图标也换成中性橙，不再用告警红。直接复用「采集状态」那组色（STAT_ICONS.scraper），
+// 不新增裸 hex/rgba：设计护栏按文件数存量色值，只减不增。
+const kitchenHealthIcon = computed(() => (kdsActive.value
+  ? STAT_ICONS.kitchenHealth
+  : { name: STAT_ICONS.kitchenHealth.name, bg: STAT_ICONS.scraper.bg, color: STAT_ICONS.scraper.color }))
 </script>
 
 <template>
@@ -93,15 +104,22 @@ const kitchenHealth = computed(() => {
       </div>
     </div>
     <div class="card stat-card">
-      <div class="stat-icon" :style="{ background: STAT_ICONS.kitchenHealth.bg, color: STAT_ICONS.kitchenHealth.color }">
-        <SvgIcon :name="STAT_ICONS.kitchenHealth.name" :size="22" />
+      <div class="stat-icon" :style="{ background: kitchenHealthIcon.bg, color: kitchenHealthIcon.color }">
+        <SvgIcon :name="kitchenHealthIcon.name" :size="22" />
       </div>
       <div class="stat-info">
         <span class="label">出餐健康</span>
-        <span class="value" :class="kitchenHealth.overdue > 0 ? 'red' : (kitchenHealth.pending > 0 ? 'yellow' : '')">
-          待出 {{ kitchenHealth.pending }} · 超时 {{ kitchenHealth.overdue }}
-        </span>
-        <span class="sub-label">最忙 {{ kitchenHealth.busiestLabel }}</span>
+        <template v-if="kdsActive">
+          <span class="value" :class="kitchenHealth.overdue > 0 ? 'red' : (kitchenHealth.pending > 0 ? 'yellow' : '')">
+            待出 {{ kitchenHealth.pending }} · 超时 {{ kitchenHealth.overdue }}
+          </span>
+          <span class="sub-label">最忙 {{ kitchenHealth.busiestLabel }}</span>
+        </template>
+        <!-- KDS 没回写 dish_status 时待出/超时不可信：橙色提示 + 去开启入口，不报红 -->
+        <template v-else>
+          <span class="value yellow value-text">未启用</span>
+          <span class="sub-label">KDS 未回写 · 待出 {{ kitchenHealth.pending }} 条</span>
+        </template>
       </div>
     </div>
     <div class="card stat-card">
@@ -152,5 +170,11 @@ const kitchenHealth = computed(() => {
 .sub-label {
   font-size: 11px;
   color: var(--text-dim);
+}
+/* KDS 未启用时 value 从 22px 的大数字降成一句短话：22px 下「KDS 未启用」在 160px 卡里会折成
+   「KDS 未启 / 用」两行，还把整张卡顶高、和旁边六张错位。入口仍在下方的「厨房 KDS」大卡。 */
+.value-text {
+  font-size: 16px;
+  line-height: 1.4;
 }
 </style>

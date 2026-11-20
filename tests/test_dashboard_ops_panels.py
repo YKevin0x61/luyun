@@ -124,6 +124,75 @@ class DashboardOpsPanelsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(dimsum["overdue"], 1)
         self.assertEqual(dimsum["load_level"], "low")
         self.assertGreaterEqual(dimsum["oldest_wait_minutes"], 20.0)
+        # 4 行里 1 行是 KDS 回写的「已制作待上菜」（25% >= 2% 阈值）：数据源健康判定为活跃，
+        # 前端保持原有红色告警展示。
+        self.assertTrue(backlog["kds_active"])
+        self.assertEqual(backlog["kds_active_ratio"], 0.25)
+
+    async def test_aggregate_kds_backlog_flags_inactive_when_kds_not_backfilled(self):
+        # 现状数据证据：营业日 1830 行待出餐、0 行「已制作待上菜」——KDS 根本没人回写出餐状态。
+        # 占比必须在同一营业日窗口、同一批过滤条件（quantity>0、非退菜、非退款、排除楼面）下算：
+        # 这里造 101 行、其中仅 1 行「已制作待上菜」，占比 1/101≈0.99% < 2% 阈值，kds_active
+        # 必须是 False，前端据此把待出/超时降级成「KDS 未启用」，不再恒红。
+        tdb = self.db.table("orders")
+        now_iso = self.now.isoformat()
+        order_time = (self.now - timedelta(minutes=5)).isoformat()
+        for idx in range(100):
+            await tdb.execute(
+                """INSERT INTO orders
+                   (business_flow_id, table_number, dish_name, quantity, order_time,
+                    price, total_amount, status, category, station, dish_status, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    f"stale-{idx}",
+                    "C1",
+                    "烧卖",
+                    1,
+                    order_time,
+                    10.0,
+                    10.0,
+                    "未结",
+                    "点心",
+                    "dimsum",
+                    "待出餐",
+                    now_iso,
+                    now_iso,
+                ),
+            )
+        await tdb.execute(
+            """INSERT INTO orders
+               (business_flow_id, table_number, dish_name, quantity, order_time,
+                price, total_amount, status, category, station, dish_status, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                "stale-backfilled",
+                "C1",
+                "烧卖",
+                1,
+                order_time,
+                10.0,
+                10.0,
+                "未结",
+                "点心",
+                "dimsum",
+                "已制作待上菜",
+                now_iso,
+                now_iso,
+            ),
+        )
+        await tdb.commit()
+
+        with _frozen_panel_clock():
+            backlog = await self.db.aggregate_kds_backlog()
+
+        self.assertFalse(backlog["kds_active"])
+        # 4 位小数便于排查：1/101 = 0.00990099... -> 0.0099
+        self.assertEqual(backlog["kds_active_ratio"], 0.0099)
+        # 待出队列只统计「待出餐」，回写过的那行不进队列
+        self.assertEqual(backlog["total_pending"], 100)
+        # 旧字段一个都不能少（其它卡片依赖它们）
+        for key in ("total_pending", "overdue_count", "busiest_station", "stations"):
+            self.assertIn(key, backlog)
 
     async def test_aggregate_kds_backlog_load_levels(self):
         tdb = self.db.table("orders")
