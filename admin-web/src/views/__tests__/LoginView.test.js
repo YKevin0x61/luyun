@@ -412,6 +412,9 @@ describe('/login 面板：员工栏', () => {
       .mockResolvedValueOnce(jsonResponse({ success: true, employee: { name: '张三' } }))
 
     const { wrapper, router } = await mountLogin('/login?next=%2Fworkbench%2Fstaff%2Fmonth')
+    // 门店平板是多人共用的：默认不勾「记住密码，自动登录」，旁边有一行共用设备提示。
+    expect(wrapper.find('input[type="checkbox"]').element.checked).toBe(false)
+    expect(wrapper.text()).toContain('共用设备请勿勾选')
     await submitWith(wrapper, {
       'input[type="tel"]': '13800138000',
       'input[type="password"]': 's3cret',
@@ -423,7 +426,7 @@ describe('/login 面板：员工栏', () => {
     expect(JSON.parse(loginCall[1].body)).toMatchObject({
       phone: '13800138000',
       password: 's3cret',
-      remember: true,
+      remember: false,
     })
     expect(router.currentRoute.value.path).toBe('/workbench/staff/month')
   })

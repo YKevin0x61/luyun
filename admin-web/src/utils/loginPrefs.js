@@ -6,8 +6,9 @@
 
 const KEY_PREFIX = 'luyun.login.'
 
-/** 未记录过偏好时默认勾选：门店机器打开即进，是日常用法；取消勾选会写入 '0' 并保持。 */
-export const DEFAULT_REMEMBER = true
+/** 未记录过偏好时默认不勾：门店平板是多人共用的，上一个员工勾过「自动登录」
+ *  下一个人打开就进了上一个人的账号；勾选结果会写入 '1' 并保持，直到有人取消。 */
+export const DEFAULT_REMEMBER = false
 
 /** 没记住过时默认开员工栏：员工手机打开 `/login` 就该直接看到手机号那一栏。 */
 export const DEFAULT_LOGIN_TAB = 'staff'
@@ -54,8 +55,8 @@ export function loadLoginPrefs(namespace, storage) {
   const rememberRaw = readRaw(store, fieldKey(namespace, 'remember'))
   const accountRaw = readRaw(store, fieldKey(namespace, 'account'))
   return {
-    // 只认 '0' / '1'：其他脏值（含 null）都回落到默认勾选。
-    remember: rememberRaw === null ? DEFAULT_REMEMBER : rememberRaw !== '0',
+    // 只认 '0' / '1'：其他脏值（含 null）都回落到默认不勾。
+    remember: rememberRaw === '1' ? true : rememberRaw === '0' ? false : DEFAULT_REMEMBER,
     account: typeof accountRaw === 'string' ? accountRaw : '',
   }
 }

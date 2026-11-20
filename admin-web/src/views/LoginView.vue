@@ -499,6 +499,7 @@ onMounted(() => {
           <span>记住密码，自动登录（长期有效）</span>
         </label>
         <p class="hint remember-hint">密码由浏览器保存并自动填充，本系统不存储明文密码。</p>
+        <p class="hint remember-shared">共用设备请勿勾选，用完请退出登录。</p>
         <button type="submit" class="btn btn-primary btn-block" :disabled="adminSubmitting">登录</button>
       </form>
 
@@ -536,7 +537,11 @@ onMounted(() => {
           <span>记住密码，自动登录（长期有效）</span>
         </label>
         <p class="hint remember-hint">密码由浏览器保存并自动填充，本系统不存储明文密码。</p>
+        <p class="hint remember-shared">共用设备请勿勾选，用完请退出登录。</p>
         <button type="submit" class="btn btn-primary btn-block" :disabled="staffSubmitting">登录</button>
+        <!-- 员工端没有自助找回（2026-11-20 用户裁定）：密码只能由店长在花名册里重置。
+             不写「忘记密码？」链接到不存在的地方 —— 直接说清该找谁、在哪一步。 -->
+        <p class="login-help">忘记密码？联系店长在花名册里重置。</p>
         <p class="login-switch">
           还没有账号？
           <router-link to="/register">自助注册</router-link>
@@ -718,7 +723,13 @@ onMounted(() => {
 }
 
 .remember-hint {
+  margin: 0 0 2px;
+}
+
+/* 共用设备提示：门店平板是多人共用的，勾了自动登录下一个员工进来就是上一个人的账号。 */
+.remember-shared {
   margin: 0 0 16px;
+  color: var(--login-accent);
 }
 
 .logged-in-name { margin-bottom: 16px; }
@@ -738,6 +749,15 @@ onMounted(() => {
   color: var(--login-accent);
   font-weight: 700;
   text-underline-offset: .2em;
+}
+
+/* 「忘记密码」的出口：不指向任何链接，只说明找谁 —— 所以比可点的 login-switch 弱一档。 */
+.login-help {
+  margin: 12px 0 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--login-dim);
+  text-align: center;
 }
 
 .loading {

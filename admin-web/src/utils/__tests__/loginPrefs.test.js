@@ -22,9 +22,9 @@ function memoryStorage({ throwing = false } = {}) {
 }
 
 describe('loadLoginPrefs', () => {
-  it('默认勾选记住登录，账号为空', () => {
-    expect(DEFAULT_REMEMBER).toBe(true)
-    expect(loadLoginPrefs('admin', memoryStorage())).toEqual({ remember: true, account: '' })
+  it('默认不勾记住登录，账号为空（门店共用平板，下一位打开不能是上一个人的账号）', () => {
+    expect(DEFAULT_REMEMBER).toBe(false)
+    expect(loadLoginPrefs('admin', memoryStorage())).toEqual({ remember: false, account: '' })
   })
 
   it('读回已保存的偏好与账号', () => {
@@ -33,22 +33,22 @@ describe('loadLoginPrefs', () => {
     expect(loadLoginPrefs('admin', store)).toEqual({ remember: false, account: 'boss' })
   })
 
-  it('脏值回落到默认勾选', () => {
+  it('脏值回落到默认不勾', () => {
     const store = memoryStorage()
     store.setItem('luyun.login.admin.remember', 'yes-please')
-    expect(loadLoginPrefs('admin', store).remember).toBe(true)
+    expect(loadLoginPrefs('admin', store).remember).toBe(false)
   })
 
   it('admin 与 staff 的偏好互不影响', () => {
     const store = memoryStorage()
     saveLoginPrefs('staff', { remember: false, account: '13800138000' }, store)
     expect(loadLoginPrefs('staff', store)).toEqual({ remember: false, account: '13800138000' })
-    expect(loadLoginPrefs('admin', store)).toEqual({ remember: true, account: '' })
+    expect(loadLoginPrefs('admin', store)).toEqual({ remember: false, account: '' })
   })
 
   it('存储不可用时退化为默认值而不抛错', () => {
     const store = memoryStorage({ throwing: true })
-    expect(loadLoginPrefs('admin', store)).toEqual({ remember: true, account: '' })
+    expect(loadLoginPrefs('admin', store)).toEqual({ remember: false, account: '' })
     expect(() => saveLoginPrefs('admin', { remember: false, account: 'x' }, store)).not.toThrow()
   })
 })
