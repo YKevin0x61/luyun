@@ -169,6 +169,16 @@ describe('「无权访问」页：说清这页是谁的，给一颗回自己首�
     expect(wrapper.text()).toContain('你的复核工作在手机端「卫生」页里做')
   })
 
+  it('只勾「厨房采购」的员工：这一屏仍算员工，不冒充现场复核', async () => {
+    // ADR 0158：`purchase` 是员工岗位能力，不派生管理员 —— 判据不再是「勾了任意一项」。
+    vi.stubGlobal('fetch', staffAdminFetch(['purchase']))
+    const { wrapper } = await mountForbidden('/workbench/kitchen/purchase/catalog')
+
+    expect(wrapper.text()).toContain('超级管理员在电脑端用的页面')
+    expect(wrapper.text()).not.toContain('管理员（员工账号 · 现场复核）')
+    expect(wrapper.text()).toContain('你当前的身份：员工')
+  })
+
   it('超级管理员进员工页：说明这是员工手机端的页，按钮回工作台首页', async () => {
     vi.stubGlobal('fetch', adminOnlyFetch())
     const { wrapper, router } = await mountForbidden('/workbench/staff/today')

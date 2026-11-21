@@ -202,7 +202,10 @@ def test_migration_backfill_matches_the_legacy_tier():
 
 
 def test_permission_label_is_derived_from_the_caps():
-    """档位标签由开关派生：有任一管理能力即「管理员」，一项都没有即「普通员工」。
+    """档位标签由开关派生：有任一项管理权限即「管理员」，一项都没有即「普通员工」。
+
+    **厨房采购是员工岗位能力，不算管理权限**（ADR 0158）：只有 `purchase` 一项时标签仍是
+    「普通员工」，其余任一项（含未接线的七项）仍按 ADR 0093 派生「管理员」。
 
     `hygiene_employees.permission` 那一列还在（花名册的下拉照旧写它），但**读出来的标签
     一律跟开关走** —— 库里写着「管理员」、一项开关都没给时，返回的是「普通员工」。两者
@@ -238,6 +241,10 @@ def test_permission_label_is_derived_from_the_caps():
             # 「有任一项」只看有没有，不看那一项能不能用：未接线的那七项也算有管理能力。
             await accounts.set_admin_caps(employee_id, ["data"])
             seen["给了未接线的一项"] = await roster_label()
+            # 厨房采购只是员工岗位能力：只有它时不派生管理员（ADR 0158）。
+            await accounts.set_admin_caps(employee_id, ["purchase"])
+            seen["只给了厨房采购"] = await roster_label()
+            seen["只给了厨房采购（登录）"] = await login_label()
             await accounts.set_admin_caps(employee_id, ["daily_review"])
             seen["给了员工端真生效的一项"] = await roster_label()
             seen["登录返回的 employee"] = await login_label()
@@ -253,6 +260,8 @@ def test_permission_label_is_derived_from_the_caps():
     seen = asyncio.run(scenario())
     assert seen["一项都没有"] == "普通员工"
     assert seen["给了未接线的一项"] == "管理员"
+    assert seen["只给了厨房采购"] == "普通员工"
+    assert seen["只给了厨房采购（登录）"] == "普通员工"
     assert seen["给了员工端真生效的一项"] == "管理员"
     assert seen["登录返回的 employee"] == "管理员"
     assert seen["库列写管理员、开关为空（花名册）"] == "普通员工"

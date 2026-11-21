@@ -106,7 +106,10 @@ onMounted(async () => {
   // 只看它会把"标签是管理员、一个勾都没给"的人说成有复核工作（正好说反）。
   const caps = (session && session.employee && session.employee.admin_caps) || []
   myCaps.value = Array.isArray(caps) ? caps : []
-  if (myCaps.value.length > 0) identity.value = 'staff-admin'
+  // `purchase` 是**员工岗位能力**、不是管理权限（ADR 0158）：只勾采购的人这一屏仍算
+  // 「员工」。真把他写成「管理员（员工账号 · 现场复核）」等于凭空给了个复核身份。
+  const adminCaps = myCaps.value.filter((cap) => cap !== 'purchase')
+  if (adminCaps.length > 0) identity.value = 'staff-admin'
 })
 
 const identityLabel = computed(() => {

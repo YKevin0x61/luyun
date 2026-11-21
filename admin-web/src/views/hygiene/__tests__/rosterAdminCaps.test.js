@@ -12,11 +12,12 @@ import {
  * 花名册的「管理权限」（2026-10 改版：动作搬进编辑抽屉）。
  *
  * 三件事在这一组里压死：
- * 1. **可勾的只有员工端真有执行点的九项**；只读那七项**整块不渲染** —— 名字、说明、
- *    连 `title` 都不给（design §3.4）。页面不显示 ≠ 键可以抹掉，见第 4 条。
- * 2. **「管理权限」是开关**（2026-11-17 用户裁定）：关着时下面九项灰掉不可勾，关掉会
- *    清空已勾的项；开关只活在草稿里，页面仍不 PATCH `permission`（服务端按 admin_caps 派生
- *    「管理员 / 普通员工」这个标签）。
+ * 1. **管理权限可勾的只有员工端真有执行点的八项**（厨房采购单独一勾）；只读那七项
+ *    **整块不渲染** —— 名字、说明、连 `title` 都不给（design §3.4）。页面不显示 ≠ 键可以抹掉，
+ *    见第 4 条。
+ * 2. **「管理权限」是开关**（2026-11-17 用户裁定）：关着时下面八项灰掉不可勾，关掉会
+ *    清空已勾的项；厨房采购是独立的一勾，普通员工也能直接勾，不受这个开关管（ADR 0158）。
+ *    开关只活在草稿里，页面仍不 PATCH `permission`（服务端按 admin_caps 派生标签）。
  * 3. **勾选不发请求**：点「保存」才发**一次** PATCH，`admin_caps` 是整组（归一化成契约顺序），
  *    并且必须把库里只读七项已有的值原样带回 —— 整组替换少带一个就是静默删权限。
  */
@@ -100,6 +101,8 @@ async function openDrawer(wrapper) {
   await flushPromises()
 }
 
+const MANAGEMENT_DEFS = ADMIN_CAP_STAFF_DEFS.filter((cap) => cap.key !== 'purchase')
+
 function capBoxes(wrapper) {
   return wrapper.findAll('.roster-cap input')
 }
@@ -109,7 +112,7 @@ function saveButton(wrapper) {
 }
 
 describe('花名册 · 管理权限（抽屉）', () => {
-  it('可勾的只有员工端真正生效的九项；「管理权限」是开关，普通员工时整块不显示', async () => {
+  it('可勾的管理权限是员工端真正生效的八项；厨房采购单独一勾，普通员工也能直接勾', async () => {
     const wrapper = await mountRoster()
     await openDrawer(wrapper)
 
@@ -117,17 +120,20 @@ describe('花名册 · 管理权限（抽屉）', () => {
     expect(wrapper.findAll('select')).toHaveLength(0)
     expect(wrapper.text()).toContain('管理权限')
     expect(wrapper.text()).toContain('普通员工')
-    // 普通员工（admin_caps 为空）：具体权限整块不渲染（用户裁定：这里不用显示）。
+    // 普通员工（admin_caps 为空）：管理权限的具体权限整块不渲染，但厨房采购始终可勾。
     expect(wrapper.findAll('.roster-caps')).toHaveLength(0)
     expect(wrapper.text()).not.toContain('具体权限')
+    const purchase = wrapper.get('.roster-purchase input')
+    expect(purchase.element.checked).toBe(false)
+    expect(purchase.element.disabled).toBe(false)
 
-    // 打开开关才轮到勾。
+    // 打开开关才轮到勾管理权限。
     await wrapper.get('.roster-cap-toggle-input').setValue(true)
     await flushPromises()
     expect(wrapper.text()).toContain('管理员')
     expect(wrapper.findAll('.roster-cap').map((node) => node.text()))
-      .toEqual(ADMIN_CAP_STAFF_DEFS.map((item) => item.label))
-    expect(capBoxes(wrapper)).toHaveLength(9)
+      .toEqual(MANAGEMENT_DEFS.map((item) => item.label))
+    expect(capBoxes(wrapper)).toHaveLength(8)
     expect(capBoxes(wrapper).every((box) => box.element.disabled)).toBe(false)
     // 只是打开开关、一项没勾：提示出来（这种草稿保存后仍是普通员工）。
     expect(wrapper.text()).toContain('勾一项才算管理员')
@@ -217,7 +223,7 @@ describe('花名册 · 管理权限（抽屉）', () => {
     await openDrawer(wrapper)
 
     // 界面上看不见 data / boards 的勾。
-    expect(capBoxes(wrapper)).toHaveLength(9)
+    expect(capBoxes(wrapper)).toHaveLength(8)
 
     // 再加一项「专项验收」，然后保存。
     await capBoxes(wrapper)[1].setValue(true)
@@ -265,7 +271,7 @@ describe('花名册 · 管理权限（抽屉）', () => {
     wrapper.unmount()
   })
 
-  it('行内标签的项数只数员工端真正生效的五项（超管专属七项不计入）', async () => {
+  it('行内标签的项数只数员工端真正生效的九项（超管专属七项不计入）', async () => {
     rows = [serverRow({
       permission: '管理员',
       admin_caps: ['daily_review', 'fix', 'data', 'boards'],
@@ -274,7 +280,7 @@ describe('花名册 · 管理权限（抽屉）', () => {
 
     const chip = wrapper.get('.roster-chip')
     expect(chip.text()).toBe('管理员 · 2 项')
-    expect(chip.attributes('title')).toBe('管理权限的实际项数')
+    expect(chip.attributes('title')).toBe('员工能力与管理权限的实际项数')
 
     wrapper.unmount()
   })
@@ -292,6 +298,43 @@ describe('花名册 · 管理权限（抽屉）', () => {
     const wrapper = await mountRoster()
 
     expect(wrapper.get('.roster-chip').text()).toBe('普通员工 · 无')
+
+    wrapper.unmount()
+  })
+
+  it('只勾厨房采购时不算管理员：行内写「员工能力 · 1 项」，抽屉里仍可直接改', async () => {
+    rows = [serverRow({ permission: '普通员工', admin_caps: ['purchase'] })]
+    const wrapper = await mountRoster()
+
+    const chip = wrapper.get('.roster-chip')
+    expect(chip.text()).toBe('员工能力 · 1 项')
+    expect(chip.attributes('title')).toBe('员工能力与管理权限的实际项数')
+
+    await openDrawer(wrapper)
+    const purchase = wrapper.get('.roster-purchase input')
+    expect(purchase.element.checked).toBe(true)
+    expect(purchase.element.disabled).toBe(false)
+    // 管理权限一项都没有：开关关着，具体权限整块不显示。
+    expect(wrapper.findAll('.roster-caps')).toHaveLength(0)
+
+    wrapper.unmount()
+  })
+
+  it('普通员工不用先开管理权限，勾上厨房采购就能保存', async () => {
+    const wrapper = await mountRoster()
+    await openDrawer(wrapper)
+
+    await wrapper.get('.roster-purchase input').setValue(true)
+    await flushPromises()
+    expect(patchCalls).toHaveLength(0)
+
+    await saveButton(wrapper).trigger('click')
+    await flushPromises()
+
+    expect(patchCalls).toHaveLength(1)
+    expect(patchCalls[0].body.admin_caps).toEqual(['purchase'])
+    expect(patchCalls[0].body).not.toHaveProperty('permission')
+    expect(patchCalls[0].body).not.toHaveProperty('purchase_enabled')
 
     wrapper.unmount()
   })

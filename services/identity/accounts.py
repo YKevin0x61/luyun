@@ -26,7 +26,7 @@ from database import CHINA_TZ
 # 写口只有一份实现；这个名字继续从这里转出（services/identity/__init__.py 与
 # 各域 service 都还按老位置导入）。
 from db_core.write_gate import serialized_write
-from services.identity.capabilities import dump_caps, parse_caps
+from services.identity.capabilities import CAP_PURCHASE, dump_caps, parse_caps
 from services.identity.profile import (
     HEALTH_CERT_STATE_NONE,
     ProfileError,
@@ -277,7 +277,13 @@ class EmployeeAccounts:
             # 「管理员」，一项都没有就是「普通员工」。库里那一列保留（花名册的下拉照旧写它），
             # 但不再是真相来源 —— 两者不一致时一律以开关为准，界面上因此不可能出现
             # "标签说管理员、一项开关都没给"这种自相矛盾的行。
-            "permission": PERMISSION_ADMIN if caps else PERMISSION_STAFF,
+            # 2026-11-22 用户裁定（ADR 0158）：`purchase` 是员工岗位能力，**不派生管理员**；
+            # 只有它时仍是「普通员工」，其余任一项仍按 ADR 0093 派生。
+            "permission": (
+                PERMISSION_ADMIN
+                if any(cap != CAP_PURCHASE for cap in caps)
+                else PERMISSION_STAFF
+            ),
             "admin_caps": list(caps),
             "approved": _as_bool(mapping["approved"]),
             # 离职（2026-10-29 取代「停用」）：原始日期 + 派生状态。

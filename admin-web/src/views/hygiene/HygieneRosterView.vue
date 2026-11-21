@@ -28,12 +28,16 @@ import {
   keepSupervisorOnlyCaps,
   normalizeCaps,
 } from '../../utils/adminCaps'
-import { hygienePermissionLabel, rosterStatusLabel } from '../../utils/hygieneCopy'
+import { rosterStatusLabel } from '../../utils/hygieneCopy'
 import { formatHygieneStamp } from '../../utils/hygieneTime'
 import { useHygieneDayStore } from '../../stores/hygieneDay'
 import { STAFF_ENTRY_PATH } from '../../utils/staffPaths'
 import { pageTitle } from '../../router/pageRoutes.js'
 import { workbenchDocumentTitle } from '../../utils/workbenchCopy'
+
+// 厨房采购单独一勾：它不归「管理权限」开关，普通员工也能直接拿到（ADR 0158）。
+// 其余八项员工侧能力仍归管理权限，由开关控制显示。
+const ADMIN_CAP_MANAGEMENT_DEFS = ADMIN_CAP_STAFF_DEFS.filter((cap) => cap.key !== 'purchase')
 
 const employees = ref([])
 const loading = ref(true)
@@ -173,13 +177,17 @@ function segmentText(item) {
   return item.id === 'all' ? item.label : `${item.label} ${employeeCount(item.id)}`
 }
 
-/** 「管理员 · N 项 / 普通员工 · 无」：标签用服务端派生的值，**项数只数员工端真正生效的
- *  五项**（`admin_caps` 里可能存着超管专属七项，按全长度报会写成「管理员 · 8 项」而实际
- *  能用 0 项）。边缘情况照实显示「管理员 · 0 项」。 */
+/** 「管理员 · N 项 / 员工能力 · N 项 / 普通员工 · 无」。
+ *
+ *  项数只数员工端真正生效的九项（`admin_caps` 里可能存着超管专属七项，按全长度报会写成
+ *  「管理员 · 8 项」而实际能用 0 项）。厨房采购是员工岗位能力，只有它时不算管理员，
+ *  所以单独显示「员工能力」（ADR 0158）；任何非采购能力仍算管理员。 */
 function capChip(row) {
   const caps = normalizeCaps(row.admin_caps)
   const usable = ADMIN_CAP_STAFF_DEFS.filter((item) => caps.includes(item.key)).length
-  return hygienePermissionLabel(row.permission) === '管理员' ? `管理员 · ${usable} 项` : '普通员工 · 无'
+  if (caps.some((key) => key !== 'purchase')) return `管理员 · ${usable} 项`
+  if (caps.includes('purchase')) return `员工能力 · ${usable} 项`
+  return '普通员工 · 无'
 }
 
 function healthChip(row) {
@@ -253,6 +261,9 @@ useHygieneRealtime({
 
 // ── 抽屉 ──────────────────────────────────────────────────────────────────
 function draftFrom(row) {
+  const caps = normalizeCaps(row.admin_caps)
+  // 厨房采购从管理权限里拆出来：`purchase_enabled` 是独立的一勾，开关关掉也不会清它。
+  const managementCaps = caps.filter((key) => key !== 'purchase')
   return {
     name: row.name || '',
     job_title: row.job_title || '',
@@ -264,11 +275,11 @@ function draftFrom(row) {
       row.seniority_bonus === null || row.seniority_bonus === undefined
         ? ''
         : String(row.seniority_bonus),
-    admin_caps: normalizeCaps(row.admin_caps),
-    // 「管理权限」开关：库里的 `permission` 由 admin_caps 派生（有任一项即管理员），
-    // 所以开关不是独立字段 —— 开着就等于「至少勾了一项」。它只活在草稿里，保存后由
+    purchase_enabled: caps.includes('purchase'),
+    admin_caps: managementCaps,
+    // 「管理权限」开关：只由**非厨房采购**的能力派生（ADR 0158）。它只活在草稿里，保存后由
     // draftFrom(fresh) 重新算回来；点了保存却一项没勾，等于没开。
-    admin_enabled: normalizeCaps(row.admin_caps).length > 0,
+    admin_enabled: managementCaps.length > 0,
   }
 }
 
@@ -278,7 +289,8 @@ const adminCapsHint = computed(() => {
   return normalizeCaps(draft.value.admin_caps).length ? '' : '勾一项才算管理员'
 })
 
-/** 开关：关掉就把已勾的具体权限一起清空 —— 普通员工不该留着管理权限。 */
+/** 开关：关掉就把已勾的具体权限一起清空 —— 普通员工不该留着管理权限。
+ *  厨房采购是独立的一勾，不清（ADR 0158）。 */
 function toggleAdminEnabled(on) {
   if (!draft.value || busy.value) return
   draft.value.admin_enabled = Boolean(on)
@@ -306,7 +318,11 @@ function patchBody(source, row) {
     base_salary: salaryValue(source.base_salary),
     hire_date: source.hire_date || null,
     seniority_bonus: salaryValue(source.seniority_bonus),
-    admin_caps: normalizeCaps([...source.admin_caps, ...keepSupervisorOnlyCaps(row.admin_caps)]),
+    admin_caps: normalizeCaps([
+      ...(source.purchase_enabled ? ['purchase'] : []),
+      ...source.admin_caps,
+      ...keepSupervisorOnlyCaps(row.admin_caps),
+    ]),
   }
 }
 
@@ -910,7 +926,7 @@ async function copyInvite() {
               <span>{{ row.phone }}</span>
             </span>
             <span class="roster-row-meta">
-              <span class="roster-chip" title="管理权限的实际项数">{{ capChip(row) }}</span>
+              <span class="roster-chip" title="员工能力与管理权限的实际项数">{{ capChip(row) }}</span>
               <span v-if="row.profile_incomplete" class="roster-chip is-warn" title="四项档案有一项为空">待补</span>
               <span
                 v-if="healthChip(row)"
@@ -1099,7 +1115,19 @@ async function copyInvite() {
               </span>
             </label>
 
-            <label title="开了才是管理员；管理员才能勾下面的具体权限，关掉会连同已勾的一起清空">
+            <fieldset class="roster-purchase">
+              <legend class="roster-purchase-title">厨房采购</legend>
+              <label
+                class="roster-purchase-check"
+                title="普通员工也能勾：按岗位下单、看全店采购单与今日汇总；改单与管理页仍只认管理端"
+              >
+                <input v-model="draft.purchase_enabled" type="checkbox" :disabled="busy">
+                <span>给这名员工开厨房采购</span>
+              </label>
+              <p class="roster-purchase-note">只开这一项不会变成管理员。改单、完成核对、商品与供应商、采购分析、数据迁移仍只认管理端。</p>
+            </fieldset>
+
+            <label title="开了才是管理员；管理员才能勾下面的八项具体权限，关掉会连同已勾的一起清空">
               <span class="roster-field-head">
                 <span>管理权限</span>
                 <span v-if="adminCapsHint" class="roster-field-note">{{ adminCapsHint }}</span>
@@ -1123,7 +1151,7 @@ async function copyInvite() {
               <legend class="roster-caps-title">具体权限</legend>
               <div class="roster-caps-grid">
                 <label
-                  v-for="cap in ADMIN_CAP_STAFF_DEFS"
+                  v-for="cap in ADMIN_CAP_MANAGEMENT_DEFS"
                   :key="cap.key"
                   class="roster-cap"
                   :title="cap.note"
@@ -1747,6 +1775,12 @@ async function copyInvite() {
 .roster-page .roster-input-suffix .input { flex: 1 1 auto; min-width: 0; }
 .roster-page .roster-suffix { flex: 0 0 auto; font-size: .76rem; font-weight: 500; color: var(--ink-dim); }
 .roster-page .roster-caps { min-width: 0; margin: 0; padding: 0; border: 0; display: flex; flex-direction: column; gap: .35rem; }
+.roster-page .roster-purchase { min-width: 0; margin: 0; padding: .55rem .7rem; border: var(--edge-w, 2px) solid var(--edge); border-radius: .5rem; background: var(--surface-2); display: flex; flex-direction: column; gap: .3rem; }
+.roster-page .roster-purchase-title { padding: 0; font-size: .76rem; font-weight: 600; color: var(--ink-faint); }
+.roster-page .hy-person-fields .roster-purchase-check { flex-direction: row; align-items: center; gap: .5rem; min-height: 44px; font-size: .8rem; color: var(--ink); cursor: pointer; }
+.roster-page .roster-purchase-check input { flex: 0 0 auto; width: 16px; height: 16px; margin: 0; accent-color: var(--action); }
+.roster-page .roster-purchase-check input:disabled { cursor: not-allowed; }
+.roster-page .roster-purchase-note { margin: 0; color: var(--ink-faint); font-size: .72rem; font-weight: 500; line-height: 1.45; }
 .roster-page .roster-caps-title { padding: 0; font-size: .76rem; font-weight: 600; color: var(--ink-faint); }
 .roster-page .roster-caps-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(8rem, 1fr)); gap: .15rem .7rem; max-width: 44rem; }
 .roster-page .hy-person-fields .roster-cap {

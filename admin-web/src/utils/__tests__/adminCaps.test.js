@@ -156,22 +156,23 @@ describe('判据收敛：两个页面只按开关判，不按 permission 档位'
     // 抽屉里没有任何下拉（「卫生权限」原来是唯一一个 `<select>`）。
     expect(src).not.toMatch(/<select/)
     expect(src).not.toMatch(/permission\s*===/)
-    // 可勾的那五项按契约顺序渲染；草稿进页归一化，PATCH 时把**只读七项已有的值原样带回**
-    // （它们没有可勾的界面，整组替换若漏掉就是静默删权限）。
-    expect(src).toMatch(/v-for="cap in ADMIN_CAP_STAFF_DEFS"/)
+    // 厨房采购是开关之外的独立一勾；管理权限按契约顺序渲染其余八项。草稿进页归一化，
+    // PATCH 时把**只读七项已有的值原样带回**（它们没有可勾的界面，整组替换若漏掉就是静默删权限）。
+    expect(src).toMatch(/v-model="draft\.purchase_enabled"/)
+    expect(src).toMatch(/v-for="cap in ADMIN_CAP_MANAGEMENT_DEFS"/)
     expect(src).toMatch(
-      /admin_caps: normalizeCaps\(\[\.\.\.source\.admin_caps, \.\.\.keepSupervisorOnlyCaps\(row\.admin_caps\)\]\)/,
+      /admin_caps: normalizeCaps\(\[\s*\.\.\.\(source\.purchase_enabled \? \['purchase'\] : \[\]\),\s*\.\.\.source\.admin_caps,\s*\.\.\.keepSupervisorOnlyCaps\(row\.admin_caps\),\s*\]\)/,
     )
-    expect(src).toMatch(/admin_caps: normalizeCaps\(row\.admin_caps\)/)
+    expect(src).toMatch(/const caps = normalizeCaps\(row\.admin_caps\)/)
     // 只读那七项**整块不渲染**：连它们的定义都不引进来，名字与说明就没有出场的机会。
     expect(src).not.toMatch(/ADMIN_CAP_SUPERVISOR_ONLY/)
   })
 
-  it('花名册行内项数只数员工端真正生效的五项（不按 admin_caps 全长度报）', () => {
+  it('花名册行内标签只数员工端真正生效的九项，厨房采购单独归「员工能力」', () => {
     const src = readView('HygieneRosterView')
-    expect(src).toMatch(
-      /ADMIN_CAP_STAFF_DEFS\.filter\(\(item\) => caps\.includes\(item\.key\)\)\.length/,
-    )
+    expect(src).toMatch(/caps\.some\(\(key\) => key !== 'purchase'\)/)
+    expect(src).toMatch(/caps\.includes\('purchase'\)/)
+    expect(src).toMatch(/员工能力 · \$\{usable\} 项/)
     expect(src).toMatch(/普通员工 · 无/)
     expect(src).toMatch(/管理员 · \$\{usable\} 项/)
   })

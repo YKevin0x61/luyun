@@ -50,7 +50,7 @@ CAP_DEEP_REVIEW = "deep_review"  # 专项验收：判专项卫生的前后对照
 CAP_FIX = "fix"  # 整改单：开单 + 验收 + 驳回
 CAP_SCHEDULE = "schedule"  # 人事管理：排班 / 班次表 / 考勤表，外加加班与补钟审批
 CAP_WASTAGE = "wastage"  # 损耗分析：看全店损耗统计与明细（含谁记的）
-CAP_PURCHASE = "purchase"  # 厨房采购：下单、看自己的采购单与汇总（2026-11-21 新增）
+CAP_PURCHASE = "purchase"  # 厨房采购：下单、看全店采购单与汇总（2026-11-21 新增）
 CAP_PREP_REVIEW = "prep_review"  # 备货复盘：只读看偏差、分组对比与多备代价
 CAP_RECIPE_QR = "recipe_qr"  # 岗位二维码：只读查看 / 打印岗位码
 CAP_TASK = "task"  # 任务管理：发布 / 验收 / 改派工作任务
@@ -106,7 +106,7 @@ CAPABILITY_NOTES: dict[str, str] = {
     CAP_FIX: "开整改单、验收或驳回整改单",
     CAP_SCHEDULE: "改全店排班、批请假与换班、管班次表，看与改考勤表；批 / 驳加班与补钟登记",
     CAP_WASTAGE: "看全店损耗统计与明细，含「谁记的」",
-    CAP_PURCHASE: "按岗位下单、看自己的采购单与今日汇总；管理页与改单仍只认管理端",
+    CAP_PURCHASE: "按岗位下单、看全店采购单与今日汇总；管理页与改单仍只认管理端",
     CAP_PREP_REVIEW: "只读看备货复盘：偏差口径、分组对比与多备代价",
     CAP_RECIPE_QR: "只读查看并打印各岗位二维码",
     CAP_TASK: "发布、验收与改派工作任务",
@@ -132,8 +132,9 @@ LEGACY_ADMIN_CAPABILITIES: tuple[str, ...] = (CAP_DAILY_REVIEW, CAP_DEEP_REVIEW,
 #: 勾了对应能力的管理员只读使用（判据见 `api/prep_plan.py` 的 `_require_review_reader`
 #: 与 `api/recipes.py` 的 `list_qr_stations`）；**任务管理** 2026-11-11 用户裁定新开，
 #: 发布 / 验收 / 改派任务都看这一项（判据见 `api/tasks.py` 的 `_require_task_manager`）；
-#: **厨房采购** 2026-11-21 新增，员工端下单页与自己的采购单看这一项（判据见
+#: **厨房采购** 2026-11-21 新增，员工端下单页与全店采购单看这一项（判据见
 #: `services/purchase/service.py` 的 `_require_reader`），管理页 / 改单 / 分析仍只认管理端。
+#: 它是**员工岗位能力**：只有这一项时不派生「管理员」（ADR 0158）。
 #: 花名册里**可勾**的就是这一组 —— 勾了就能用，不存在"勾了不生效"。
 STAFF_SIDE_CAPABILITIES: tuple[str, ...] = (
     CAP_DAILY_REVIEW,

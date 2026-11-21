@@ -52,7 +52,7 @@ export const ADMIN_CAP_DEFS = [
   { key: 'fix', label: '整改单', note: '开整改单、验收或驳回整改单', staffSide: true },
   { key: 'schedule', label: '人事管理', note: '改全店排班、批请假与换班、管班次表，看与改考勤表；批 / 驳加班与补钟登记', staffSide: true },
   { key: 'wastage', label: '损耗分析', note: '看全店损耗统计与明细，含「谁记的」', staffSide: true },
-  { key: 'purchase', label: '厨房采购', note: '按岗位下单、看自己的采购单与今日汇总；管理页与改单仍只认管理端', staffSide: true },
+  { key: 'purchase', label: '厨房采购', note: '按岗位下单、看全店采购单与今日汇总；管理页与改单仍只认管理端', staffSide: true },
   { key: 'prep_review', label: '备货复盘', note: '只读看备货复盘：偏差口径、分组对比与多备代价', staffSide: true },
   { key: 'recipe_qr', label: '岗位二维码', note: '只读查看并打印各岗位二维码', staffSide: true },
   { key: 'task', label: '任务管理', note: '发布、验收与改派工作任务', staffSide: true },
@@ -68,10 +68,10 @@ export const ADMIN_CAP_DEFS = [
 /** 键名清单（顺序 = 契约）：`normalizeCaps` 的排序与后端 `dump_caps` 的写法都以它为准。 */
 export const ADMIN_CAPABILITIES = ADMIN_CAP_DEFS.map((item) => item.key)
 
-/** 花名册上**可勾**的九项（员工端有执行点）。 */
+/** 员工端有执行点的九项。花名册把厨房采购单独一勾，其余八项归「管理权限」开关。 */
 export const ADMIN_CAP_STAFF_DEFS = ADMIN_CAP_DEFS.filter((item) => item.staffSide)
 
-/** 花名册上**只读展示**的七项：键保留、员工端暂无入口。 */
+/** 超管专属的七项：键保留、员工端暂无入口，花名册不渲染。 */
 export const ADMIN_CAP_SUPERVISOR_ONLY_DEFS = ADMIN_CAP_DEFS.filter((item) => !item.staffSide)
 
 /** 只读那七项的键 —— 保存一行时要**原样保留**库里已有的值，不能因为界面不显示就抹掉。 */
