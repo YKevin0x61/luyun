@@ -48,6 +48,19 @@ def test_load_documents_accepts_array_wrapper_and_jsonl(tmp_path):
     packed = tmp_path / "orders.jsonl.gz"
     packed.write_bytes(gzip.compress('{"_id": "e"}\n'.encode()))
     assert IMPORT.load_documents(packed) == [{"_id": "e"}]
+    # 腾讯云开发导出的 .json 没有方括号，实际是逐行对象；不能按单值 JSON 解析。
+    cloud = tmp_path / "orders-2026-11-22.json"
+    cloud.write_text('{"_id": "f"}\n{"_id": "g"}\n', encoding="utf-8")
+    assert [row["_id"] for row in IMPORT.load_documents(cloud)] == ["f", "g"]
+    # 只有一条订单时 JSONL 只有一行；不能把订单自己的 items 当成集合。
+    single = tmp_path / "orders-single.json"
+    single.write_text(
+        json.dumps({"_id": "h", "items": [{"productId": "p", "quantity": 1}]}),
+        encoding="utf-8",
+    )
+    assert IMPORT.load_documents(single) == [
+        {"_id": "h", "items": [{"productId": "p", "quantity": 1}]}
+    ]
 
 
 def test_discover_files_matches_eight_collections(tmp_path):

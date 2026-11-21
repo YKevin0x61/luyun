@@ -195,6 +195,24 @@ def order_no_for(cloud_id: str, submitted: dt.datetime) -> str:
     return "P%s-%06d" % (submitted.strftime("%Y%m%d"), crc % 1_000_000)
 
 
+def _parse_concatenated_json(text: str) -> List[Dict[str, Any]]:
+    """解析首尾相接的 JSON 对象（云开发导出的 .json 实际是 JSON Lines）。"""
+    decoder = json.JSONDecoder()
+    rows: List[Dict[str, Any]] = []
+    index = 0
+    length = len(text)
+    while index < length:
+        while index < length and text[index].isspace():
+            index += 1
+        if index >= length:
+            break
+        value, index = decoder.raw_decode(text, index)
+        if not isinstance(value, dict):
+            raise ValueError("集合文件里每一项都必须是对象")
+        rows.append(value)
+    return rows
+
+
 def load_documents(path: Path) -> List[Dict[str, Any]]:
     raw = gzip.decompress(path.read_bytes()) if path.suffix == ".gz" else path.read_bytes()
     text = raw.decode("utf-8-sig")
@@ -205,11 +223,16 @@ def load_documents(path: Path) -> List[Dict[str, Any]]:
             if line:
                 rows.append(json.loads(line))
         return rows
-    payload = json.loads(text)
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        # 腾讯云开发导出的 .json 是每行一个对象，不是数组；文件后缀也不会带 .jsonl。
+        return _parse_concatenated_json(text)
     if isinstance(payload, list):
         return payload
     if isinstance(payload, dict):
-        for key in ("data", "list", "records", "items", "results", "rows"):
+        # 包装形状只认明确的集合键；不认 items，订单文档本身就有 items 数组。
+        for key in ("data", "list", "records", "results", "rows"):
             value = payload.get(key)
             if isinstance(value, list):
                 return value
@@ -217,6 +240,8 @@ def load_documents(path: Path) -> List[Dict[str, Any]]:
                 for inner in ("list", "records", "items", "rows"):
                     if isinstance(value.get(inner), list):
                         return value[inner]
+        # 单对象也可能是合法的集合（例如只导出一条订单）；不能把它的 items 当集合。
+        return [payload]
     raise ValueError("认不出这个 JSON 的形状：需要数组，或 {data:[...]}")
 
 

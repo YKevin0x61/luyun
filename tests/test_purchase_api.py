@@ -784,6 +784,36 @@ def test_web_migration_preview_apply_and_discard(purchase_http):
     assert client.get(f"/api/purchase/admin/migrations/{migration_id}").status_code == 404
 
 
+def test_web_migration_accepts_cloud_jsonl_export(purchase_http):
+    """腾讯云开发导出的 .json 是逐行对象，没有方括号；网页预览必须能读。"""
+    client, _accounts = purchase_http
+    _admin_cookie(client)
+    documents = {}
+    for name, data in _migration_documents().items():
+        rows = json.loads(data)
+        documents[name] = "\n".join(
+            json.dumps(row, ensure_ascii=False) for row in rows
+        ).encode("utf-8")
+
+    started = client.post(
+        "/api/purchase/admin/migrations",
+        files=_migration_upload_files(documents),
+        data={"limit": "0"},
+    )
+    assert started.status_code == 200, started.text
+    migration_id = started.json()["migration"]["id"]
+    migration, preview = _wait_migration_job(client, migration_id, "preview")
+    assert preview["state"] == "done", preview
+    assert migration["missing"] == []
+    stats = preview["report"]["stats"]
+    assert stats["suppliers"]["created"] == 1
+    assert stats["products"]["created"] == 1
+    assert stats["orders"]["created"] == 1
+    assert stats["material_stock"]["created"] == 1
+    assert preview["report"]["failures"] == []
+    client.delete(f"/api/purchase/admin/migrations/{migration_id}")
+
+
 def test_web_migration_accepts_zip_and_rejects_bad_archive(purchase_http):
     client, _accounts = purchase_http
     _admin_cookie(client)
