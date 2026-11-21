@@ -176,6 +176,26 @@ STAFF_MEAL_TABLES = (
     "staff_meal_order_items",
 )
 
+# 厨房采购（迁移 0062，spec `.scratch/worktool2-import/spec.md`，ADR 0156/0157）：
+# 供应商 / 分类 / 商品 / 岗位 / 盘点快照 / 日期标签 / 采购单与行 / 事件 / 改码审计。
+# 与 STAFF_MEAL_TABLES 同一个理由不进 ALL_TABLES —— 业务写口只有
+# `services/purchase/store.py`（历史导入脚本一次性直写），Admin 数据浏览器只读列出
+# （分组「厨房采购」）。
+PURCHASE_TABLES = (
+    "purchase_suppliers",
+    "purchase_categories",
+    "purchase_products",
+    "purchase_positions",
+    "purchase_product_positions",
+    "purchase_orders",
+    "purchase_order_items",
+    "purchase_stock_counts",
+    "purchase_date_tags",
+    "purchase_weekday_defaults",
+    "purchase_order_events",
+    "purchase_product_code_changes",
+)
+
 # Admin DataTable exposes these tables read-only; their owning feature pages
 # remain the only supported write paths.
 ADMIN_READ_ONLY_TABLES = (
@@ -189,6 +209,7 @@ ADMIN_READ_ONLY_TABLES = (
     *ATTENDANCE_TABLES,
     *WASTAGE_TABLES,
     *STAFF_MEAL_TABLES,
+    *PURCHASE_TABLES,
 )
 
 # 表按域分组的口径：Admin 数据浏览器与「备份 → 这个包里装了什么」共用同一份，
@@ -235,6 +256,7 @@ TABLE_GROUPS = (
     ("hr", "人事考勤", OVERTIME_TABLES + ATTENDANCE_TABLES),
     ("wastage", "损耗", WASTAGE_TABLES),
     ("staff_meal", "员工餐", STAFF_MEAL_TABLES),
+    ("purchase", "厨房采购", PURCHASE_TABLES),
     ("config", "系统设置", ("app_settings",) + AUTH_PHYSICAL_TABLES + ("logs",)),
 )
 

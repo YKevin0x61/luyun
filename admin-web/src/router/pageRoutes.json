@@ -336,6 +336,49 @@
       "public": false
     },
     {
+      "path": "/workbench/kitchen/purchase",
+      "title": "厨房采购",
+      "group": "kitchen",
+      "audience": "admin",
+      "staffCap": "purchase",
+      "standalone": true,
+      "public": false
+    },
+    {
+      "path": "/workbench/kitchen/purchase/orders",
+      "title": "采购单",
+      "group": "kitchen",
+      "audience": "admin",
+      "staffCap": "purchase",
+      "standalone": true,
+      "public": false
+    },
+    {
+      "path": "/workbench/kitchen/purchase/order",
+      "title": "采购单详情",
+      "group": "kitchen",
+      "audience": "admin",
+      "staffCap": "purchase",
+      "standalone": true,
+      "public": false
+    },
+    {
+      "path": "/workbench/kitchen/purchase/catalog",
+      "title": "商品与供应商",
+      "group": "kitchen",
+      "audience": "admin",
+      "standalone": true,
+      "public": false
+    },
+    {
+      "path": "/workbench/kitchen/purchase/analysis",
+      "title": "采购分析",
+      "group": "kitchen",
+      "audience": "admin",
+      "standalone": true,
+      "public": false
+    },
+    {
       "path": "/workbench/tasks",
       "title": "任务",
       "group": "tasks",

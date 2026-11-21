@@ -58,6 +58,11 @@ from api.staff_meal import (
     reader_router as staff_meal_reader_router,
 )
 from api.staff_meal import router as staff_meal_router
+# 厨房采购（2026-11-21）：下单页 / 目录 / 分析共用服务层判权限。两条 router 都
+# 不挂 verify_admin_token —— 员工手机端没有 API token，员工要拿到 403「没开权限」
+# 而不是 401「没登录」；管理端专属动作由服务层 _require_admin 拒绝。
+from api.purchase import manager_router as purchase_manager_router
+from api.purchase import reader_router as purchase_reader_router
 from api.tables import router as tables_router
 from api.analytics import router as analytics_router
 from api.export_api import router as export_router
@@ -1216,6 +1221,10 @@ app.include_router(prep_plan.manager_router)
 # 员工餐采购的读面与员工写面：任一身份进门，服务层再判能力与归属（同备货复盘）。
 app.include_router(staff_meal_reader_router)
 app.include_router(staff_meal_manager_router)
+# 厨房采购：读面（任一身份 + 服务层判能力）与写面（任一身份 + 服务层判管理员 /
+# 提交者本人）。两条都在「任一身份」门内，员工才拿得到业务层 403。
+app.include_router(purchase_reader_router)
+app.include_router(purchase_manager_router)
 # —— 业务面：统一挂管理员凭据（会话 cookie / X-Admin-Token / Bearer）——
 app.include_router(orders.router, dependencies=[Depends(verify_admin_token)])
 app.include_router(dishes.router, dependencies=[Depends(verify_admin_token)])
@@ -1467,6 +1476,15 @@ SPA_PAGE_ROUTES = (
     # 页面清单里是 `audience: admin + staffCap: meal_purchase`（管理端直进、勾了能力的员工进）。
     # 同这一批：漏一条就是直连 uvicorn 硬导航 404（前端侧由 tests/test_spa_page_routes.py 双向盯住）。
     "/workbench/kitchen/staff-meal",
+    # 厨房采购（2026-11-21 从 worktool2 小程序搬来）：后勤组五页 —— 下单 / 采购单 /
+    # 详情 / 商品与供应商 / 采购分析。前三页页面清单里是 admin + staffCap: purchase，
+    # 后两页只给管理端。同这一批：漏一条就是直连 uvicorn 硬导航 404
+    # （前端侧由 tests/test_spa_page_routes.py 双向盯住）。
+    "/workbench/kitchen/purchase",
+    "/workbench/kitchen/purchase/orders",
+    "/workbench/kitchen/purchase/order",
+    "/workbench/kitchen/purchase/catalog",
+    "/workbench/kitchen/purchase/analysis",
     # 工作台「任务」（2026-11-11）：管理端两页（任务 / 定期任务）与员工端「我的任务」。
     # 同这一批：漏一条就是直连 uvicorn 硬导航 404（前端侧由 tests/test_spa_page_routes.py 双向盯住）。
     "/workbench/tasks",

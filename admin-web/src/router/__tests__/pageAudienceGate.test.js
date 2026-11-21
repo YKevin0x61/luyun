@@ -331,12 +331,14 @@ describe('员工专属页不出现在管理端导航里（同一道门的反向�
     const kitchen = wrapper.findAll('.wb-nav-cell.is-dropdown')
       .find((cell) => cell.text().includes('后勤'))
     await kitchen.get('.wb-nav-trigger').trigger('click')
-    // 后勤下拉里的四扇门：配方 / 备货计划 / 员工餐采购 / 损耗分析。
+    // 后勤下拉里的五扇门：配方 / 备货计划 / 员工餐采购 / 厨房采购 / 损耗分析。
     expect(kitchen.findAll('.wb-nav-menu-item').map((item) => item.attributes('href'))).toEqual([
       '/workbench/kitchen/recipe',
       '/workbench/kitchen/prep-plan',
       // 员工餐采购（ADR 0135）：`both`，管理端也看得见。
       '/workbench/kitchen/staff-meal',
+      // 厨房采购（worktool2 搬迁）：管理端与勾了 purchase 的员工。
+      '/workbench/kitchen/purchase',
       // 损耗分析（从 worktool2 那个小程序搬过来）：只给管理端。
       '/workbench/kitchen/loss',
     ])

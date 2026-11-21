@@ -32,6 +32,7 @@ import { canCancel, incomingLine, requestLine } from '../../utils/leaveRequest'
 import { loginRedirectTarget } from '../../utils/loginNext'
 import { birthdayText } from '../../utils/birthdayReminder'
 import { monthText } from '../../utils/seniorityReminder'
+import { PURCHASE_HOME_PATH } from '../../utils/purchasePaths.js'
 
 const router = useRouter()
 const route = useRoute()
@@ -65,7 +66,7 @@ const staffMe = ref(null)
 const deepClock = ref(null)
 const dailyClocks = ref(null)
 
-// 「你能做的事」能力卡（票 01 / ADR 0093）的数据：十四项开关里**员工端真有执行点**的那七项
+// 「你能做的事」能力卡（票 01 / ADR 0093）的数据：十六项开关里**员工端真有执行点**的那九项
 // （`ADMIN_CAP_STAFF_DEFS` 与后端 `STAFF_SIDE_CAPABILITIES` 同义），逐项标出开了没有。
 // 判据一律看 `admin_caps` —— `permission` 只是显示用的标签（真机走查 S10：标签写着
 // 「管理员」而一项开关都没给是合法状态），拿标签判会放行没给的那件事。
@@ -77,9 +78,9 @@ const staffCaps = computed(() => ADMIN_CAP_STAFF_DEFS.map((item) => ({
 })))
 const staffCapCount = computed(() => staffCaps.value.filter((item) => item.granted).length)
 
-// 能力 → 落点（§12 第 1 条裁定：能力卡计**员工端有执行点的每一项**，今天八项；三项在「卫生」页、
-// `schedule` 在人事组，`wastage` 在后勤组；2026-11-10 新增的 `prep_review` / `recipe_qr` 落到后勤组
-// 两个只读页；2026-11-11 的任务管理落到「我的任务」）。
+// 能力 → 落点（§12 第 1 条裁定：能力卡计**员工端有执行点的每一项**，今天九项；三项在「卫生」页、
+// `schedule` 在人事组，`wastage` / `purchase` 在后勤组；2026-11-10 新增的 `prep_review` / `recipe_qr`
+// 落到后勤组两个只读页；2026-11-11 的任务管理落到「我的任务」；厨房采购落到后勤组下单页）。
 // 加班与补钟审批 2026-11-03 并进了 `schedule`，「加班与补钟」页仍在 `/workbench/staff/overtime`，
 // 但能力卡上不再单独占一项 —— 它的落点跟着人事管理走。
 // 落点写在数据旁边，而不是页尾一句概括句 —— 那种句子在一项能力多出来之后就会变成假话。
@@ -98,6 +99,7 @@ const CAP_ROUTES = {
   fix: '/workbench/staff/clean',
   schedule: '/workbench/hr/calendar',
   wastage: '/workbench/kitchen/loss',
+  purchase: PURCHASE_HOME_PATH,
   prep_review: '/workbench/kitchen/prep-plan/review',
   recipe_qr: '/workbench/kitchen/recipe/qr',
   task: '/workbench/staff/tasks',
@@ -937,7 +939,7 @@ useNudgePull({
           <h2>你能做的事</h2>
           <!-- 档位那颗胶囊：原来在账号信息里的「卫生权限」那一行，票 01 起搬到这里 ——
                同一件事只说一遍。措辞 2026-10-14 从「现场复核」改成「管理权限」：花名册上
-               可勾的现在有七项，其中人事管理 / 损耗分析 / 备货复盘 / 岗位二维码不是「复核」，写着那个词就成假话。 -->
+               可勾的现在有九项，其中人事管理 / 损耗分析 / 备货复盘 / 岗位二维码 / 厨房采购不是「复核」，写着那个词就成假话。 -->
           <span class="hint">管理权限 · {{ staffCapCount }} 项</span>
         </div>
 

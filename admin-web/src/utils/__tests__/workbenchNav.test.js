@@ -17,6 +17,7 @@ import {
 import { PREP_PLAN_PATH } from '../prepPlanPaths.js'
 import { WASTAGE_ANALYSIS_PATH } from '../wastagePaths.js'
 import { STAFF_MEAL_PATH } from '../staffMealPaths.js'
+import { PURCHASE_HOME_PATH } from '../purchasePaths.js'
 
 // 票 04：导航的判据从「这一页的身份」换成「**此刻的身份**」，于是工作台身份那两档
 // （`super` / `staff`）要先映射成清单里的身份词（`admin` / `staff`）。
@@ -168,6 +169,13 @@ describe('两套一级导航表（2026-10-19 信息架构重排第二层）', ()
       '/workbench/kitchen/loss',
       // 员工餐采购（ADR 0135）：2026-11-11 起 `audience: both`，员工也直接看得见。
       '/workbench/kitchen/staff-meal',
+      // 厨房采购（worktool2 搬迁）：下单 / 采购单 / 详情三页给管理端与勾了 purchase 的员工。
+      '/workbench/kitchen/purchase',
+      '/workbench/kitchen/purchase/orders',
+      '/workbench/kitchen/purchase/order',
+      // 目录与分析只给管理端。
+      '/workbench/kitchen/purchase/catalog',
+      '/workbench/kitchen/purchase/analysis',
     ])
     // **导航入口**是组表里手写的那几页（2026-10-08）：清单里的「配方详情」（要带 `?slug=`）
     // 与「配方打印」（A4 预览）是**从列表点进去**的功能页 —— 当成一级入口就是两扇点不通的
@@ -176,11 +184,12 @@ describe('两套一级导航表（2026-10-19 信息架构重排第二层）', ()
       '/workbench/kitchen/recipe',
       '/workbench/kitchen/prep-plan',
       '/workbench/kitchen/staff-meal',
+      PURCHASE_HOME_PATH,
       '/workbench/kitchen/loss',
     ])
     // 名单里只写路径，标题仍从清单取（一处定义）；配方那一页 2026-11-17 起叫「配方」。
     expect(workbenchPagesOf('kitchen').map((page) => page.title)).toEqual([
-      '配方', '备货计划', '员工餐采购', '损耗分析',
+      '配方', '备货计划', '员工餐采购', '厨房采购', '损耗分析',
     ])
     for (const old of [
       '/recipe', '/recipe/detail', '/recipe/print', '/recipe/qr', '/recipe/manage',
@@ -211,8 +220,8 @@ describe('按身份过滤导航', () => {
     }
   })
 
-  it('后勤那一格是下拉四门：每条链接各自按落点那一页的 audience 过滤', () => {
-    // 2026-11-17 的形态：后勤只留一扇门，点开是配方 / 备货计划 / 员工餐采购 / 损耗分析。
+  it('后勤那一格是下拉五门：每条链接各自按落点那一页的 audience 过滤', () => {
+    // 2026-11-17 的形态：后勤只留一扇门，点开是配方 / 备货计划 / 员工餐采购 / 厨房采购 / 损耗分析。
     // 每条链接的可见性仍只看它自己落点那一页的身份 —— 不另写一份名单。
     const kitchen = ADMIN_NAV_GROUPS.find((group) => group.key === 'kitchen')
     expect(kitchen.dropdown).toBe(true)
@@ -220,6 +229,7 @@ describe('按身份过滤导航', () => {
       '/workbench/kitchen/recipe',
       PREP_PLAN_PATH,
       STAFF_MEAL_PATH,
+      PURCHASE_HOME_PATH,
       WASTAGE_ANALYSIS_PATH,
     ])
     for (const link of kitchen.links) {
@@ -227,16 +237,20 @@ describe('按身份过滤导航', () => {
       expect(row, `后勤的落点 ${link.to} 不在页面清单里`).toBeTruthy()
       expect(row.group, `后勤的落点 ${link.to} 落在别组`).toBe('kitchen')
     }
-    // 配方、备货计划、员工餐采购是 `both`（员工都看得见）；损耗分析只给管理端。
+    // 配方、备货计划、员工餐采购是 `both`（员工都看得见）；厨房采购按能力键；
+    // 损耗分析只给管理端。
     expect(pageMeta(PREP_PLAN_PATH).audience).toBe('both')
     expect(pageMeta(STAFF_MEAL_PATH).audience).toBe('both')
+    expect(pageMeta(PURCHASE_HOME_PATH).audience).toBe('admin')
+    expect(pageMeta(PURCHASE_HOME_PATH).staffCap).toBe('purchase')
     expect(pageMeta(WASTAGE_ANALYSIS_PATH).audience).toBe('admin')
 
     const toOf = (identity) => workbenchNavFor(identity)
       .filter((item) => item.key === 'kitchen')
       .map((item) => item.to)
     expect(toOf('super')).toEqual([
-      '/workbench/kitchen/recipe', PREP_PLAN_PATH, STAFF_MEAL_PATH, WASTAGE_ANALYSIS_PATH,
+      '/workbench/kitchen/recipe', PREP_PLAN_PATH, STAFF_MEAL_PATH, PURCHASE_HOME_PATH,
+      WASTAGE_ANALYSIS_PATH,
     ])
     expect(toOf('staff')).toEqual(['/workbench/kitchen/recipe', PREP_PLAN_PATH, STAFF_MEAL_PATH])
   })
@@ -262,7 +276,7 @@ describe('按身份过滤导航', () => {
     expect(pageMeta('/workbench/staff/today').audience).toBe('staff')
   })
 
-  it('员工勾了「人事管理」/「损耗分析」之后，那两扇门才出现（2026-10-14）', () => {
+  it('员工勾了「人事管理」/「损耗分析」/「厨房采购」之后，那几扇门才出现', () => {
     const keysOf = (identity, caps) => [
       ...new Set(workbenchNavFor(identity, caps).map((item) => item.key)),
     ]
@@ -280,6 +294,14 @@ describe('按身份过滤导航', () => {
     ])
     expect(kitchenTo(['wastage'])).toEqual([
       '/workbench/kitchen/recipe', PREP_PLAN_PATH, STAFF_MEAL_PATH, WASTAGE_ANALYSIS_PATH,
+    ])
+    // 厨房采购同样按能力键开：勾了才多这一扇门。
+    expect(kitchenTo(['purchase'])).toEqual([
+      '/workbench/kitchen/recipe', PREP_PLAN_PATH, STAFF_MEAL_PATH, PURCHASE_HOME_PATH,
+    ])
+    expect(kitchenTo(['purchase', 'wastage'])).toEqual([
+      '/workbench/kitchen/recipe', PREP_PLAN_PATH, STAFF_MEAL_PATH, PURCHASE_HOME_PATH,
+      WASTAGE_ANALYSIS_PATH,
     ])
     // 管理端不看能力键：四格照旧（排班三页与损耗分析本来就在他那一档里）。
     expect(keysOf('super', [])).toEqual(['home', 'hr', 'floor', 'kitchen', 'tasks'])

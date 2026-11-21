@@ -25,6 +25,7 @@ import { PAGE_ROUTES, pageMeta, pageRow } from '../router/pageRoutes.js'
 import { hasCap } from './adminCaps.js'
 import { PREP_PLAN_PATH } from './prepPlanPaths.js'
 import { RECIPE_HOME_PATH } from './recipePaths.js'
+import { PURCHASE_HOME_PATH } from './purchasePaths.js'
 import { STAFF_MEAL_PATH } from './staffMealPaths.js'
 import { TASKS_HOME_PATH } from './tasksPaths.js'
 import { WASTAGE_ANALYSIS_PATH } from './wastagePaths.js'
@@ -66,6 +67,9 @@ const KITCHEN_GROUP = {
     // 员工餐采购（ADR 0135）：店长传月菜单、员工逐天填采购单，提交即推核心群。
     // 清单里是 `both` —— 2026-11-11 用户裁定这一域不设能力开关（全员可用）。
     { to: STAFF_MEAL_PATH },
+    // 厨房采购（2026-11-21 从 worktool2 小程序搬来）：管理端与勾了「厨房采购」能力的
+    // 员工都从这扇门进；目录与分析是页内 tab，不再各占一格。
+    { to: PURCHASE_HOME_PATH },
     // 损耗分析（从 worktool2 那个小程序搬过来）：店长按月看「这个月损耗了多少、什么
     // 原因最多、哪几样最费」，是天天会看的数，不是配置页 —— 所以给它一扇直达的门。
     // 员工那一档看不到它（清单里 `audience: admin`）。
@@ -75,7 +79,7 @@ const KITCHEN_GROUP = {
   // 「配方详情」（要带 `?slug=`）与「配方打印」（A4 预览）是**从列表点进去**的功能页，
   // 不是能当入口的页 —— 放进页头那个下拉就是两扇点不通的死门（2026-10-08 实测，
   // 派生出来是六项）。名单里只写路径，标题仍从清单取。
-  pages: [RECIPE_HOME_PATH, PREP_PLAN_PATH, STAFF_MEAL_PATH, WASTAGE_ANALYSIS_PATH],
+  pages: [RECIPE_HOME_PATH, PREP_PLAN_PATH, STAFF_MEAL_PATH, PURCHASE_HOME_PATH, WASTAGE_ANALYSIS_PATH],
 }
 
 /** 管理端一级导航：5 组（今天 / 人事 / 现场 / 后勤 / 任务）。 */

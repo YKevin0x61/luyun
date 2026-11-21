@@ -100,6 +100,7 @@ def test_catalog_includes_physical_tables_and_groups(admin_client):
         "hr",         # 加班与补钟（人事）+ 法定节假日 / 月度考勤台账
         "wastage",
         "staff_meal",  # 员工餐采购（ADR 0135）：菜单日 / 采购单 / 菜品 / 采购条目
+        "purchase",   # 厨房采购（迁移 0062）：供应商 / 商品 / 岗位 / 采购单 / 盘点快照
         "config",     # 应用设置 + 登录凭据三张 + 运行日志入口
     ]
 

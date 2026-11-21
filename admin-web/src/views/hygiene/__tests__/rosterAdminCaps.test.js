@@ -12,9 +12,9 @@ import {
  * 花名册的「管理权限」（2026-10 改版：动作搬进编辑抽屉）。
  *
  * 三件事在这一组里压死：
- * 1. **可勾的只有员工端真有执行点的八项**；只读那七项**整块不渲染** —— 名字、说明、
+ * 1. **可勾的只有员工端真有执行点的九项**；只读那七项**整块不渲染** —— 名字、说明、
  *    连 `title` 都不给（design §3.4）。页面不显示 ≠ 键可以抹掉，见第 4 条。
- * 2. **「管理权限」是开关**（2026-11-17 用户裁定）：关着时下面八项灰掉不可勾，关掉会
+ * 2. **「管理权限」是开关**（2026-11-17 用户裁定）：关着时下面九项灰掉不可勾，关掉会
  *    清空已勾的项；开关只活在草稿里，页面仍不 PATCH `permission`（服务端按 admin_caps 派生
  *    「管理员 / 普通员工」这个标签）。
  * 3. **勾选不发请求**：点「保存」才发**一次** PATCH，`admin_caps` 是整组（归一化成契约顺序），
@@ -109,7 +109,7 @@ function saveButton(wrapper) {
 }
 
 describe('花名册 · 管理权限（抽屉）', () => {
-  it('可勾的只有员工端真正生效的八项；「管理权限」是开关，普通员工时整块不显示', async () => {
+  it('可勾的只有员工端真正生效的九项；「管理权限」是开关，普通员工时整块不显示', async () => {
     const wrapper = await mountRoster()
     await openDrawer(wrapper)
 
@@ -127,7 +127,7 @@ describe('花名册 · 管理权限（抽屉）', () => {
     expect(wrapper.text()).toContain('管理员')
     expect(wrapper.findAll('.roster-cap').map((node) => node.text()))
       .toEqual(ADMIN_CAP_STAFF_DEFS.map((item) => item.label))
-    expect(capBoxes(wrapper)).toHaveLength(8)
+    expect(capBoxes(wrapper)).toHaveLength(9)
     expect(capBoxes(wrapper).every((box) => box.element.disabled)).toBe(false)
     // 只是打开开关、一项没勾：提示出来（这种草稿保存后仍是普通员工）。
     expect(wrapper.text()).toContain('勾一项才算管理员')
@@ -217,7 +217,7 @@ describe('花名册 · 管理权限（抽屉）', () => {
     await openDrawer(wrapper)
 
     // 界面上看不见 data / boards 的勾。
-    expect(capBoxes(wrapper)).toHaveLength(8)
+    expect(capBoxes(wrapper)).toHaveLength(9)
 
     // 再加一项「专项验收」，然后保存。
     await capBoxes(wrapper)[1].setValue(true)

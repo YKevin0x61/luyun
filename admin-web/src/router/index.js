@@ -200,6 +200,14 @@ const routes = [
   // `api/staff_meal.py` 再判「是不是本人提交的单」。单日视图是这一页的**页内状态**，不拆子路由
   // —— 拆了以后「今天」这类入口与页头面包屑都要多认一层。
   workbenchKitchenPage('/workbench/kitchen/staff-meal', 'staff-meal', () => import('../views/workbench/StaffMealView.vue')),
+  // 厨房采购（从 worktool2 小程序搬来）：后勤组的五页。下单 / 采购单 / 详情三页
+  // 页面清单里是 audience: admin + staffCap: purchase —— 管理端直接进，员工会话勾了
+  // 「厨房采购」才进。目录与分析只给管理端；详情页是静态路径 + ?id=（仓库先例：配方详情 ?slug=）。
+  workbenchKitchenPage('/workbench/kitchen/purchase', 'purchase-order', () => import('../views/purchase/PurchaseOrderView.vue')),
+  workbenchKitchenPage('/workbench/kitchen/purchase/orders', 'purchase-orders', () => import('../views/purchase/PurchaseOrdersView.vue')),
+  workbenchKitchenPage('/workbench/kitchen/purchase/order', 'purchase-order-detail', () => import('../views/purchase/PurchaseOrderDetailView.vue')),
+  workbenchKitchenPage('/workbench/kitchen/purchase/catalog', 'purchase-catalog', () => import('../views/purchase/PurchaseCatalogView.vue')),
+  workbenchKitchenPage('/workbench/kitchen/purchase/analysis', 'purchase-analysis', () => import('../views/purchase/PurchaseAnalysisView.vue')),
   // 工作台「任务」（2026-11-11 起）：管理端新的一级组「任务」，底栏第 5 格。两页都套
   // 工作台外壳（`WorkbenchLayout`）；页面本身在清单里是 `audience: admin`，员工端走
   // `/workbench/staff/tasks`（「我的任务」）。票 01 只立页与空态，发布 / 验收 / 定期

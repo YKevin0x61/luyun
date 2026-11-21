@@ -30,6 +30,7 @@ from db_core.schema import (
     RECIPE_TABLES,
     SCHEDULING_TABLES,
     STAFF_MEAL_TABLES,
+    PURCHASE_TABLES,
     WASTAGE_TABLES,
     WECOM_SUBSCRIPTION_TABLES,
 )
@@ -93,6 +94,7 @@ class DatabaseConnection:
                 + list(ATTENDANCE_TABLES)
                 + list(WASTAGE_TABLES)
                 + list(STAFF_MEAL_TABLES)
+                + list(PURCHASE_TABLES)
             )
             for table in tables:
                 self._table_views[table] = TableView(table, self)

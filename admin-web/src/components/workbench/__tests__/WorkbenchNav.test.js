@@ -23,6 +23,7 @@ const ROUTES = [
   { path: '/workbench/kitchen/prep-plan/rules', component: { template: '<div>换算规则</div>' } },
   { path: '/workbench/kitchen/prep-plan/review', component: { template: '<div>复盘</div>' } },
   { path: '/workbench/kitchen/staff-meal', component: { template: '<div>员工餐</div>' } },
+  { path: '/workbench/kitchen/purchase', component: { template: '<div>厨房采购</div>' } },
   { path: '/workbench/kitchen/loss', component: { template: '<div>损耗</div>' } },
   { path: '/workbench/staff/today', component: { template: '<div>我的</div>' } },
 ]
@@ -90,7 +91,7 @@ describe('工作台级导航（管理端：今天 / 人事 / 现场 / 后勤 / �
     ])
   })
 
-  it('后勤下拉：点开是四张单，按页面清单命名；点按钮本身不导航', async () => {
+  it('后勤下拉：点开是五张单，按页面清单命名；点按钮本身不导航', async () => {
     const { wrapper, router } = await mountNav('/workbench/kitchen/prep-plan', 'super')
 
     const cell = wrapper.findAll('.wb-nav-cell.is-dropdown')
@@ -102,7 +103,7 @@ describe('工作台级导航（管理端：今天 / 人事 / 现场 / 后勤 / �
     await cell.get('.wb-nav-trigger').trigger('click')
     expect(cell.get('.wb-nav-trigger').attributes('aria-expanded')).toBe('true')
     expect(cell.findAll('.wb-nav-menu-item').map((item) => item.text())).toEqual([
-      '配方', '备货计划', '员工餐采购', '损耗分析',
+      '配方', '备货计划', '员工餐采购', '厨房采购', '损耗分析',
     ])
     // 站在备货计划上：只有这一项亮，整格也亮。
     expect(cell.findAll('.wb-nav-menu-item.is-current').map((item) => item.attributes('href')))

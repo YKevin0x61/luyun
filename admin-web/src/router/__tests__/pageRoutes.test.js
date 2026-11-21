@@ -96,7 +96,7 @@ describe('页面清单（唯一来源）', () => {
     expect(aliases.filter((alias) => paths.includes(alias))).toEqual([])
   })
 
-  it('staffCap 只标在这八页上，audience 仍是 admin（它是第四维，不是第二份 audience）', () => {
+  it('staffCap 只标在这些页上，audience 仍是 admin（它是第四维，不是第二份 audience）', () => {
     // 2026-10-14 用户裁定：排班三页（人事组）与损耗分析（后勤组）对「勾了对应能力的员工」
     // 也开。audience 仍是 admin —— 管理端会话照旧直接放行，员工身份再要那一项能力。
     // 2026-10-31 用户裁定：考勤表页并进同一项（`schedule`，显示名改成「人事管理」）。
@@ -111,6 +111,11 @@ describe('页面清单（唯一来源）', () => {
       ['/workbench/kitchen/recipe/qr', 'recipe_qr'],
       ['/workbench/kitchen/prep-plan/review', 'prep_review'],
       ['/workbench/kitchen/loss', 'wastage'],
+      // 厨房采购（从 worktool2 搬过来）：下单、采购单、单据详情三页都对
+      // 「勾了 purchase 的员工」开；商品目录与采购分析仍只给管理端。
+      ['/workbench/kitchen/purchase', 'purchase'],
+      ['/workbench/kitchen/purchase/orders', 'purchase'],
+      ['/workbench/kitchen/purchase/order', 'purchase'],
     ])
     for (const row of withCap) expect(row.audience, row.path).toBe('admin')
     // meta 透出同一个值；没有这一项的页给 null（守卫与导航都按「不额外要求」处理）。
@@ -171,6 +176,13 @@ describe('页面清单（唯一来源）', () => {
       '/workbench/kitchen/loss',
       // 员工餐采购（ADR 0135）：后勤组的一页，月历 + 点某天进单（单日是页内状态）。
       '/workbench/kitchen/staff-meal',
+      // 厨房采购（从 worktool2 搬过来）：后勤组的五页 —— 下单 / 采购单 / 详情 /
+      // 商品与供应商 / 采购分析，同套工作台外壳。
+      '/workbench/kitchen/purchase',
+      '/workbench/kitchen/purchase/orders',
+      '/workbench/kitchen/purchase/order',
+      '/workbench/kitchen/purchase/catalog',
+      '/workbench/kitchen/purchase/analysis',
       // 任务（2026-11-11）：管理端新的一级组，底栏第 5 格；两页同套工作台外壳。
       '/workbench/tasks',
       '/workbench/tasks/recurring',

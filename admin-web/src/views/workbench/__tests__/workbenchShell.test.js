@@ -287,7 +287,7 @@ describe('工作台外壳的导航', () => {
       .find((cell) => cell.text().includes('后勤'))
     await kitchen.get('.wb-nav-trigger').trigger('click')
     expect(kitchen.findAll('.wb-nav-menu-item').map((item) => item.text())).toEqual([
-      '配方', '备货计划', '员工餐采购', '损耗分析',
+      '配方', '备货计划', '员工餐采购', '厨房采购', '损耗分析',
     ])
   })
 

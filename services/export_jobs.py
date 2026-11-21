@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""导出任务注册表：三份导出共用的一台状态机。
+"""导出任务注册表：四份导出共用的一台状态机。
 
 标准图包、照片存档包、系统备份包原先各写一份 dict + TTL + 并发上限 + 临时文件
 清理。这里把任务生命周期收成一个深模块：调用方只负责「把文件打出来」，注册表负责
@@ -43,6 +43,7 @@ DEFAULT_MAX_RUNTIME_SECONDS = 2 * 60 * 60
 KIND_STANDARDS = "standards"
 KIND_ARCHIVE = "archive"
 KIND_BACKUP = "backup"
+KIND_PURCHASE_ANALYSIS = "purchase_analysis"
 
 _SNAPSHOT_KEYS = {
     "job_id",

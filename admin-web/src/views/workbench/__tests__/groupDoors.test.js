@@ -12,6 +12,7 @@ import { PREP_PLAN_PATH } from '../../../utils/prepPlanPaths.js'
 import { RECIPE_HOME_PATH } from '../../../utils/recipePaths.js'
 import { WASTAGE_ANALYSIS_PATH } from '../../../utils/wastagePaths.js'
 import { STAFF_MEAL_PATH } from '../../../utils/staffMealPaths.js'
+import { PURCHASE_HOME_PATH } from '../../../utils/purchasePaths.js'
 import { TASKS_HOME_PATH } from '../../../utils/tasksPaths.js'
 import { workbenchPagesOf } from '../../../utils/workbenchNav.js'
 
@@ -150,7 +151,7 @@ describe('人事壳（工作台级导航 + 本组四页）', () => {
       .find((cell) => cell.text().includes('后勤'))
     await kitchen.get('.wb-nav-trigger').trigger('click')
     expect(kitchen.findAll('.wb-nav-menu-item').map((item) => item.attributes('href'))).toEqual([
-      RECIPE_HOME_PATH, PREP_PLAN_PATH, STAFF_MEAL_PATH, WASTAGE_ANALYSIS_PATH,
+      RECIPE_HOME_PATH, PREP_PLAN_PATH, STAFF_MEAL_PATH, PURCHASE_HOME_PATH, WASTAGE_ANALYSIS_PATH,
     ])
     // ③-2：组内页挪到左 rail（统一壳一处渲染），它自己的条数 = 本组可见页数。
     expect(wrapper.get('.wb-rail').findAll('.wb-rail-item').length).toBe(workbenchPagesOf('hr').length)
@@ -252,7 +253,7 @@ describe('现场壳（rail 八项 + 内容区顶上的工作台级导航）', ()
       .find((cell) => cell.text().includes('后勤'))
     await kitchen.get('.wb-nav-trigger').trigger('click')
     expect(kitchen.findAll('.wb-nav-menu-item').map((item) => item.attributes('href'))).toEqual([
-      RECIPE_HOME_PATH, PREP_PLAN_PATH, STAFF_MEAL_PATH, WASTAGE_ANALYSIS_PATH,
+      RECIPE_HOME_PATH, PREP_PLAN_PATH, STAFF_MEAL_PATH, PURCHASE_HOME_PATH, WASTAGE_ANALYSIS_PATH,
     ])
     // rail 自己的名字跟着组名走：工作台 · 现场（2026-10-19 信息架构重排第二层：
     // 管理端那一格从「卫生验收」收口成「现场」，与工作台导航里那一格同一个词 ——
