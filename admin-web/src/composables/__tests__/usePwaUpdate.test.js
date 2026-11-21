@@ -302,6 +302,38 @@ describe('usePwaUpdate', () => {
     expect(reload).toHaveBeenCalledTimes(1)
   })
 
+  it('controllerchange 不来、worker 自己变成 activated 时也要刷新', async () => {
+    const serviceWorker = new FakeServiceWorkerContainer()
+    serviceWorker.controller = {}
+    const waitingWorker = new FakeEventTarget()
+    waitingWorker.state = 'installed'
+    waitingWorker.postMessage = vi.fn()
+    serviceWorker.register.mockResolvedValue(
+      new FakeRegistration({ waiting: waitingWorker }),
+    )
+    const reload = vi.fn()
+    const controller = createPwaUpdateController({
+      serviceWorker,
+      locationRef: { protocol: 'https:', hostname: 'shop.example' },
+      enabled: true,
+      reload,
+      controllerChangeTimeoutMs: 500,
+    })
+
+    await controller.initialize()
+    const applying = controller.apply()
+    // 等 apply() 走到「发 SKIP_WAITING 并挂上 statechange 监听」
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(waitingWorker.postMessage).toHaveBeenCalledWith({ type: 'SKIP_WAITING' })
+    // 模拟手机内核：不发 controllerchange，只有 worker 自己的 statechange
+    waitingWorker.state = 'activated'
+    waitingWorker.emit('statechange')
+
+    expect(await applying).toBe(true)
+    expect(reload).toHaveBeenCalledTimes(1)
+    expect(controller.error.value).toBe('')
+  })
+
   it('等不到 controllerchange 时不盲目 reload，保留提示条并报错', async () => {
     const serviceWorker = new FakeServiceWorkerContainer()
     serviceWorker.controller = {}

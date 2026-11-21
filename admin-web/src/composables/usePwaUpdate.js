@@ -19,7 +19,10 @@ export function createPwaUpdateController({
   // 让用户可以点「稍后」把手上的活交掉再更新。默认走浏览器原生 confirm；测试可注入。
   confirmApply = (message) =>
     typeof globalThis.confirm === 'function' ? globalThis.confirm(message) : true,
-  controllerChangeTimeoutMs = 3000,
+  // 发 SKIP_WAITING 后等 worker 变成 activated 的上限。激活通常 <1s，
+  // 手机内核上偶尔要几秒；超过就提示「已下载但没切换」，不盲目刷新
+  // （旧 active worker 会返回旧 index.html）。参数名沿用旧名，测试里这么传。
+  controllerChangeTimeoutMs = 6000,
   // 点「立即更新」时本次发布的新版本可能还在安装（预缓存几十个文件要几秒）。
   // 这时 registration.waiting 还是上一版（用户上次点「稍后」留下的），先激活
   // 它只会刷回同一个旧页面，新版本装完提示条又出现 —— 用户看到的就是「点了
@@ -158,40 +161,70 @@ export function createPwaUpdateController({
     })
   }
 
-  /** 等 controller 真正换过来。返回 true 才允许 reload —— 超时说明新 worker
-   *  还没接管，这时 reload 只会刷回旧页面（旧 SW 的 navigateFallback 还端着
-   *  旧 index.html），用户就得再点一次。 */
-  function waitForControllerChange(waitingWorker) {
+  /** 让等待中的 worker 跳过等待并激活，返回 true 才允许 reload。
+   *
+   *  不能只等 `controllerchange`：手机浏览器上这条事件经常不来（页面被
+   *  bfcache 接管、内核把 claim 合并到下一次导航等），用户看到的就是
+   *  「新版本已下载，但页面还没切换，请再点一次」，点多少次都一样。
+   *  `statechange` 到 `activated` 是 worker 自己的状态，跨内核可靠；
+   *  `registration.active === worker` 作为第二判据，`controllerchange` 保留
+   *  兼容旧测试替身。三条任一成立就说明新 worker 已是 active —— 此时
+   *  reload 的导航请求会由它处理，刷出来的一定是新页面。 */
+  function waitForWorkerActivated(waitingWorker) {
     return new Promise((resolve) => {
       let settled = false
       let timer = null
-      let changed = false
+      let poll = null
 
-      function finish() {
+      function cleanup() {
+        if (timer) clearTimer(timer)
+        if (poll) clearInterval(poll)
+        serviceWorker?.removeEventListener?.('controllerchange', onChange)
+        waitingWorker?.removeEventListener?.('statechange', onStateChange)
+      }
+
+      function finish(value) {
         if (settled) return
         settled = true
-        if (timer) clearTimer(timer)
-        serviceWorker?.removeEventListener?.('controllerchange', onChange)
-        resolve(changed)
+        cleanup()
+        resolve(value)
       }
 
       function onChange() {
-        changed = true
-        finish()
+        finish(true)
       }
 
-      timer = setTimer(finish, controllerChangeTimeoutMs)
+      function onStateChange() {
+        if (waitingWorker.state === 'activated') finish(true)
+        else if (waitingWorker.state === 'redundant') finish(false)
+      }
+
+      if (waitingWorker?.state === 'activated') {
+        finish(true)
+        return
+      }
+
+      timer = setTimer(() => finish(false), controllerChangeTimeoutMs)
       serviceWorker?.addEventListener?.('controllerchange', onChange, { once: true })
+      waitingWorker?.addEventListener?.('statechange', onStateChange)
+      // 部分内核不派发 controllerchange、也不及时更新 worker.state：
+      // 一旦它成为 registration.active，就说明激活完成。
+      poll = setInterval(() => {
+        if (registration?.active === waitingWorker) finish(true)
+      }, 250)
+
       if (waitingWorker?.postMessage) {
         try {
           waitingWorker.postMessage({ type: 'SKIP_WAITING' })
         } catch (error) {
-          if (timer) clearTimer(timer)
-          serviceWorker?.removeEventListener?.('controllerchange', onChange)
+          // 消息发不出去（worker 已经失效等）：清掉监听后把错误抛给 apply，
+          // 让它显示真实原因，而不是笼统的「还没切换」。
+          settled = true
+          cleanup()
           throw error
         }
       } else {
-        finish()
+        finish(false)
       }
     })
   }
@@ -230,7 +263,7 @@ export function createPwaUpdateController({
         worker = installed
       }
       status.value = '正在切换页面…'
-      const applied = await waitForControllerChange(worker)
+      const applied = await waitForWorkerActivated(worker)
       if (!applied) {
         applying.value = false
         error.value = '新版本已下载，但页面还没切换，请再点一次'
