@@ -149,6 +149,8 @@ function remesurePages() {
 
 async function layoutPages() {
   await waitForRecipeCss()
+  // 单测卸载后定时器仍可能走到这里：jsdom 已销毁，别再碰 document。
+  if (typeof document === 'undefined') return
   if (document.fonts?.ready) await document.fonts.ready
   await nextTick()
   remesurePages()

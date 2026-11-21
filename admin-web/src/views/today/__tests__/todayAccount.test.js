@@ -132,6 +132,7 @@ function moreText(wrapper) {
 }
 
 describe('「今天」页尾的账号设置（从卫生页搬来）', () => {
+  // 这条要挂整页（今天 / 日程单），单独跑约 1.3s，全量并行时会被 5s 默认超时顶掉；给足余量避免假红。
   it('三行入口都在，资料用的是卫生那条 /staff/me（不额外发请求）', async () => {
     const { wrapper } = await mountToday()
     for (const label of ['修改个人信息', '修改密码', '重新选择区域和班次']) {
@@ -148,7 +149,7 @@ describe('「今天」页尾的账号设置（从卫生页搬来）', () => {
     expect(more).toContain('余威威')
     expect(more).toContain('18:00 前交')
     expect(more).toContain('20:00 前做完')
-  })
+  }, 15000)
 
   it('改手机号：先确认再发 PATCH，body 是姓名 + 新号', async () => {
     const { wrapper, writes } = await mountToday()

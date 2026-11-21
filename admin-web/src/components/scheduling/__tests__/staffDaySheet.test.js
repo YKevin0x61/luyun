@@ -145,6 +145,7 @@ function confirmButton(wrapper) {
 }
 
 describe('某一天的操作单：点开一天就能把那天的事办掉（票 15）', () => {
+  // 这条要挂整页（今天 / 日程单），单独跑约 1.3s，全量并行时会被 5s 默认超时顶掉；给足余量避免假红。
   it('一屏里既看得到那天的名单，也看得到那一天能办的两件事', async () => {
     const { wrapper } = await mountSheet()
     // 名单（票 13 那一份照旧）：谁在班、在哪个区、谁休谁请假。
@@ -155,7 +156,7 @@ describe('某一天的操作单：点开一天就能把那天的事办掉（票 
     // 两个动作：日期就是这一天，不再让员工自己选一遍。
     expect(wrapper.text()).toContain('请这天的假')
     expect(wrapper.text()).toContain('换这天的班')
-  })
+  }, 15000)
 
   it('点「请这天的假」：起始日已经填好这一天，提交的就是这一天', async () => {
     const { wrapper, calls } = await mountSheet()

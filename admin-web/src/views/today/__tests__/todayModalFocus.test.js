@@ -113,11 +113,12 @@ async function openModal(wrapper, key) {
 }
 
 describe('资料表折叠：主表恰 6 行、移出 5 项可达、路由未动（t72 第一组）', () => {
+  // 这条要挂整页（今天 / 日程单），单独跑约 1.3s，全量并行时会被 5s 默认超时顶掉；给足余量避免假红。
   it('主表恰 6 行，逐项点名；多一行少一行都红', async () => {
     const { wrapper } = await mountToday()
     const rows = metaTexts(wrapper)[0]
     expect(rows).toEqual(MAIN_SIX)
-  })
+  }, 15000)
 
   it('移出的 5 项：入口在、主表没有、点开「完整资料」后全部可达', async () => {
     // 入口本身也要判：没了入口，「可达」就只是测试钩子里的可达（t72 负向④踩到的）

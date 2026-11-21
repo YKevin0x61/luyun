@@ -118,6 +118,7 @@ afterEach(() => {
 })
 
 describe('员工端 · 页头「加班与补钟」入口', () => {
+  // 这条要挂整页（今天 / 日程单），单独跑约 1.3s，全量并行时会被 5s 默认超时顶掉；给足余量避免假红。
   it('「整月 ›」旁出现「加班与补钟 ›」，链接到 /workbench/staff/overtime', async () => {
     const { wrapper } = await mountToday()
     const links = wrapper.findAll('.tTop-link')
@@ -127,7 +128,7 @@ describe('员工端 · 页头「加班与补钟」入口', () => {
     const overtime = wrapper.get('.tTop-link[href="/workbench/staff/overtime"]')
     expect(overtime.text()).toBe('加班与补钟 ›')
     wrapper.unmount()
-  })
+  }, 15000)
 })
 
 describe('员工端 · 健康证自助更新', () => {
