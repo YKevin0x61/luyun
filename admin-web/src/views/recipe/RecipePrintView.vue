@@ -76,8 +76,12 @@ function rememberPages(pages) {
 }
 
 async function waitForRecipeCss() {
+  // 单测里组件刚挂载就被卸掉，这个 2s 轮询会活到 test environment 销毁之后；
+  // 没有 document 时直接退出，别在 teardown 里抛 ReferenceError。
+  if (typeof document === 'undefined') return
   const deadline = Date.now() + 2000
   while (Date.now() < deadline) {
+    if (typeof document === 'undefined') return
     const link = document.querySelector('link[data-scoped="true"][href*="recipe.css"]')
     if (link?.sheet) return
     await new Promise((r) => setTimeout(r, 20))

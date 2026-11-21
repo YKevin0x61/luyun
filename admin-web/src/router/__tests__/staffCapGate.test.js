@@ -52,6 +52,8 @@ afterEach(() => {
 })
 
 describe('守卫：员工会话 + staffCap', () => {
+  // 这个用例要 resetModules 四次、每次重新挂真实 router；全量并行跑时 5s 默认超时
+  // 会被机器负载顶掉（单独跑约 1.7s），给足余量避免假红。
   it('勾了「人事管理」的员工进得去人事四页', async () => {
     staffEmployee = { id: 7, name: '张三', admin_caps: ['schedule'] }
     for (const path of [
@@ -65,7 +67,7 @@ describe('守卫：员工会话 + staffCap', () => {
       await router.push(path)
       expect(router.currentRoute.value.path, path).toBe(path)
     }
-  })
+  }, 15000)
 
   it('没勾「人事管理」的员工落无权访问页（不是静默改道、也不是登录页）', async () => {
     staffEmployee = { id: 7, name: '张三', admin_caps: [] }
