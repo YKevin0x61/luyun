@@ -3,20 +3,10 @@
 """worktool2 历史导入脚本的纯函数：日期、单号、集合发现。"""
 
 import gzip
-import importlib.util
 import json
-import sys
 from datetime import date
-from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
-SPEC = importlib.util.spec_from_file_location(
-    "import_worktool2_purchase", ROOT / "scripts" / "import_worktool2_purchase.py"
-)
-assert SPEC and SPEC.loader
-IMPORT = importlib.util.module_from_spec(SPEC)
-sys.modules[SPEC.name] = IMPORT  # dataclass 解析注解时要能从 sys.modules 找到模块
-SPEC.loader.exec_module(IMPORT)
+from services.purchase import importer as IMPORT
 
 
 def test_order_no_is_stable_and_keeps_submit_day():

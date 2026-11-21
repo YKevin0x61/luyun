@@ -379,6 +379,14 @@
       "public": false
     },
     {
+      "path": "/workbench/kitchen/purchase/import",
+      "title": "数据迁移",
+      "group": "kitchen",
+      "audience": "admin",
+      "standalone": true,
+      "public": false
+    },
+    {
       "path": "/workbench/tasks",
       "title": "任务",
       "group": "tasks",

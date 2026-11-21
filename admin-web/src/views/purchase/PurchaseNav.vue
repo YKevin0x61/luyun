@@ -11,6 +11,7 @@ import {
   PURCHASE_ANALYSIS_PATH,
   PURCHASE_CATALOG_PATH,
   PURCHASE_HOME_PATH,
+  PURCHASE_MIGRATION_PATH,
   PURCHASE_ORDERS_PATH,
 } from '../../utils/purchasePaths'
 
@@ -66,6 +67,7 @@ const tabs = computed(() => {
   if (isAdmin.value) {
     rows.push({ key: 'catalog', label: '商品与供应商', to: PURCHASE_CATALOG_PATH })
     rows.push({ key: 'analysis', label: '采购分析', to: PURCHASE_ANALYSIS_PATH })
+    rows.push({ key: 'migration', label: '数据迁移', to: PURCHASE_MIGRATION_PATH })
   }
   return rows
 })

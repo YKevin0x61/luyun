@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import json
 import logging
 from pathlib import Path
 from typing import Any, Optional
@@ -51,6 +52,11 @@ from services.purchase.catalog_xlsx import (
     build_catalog_workbook,
     export_filename,
     parse_catalog_workbook,
+)
+from services.purchase.migration import (
+    MAX_UPLOAD_BYTES as MAX_MIGRATION_UPLOAD_BYTES,
+    MigrationError,
+    migration_manager,
 )
 from services.purchase.service import (
     PurchaseActor,
@@ -108,11 +114,16 @@ _MAX_WORKBOOK_BYTES = 10 * 1024 * 1024
 _UPLOAD_CHUNK_BYTES = 1024 * 1024
 
 
-async def _read_upload_bounded(file: UploadFile, label: str = "采购目录文件") -> bytes:
+async def _read_upload_bounded(
+    file: UploadFile,
+    label: str = "采购目录文件",
+    *,
+    max_bytes: int = _MAX_WORKBOOK_BYTES,
+) -> bytes:
     """分块读上传文件，超过上限直接 413，不把整份大表吃进内存。"""
-    limit_mb = _MAX_WORKBOOK_BYTES // (1024 * 1024)
+    limit_mb = max(1, (max_bytes + 1024 * 1024 - 1) // (1024 * 1024))
     declared = getattr(file, "size", None)
-    if declared is not None and declared > _MAX_WORKBOOK_BYTES:
+    if declared is not None and declared > max_bytes:
         raise HTTPException(status_code=413, detail=f"{label}不能超过 {limit_mb} MB")
     data = bytearray()
     while True:
@@ -120,7 +131,7 @@ async def _read_upload_bounded(file: UploadFile, label: str = "采购目录文�
         if not chunk:
             break
         data.extend(chunk)
-        if len(data) > _MAX_WORKBOOK_BYTES:
+        if len(data) > max_bytes:
             raise HTTPException(status_code=413, detail=f"{label}不能超过 {limit_mb} MB")
     return bytes(data)
 
@@ -198,6 +209,36 @@ def _export_job_http_error(exc: ExportJobError) -> HTTPException:
     if isinstance(exc, ExportJobFailed):
         return HTTPException(status_code=409, detail=str(exc))
     return HTTPException(status_code=409, detail=str(exc) or "导出失败")
+
+
+_MIGRATION_STATUS = {
+    "not_found": 404,
+    "expired": 410,
+    "busy": 429,
+    "preview_required": 409,
+    "preview_not_done": 409,
+    "report_not_ready": 409,
+    "no_files": 400,
+    "too_many_files": 400,
+    "too_large": 413,
+    "bad_archive": 400,
+    "bad_file": 400,
+    "no_collections": 400,
+    "ambiguous_collection": 400,
+    "bad_request": 400,
+    "not_migrated": 503,
+    "bad_source": 400,
+    "storage": 500,
+}
+
+
+def _migration_http_error(exc: MigrationError) -> HTTPException:
+    logger.info("厨房采购迁移请求被拒: code=%s detail=%s", exc.code, exc)
+    return HTTPException(
+        status_code=_MIGRATION_STATUS.get(exc.code, 400),
+        detail=str(exc) or "迁移请求不合法",
+        headers={"X-Error-Code": exc.code},
+    )
 
 
 # ── 读：下单页 / 目录 / 单张单 ──────────────────────────────────
@@ -781,6 +822,129 @@ async def purchase_set_weekday_default(
     return await _run(
         purchase_service.set_weekday_default, db, _actor(identity), payload
     )
+
+
+# ── 网页全量迁移 ─────────────────────────────────────────────
+
+
+@manager_router.post("/admin/migrations")
+async def purchase_start_migration(
+    files: list[UploadFile] = File(...),
+    sync_catalog: bool = Form(False),
+    skip_orders: bool = Form(False),
+    skip_stock: bool = Form(False),
+    limit: int = Form(0),
+    identity: dict = Depends(require_any_identity_session),
+) -> dict:
+    """上传 8 个集合或一个 zip，暂存后自动跑 dry-run 预览。"""
+    _ensure_admin(identity)
+    uploads: list[tuple[str, bytes]] = []
+    total = 0
+    for upload in files:
+        name = Path(str(upload.filename or "文件")).name or "文件"
+        remaining = MAX_MIGRATION_UPLOAD_BYTES - total
+        if remaining <= 0:
+            raise HTTPException(
+                status_code=413,
+                detail=f"单次上传合计不能超过 {MAX_MIGRATION_UPLOAD_BYTES // (1024 * 1024)} MB",
+            )
+        data = await _read_upload_bounded(upload, name, max_bytes=remaining)
+        total += len(data)
+        uploads.append((name, data))
+    try:
+        migration = await migration_manager.stage(
+            uploads,
+            {
+                "sync_catalog": sync_catalog,
+                "skip_orders": skip_orders,
+                "skip_stock": skip_stock,
+                "limit": limit,
+            },
+        )
+        try:
+            migration_manager.start_preview(migration.id)
+        except MigrationError:
+            migration_manager.discard(migration.id)
+            raise
+        return {"migration": migration_manager.public(migration.id)}
+    except MigrationError as exc:
+        raise _migration_http_error(exc) from exc
+
+
+@manager_router.get("/admin/migrations/{migration_id}")
+async def purchase_get_migration(
+    migration_id: str,
+    identity: dict = Depends(require_any_identity_session),
+) -> dict:
+    _ensure_admin(identity)
+    try:
+        return {"migration": migration_manager.public(migration_id)}
+    except MigrationError as exc:
+        raise _migration_http_error(exc) from exc
+
+
+@manager_router.post("/admin/migrations/{migration_id}/preview")
+async def purchase_preview_migration(
+    migration_id: str,
+    identity: dict = Depends(require_any_identity_session),
+) -> dict:
+    _ensure_admin(identity)
+    try:
+        migration_manager.start_preview(migration_id)
+        return {"migration": migration_manager.public(migration_id)}
+    except MigrationError as exc:
+        raise _migration_http_error(exc) from exc
+
+
+@manager_router.post("/admin/migrations/{migration_id}/apply")
+async def purchase_apply_migration(
+    migration_id: str,
+    payload: dict[str, Any] = Body(...),
+    identity: dict = Depends(require_any_identity_session),
+) -> dict:
+    _ensure_admin(identity)
+    if payload.get("confirm") is not True:
+        raise HTTPException(status_code=400, detail="写库前需要确认（confirm=true）")
+    try:
+        migration_manager.start_apply(migration_id)
+        return {"migration": migration_manager.public(migration_id)}
+    except MigrationError as exc:
+        raise _migration_http_error(exc) from exc
+
+
+@manager_router.delete("/admin/migrations/{migration_id}")
+async def purchase_discard_migration(
+    migration_id: str,
+    identity: dict = Depends(require_any_identity_session),
+) -> dict:
+    _ensure_admin(identity)
+    try:
+        migration_manager.discard(migration_id)
+        return {"discarded": True}
+    except MigrationError as exc:
+        raise _migration_http_error(exc) from exc
+
+
+@manager_router.get("/admin/migrations/{migration_id}/jobs/{job_id}/report")
+async def purchase_migration_report(
+    migration_id: str,
+    job_id: str,
+    identity: dict = Depends(require_any_identity_session),
+) -> Response:
+    _ensure_admin(identity)
+    try:
+        job = migration_manager.job(migration_id, job_id)
+        if job.state != "done" or job.report is None:
+            raise MigrationError("report_not_ready", "任务还没成功结束，报告还没生成")
+        content = json.dumps(job.report, ensure_ascii=False, indent=2).encode("utf-8")
+        filename = f"purchase-migration-{job.kind}-{migration_id[:8]}.json"
+        return Response(
+            content=content,
+            media_type="application/json",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+    except MigrationError as exc:
+        raise _migration_http_error(exc) from exc
 
 
 # ── xlsx ─────────────────────────────────────────────────────

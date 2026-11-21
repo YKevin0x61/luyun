@@ -151,8 +151,8 @@ describe('两套一级导航表（2026-10-19 信息架构重排第二层）', ()
     }
   })
 
-  it('产品组：清单里是配方五页 + 备货计划 + 损耗分析，导航入口只给能当入口的那五页', () => {
-    // 页面清单仍是完整的七条 —— 路由、页面墙、页面标题都从它来。
+  it('厨房组：清单里是配方五页、备货计划、员工餐采购、厨房采购六页与损耗分析，导航入口只给能当入口的五页', () => {
+    // 页面清单包含功能页与模块 tab —— 路由、页面墙、页面标题都从它来。
     expect(PAGE_ROUTES.filter((row) => row.group === 'kitchen').map((row) => row.path)).toEqual([
       '/workbench/kitchen/recipe',
       '/workbench/kitchen/recipe/detail',
@@ -173,9 +173,10 @@ describe('两套一级导航表（2026-10-19 信息架构重排第二层）', ()
       '/workbench/kitchen/purchase',
       '/workbench/kitchen/purchase/orders',
       '/workbench/kitchen/purchase/order',
-      // 目录与分析只给管理端。
+      // 目录、分析与数据迁移只给管理端。
       '/workbench/kitchen/purchase/catalog',
       '/workbench/kitchen/purchase/analysis',
+      '/workbench/kitchen/purchase/import',
     ])
     // **导航入口**是组表里手写的那几页（2026-10-08）：清单里的「配方详情」（要带 `?slug=`）
     // 与「配方打印」（A4 预览）是**从列表点进去**的功能页 —— 当成一级入口就是两扇点不通的

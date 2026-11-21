@@ -9,7 +9,9 @@
 
 import asyncio
 import io
+import json
 import time
+import zipfile
 from datetime import datetime
 
 import pytest
@@ -24,6 +26,7 @@ from config import settings
 from database import CHINA_TZ, DatabaseManager
 from services.app_runtime import AppRuntime, set_runtime
 from services.hygiene.accounts import EmployeeAccounts
+from services.purchase.migration import migration_manager
 from services.purchase.store import PurchaseStore
 
 PASSWORD = "password123"
@@ -53,6 +56,7 @@ def _run(coro):
 def purchase_http(tmp_path, monkeypatch):
     old = settings.DATABASE_DIR
     settings.DATABASE_DIR = str(tmp_path)
+    migration_manager.reset_for_tests()
     db = DatabaseManager()
     _run(db.connect())
     set_runtime(AppRuntime(db=db))
@@ -73,6 +77,7 @@ def purchase_http(tmp_path, monkeypatch):
         )
         assert login.status_code == 200, login.text
         yield client, accounts
+    migration_manager.reset_for_tests()
     _run(db.close())
     set_runtime(None)
     settings.DATABASE_DIR = old
@@ -606,3 +611,205 @@ def test_reference_all_view_tags_bulk_and_position_visibility(purchase_http):
         params={"day": TODAY, "position_ids": str(first["id"])},
     ).json()
     assert only_first["order_count"] == 1
+
+
+# ── 网页全量迁移 ─────────────────────────────────────────────────────────
+
+
+def _migration_documents():
+    """一份最小的 8 集合云导出；迁移器只认字段，不要求顺序。"""
+    supplier = {
+        "_id": "sup_migrate",
+        "name": "迁移供应商",
+        "code": "05",
+        "nextCategoryCode": 1,
+        "isActive": True,
+    }
+    category = {
+        "_id": "cat_migrate",
+        "supplierId": "sup_migrate",
+        "supplierName": "迁移供应商",
+        "supplierCode": "05",
+        "name": "迁移分类",
+        "code": "02",
+        "nextProductSeq": 1,
+        "isActive": True,
+    }
+    position = {"_id": "pos_migrate", "name": "迁移岗", "sortOrder": 201}
+    product = {
+        "_id": "prod_migrate",
+        "productId": "0502001",
+        "supplier": "迁移供应商",
+        "supplierCode": "05",
+        "categoryId": "cat_migrate",
+        "categoryName": "迁移分类",
+        "position": ["迁移岗"],
+        "name": "迁移土豆",
+        "unit": "斤",
+        "needStockCheck": True,
+        "orderStep": 1,
+        "safetyFactor": 1.2,
+        "isActive": True,
+    }
+    order = {
+        "_id": "order_migrate",
+        "createTime": "2026-11-20T10:00:00+08:00",
+        "status": "pending",
+        "userInfo": {"name": "迁移测试员"},
+        "items": [
+            {
+                "productId": "prod_migrate",
+                "name": "迁移土豆",
+                "quantity": 2,
+                "unit": "斤",
+                "specification": "",
+                "supplier": "迁移供应商",
+                "position": "迁移岗",
+            }
+        ],
+    }
+    stock = {
+        "productId": "prod_migrate",
+        "productName": "迁移土豆",
+        "date": "2026-11-20",
+        "currentStock": 4,
+        "countByName": "迁移测试员",
+    }
+    tag = {"_id": "tag_migrate", "date": "2026-11-20", "tag": "6万", "remark": "测试"}
+    weekday = {"_id": "wd_migrate", "weekday": 5, "tag": "4万"}
+    return {
+        "suppliers.json": json.dumps([supplier], ensure_ascii=False).encode("utf-8"),
+        "categories.json": json.dumps([category], ensure_ascii=False).encode("utf-8"),
+        "products.json": json.dumps([product], ensure_ascii=False).encode("utf-8"),
+        "positions.json": json.dumps([position], ensure_ascii=False).encode("utf-8"),
+        "date_factor_tags.json": json.dumps([tag], ensure_ascii=False).encode("utf-8"),
+        "date_factor_weekday_defaults.json": json.dumps([weekday], ensure_ascii=False).encode("utf-8"),
+        "orders.json": json.dumps([order], ensure_ascii=False).encode("utf-8"),
+        "material_stock.json": json.dumps([stock], ensure_ascii=False).encode("utf-8"),
+    }
+
+
+def _migration_upload_files(documents=None):
+    documents = documents or _migration_documents()
+    return [
+        ("files", (name, data, "application/json"))
+        for name, data in documents.items()
+    ]
+
+
+def _wait_migration_job(client, migration_id, kind):
+    last = None
+    for _ in range(240):
+        response = client.get(f"/api/purchase/admin/migrations/{migration_id}")
+        assert response.status_code == 200, response.text
+        last = response.json()["migration"]
+        job = last.get(kind)
+        if job and job["state"] in {"done", "failed"}:
+            return last, job
+        time.sleep(0.05)
+    raise AssertionError(f"迁移任务没有结束：{last}")
+
+
+def test_web_migration_preview_apply_and_discard(purchase_http):
+    client, accounts = purchase_http
+    documents = {
+        name: data
+        for name, data in _migration_documents().items()
+        if name in {"suppliers.json", "categories.json", "products.json", "positions.json"}
+    }
+
+    # 员工即使有采购能力，也不能上传全量迁移包。
+    _employee(accounts, caps=["purchase"])
+    _staff_cookie(client, accounts)
+    denied = client.post(
+        "/api/purchase/admin/migrations", files=_migration_upload_files(documents)
+    )
+    assert denied.status_code == 403
+
+    _admin_cookie(client)
+    started = client.post(
+        "/api/purchase/admin/migrations",
+        files=_migration_upload_files(documents),
+        data={"limit": "0", "skip_orders": "false", "skip_stock": "false"},
+    )
+    assert started.status_code == 200, started.text
+    migration = started.json()["migration"]
+    migration_id = migration["id"]
+    assert set(migration["missing"]) == {
+        "date_factor_tags",
+        "date_factor_weekday_defaults",
+        "orders",
+        "material_stock",
+    }
+    assert {row["name"] for row in migration["files"]} == set(documents)
+
+    migration, preview = _wait_migration_job(client, migration_id, "preview")
+    assert preview["state"] == "done", preview
+    assert preview["report"]["apply"] is False
+    assert preview["report"]["stats"]["suppliers"]["created"] == 1
+    assert preview["report"]["stats"]["products"]["created"] == 1
+    assert preview["report"]["failures"] == []
+
+    # 报告可以从任务里下载成 JSON。
+    report = client.get(
+        f"/api/purchase/admin/migrations/{migration_id}/jobs/{preview['id']}/report"
+    )
+    assert report.status_code == 200, report.text
+    assert "attachment" in report.headers["content-disposition"]
+    assert json.loads(report.text)["apply"] is False
+
+    # 没有确认不能写库；确认后预览过的同一份上传会被真正导入。
+    unconfirmed = client.post(
+        f"/api/purchase/admin/migrations/{migration_id}/apply", json={}
+    )
+    assert unconfirmed.status_code == 400
+    applied = client.post(
+        f"/api/purchase/admin/migrations/{migration_id}/apply", json={"confirm": True}
+    )
+    assert applied.status_code == 200, applied.text
+    migration, apply_job = _wait_migration_job(client, migration_id, "apply")
+    assert apply_job["state"] == "done", apply_job
+    assert apply_job["report"]["apply"] is True
+
+    products = client.get("/api/purchase/admin/products").json()["products"]
+    assert any(row["name"] == "迁移土豆" for row in products)
+    tags = client.get(
+        "/api/purchase/admin/date-tags", params={"start": TODAY, "end": TODAY}
+    )
+    assert tags.status_code == 200
+
+    discarded = client.delete(f"/api/purchase/admin/migrations/{migration_id}")
+    assert discarded.status_code == 200
+    assert discarded.json()["discarded"] is True
+    assert client.get(f"/api/purchase/admin/migrations/{migration_id}").status_code == 404
+
+
+def test_web_migration_accepts_zip_and_rejects_bad_archive(purchase_http):
+    client, _accounts = purchase_http
+    _admin_cookie(client)
+    documents = _migration_documents()
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        for name, data in documents.items():
+            archive.writestr(name, data)
+
+    started = client.post(
+        "/api/purchase/admin/migrations",
+        files=[("files", ("worktool2-export.zip", buffer.getvalue(), "application/zip"))],
+        data={"limit": "0"},
+    )
+    assert started.status_code == 200, started.text
+    migration_id = started.json()["migration"]["id"]
+    migration, preview = _wait_migration_job(client, migration_id, "preview")
+    assert preview["state"] == "done", preview
+    assert migration["missing"] == []
+    assert preview["report"]["stats"]["orders"]["created"] == 1
+    assert preview["report"]["stats"]["material_stock"]["created"] == 1
+
+    bad = client.post(
+        "/api/purchase/admin/migrations",
+        files=[("files", ("bad.zip", b"not a zip", "application/zip"))],
+    )
+    assert bad.status_code == 400
+    assert bad.headers.get("x-error-code") == "bad_archive"
+    assert "zip" in bad.json()["detail"]

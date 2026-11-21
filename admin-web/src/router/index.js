@@ -208,6 +208,9 @@ const routes = [
   workbenchKitchenPage('/workbench/kitchen/purchase/order', 'purchase-order-detail', () => import('../views/purchase/PurchaseOrderDetailView.vue')),
   workbenchKitchenPage('/workbench/kitchen/purchase/catalog', 'purchase-catalog', () => import('../views/purchase/PurchaseCatalogView.vue')),
   workbenchKitchenPage('/workbench/kitchen/purchase/analysis', 'purchase-analysis', () => import('../views/purchase/PurchaseAnalysisView.vue')),
+  // 数据迁移（0.9.0 上线前补）：把云开发导出的 8 个集合从网页搬进采购域，
+  // 只给管理端；先 dry-run 预览、再确认写库。页面清单里是 audience: admin。
+  workbenchKitchenPage('/workbench/kitchen/purchase/import', 'purchase-import', () => import('../views/purchase/PurchaseImportView.vue')),
   // 工作台「任务」（2026-11-11 起）：管理端新的一级组「任务」，底栏第 5 格。两页都套
   // 工作台外壳（`WorkbenchLayout`）；页面本身在清单里是 `audience: admin`，员工端走
   // `/workbench/staff/tasks`（「我的任务」）。票 01 只立页与空态，发布 / 验收 / 定期

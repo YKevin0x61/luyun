@@ -183,6 +183,8 @@ describe('页面清单（唯一来源）', () => {
       '/workbench/kitchen/purchase/order',
       '/workbench/kitchen/purchase/catalog',
       '/workbench/kitchen/purchase/analysis',
+      // 数据迁移（0.9.0 上线前补）：只给管理端，把云开发 8 个集合从网页搬进来。
+      '/workbench/kitchen/purchase/import',
       // 任务（2026-11-11）：管理端新的一级组，底栏第 5 格；两页同套工作台外壳。
       '/workbench/tasks',
       '/workbench/tasks/recurring',

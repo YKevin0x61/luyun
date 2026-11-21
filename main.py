@@ -1476,15 +1476,16 @@ SPA_PAGE_ROUTES = (
     # 页面清单里是 `audience: admin + staffCap: meal_purchase`（管理端直进、勾了能力的员工进）。
     # 同这一批：漏一条就是直连 uvicorn 硬导航 404（前端侧由 tests/test_spa_page_routes.py 双向盯住）。
     "/workbench/kitchen/staff-meal",
-    # 厨房采购（2026-11-21 从 worktool2 小程序搬来）：后勤组五页 —— 下单 / 采购单 /
-    # 详情 / 商品与供应商 / 采购分析。前三页页面清单里是 admin + staffCap: purchase，
-    # 后两页只给管理端。同这一批：漏一条就是直连 uvicorn 硬导航 404
-    # （前端侧由 tests/test_spa_page_routes.py 双向盯住）。
+    # 厨房采购（2026-11-21 从 worktool2 小程序搬来）：后勤组六页 —— 下单 / 采购单 /
+    # 详情 / 商品与供应商 / 采购分析 / 数据迁移。前三页页面清单里是 admin +
+    # staffCap: purchase；后三页只给管理端。同这一批：漏一条就是直连 uvicorn
+    # 硬导航 404（前端侧由 tests/test_spa_page_routes.py 双向盯住）。
     "/workbench/kitchen/purchase",
     "/workbench/kitchen/purchase/orders",
     "/workbench/kitchen/purchase/order",
     "/workbench/kitchen/purchase/catalog",
     "/workbench/kitchen/purchase/analysis",
+    "/workbench/kitchen/purchase/import",
     # 工作台「任务」（2026-11-11）：管理端两页（任务 / 定期任务）与员工端「我的任务」。
     # 同这一批：漏一条就是直连 uvicorn 硬导航 404（前端侧由 tests/test_spa_page_routes.py 双向盯住）。
     "/workbench/tasks",

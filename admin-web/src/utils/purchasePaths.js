@@ -12,6 +12,7 @@ export const PURCHASE_ORDERS_PATH = '/workbench/kitchen/purchase/orders'
 export const PURCHASE_ORDER_DETAIL_PATH = '/workbench/kitchen/purchase/order'
 export const PURCHASE_CATALOG_PATH = '/workbench/kitchen/purchase/catalog'
 export const PURCHASE_ANALYSIS_PATH = '/workbench/kitchen/purchase/analysis'
+export const PURCHASE_MIGRATION_PATH = '/workbench/kitchen/purchase/import'
 
 /** 订单详情地址：只接受正整数，脏 id 返回空串（调用方按「没有这一单」处理）。 */
 export function purchaseOrderPath(orderId) {
