@@ -47,7 +47,7 @@ import NavBar from '../../components/NavBar.vue'
 import { clearAuthStatusCache } from '../../utils/authStatus.js'
 import { RECIPE_QR_PATH } from '../../utils/recipePaths.js'
 import { IDENTITY_ADMIN, IDENTITY_STAFF } from '../../utils/workbenchIdentity.js'
-import { workbenchAudienceFor } from '../../utils/workbenchNav.js'
+import { pageVisibleFor, workbenchAudienceFor } from '../../utils/workbenchNav.js'
 
 /** jsdom 缺的那几样浏览器 API：这道门要真的挂载页面，缺一个就在 `onMounted` 里炸。
  *
@@ -192,7 +192,8 @@ function linkedPaths(wrapper) {
  *
  *  - 清单里没有的路径：不是页面（`/api/...`、静态资源），不归这道门管；
  *  - 公开页（`public: true`）：谁都能开 —— `/login` 上的「自助注册」就是一例；
- *  - 其余按 `audience`：`both` 两档都开，`admin` / `staff` 各一边。
+ *  - 其余按 `audience`：`both` 两档的基础可见性都开，`admin` / `staff` 各一边；
+ *    `both + staffCap` 员工还要有那项能力（厨房采购三页）。
  *
  *  身份词（`super` / `staff`）翻成清单里的词（`admin` / `staff`）走
  *  `workbenchAudienceFor` —— 这个映射全仓只有那一处，这里不再抄一份副本（抄的那份一旦
@@ -216,11 +217,15 @@ function unreachableEntries(wrapper, identity) {
   return offenders
 }
 
-/** 清单里所有「这个身份进得去」的页（公开页也算：谁都能开）。 */
+/** 清单里所有「这个身份进得去」的页（公开页也算：谁都能开）。
+ *
+ * 2026-11-22：`both` 不再等于「谁都看得见」—— 厨房采购三页是 `both + staffCap`，
+ * 没勾「厨房采购」的员工打不开。这里必须走同一个 `pageVisibleFor`，否则会把这三页
+ * 也算进员工可达面，再拿无能力的员工身份去渲染，就会被守卫改道到 forbidden。 */
 function pagesReachableBy(identity) {
   const audience = workbenchAudienceFor(identity)
   return PAGE_ROUTES.filter(
-    (row) => row.public || row.audience === 'both' || row.audience === audience,
+    (row) => row.public || pageVisibleFor(row, audience, []),
   ).map((row) => row.path)
 }
 

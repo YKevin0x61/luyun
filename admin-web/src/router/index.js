@@ -201,8 +201,9 @@ const routes = [
   // —— 拆了以后「今天」这类入口与页头面包屑都要多认一层。
   workbenchKitchenPage('/workbench/kitchen/staff-meal', 'staff-meal', () => import('../views/workbench/StaffMealView.vue')),
   // 厨房采购（从 worktool2 小程序搬来）：后勤组的五页。下单 / 采购单 / 详情三页
-  // 页面清单里是 audience: admin + staffCap: purchase —— 管理端直接进，员工会话勾了
-  // 「厨房采购」才进。目录与分析只给管理端；详情页是静态路径 + ?id=（仓库先例：配方详情 ?slug=）。
+  // 页面清单里是 audience: both + staffCap: purchase —— 管理端直接进，员工会话勾了
+  // 「厨房采购」才进；它们不是管理权限页，只是员工这一档额外要能力键。目录与分析只给
+  // 管理端；详情页是静态路径 + ?id=（仓库先例：配方详情 ?slug=）。
   workbenchKitchenPage('/workbench/kitchen/purchase', 'purchase-order', () => import('../views/purchase/PurchaseOrderView.vue')),
   workbenchKitchenPage('/workbench/kitchen/purchase/orders', 'purchase-orders', () => import('../views/purchase/PurchaseOrdersView.vue')),
   workbenchKitchenPage('/workbench/kitchen/purchase/order', 'purchase-order-detail', () => import('../views/purchase/PurchaseOrderDetailView.vue')),
@@ -338,7 +339,10 @@ router.beforeEach(async (to) => {
   //   没有 → 越权落点，不静默改道（票 03 的口径）；
   //   问不到（断网 / 超时）→ 放行到页面：不能因为一次网络失败就把员工判成越权，
   //     页面自己那条 401 / 断网兜底会处理。
-  if (audience === 'admin' && to.meta.staffCap) {
+  // 2026-11-22 用户裁定：厨房采购的下单 / 采购单 / 详情三页不是管理页，改成
+  // `audience: both + staffCap: purchase` —— `both` 只说明两档都能进，员工这一档仍要
+  // 能力键；管理端已在上面 `isLoggedIn()` 那条放行，所以不能把 `both` 一律当「谁都看得见」。
+  if (to.meta.staffCap && (audience === 'admin' || audience === 'both')) {
     const probe = await staffCapsProbe()
     if (probe.state === 'unauthenticated') return loginRedirect(to)
     if (probe.state === 'unknown') return true

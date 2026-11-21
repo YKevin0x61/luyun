@@ -240,9 +240,27 @@ onMounted(loadOrder)
         改单会按提交日重新算新加商品的参考值；已在单里的商品保留当时的参考值 / 库存快照。
       </p>
 
+      <section class="pd-section">
+        <h2 class="pd-section-title">基本信息</h2>
+        <div class="pd-info">
+          <div class="pd-info-row">
+            <span>下单人</span>
+            <strong>{{ order.submitter_name || '未知用户' }}</strong>
+          </div>
+          <div class="pd-info-row">
+            <span>下单时间</span>
+            <strong>{{ formatDateTime(order.submitted_at) }}</strong>
+          </div>
+          <div class="pd-info-row">
+            <span>订单状态</span>
+            <strong class="pd-info-status" :class="'is-' + order.status">{{ statusText(order.status) }}</strong>
+          </div>
+        </div>
+      </section>
+
       <section class="pd-card">
         <header class="pd-card-head">
-          <h2>商品 {{ items.length }} 项</h2>
+          <h2>商品列表</h2>
           <span v-if="!editMode">合计 {{ formatQty(items.reduce((sum, item) => sum + (Number(item.quantity) || 0), 0)) }}</span>
         </header>
 
@@ -263,9 +281,6 @@ onMounted(loadOrder)
                 参考 {{ formatQty(item.reference_qty) }}
                 <template v-if="item.stock_qty !== null && item.stock_qty !== undefined">
                   · 当时库存 {{ formatQty(item.stock_qty) }}
-                </template>
-                <template v-if="item.suggested_qty !== null && item.suggested_qty !== undefined">
-                  · 建议 {{ formatQty(item.suggested_qty) }}
                 </template>
               </p>
             </div>
@@ -291,6 +306,20 @@ onMounted(loadOrder)
         </div>
       </section>
 
+
+      <section class="pd-section">
+        <h2 class="pd-section-title">订单汇总</h2>
+        <div class="pd-info">
+          <div class="pd-info-row">
+            <span>商品种类</span>
+            <strong>{{ items.length }} 种</strong>
+          </div>
+          <div class="pd-info-row">
+            <span>总数量</span>
+            <strong>{{ formatQty(items.reduce((sum, item) => sum + (Number(item.quantity) || 0), 0)) }}</strong>
+          </div>
+        </div>
+      </section>
       <section class="pd-card">
         <h2 class="pd-card-title">操作记录</h2>
         <div v-if="!events.length" class="pd-empty">还没有操作记录。</div>
@@ -376,7 +405,12 @@ onMounted(loadOrder)
   align-items: flex-start;
   justify-content: space-between;
   gap: 10px;
-  padding: 2px 0 10px;
+  margin-bottom: 10px;
+  padding: 14px;
+  border: 1px solid var(--line-strong);
+  border-radius: 16px;
+  background: linear-gradient(135deg, var(--surface-1), var(--wb-tint-08));
+  box-shadow: var(--paper-shadow-sm);
 }
 .pd-no {
   margin: 0;
@@ -412,6 +446,48 @@ onMounted(loadOrder)
 .pd-status.is-cancelled {
   background: var(--wb-danger-a10);
   opacity: 0.75;
+}
+.pd-section {
+  margin: 0 0 12px;
+}
+.pd-section-title {
+  margin: 0 0 7px;
+  font-size: var(--fs-14);
+}
+.pd-info {
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface-1);
+  box-shadow: var(--paper-shadow-sm);
+}
+.pd-info-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  border-bottom: 1px dashed var(--line);
+  font-size: var(--fs-13);
+}
+.pd-info-row:last-child {
+  border-bottom: 0;
+}
+.pd-info-row span {
+  opacity: 0.6;
+}
+.pd-info-row strong {
+  font-weight: 600;
+  text-align: right;
+}
+.pd-info-status.is-pending {
+  color: var(--action);
+}
+.pd-info-status.is-completed {
+  color: var(--ink);
+}
+.pd-info-status.is-cancelled {
+  opacity: 0.55;
 }
 .pd-actions {
   display: flex;

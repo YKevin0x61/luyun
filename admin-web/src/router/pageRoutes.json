@@ -339,7 +339,7 @@
       "path": "/workbench/kitchen/purchase",
       "title": "厨房采购",
       "group": "kitchen",
-      "audience": "admin",
+      "audience": "both",
       "staffCap": "purchase",
       "standalone": true,
       "public": false
@@ -348,7 +348,7 @@
       "path": "/workbench/kitchen/purchase/orders",
       "title": "采购单",
       "group": "kitchen",
-      "audience": "admin",
+      "audience": "both",
       "staffCap": "purchase",
       "standalone": true,
       "public": false
@@ -357,7 +357,7 @@
       "path": "/workbench/kitchen/purchase/order",
       "title": "采购单详情",
       "group": "kitchen",
-      "audience": "admin",
+      "audience": "both",
       "staffCap": "purchase",
       "standalone": true,
       "public": false

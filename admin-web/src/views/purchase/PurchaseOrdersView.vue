@@ -37,7 +37,7 @@ const pageSize = ref(10)
 const loadingOrders = ref(false)
 
 const summaryDay = ref(today)
-const summaryPositionIds = ref([])
+const summaryPositionId = ref(0)
 const summary = ref(null)
 const loadingSummary = ref(false)
 const exporting = ref(false)
@@ -47,14 +47,11 @@ const errorText = ref('')
 const positions = computed(() => (meta.value.positions || []).filter((item) => item.active))
 const totalPages = computed(() => Math.max(1, Math.ceil(total.value / (pageSize.value || 10))))
 const summaryPositionNames = computed(() => {
-  if (!summaryPositionIds.value.length) return '全部岗位'
-  return positions.value
-    .filter((item) => summaryPositionIds.value.includes(item.id))
-    .map((item) => item.name)
-    .join('、')
+  if (!summaryPositionId.value) return '全部岗位'
+  return positions.value.find((item) => item.id === summaryPositionId.value)?.name || '全部岗位'
 })
 const summaryPositionQuery = computed(() =>
-  summaryPositionIds.value.length ? summaryPositionIds.value.join(',') : undefined,
+  summaryPositionId.value ? String(summaryPositionId.value) : undefined,
 )
 
 function statusClass(status) {
@@ -113,17 +110,6 @@ function applyFilters() {
   loadOrders()
 }
 
-function toggleSummaryPosition(positionId) {
-  if (!positionId) {
-    summaryPositionIds.value = []
-  } else if (summaryPositionIds.value.includes(positionId)) {
-    summaryPositionIds.value = summaryPositionIds.value.filter((id) => id !== positionId)
-  } else {
-    summaryPositionIds.value = [...summaryPositionIds.value, positionId].sort((a, b) => a - b)
-  }
-  loadSummary()
-}
-
 function shiftPage(delta) {
   const next = page.value + delta
   if (next < 1 || next > totalPages.value) return
@@ -161,39 +147,70 @@ function escapeHtml(value) {
 /**
  * 打印视图放在一个空白窗口里：工作台外壳（顶栏 / 底栏 / 导航）不参与打印，
  * 也不必为了打印往页面里塞一套 @media print 的全局样式。
+ *
+ * 内容照小程序「今日汇总」的打印预览排：日期标题、下单人员、按供应商 /
+ * 分类 / 商品折起来、每个供应商的采购种类、整体的供应商与种类总数、
+ * 打印时间。热敏纸 58mm 与 A4 都用同一份文本，不再另做一套表格。
  */
 function printSummary() {
   if (!summary.value) return
   const data = summary.value
-  const lines = []
-  lines.push('<h1>厨房采购汇总</h1>')
-  lines.push('<p class="meta">' + escapeHtml(data.date) + ' · ' + escapeHtml(summaryPositionNames.value) + '</p>')
+  const blocks = []
+  const submitters = []
+  const seenSubmitters = new Set()
+  let totalSuppliers = 0
+  let totalTypes = 0
+
   for (const supplier of data.suppliers || []) {
-    lines.push('<h2>' + escapeHtml(supplier.supplier_name) + '</h2>')
-    lines.push('<table><thead><tr><th>商品编码</th><th>商品</th><th>规格</th><th>单位</th><th>数量</th><th>库存快照</th><th>下单人</th><th>岗位</th></tr></thead><tbody>')
+    const groups = []
+    let supplierTypeCount = 0
     for (const category of supplier.categories || []) {
-      for (const product of category.products || []) {
-        const positionText = (product.positions || [])
-          .map((item) => item.position_name + ' ' + formatQty(item.quantity))
-          .join(' / ')
-        const stockText = product.stock_qty === null || product.stock_qty === undefined
-          ? '—'
-          : formatQty(product.stock_qty)
-        const submitterText = (product.submitters || []).join('、') || '—'
-        lines.push(
-          '<tr><td>' + escapeHtml(product.product_code) + '</td><td>' +
-          escapeHtml(product.name) + '</td><td>' + escapeHtml(product.specification) +
-          '</td><td>' + escapeHtml(product.unit) + '</td><td class="num">' +
-          escapeHtml(formatQty(product.quantity)) + '</td><td class="num">' +
-          escapeHtml(stockText) + '</td><td>' + escapeHtml(submitterText) +
-          '</td><td>' + escapeHtml(positionText) + '</td></tr>',
-        )
+      const products = (category.products || []).filter((product) => Number(product.quantity) > 0)
+      if (!products.length) continue
+      groups.push({ name: category.category_name || '未分类', products })
+      supplierTypeCount += products.length
+      for (const product of products) {
+        for (const submitter of product.submitters || []) {
+          const name = String(submitter || '').trim()
+          if (name && !seenSubmitters.has(name)) {
+            seenSubmitters.add(name)
+            submitters.push(name)
+          }
+        }
       }
     }
-    lines.push('</tbody></table>')
+    if (!groups.length) continue
+    totalSuppliers += 1
+    totalTypes += supplierTypeCount
+
+    let block = '【' + (supplier.supplier_name || '') + '】\n'
+    block += '------------------------\n'
+    for (const group of groups) {
+      block += '[' + group.name + ']\n'
+      for (const product of group.products) {
+        const stock = product.stock_qty === null || product.stock_qty === undefined
+          ? ''
+          : '【库' + formatQty(product.stock_qty) + '】'
+        block += '　　' + (product.name || '') + '： ' +
+          formatQty(product.quantity) + (product.unit || '') + stock + '\n'
+      }
+    }
+    block += '----\n'
+    block += '采购种类：' + supplierTypeCount + '种\n'
+    block += '------------------------\n'
+    blocks.push(block)
   }
-  lines.push('<p class="total">合计 ' + escapeHtml(formatQty(data.total_quantity)) + ' · ' +
-    escapeHtml(data.order_count || 0) + ' 张单</p>')
+
+  let text = data.date + ' 采购汇总\n'
+  text += '========================\n'
+  if (submitters.length) text += '下单人员：' + submitters.join('、') + '\n'
+  text += '========================\n\n'
+  text += blocks.join('\n')
+  text += '========================\n'
+  text += '供应商总数：' + totalSuppliers + '家\n'
+  text += '采购种类总数：' + totalTypes + '种\n'
+  text += '========================\n'
+  text += '打印时间：' + printTimeText() + '\n'
 
   const win = window.open('', '_blank', 'width=900,height=700')
   if (!win) {
@@ -202,21 +219,24 @@ function printSummary() {
   }
   win.document.write(
     '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">' +
-    '<title>厨房采购汇总 ' + escapeHtml(data.date) + '</title>' +
+    '<title>' + escapeHtml(data.date) + ' 采购汇总</title>' +
     '<style>body{font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB",sans-serif;' +
-    'color:black;margin:28px;font-size:10pt}h1{font-size:18pt;margin:0 0 4px}' +
-    '.meta{color:dimgray;margin:0 0 18px}h2{font-size:12pt;margin:16px 0 6px;' +
-    'border-bottom:1px solid darkgray;padding-bottom:4px}table{width:100%;border-collapse:collapse}' +
-    'th,td{text-align:left;padding:4px 6px;border-bottom:1px solid gainsboro;vertical-align:top}' +
-    'th{font-weight:600;background:whitesmoke}.num{text-align:right;font-variant-numeric:tabular-nums}' +
-    '.total{margin-top:14px;font-size:10.5pt;font-weight:600}@media print{body{margin:10mm}}' +
-    '</style></head><body>' + lines.join('') + '</body></html>',
+    'color:black;margin:28px;font-size:10pt}pre{margin:0;font-family:"SFMono-Regular",Menlo,Consolas,' +
+    '"PingFang SC","Hiragino Sans GB",monospace;font-size:10pt;line-height:1.65;' +
+    'white-space:pre-wrap;word-break:break-word}@media print{body{margin:10mm}}</style>' +
+    '</head><body><pre>' + escapeHtml(text) + '</pre></body></html>',
   )
   win.document.close()
   win.focus()
   win.setTimeout(() => {
     win.print()
   }, 250)
+}
+
+function printTimeText(now = new Date()) {
+  const pad = (value) => String(value).padStart(2, '0')
+  return now.getFullYear() + '/' + (now.getMonth() + 1) + '/' + now.getDate() +
+    ' ' + pad(now.getHours()) + ':' + pad(now.getMinutes()) + ':' + pad(now.getSeconds())
 }
 
 watch(activeTab, (value) => {
@@ -240,13 +260,17 @@ onMounted(async () => {
     <PurchaseNav :active="activeTab" />
 
     <header class="pl-head">
-      <div>
+      <div class="pl-head-text">
         <h1>{{ activeTab === 'summary' ? '今日采购汇总' : '采购单' }}</h1>
         <p class="pl-sub">
           {{ activeTab === 'summary'
             ? '按供应商 / 分类 / 商品折起来，导出 Excel 或打印给供应商'
             : '按提交日期查；点一行看明细、改单或完成核对' }}
         </p>
+      </div>
+      <div class="pl-head-count">
+        <strong>{{ activeTab === 'summary' ? (summary?.order_count || 0) : total }}</strong>
+        <small>张单</small>
       </div>
     </header>
 
@@ -299,21 +323,36 @@ onMounted(async () => {
           @keydown.enter="$router.push(purchaseOrderPath(order.id))"
           @keydown.space.prevent="$router.push(purchaseOrderPath(order.id))"
         >
-          <div class="pl-order-top">
-            <span class="pl-order-no">{{ order.order_no }}</span>
+          <header class="pl-order-head">
+            <div class="pl-order-person">
+              <span class="pl-person-dot" aria-hidden="true"></span>
+              <strong>{{ order.submitter_name || '未知用户' }}</strong>
+              <span class="pl-order-pos">{{ order.position_name }}</span>
+            </div>
             <span class="pl-status" :class="statusClass(order.status)">{{ statusText(order.status) }}</span>
+          </header>
+          <div class="pl-order-items">
+            <div
+              v-for="item in (order.items || []).slice(0, 6)"
+              :key="item.product_code + ':' + item.name"
+              class="pl-order-item"
+            >
+              <span class="pl-item-name">{{ item.name }}</span>
+              <span
+                v-if="item.stock_qty !== null && item.stock_qty !== undefined"
+                class="pl-item-stock"
+              >库:{{ formatQty(item.stock_qty) }}</span>
+              <span class="pl-item-qty">×{{ formatQty(item.quantity) }} <small>{{ item.unit }}</small></span>
+            </div>
+            <p v-if="(order.items || []).length > 6" class="pl-order-more">
+              还有 {{ order.items.length - 6 }} 项，点开看全部
+            </p>
           </div>
-          <div class="pl-order-main">
-            <strong>{{ order.position_name }}</strong>
-            <span>{{ order.submitter_name }}</span>
-            <span>{{ formatDateTime(order.submitted_at) }}</span>
-          </div>
-          <div class="pl-order-meta">
-            <span>{{ order.item_count || 0 }} 项</span>
-            <span>合计 {{ formatQty(order.total_quantity) }}</span>
-            <template v-if="order.completed_at">· 完成 {{ formatMonthDay(order.completed_at) }}</template>
-            <template v-else-if="order.cancelled_at">· 取消 {{ formatMonthDay(order.cancelled_at) }}</template>
-          </div>
+          <footer class="pl-order-foot">
+            <span class="pl-order-no">{{ order.order_no }}</span>
+            <span>{{ order.item_count || 0 }} 项 · 合计 {{ formatQty(order.total_quantity) }}</span>
+            <span class="pl-order-at">{{ formatDateTime(order.submitted_at) }}</span>
+          </footer>
         </article>
       </div>
 
@@ -341,23 +380,15 @@ onMounted(async () => {
         </button>
       </section>
 
-      <div class="pl-summary-filter">
+      <label class="pl-summary-filter">
         <span class="pl-positions-label">岗位</span>
-        <button
-          type="button"
-          class="pl-chip"
-          :class="{ 'is-on': !summaryPositionIds.length }"
-          @click="toggleSummaryPosition(0)"
-        >全部</button>
-        <button
-          v-for="position in positions"
-          :key="position.id"
-          type="button"
-          class="pl-chip"
-          :class="{ 'is-on': summaryPositionIds.includes(position.id) }"
-          @click="toggleSummaryPosition(position.id)"
-        >{{ position.name }}</button>
-      </div>
+        <select v-model.number="summaryPositionId" class="pl-select pl-summary-select" @change="loadSummary">
+          <option :value="0">全部岗位</option>
+          <option v-for="position in positions" :key="position.id" :value="position.id">
+            {{ position.name }}
+          </option>
+        </select>
+      </label>
 
       <div v-if="loadingSummary" class="pl-empty">正在汇总…</div>
       <div v-else-if="!summary" class="pl-empty">这一天还没有汇总。</div>
@@ -376,31 +407,41 @@ onMounted(async () => {
         </div>
 
         <div v-if="!(summary.suppliers || []).length" class="pl-empty">这一天还没有有效采购。</div>
-        <section v-for="supplier in summary.suppliers" :key="supplier.supplier_name" class="pl-supplier">
-          <header class="pl-supplier-head">
-            <h2>{{ supplier.supplier_name }}</h2>
-            <span>{{ formatQty(supplier.quantity) }}</span>
+        <section v-else class="pl-paper" aria-label="今日采购汇总明细">
+          <header class="pl-paper-head">
+            <span>{{ summary.day || summaryDay }} 采购汇总</span>
+            <strong>{{ summary.order_count || 0 }} 张单</strong>
           </header>
-          <div v-for="category in supplier.categories" :key="category.category_name" class="pl-category">
-            <h3>{{ category.category_name }}</h3>
-            <div v-for="product in category.products" :key="product.product_id" class="pl-row">
-              <div class="pl-row-main">
-                <strong>{{ product.name }}</strong>
-                <span v-if="product.specification" class="pl-row-spec">{{ product.specification }}</span>
-                <span class="pl-row-code">{{ product.product_code }}</span>
-              </div>
-              <div class="pl-row-qty">{{ formatQty(product.quantity) }} <small>{{ product.unit }}</small></div>
-              <div class="pl-row-positions">
-                <span v-for="item in product.positions" :key="item.position_name">
-                  {{ item.position_name }} {{ formatQty(item.quantity) }}
-                </span>
-              </div>
-              <div class="pl-row-extra">
-                <span>库存快照 {{ formatQty(product.stock_qty) }}</span>
-                <span>下单人 {{ (product.submitters || []).join('、') || '—' }}</span>
+          <div v-for="supplier in summary.suppliers" :key="supplier.supplier_name" class="pl-paper-supplier">
+            <header class="pl-supplier-head">
+              <h2>{{ supplier.supplier_name }}</h2>
+              <span>{{ formatQty(supplier.quantity) }}</span>
+            </header>
+            <div v-for="category in supplier.categories" :key="category.category_name" class="pl-category">
+              <h3>{{ category.category_name }}</h3>
+              <div v-for="product in category.products" :key="product.product_id" class="pl-row">
+                <div class="pl-row-main">
+                  <strong>{{ product.name }}</strong>
+                  <span class="pl-row-code">{{ product.product_code }}</span>
+                  <span v-if="product.specification" class="pl-row-spec">{{ product.specification }}</span>
+                </div>
+                <div class="pl-row-qty">{{ formatQty(product.quantity) }} <small>{{ product.unit }}</small></div>
+                <div class="pl-row-positions">
+                  <span v-for="item in product.positions" :key="item.position_name">
+                    {{ item.position_name }} {{ formatQty(item.quantity) }}
+                  </span>
+                </div>
+                <div class="pl-row-extra">
+                  <span>库存快照 {{ formatQty(product.stock_qty) }}</span>
+                  <span>下单人 {{ (product.submitters || []).join('、') || '—' }}</span>
+                </div>
               </div>
             </div>
           </div>
+          <footer class="pl-paper-foot">
+            <span>合计</span>
+            <strong>{{ formatQty(summary.total_quantity) }}</strong>
+          </footer>
         </section>
       </template>
     </template>
@@ -419,7 +460,35 @@ onMounted(async () => {
   line-height: 1.45;
 }
 .pl-head {
-  padding: 2px 0 12px;
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+  padding: 16px 18px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: linear-gradient(135deg, var(--surface-1), var(--wb-tint-14));
+  box-shadow: var(--paper-shadow-sm);
+}
+.pl-head-text {
+  min-width: 0;
+}
+.pl-head-count {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: baseline;
+  gap: 4px;
+}
+.pl-head-count strong {
+  font-size: var(--fs-24);
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+.pl-head-count small {
+  color: var(--ink);
+  font-size: var(--fs-11);
+  opacity: 0.6;
 }
 .pl-head h1 {
   margin: 0;
@@ -501,9 +570,9 @@ onMounted(async () => {
   display: block;
   width: 100%;
   min-height: 44px;
-  padding: 12px 14px;
+  overflow: hidden;
   border: 1px solid var(--line);
-  border-radius: 13px;
+  border-radius: 14px;
   background: var(--surface-1);
   color: var(--ink);
   font: inherit;
@@ -514,6 +583,104 @@ onMounted(async () => {
 .pl-order:focus-visible {
   outline: 2px solid var(--action);
   outline-offset: 2px;
+}
+.pl-order-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--line);
+  background: var(--wb-tint-08);
+}
+.pl-order-person {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+.pl-order-person strong {
+  font-size: var(--fs-14);
+}
+.pl-person-dot {
+  width: 16px;
+  height: 16px;
+  border: 1px solid var(--line-strong);
+  border-radius: 50%;
+  background: var(--surface-2);
+  flex: 0 0 auto;
+}
+.pl-order-pos {
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: var(--surface-1);
+  font-size: var(--fs-11);
+  opacity: 0.72;
+}
+.pl-order-items {
+  padding: 2px 14px;
+}
+.pl-order-item {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 0;
+  border-bottom: 1px dashed var(--line);
+}
+.pl-order-item:last-child {
+  border-bottom: 0;
+}
+.pl-item-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--fs-13);
+  font-weight: 600;
+}
+.pl-item-stock {
+  flex: 0 0 auto;
+  padding: 2px 7px;
+  border-radius: 6px;
+  background: var(--wb-warn-a10);
+  color: var(--ink);
+  font-size: var(--fs-11);
+  font-variant-numeric: tabular-nums;
+}
+.pl-item-qty {
+  flex: 0 0 auto;
+  padding: 2px 8px;
+  border-radius: 7px;
+  background: var(--wb-tint-08);
+  font-size: var(--fs-12);
+  font-variant-numeric: tabular-nums;
+}
+.pl-item-qty small {
+  font-size: var(--fs-11);
+  opacity: 0.7;
+}
+.pl-order-more {
+  margin: 0;
+  padding: 7px 0;
+  color: var(--ink);
+  font-size: var(--fs-11);
+  opacity: 0.58;
+}
+.pl-order-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  padding: 8px 14px;
+  border-top: 1px solid var(--line);
+  background: var(--surface-2);
+  font-size: var(--fs-11);
+  opacity: 0.72;
+}
+.pl-order-at {
+  margin-left: auto;
 }
 .pl-order-top {
   display: flex;
@@ -578,25 +745,12 @@ onMounted(async () => {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   margin: -4px 0 12px;
 }
-.pl-chip {
-  min-height: 44px;
-  padding: 5px 12px;
-  border: 1px solid var(--line-strong);
-  border-radius: 999px;
-  background: var(--surface-1);
-  color: var(--ink);
-  font: inherit;
-  font-size: var(--fs-12);
-  cursor: pointer;
-}
-.pl-chip.is-on {
-  border-color: var(--action);
-  background: var(--action);
-  color: var(--action-ink);
-  font-weight: 600;
+.pl-summary-select {
+  min-width: 180px;
+  max-width: 100%;
 }
 .pl-stats {
   display: grid;
@@ -639,6 +793,62 @@ onMounted(async () => {
   border-radius: 999px;
   background: var(--wb-tint-14);
   font-size: var(--fs-12);
+}
+.pl-paper {
+  overflow: hidden;
+  border: 1px solid var(--line-strong);
+  border-radius: 14px;
+  background: var(--surface-1);
+  box-shadow: var(--paper-shadow-sm);
+}
+.pl-paper-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--line);
+  background: var(--wb-tint-08);
+  font-size: var(--fs-13);
+}
+.pl-paper-head strong {
+  font-size: var(--fs-12);
+  font-weight: 500;
+  opacity: 0.62;
+}
+.pl-paper .pl-supplier {
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+.pl-paper .pl-supplier + .pl-supplier {
+  border-top: 1px solid var(--line);
+}
+.pl-paper .pl-supplier-head {
+  padding: 11px 14px 7px;
+  border-bottom: 0;
+  background: transparent;
+}
+.pl-paper .pl-category {
+  padding-top: 2px;
+}
+.pl-paper-foot {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 12px 14px;
+  border-top: 1px solid var(--line-strong);
+  background: var(--surface-2);
+}
+.pl-paper-foot span {
+  font-size: var(--fs-12);
+  opacity: 0.65;
+}
+.pl-paper-foot strong {
+  font-size: var(--fs-16);
+  font-variant-numeric: tabular-nums;
 }
 .pl-supplier {
   margin-bottom: 12px;
@@ -746,6 +956,25 @@ onMounted(async () => {
   opacity: 0.68;
 }
 @media (max-width: 560px) {
+  .pl-summary-tools {
+    flex-wrap: nowrap;
+    gap: 5px;
+    padding: 8px;
+  }
+  .pl-summary-tools .pl-field {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+  .pl-summary-tools .luyun-date-picker {
+    width: 100%;
+    min-width: 0;
+  }
+  .pl-summary-tools .pl-btn {
+    flex: 0 0 auto;
+    padding: 8px;
+    font-size: var(--fs-12);
+    white-space: nowrap;
+  }
   .pl-stats {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }

@@ -71,3 +71,23 @@ export function parseOrderId(raw) {
   const number = Number(String(value || '').trim())
   return Number.isInteger(number) && number > 0 ? number : 0
 }
+
+/**
+ * 与 services/purchase/forecast.py 的 suggested_quantity 同口径：
+ * 参考值 × 安全系数 − 当前盘点，按 order_step 向上取整；raw < 1 保留 1 位。
+ * 页面在用户改了盘点库存后用这个函数实时重算参考值（下单量）。
+ */
+export function suggestedQuantity(reference, options = {}) {
+  const ref = Number(reference)
+  if (!Number.isFinite(ref) || ref <= 0) return null
+  const factor = Number(options.safetyFactor)
+  const safety = Number.isFinite(factor) && factor > 0 ? factor : 1.2
+  const stepValue = Number(options.orderStep)
+  const step = Number.isFinite(stepValue) && stepValue > 0 ? stepValue : 1
+  const stockValue = Number(options.currentStock)
+  const stock = Number.isFinite(stockValue) && stockValue > 0 ? stockValue : 0
+  const raw = Math.max(0, ref * safety - stock)
+  if (raw <= 0) return 0
+  if (raw < 1) return Math.round((raw + 1e-9) * 10) / 10
+  return Math.round((Math.ceil(raw / step) * step + 1e-9) * 100) / 100
+}

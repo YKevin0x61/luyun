@@ -242,7 +242,7 @@ describe('按身份过滤导航', () => {
     // 损耗分析只给管理端。
     expect(pageMeta(PREP_PLAN_PATH).audience).toBe('both')
     expect(pageMeta(STAFF_MEAL_PATH).audience).toBe('both')
-    expect(pageMeta(PURCHASE_HOME_PATH).audience).toBe('admin')
+    expect(pageMeta(PURCHASE_HOME_PATH).audience).toBe('both')
     expect(pageMeta(PURCHASE_HOME_PATH).staffCap).toBe('purchase')
     expect(pageMeta(WASTAGE_ANALYSIS_PATH).audience).toBe('admin')
 
@@ -332,6 +332,9 @@ describe('按身份过滤导航', () => {
       STAFF_MEAL_PATH,
     ])
     expect(kitchenPages('staff', ['wastage'])).toContain(WASTAGE_ANALYSIS_PATH)
+    // 厨房采购是 both + staffCap：员工没勾不出现，勾了才出现；管理端不受影响。
+    expect(kitchenPages('staff', [])).not.toContain(PURCHASE_HOME_PATH)
+    expect(kitchenPages('staff', ['purchase'])).toContain(PURCHASE_HOME_PATH)
   })
 })
 

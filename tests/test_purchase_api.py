@@ -3,8 +3,8 @@
 """厨房采购的 HTTP 面：谁能下单、盘点写哪、单据怎么走、汇总与分析看什么。
 
 主缝在 services/purchase/，这里只钉用户真会撞上的几件事：
-岗位必选、只写所选岗位的盘点（未填按 0）、员工只看自己的单、
-取消只能本人或店长、汇总/导出/分析口径与权限。
+岗位必选、只写所选岗位的盘点（未填按 0）、员工能看全店但只能取消自己的单、
+汇总/导出/分析口径与权限。
 """
 
 import asyncio
@@ -24,7 +24,7 @@ import api.purchase as purchase_module
 import main as main_module
 from config import settings
 from database import CHINA_TZ, DatabaseManager
-from services.app_runtime import AppRuntime, set_runtime
+from services.app_runtime import AppRuntime, get_runtime, set_runtime
 from services.hygiene.accounts import EmployeeAccounts
 from services.purchase.migration import migration_manager
 from services.purchase.store import PurchaseStore
@@ -68,6 +68,7 @@ def purchase_http(tmp_path, monkeypatch):
     app.include_router(auth_module.router)
     app.include_router(purchase_module.reader_router)
     app.include_router(purchase_module.manager_router)
+    app.include_router(purchase_module.public_router)
     with TestClient(app) as client:
         init = client.post("/api/auth/init", json=ADMIN)
         assert init.status_code == 200, init.text
@@ -173,6 +174,10 @@ def test_catalog_permissions_and_code_generation(purchase_http):
     _employee(accounts, caps=[])
     _staff_cookie(client, accounts)
     assert client.get("/api/purchase/products").status_code == 403
+    # 下单 / 采购单 / 今日汇总三页是「both + staffCap: purchase」：没勾能力的员工
+    # 连数据都拿不到（页面守卫挡一次，接口再挡一次）。
+    assert client.get("/api/purchase/orders").status_code == 403
+    assert client.get("/api/purchase/summary").status_code == 403
     denied = client.post("/api/purchase/admin/suppliers", json={"name": "越权"})
     assert denied.status_code == 403
     assert denied.json()["detail"]
@@ -186,6 +191,8 @@ def test_catalog_permissions_and_code_generation(purchase_http):
     products = client.get("/api/purchase/products")
     assert products.status_code == 200, products.text
     assert products.json()["products"][0]["id"] == product["id"]
+    assert client.get("/api/purchase/orders").status_code == 200
+    assert client.get("/api/purchase/summary").status_code == 200
     assert client.post("/api/purchase/admin/suppliers", json={"name": "越权2"}).status_code == 403
     assert client.get("/api/purchase/analysis/overview").status_code == 403
 
@@ -202,6 +209,48 @@ def test_catalog_permissions_and_code_generation(purchase_http):
             "name": "无岗位",
         },
     ).status_code == 400
+
+
+def test_public_summary_needs_no_session(purchase_http):
+    """今日汇总的公开面：一个 cookie 都不带也能读；工作台那条仍要登录。"""
+    client, accounts = purchase_http
+    _admin_cookie(client)
+    _supplier, _category, first, _second, product, _other = _setup_catalog(client)
+
+    _employee(accounts, caps=["purchase"])
+    _staff_cookie(client, accounts)
+    _post(
+        client,
+        "/api/purchase/orders",
+        {
+            "position_id": first["id"],
+            "items": [{"product_id": product["id"], "quantity": 3}],
+            "stock": {str(product["id"]): 2},
+        },
+    )
+
+    client.cookies.clear()
+    assert client.get("/api/purchase/summary", params={"day": TODAY}).status_code == 401
+
+    public = client.get("/api/purchase/public/summary", params={"day": TODAY})
+    assert public.status_code == 200, public.text
+    body = public.json()
+    assert body["date"] == TODAY
+    assert body["order_count"] == 1
+    assert body["item_count"] == 1
+    assert body["total_quantity"] == 3
+    row = body["suppliers"][0]["categories"][0]["products"][0]
+    assert row["name"] == "土豆"
+    assert row["submitters"] == [NAME]
+    assert body["positions"] == [{"position_name": first["name"], "quantity": 3}]
+
+    # 岗位筛选照旧生效；不传 day 时按服务端今天（这里是 FIXED_NOW 那天）。
+    filtered = client.get(
+        "/api/purchase/public/summary",
+        params={"day": TODAY, "position_ids": "999"},
+    ).json()
+    assert filtered["order_count"] == 0
+    assert client.get("/api/purchase/public/summary").json()["date"] == TODAY
 
 
 # ── 下单、盘点范围与汇总 ───────────────────────────────────────────────────
@@ -257,6 +306,12 @@ def test_submit_only_counts_the_selected_position(purchase_http):
         "/api/purchase/orders", params={"day_from": TODAY, "day_to": TODAY}
     ).json()
     assert listing["total"] == 1 and listing["orders"][0]["id"] == order_id
+    # 列表卡片要像小程序那样直接列出单里有什么，不用再点进详情。
+    listed_items = listing["orders"][0]["items"]
+    assert [item["name"] for item in listed_items] == ["土豆"]
+    assert float(listed_items[0]["quantity"]) == 3
+    assert listed_items[0]["unit"] == "斤"
+    assert float(listed_items[0]["stock_qty"]) == 2
     # 时间统一按北京时区下发：库里是 TIMESTAMPTZ，asyncpg 会给 UTC，
     # 前端只截 ISO 前 16 位显示，不转时区就会把 07:30 的单显示成前一天。
     assert listing["orders"][0]["submitted_at"].startswith("2026-11-21T10:00:00+08:00")
@@ -286,13 +341,15 @@ def test_complete_cancel_and_employee_visibility(purchase_http):
     )
     order_id = created["order"]["id"]
 
-    # 另一个人看不到，也取消不了。
+    # 另一个人能看同一张单（2026-11-22 起全店可见），但取消不了。
     _staff_cookie(client, accounts, PHONE2)
-    assert client.get("/api/purchase/orders/" + str(order_id)).status_code == 403
+    other_view = client.get("/api/purchase/orders/" + str(order_id))
+    assert other_view.status_code == 200, other_view.text
+    assert other_view.json()["order"]["can_cancel"] is False
     assert client.post("/api/purchase/orders/" + str(order_id) + "/cancel").status_code == 403
     assert client.get(
         "/api/purchase/orders", params={"day_from": TODAY, "day_to": TODAY}
-    ).json()["total"] == 0
+    ).json()["total"] == 1
 
     # 提交者本人可以取消待处理单。
     _staff_cookie(client, accounts)
@@ -341,8 +398,19 @@ def test_analysis_counts_and_zero_stock(purchase_http):
     assert overview["trend"][-1]["date"] == TODAY
     assert overview["trend"][-1]["quantity"] == 4
 
+    # 把这张单挪到 4 天前：连续没下单里要带最后下单人。
+    _run(get_runtime().db._connection.execute(
+        "UPDATE purchase_orders SET submitted_at = submitted_at - INTERVAL '4 days'"
+    ))
+    _run(get_runtime().db._connection.commit())
+
     anomalies = client.get("/api/purchase/analysis/anomalies", params={"day": TODAY}).json()
     assert any(row["product_id"] == product["id"] for row in anomalies["zero_stock"])
+    stale = next(row for row in anomalies["no_order"] if row["product_id"] == product["id"])
+    assert stale["days"] == 4
+    assert stale["last_quantity"] == 4
+    assert stale["last_submitters"] == [NAME]
+    assert stale["last_ordered"] == "2026-11-17"
     assert anomalies["parameters"]["no_order_days"] == 3
 
     # 日期标签：管理端维护，meta 与目录页读得到。

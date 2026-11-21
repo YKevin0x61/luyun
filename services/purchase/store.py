@@ -795,6 +795,33 @@ class PurchaseStore:
         return [_item_row(row) for row in rows]
 
     @_needs_migration
+    async def order_items_for(self, order_ids: Iterable[int]) -> dict[int, list[dict]]:
+        """批量取多张单的商品行，给列表页做「单里有什么」预览。"""
+        ids = [int(value) for value in order_ids]
+        if not ids:
+            return {}
+        placeholders = ', '.join('?' for _ in ids)
+        rows = await self._rows(
+            'SELECT order_id, product_code, name, quantity, unit, stock_qty, sort_order'
+            ' FROM purchase_order_items'
+            f' WHERE order_id IN ({placeholders})'
+            ' ORDER BY order_id, sort_order, id',
+            tuple(ids),
+        )
+        grouped: dict[int, list[dict]] = {}
+        for row in rows:
+            grouped.setdefault(int(row['order_id']), []).append(
+                {
+                    'product_code': row.get('product_code'),
+                    'name': row.get('name'),
+                    'quantity': _num(row.get('quantity')) or 0.0,
+                    'unit': row.get('unit') or '',
+                    'stock_qty': _num(row.get('stock_qty')),
+                }
+            )
+        return grouped
+
+    @_needs_migration
     async def delete_order_items(self, order_id: int) -> None:
         await self._conn.execute(
             'DELETE FROM purchase_order_items WHERE order_id = ?', (int(order_id),)
@@ -949,7 +976,8 @@ class PurchaseStore:
         rows = await self._rows(
             'SELECT i.product_id,'
             " (o.submitted_at AT TIME ZONE 'Asia/Shanghai')::date AS purchase_date,"
-            ' SUM(i.quantity) AS quantity'
+            ' SUM(i.quantity) AS quantity,'
+            " STRING_AGG(DISTINCT o.submitter_name, '、') AS submitter_names"
             ' FROM purchase_order_items i'
             ' JOIN purchase_orders o ON o.id = i.order_id'
             ' WHERE i.product_id = ANY(?) AND o.submitted_at >= ? AND o.submitted_at < ?'

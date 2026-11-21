@@ -96,11 +96,13 @@ describe('页面清单（唯一来源）', () => {
     expect(aliases.filter((alias) => paths.includes(alias))).toEqual([])
   })
 
-  it('staffCap 只标在这些页上，audience 仍是 admin（它是第四维，不是第二份 audience）', () => {
+  it('staffCap 只标在这些页上：采购三页是 both 能力页，其余仍是 admin 第四维', () => {
     // 2026-10-14 用户裁定：排班三页（人事组）与损耗分析（后勤组）对「勾了对应能力的员工」
     // 也开。audience 仍是 admin —— 管理端会话照旧直接放行，员工身份再要那一项能力。
     // 2026-10-31 用户裁定：考勤表页并进同一项（`schedule`，显示名改成「人事管理」）。
     // 2026-11-03 用户裁定：加班补钟审批拆成独立页，同样归 `schedule`。
+    // 2026-11-22 用户裁定：厨房采购的下单/采购单/详情不是管理页，audience 改成 both；
+    // 员工这一档仍要 purchase，管理端不要求。
     const withCap = PAGE_ROUTES.filter((row) => row.staffCap)
     expect(withCap.map((row) => [row.path, row.staffCap])).toEqual([
       ['/workbench/hr/calendar', 'schedule'],
@@ -117,8 +119,20 @@ describe('页面清单（唯一来源）', () => {
       ['/workbench/kitchen/purchase/orders', 'purchase'],
       ['/workbench/kitchen/purchase/order', 'purchase'],
     ])
-    for (const row of withCap) expect(row.audience, row.path).toBe('admin')
+    const purchaseCapPaths = [
+      '/workbench/kitchen/purchase',
+      '/workbench/kitchen/purchase/orders',
+      '/workbench/kitchen/purchase/order',
+    ]
+    expect(withCap.filter((row) => row.audience === 'both').map((row) => row.path))
+      .toEqual(purchaseCapPaths)
+    for (const row of withCap) {
+      if (purchaseCapPaths.includes(row.path)) continue
+      expect(row.audience, row.path).toBe('admin')
+    }
     // meta 透出同一个值；没有这一项的页给 null（守卫与导航都按「不额外要求」处理）。
+    expect(pageMeta('/workbench/kitchen/purchase').audience).toBe('both')
+    expect(pageMeta('/workbench/kitchen/purchase').staffCap).toBe('purchase')
     expect(pageMeta('/workbench/hr/calendar').staffCap).toBe('schedule')
     expect(pageMeta('/workbench/kitchen/loss').staffCap).toBe('wastage')
     expect(pageMeta('/workbench/hr/roster').staffCap).toBeNull()

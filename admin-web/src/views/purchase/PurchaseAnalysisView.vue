@@ -863,27 +863,30 @@ onBeforeUnmount(() => {
         <div class="pa-skeleton-card"></div>
       </div>
       <template v-else-if="overview">
-        <section class="pa-stats" aria-label="当日概览">
-          <div class="pa-stat">
-            <span class="pa-stat-label">采购单</span>
-            <strong class="pa-stat-value">{{ overview.order_count }}<span class="pa-stat-unit">张</span></strong>
-            <span class="pa-delta" :class="deltaClass">{{ deltaText }} 单 · {{ yesterdayLabel }}</span>
-            <span class="pa-stat-note">{{ deltaNote }}</span>
+        <section class="pa-hero" aria-label="当日概览">
+          <div class="pa-hero-top">
+            <div>
+              <span class="pa-hero-eyebrow">今日订单</span>
+              <strong class="pa-hero-value">{{ overview.order_count }}<small>单</small></strong>
+            </div>
+            <div class="pa-hero-delta">
+              <span class="pa-delta" :class="deltaClass">{{ deltaText }} 单</span>
+              <span>{{ yesterdayLabel }}</span>
+            </div>
           </div>
-          <div class="pa-stat">
-            <span class="pa-stat-label">采购量</span>
-            <strong class="pa-stat-value">{{ formatQty(overview.item_count) }}</strong>
-            <span class="pa-stat-note">当日数量合计</span>
-          </div>
-          <div class="pa-stat">
-            <span class="pa-stat-label">商品数</span>
-            <strong class="pa-stat-value">{{ overview.sku_count }}<span class="pa-stat-unit">个 SKU</span></strong>
-            <span class="pa-stat-note">当天出现过的商品</span>
-          </div>
-          <div class="pa-stat">
-            <span class="pa-stat-label">下单人</span>
-            <strong class="pa-stat-value">{{ overview.submitter_count }}<span class="pa-stat-unit">人</span></strong>
-            <span class="pa-stat-note">按员工 ID 去重</span>
+          <div class="pa-hero-strip">
+            <div>
+              <strong>{{ formatQty(overview.item_count) }}</strong>
+              <span>商品件数</span>
+            </div>
+            <div>
+              <strong>{{ overview.sku_count }}</strong>
+              <span>涉及商品</span>
+            </div>
+            <div>
+              <strong>{{ overview.submitter_count }}</strong>
+              <span>下单人</span>
+            </div>
           </div>
         </section>
 
@@ -1089,6 +1092,7 @@ onBeforeUnmount(() => {
             <p v-else-if="activeGroup === 'no_order'" class="pa-anom-detail">
               最后采购 {{ row.last_ordered ? formatMonthDay(row.last_ordered) : '从未' }} · 已 {{ row.days }} 天没下单
               <span v-if="row.last_quantity !== null && row.last_quantity !== undefined"> · 上次 {{ formatQty(row.last_quantity) }} {{ row.unit || '' }}</span>
+              <span v-if="row.last_submitters && row.last_submitters.length" class="pa-anom-submitter"> · 最后下单人 {{ row.last_submitters.join('、') }}</span>
             </p>
 
             <template v-else>
@@ -1584,6 +1588,74 @@ onBeforeUnmount(() => {
   font-size: var(--fs-11);
   font-variant-numeric: tabular-nums;
 }
+.pa-hero {
+  margin-bottom: 10px;
+  padding: 16px;
+  border: 1px solid var(--line-strong);
+  border-radius: 18px;
+  background: linear-gradient(135deg, var(--surface-1), var(--wb-tint-14));
+  box-shadow: var(--paper-shadow-sm);
+}
+.pa-hero-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.pa-hero-eyebrow {
+  display: block;
+  color: var(--ink-dim);
+  font-size: var(--fs-12);
+}
+.pa-hero-value {
+  display: block;
+  margin-top: 2px;
+  color: var(--action);
+  font-size: var(--fs-24);
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+}
+.pa-hero-value small {
+  margin-left: 3px;
+  color: var(--ink-dim);
+  font-size: var(--fs-12);
+  font-weight: 400;
+}
+.pa-hero-delta {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  color: var(--ink-faint);
+  font-size: var(--fs-11);
+  text-align: right;
+}
+.pa-hero-strip {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1px;
+  margin-top: 12px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--line);
+}
+.pa-hero-strip > div {
+  padding: 8px 6px;
+  background: var(--surface-1);
+  text-align: center;
+}
+.pa-hero-strip strong {
+  display: block;
+  font-size: var(--fs-16);
+  font-variant-numeric: tabular-nums;
+}
+.pa-hero-strip span {
+  display: block;
+  margin-top: 1px;
+  color: var(--ink-dim);
+  font-size: var(--fs-11);
+}
 .pa-stats {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -1913,6 +1985,10 @@ onBeforeUnmount(() => {
   color: var(--ink-dim);
   font-size: var(--fs-12);
   line-height: 1.5;
+}
+.pa-anom-submitter {
+  display: inline-block;
+  white-space: nowrap;
 }
 .pa-anom-actions {
   display: flex;

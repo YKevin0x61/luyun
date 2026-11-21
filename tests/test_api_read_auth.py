@@ -92,6 +92,8 @@ PUBLIC_PATHS = (
     "/api/system/health",
     "/api/scraper/status",
     "/api/auth/status",
+    # 厨房采购今日汇总：小程序 / 前台看板免登录读，必须过得了鉴权门
+    "/api/purchase/public/summary",
 )
 
 # 鉴权门的 401 body。用它把「鉴权拒绝」和业务自己的 401（如员工登录密码错误）区分开。

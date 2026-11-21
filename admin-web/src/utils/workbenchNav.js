@@ -8,9 +8,10 @@
  *  （员工勾了「人事管理」能力时，`hr` 那一格才出现 —— 员工表里留着它、由能力键过滤）。
  *
  *  **可见性不另写一份名单**：每一格的 `to`（以及 `links` 里的每一条）指向清单里的一页，
- *  那一页的 `audience`（以及员工那一档的 `staffCap`）就是这一项的可见性（`both` 谁都看得见、
- *  `admin` / `staff` 各给一边、`admin + staffCap` 给「勾了那项能力的员工」）。判据只有
- *  `pageVisibleFor` 一处。`to` 指不到一页时 `pageMeta` 仍当场抛错 —— 导航指一条不存在或
+ *  那一页的 `audience`（以及员工那一档的 `staffCap`）就是这一项的可见性（`both` 两档的
+ *  基础可见性都开、`admin` / `staff` 各给一边、`admin + staffCap` 给「勾了那项能力的员工」；
+ *  `both + staffCap` 是两档基础可见、员工再加能力，2026-11-22 起厨房采购三页这么挂）。
+ *  判据只有 `pageVisibleFor` 一处。`to` 指不到一页时 `pageMeta` 仍当场抛错 —— 导航指一条不存在或
  *  没登记的路径，员工点下去就是白屏。
  *
  *  **一格可以有多扇门**（后勤）：`links` 是这一格要渲染的全部条目；`to` 仍是这一格的主落点
@@ -154,22 +155,24 @@ export function workbenchLinksOf(group) {
  *
  *  三态 `audience` 之外还有 `staffCap`（2026-10-14）：店长专属页（`audience: admin`）可以
  *  对「勾了某项能力的员工」也开一扇门 —— 排班三页（`schedule`）与损耗分析（`wastage`）。
+ *  2026-11-22 起 `staffCap` 也可以挂在 `both` 上：厨房采购三页的基础可见性是两档都开，
+ *  员工这一档再要求 `purchase`（管理端不要求）—— `both` 本身不再等于「谁都看得见」。
  *
  *  判定顺序（fail-closed）：
- *  1. `both` 谁都看得见；
- *  2. `audience` 与这一档相同 —— 管理端看 admin 页，员工看 staff 页；
- *  3. 员工这一档再看 `staffCap`：勾了这一项就开，没勾就不开（管理端的 `admin` 页
- *     对管理端永远开着，不看 `staffCap`）；
- *  4. 其余不可见。
+ *  1. `staff` 页只对员工开（管理端导航里也不显示，直连由守卫放行）；
+ *  2. 管理端看 `admin` / `both` 页都开，不看 `staffCap`；
+ *  3. `both` 对员工开；带 `staffCap` 时员工还要勾了那一项；
+ *  4. `admin` 页对员工只在勾了 `staffCap` 时开；其余不可见。
  *
  *  清单里没登记的路径（单测里的临时路由）按可见处理 —— 与这条落地之前一字不差。
  */
 export function pageVisibleFor(row, audience, caps) {
   if (!row) return true
   const allowed = row.audience
-  if (allowed === 'both') return true
-  if (allowed === audience) return true
-  if (audience === 'staff' && row.staffCap) return hasCap(caps, row.staffCap)
+  if (allowed === 'staff') return audience === 'staff'
+  if (audience === 'admin') return true
+  if (allowed === 'both') return !row.staffCap || hasCap(caps, row.staffCap)
+  if (allowed === 'admin') return Boolean(row.staffCap) && hasCap(caps, row.staffCap)
   return false
 }
 

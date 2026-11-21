@@ -62,6 +62,7 @@ from api.staff_meal import router as staff_meal_router
 # 不挂 verify_admin_token —— 员工手机端没有 API token，员工要拿到 403「没开权限」
 # 而不是 401「没登录」；管理端专属动作由服务层 _require_admin 拒绝。
 from api.purchase import manager_router as purchase_manager_router
+from api.purchase import public_router as purchase_public_router
 from api.purchase import reader_router as purchase_reader_router
 from api.tables import router as tables_router
 from api.analytics import router as analytics_router
@@ -1204,6 +1205,11 @@ PUBLIC_API_SURFACE: tuple[tuple[str, str], ...] = (
     # 「任一身份」门（require_any_identity_session），三条读接口挂的是守卫，不是登记。
     # 认证例外清单里多一条就等于把「零鉴权、谁都能拉（连停用配方都能拉）」开回来。
     # 同模块的管理面（岗位增删改、全量行、导出、历史）照旧走 verify_admin_token。
+    # 厨房采购「今日汇总」对外公开面：小程序 / 前台看板免登录读今日采买清单。
+    # 单独一条路由（/api/purchase/public/summary），不是把工作台的 /summary 开门：
+    # 公开面只回汇总口径（按供应商/分类/商品聚合 + 下单人姓名），不含订单明细、
+    # 盘点流水、草稿、成本与账号信息。漏登记的后果见清单开头那三个问题。
+    ("GET", "/api/purchase/public/summary"),
     # API 信息页：只有版本号与 docs 链接
     ("GET", "/api"),
 )
@@ -1225,6 +1231,8 @@ app.include_router(staff_meal_manager_router)
 # 提交者本人）。两条都在「任一身份」门内，员工才拿得到业务层 403。
 app.include_router(purchase_reader_router)
 app.include_router(purchase_manager_router)
+# 公开面：只有今日汇总，**故意不挂任何身份依赖**（小程序/看板免登录读）。
+app.include_router(purchase_public_router)
 # —— 业务面：统一挂管理员凭据（会话 cookie / X-Admin-Token / Bearer）——
 app.include_router(orders.router, dependencies=[Depends(verify_admin_token)])
 app.include_router(dishes.router, dependencies=[Depends(verify_admin_token)])

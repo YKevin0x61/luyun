@@ -12,9 +12,13 @@
  * 目录没有物理删除接口，统一用 active 启停；被商品占用的岗位更不能删。
  */
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import { api } from '../../api/client.js'
 import { formatMonthDay, formatQty, pad2, todayText, weekdayText } from './purchaseUi.js'
+import { PURCHASE_MIGRATION_PATH } from '../../utils/purchasePaths.js'
 import PurchaseNav from './PurchaseNav.vue'
+
+const router = useRouter()
 
 const TABS = [
   { key: 'products', label: '商品' },
@@ -1090,17 +1094,25 @@ onUnmounted(() => {
   <div class="catalog">
     <PurchaseNav active="catalog" />
 
-    <header class="cat-head">
-      <div>
-        <h1 class="cat-title">商品与供应商</h1>
-        <p class="cat-sub">
-          先建供应商和分类，再建商品；编码是供应商 2 位 + 分类 2 位 + 序号 3 位。
-          商品挂上岗位后才会出现在下单页。目录不物理删除，统一用停用保留历史。
-        </p>
+    <header class="cat-hero">
+      <div class="cat-hero-top">
+        <div>
+          <h1 class="cat-title">商品与供应商</h1>
+          <p class="cat-sub">
+            先建供应商和分类，再建商品；编码是供应商 2 位 + 分类 2 位 + 序号 3 位。
+            商品挂上岗位后才会出现在下单页；目录不物理删除，统一停用保留历史。
+          </p>
+        </div>
+        <button type="button" class="btn cat-refresh" :disabled="loading" @click="loadAll">
+          {{ loading ? '刷新中…' : '刷新' }}
+        </button>
       </div>
-      <button type="button" class="btn" :disabled="loading" @click="loadAll">
-        {{ loading ? '刷新中…' : '刷新' }}
-      </button>
+      <div class="cat-hero-actions">
+        <button type="button" class="btn" @click="activeTab = 'positions'">岗位管理</button>
+        <button type="button" class="btn" @click="openImportDialog">批量导入</button>
+        <button type="button" class="btn" @click="downloadCatalog">批量导出</button>
+        <button type="button" class="btn" @click="router.push(PURCHASE_MIGRATION_PATH)">备份/迁移</button>
+      </div>
     </header>
 
     <p v-if="errorText" class="banner" role="alert">{{ errorText }}</p>
@@ -1183,45 +1195,34 @@ onUnmounted(() => {
               </div>
             </div>
 
-            <p v-if="product.specification" class="product-spec">规格：{{ product.specification }}</p>
-            <p v-if="product.remark" class="product-remark">{{ product.remark }}</p>
-
-            <dl class="product-meta">
+            <div class="product-fields">
               <div>
-                <dt>单位</dt>
-                <dd>{{ product.unit || '—' }}</dd>
+                <span>供应商</span>
+                <strong>{{ product.supplier_name || '—' }}<template v-if="product.supplier_code">（{{ product.supplier_code }}）</template></strong>
               </div>
               <div>
-                <dt>供应商</dt>
-                <dd>{{ product.supplier_name || '—' }}<span v-if="product.supplier_code">（{{ product.supplier_code }}）</span></dd>
+                <span>分类</span>
+                <strong>{{ product.category_name || '—' }}<template v-if="product.category_code">（{{ product.category_code }}）</template></strong>
               </div>
               <div>
-                <dt>分类</dt>
-                <dd>{{ product.category_name || '—' }}<span v-if="product.category_code">（{{ product.category_code }}）</span></dd>
+                <span>岗位</span>
+                <strong v-if="(product.positions || []).length">
+                  {{ product.positions.map((item) => item.name).join('、') }}
+                </strong>
+                <strong v-else class="product-field-warn">未挂岗位，不会出现在下单页</strong>
               </div>
               <div>
-                <dt>下单步长</dt>
-                <dd>{{ formatQty(product.order_step) }}</dd>
+                <span>单位</span>
+                <strong>{{ product.unit || '—' }}<template v-if="product.specification"> · {{ product.specification }}</template></strong>
               </div>
               <div>
-                <dt>安全系数</dt>
-                <dd>{{ formatQty(product.safety_factor) }}</dd>
+                <span>步长 / 系数</span>
+                <strong>{{ formatQty(product.order_step) }} / {{ formatQty(product.safety_factor) }}</strong>
               </div>
-            </dl>
-
-            <div class="product-positions">
-              <span class="label-mini">岗位</span>
-              <div v-if="(product.positions || []).length" class="chips">
-                <span
-                  v-for="position in product.positions"
-                  :key="position.id"
-                  class="chip"
-                  :class="{ 'is-off': !position.active }"
-                >
-                  {{ position.name }}
-                </span>
+              <div v-if="product.remark" class="product-field-remark">
+                <span>备注</span>
+                <strong>{{ product.remark }}</strong>
               </div>
-              <span v-else class="chip is-warn">未挂岗位，不会出现在下单页</span>
             </div>
 
             <div class="product-actions">
@@ -1948,6 +1949,32 @@ onUnmounted(() => {
   color: var(--ink);
 }
 
+.cat-hero {
+  margin-bottom: 10px;
+  padding: 14px;
+  border: 1px solid var(--line-strong);
+  border-radius: 16px;
+  background: linear-gradient(135deg, var(--surface-1), var(--wb-tint-08));
+  box-shadow: var(--paper-shadow-sm);
+}
+
+.cat-hero-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.cat-refresh {
+  flex: 0 0 auto;
+}
+
+.cat-hero-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-top: 10px;
+}
 .cat-head {
   display: flex;
   align-items: flex-start;
@@ -2212,6 +2239,7 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  overflow: hidden;
   padding: 16px;
   border: 1px solid var(--line);
   border-radius: var(--r-2);
@@ -2311,6 +2339,43 @@ onUnmounted(() => {
   color: var(--ink-dim);
 }
 
+.product-fields {
+  display: flex;
+  flex-direction: column;
+  border-top: 1px dashed var(--line);
+}
+
+.product-fields > div {
+  display: grid;
+  grid-template-columns: 68px minmax(0, 1fr);
+  gap: 8px;
+  padding: 6px 0;
+  border-bottom: 1px dashed var(--line);
+  font-size: var(--fs-12);
+  line-height: 1.5;
+}
+
+.product-fields > div:last-child {
+  border-bottom: 0;
+}
+
+.product-fields span {
+  color: var(--ink-faint);
+}
+
+.product-fields strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-weight: 500;
+}
+
+.product-field-warn {
+  color: var(--warn);
+}
+
+.product-field-remark strong {
+  color: var(--warn);
+}
 .product-meta {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -2381,10 +2446,24 @@ onUnmounted(() => {
 }
 
 .product-actions {
-  display: flex;
-  gap: 8px;
-  margin-top: auto;
-  padding-top: 4px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin: 6px -16px -16px;
+  border-top: 1px solid var(--line);
+}
+.product-actions .btn {
+  min-height: 44px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+.product-actions .btn + .btn {
+  border-left: 1px solid var(--line);
+}
+.product-actions .btn-danger,
+.product-actions .btn-enable {
+  background: transparent;
 }
 
 .pager {

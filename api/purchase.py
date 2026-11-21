@@ -3,12 +3,14 @@
 """厨房采购的 HTTP 适配层（spec: .scratch/worktool2-import/spec.md）。
 
 业务规则都在 services/purchase/service.py；这里只做身份转换、参数收集与错误翻译。
-两条 router：
+三条 router：
 
 - reader_router：任一身份进门，服务层再判「管理端或花名册勾了厨房采购」。员工手机
   与管理端电脑共用这一面。
 - manager_router：任一身份进门，服务层判管理员 / 提交者本人。**不能挂
   verify_admin_token** —— 员工要拿到 403「只有管理端能……」，不是 401「没登录」。
+- public_router：**免登录**，只放今日汇总（小程序/看板读）。没有身份判断，所以
+  只挂只读聚合，且只返回汇总口径的字段，「没人登录」是它的契约而不是漏配。
 
 页面清单与权限键（purchase）见 admin-web/src/router/pageRoutes.json 与
 services/identity/capabilities.py。
@@ -76,6 +78,9 @@ manager_router = APIRouter(
     tags=["厨房采购"],
     dependencies=[Depends(require_any_identity_session)],
 )
+#: 对外公开面：**故意不挂身份依赖**。只放今日汇总这一条只读聚合，供小程序/看板
+#: 免登录读取；新增任何写接口或明细字段都不该挂到这里（见模块 docstring）。
+public_router = APIRouter(prefix="/api/purchase/public", tags=["厨房采购（公开）"])
 
 _NOT_MIGRATED_DETAIL = (
     "厨房采购表还没建好：请在 Admin「系统更新 → 数据库迁移」应用 "
@@ -372,6 +377,28 @@ async def purchase_summary_export(
         content=_summary_workbook(data),
         media_type=_XLSX_MEDIA_TYPE,
         headers={"Content-Disposition": 'attachment; filename="' + filename + '"'},
+    )
+
+
+# ── 公开：今日汇总（免登录） ──────────────────────────────────
+
+
+@public_router.get("/summary")
+async def purchase_public_summary(
+    day: Optional[str] = Query(None),
+    position_ids: Optional[str] = Query(None),
+    db=Depends(get_db),
+) -> dict:
+    """今日汇总的免登录版本；口径与工作台 `/api/purchase/summary` 一致。
+
+    返回供应商 → 分类 → 商品的聚合（数量、下单人员），不含订单明细、参考值、
+    盘点或任何写入口。小程序只想看「今天买什么」时不必先做员工登录。
+    """
+    return await _run(
+        purchase_service.public_summary,
+        db,
+        day=day,
+        position_ids=_parse_ids(position_ids),
     )
 
 

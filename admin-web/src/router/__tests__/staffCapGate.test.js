@@ -26,9 +26,11 @@ async function freshRouter() {
 }
 
 let staffEmployee = null
+let adminLoggedIn = false
 
 beforeEach(() => {
   staffEmployee = null
+  adminLoggedIn = false
   vi.stubGlobal(
     'fetch',
     vi.fn(async (url) => {
@@ -39,7 +41,7 @@ beforeEach(() => {
           : jsonResponse({ authenticated: false, employee: null })
       }
       if (path.includes('/api/auth/status')) {
-        return jsonResponse({ logged_in: false, initialized: true })
+        return jsonResponse({ logged_in: adminLoggedIn, initialized: true })
       }
       return jsonResponse({}, 404)
     }),
@@ -96,6 +98,34 @@ describe('守卫：员工会话 + staffCap', () => {
     const router = await freshRouter()
     await router.push('/workbench/hr/shifts')
     expect(router.currentRoute.value.path).toBe('/workbench/forbidden')
+  })
+
+  it('勾了「厨房采购」的员工进得去下单 / 采购单 / 详情三页', async () => {
+    staffEmployee = { id: 7, name: '张三', admin_caps: ['purchase'] }
+    for (const path of [
+      '/workbench/kitchen/purchase',
+      '/workbench/kitchen/purchase/orders',
+      '/workbench/kitchen/purchase/order',
+    ]) {
+      const router = await freshRouter()
+      await router.push(path)
+      expect(router.currentRoute.value.path, path).toBe(path)
+    }
+  }, 15000)
+
+  it('没勾「厨房采购」的员工进不去（both 不是无条件可见）', async () => {
+    staffEmployee = { id: 7, name: '张三', admin_caps: [] }
+    const router = await freshRouter()
+    await router.push('/workbench/kitchen/purchase/orders')
+    expect(router.currentRoute.value.path).toBe('/workbench/forbidden')
+    expect(router.currentRoute.value.query.next).toBe('/workbench/kitchen/purchase/orders')
+  })
+
+  it('管理端不勾能力也能进采购能力页', async () => {
+    adminLoggedIn = true
+    const router = await freshRouter()
+    await router.push('/workbench/kitchen/purchase')
+    expect(router.currentRoute.value.path).toBe('/workbench/kitchen/purchase')
   })
 
   it('一个会话都没有 → 登录页（不是无权访问页）', async () => {

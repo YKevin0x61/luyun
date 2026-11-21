@@ -6,13 +6,14 @@
  *  - 「全部」只用于浏览和填数；提交前必须选一个采购岗位，一张单只属于一个岗位。
  *  - 提交时会把该岗位下所有「需盘点」商品的库存写成当天盘点，没填按 0，
  *    同一天重提会覆盖 —— 页面必须把这件事说清楚。
- *  - 参考值 / 建议量由服务端算，页面只负责展示与填数。
+ *  - 需要盘点的商品不再单列建议量：参考值就是按库存算出的下单量，
+ *    公式为参考值 × 安全系数 − 库存，按步长向上取整；库存一改就实时重算。
  */
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { api } from '../../api/client.js'
 import { purchaseOrderPath } from '../../utils/purchasePaths.js'
-import { formatQty, todayText } from './purchaseUi.js'
+import { formatMonthDay, formatQty, suggestedQuantity, todayText } from './purchaseUi.js'
 import PurchaseNav from './PurchaseNav.vue'
 
 const router = useRouter()
@@ -42,6 +43,25 @@ const weekday = computed(() => {
   const value = new Date(today + 'T00:00:00')
   if (Number.isNaN(value.getTime())) return ''
   return ['周日', '周一', '周二', '周三', '周四', '周五', '周六'][value.getDay()] || ''
+})
+
+const monthDay = computed(() => formatMonthDay(today))
+
+const nextDayLabel = computed(() => {
+  const value = new Date(today + 'T00:00:00')
+  if (Number.isNaN(value.getTime())) return ''
+  value.setDate(value.getDate() + 1)
+  const iso = [
+    value.getFullYear(),
+    String(value.getMonth() + 1).padStart(2, '0'),
+    String(value.getDate()).padStart(2, '0'),
+  ].join('-')
+  return formatMonthDay(iso) + ' ' + ['周日', '周一', '周二', '周三', '周四', '周五', '周六'][value.getDay()]
+})
+
+const targetTag = computed(() => {
+  const row = rows.value.find((item) => item.target_tag)
+  return row ? row.target_tag : ''
 })
 
 const positions = computed(() =>
@@ -131,6 +151,46 @@ const confirmMissingStock = computed(
     ).length,
 )
 
+function previewSort(a, b) {
+  return String(a.product_code || '').localeCompare(String(b.product_code || ''))
+}
+
+function groupPreviewRows(list) {
+  const buckets = new Map()
+  for (const row of list) {
+    const key = row.supplier_name || '未分供应商'
+    if (!buckets.has(key)) buckets.set(key, [])
+    buckets.get(key).push(row)
+  }
+  return Array.from(buckets.entries()).map(([supplierName, items]) => ({
+    supplierName,
+    items: items.slice().sort(previewSort),
+  }))
+}
+
+// 小程序 previewOrder 的结构：已填数量的按供应商分组，未填的单独列在「未下单」。
+const previewOrderedGroups = computed(() => groupPreviewRows(confirmItems.value))
+const previewNotOrderedGroups = computed(() =>
+  groupPreviewRows(
+    scopedRows.value.filter((row) => {
+      const value = Number(quantities[row.id])
+      return !(Number.isFinite(value) && value > 0)
+    }),
+  ),
+)
+
+function previewQuantity(row) {
+  const value = Number(quantities[row.id])
+  return Number.isFinite(value) && value > 0 ? formatQty(value) : '-'
+}
+
+function previewStock(row) {
+  if (!row.need_stock_check) return ''
+  const raw = stocks[row.id]
+  if (raw === '' || raw === null || raw === undefined) return '库存 按 0'
+  return '库存 ' + formatQty(raw)
+}
+
 const needStockRows = computed(() => rows.value.filter((row) => row.need_stock_check))
 
 const filledRows = computed(() =>
@@ -151,34 +211,53 @@ const filledStockCount = computed(
     ).length,
 )
 
-function rowCode(row) {
-  return row.product_code || ''
-}
-
 function referenceText(row) {
   if (row.reference === null || row.reference === undefined) return '参考 —'
-  if (row.reference === '!') return '参考 !'
-  return '参考 ' + formatQty(row.reference) + ' ' + (row.unit || '')
+  if (row.reference === '!') return '参考！'
+  // 需要盘点的商品不再单列建议量：参考值就是按库存算出的下单量。
+  if (row.need_stock_check) return '参考 ' + suggestedValue(row)
+  return '参考 ' + formatQty(row.reference)
 }
 
 function yesterdayText(row) {
   if (row.yesterday_quantity === null || row.yesterday_quantity === undefined) return '昨日 —'
-  return '昨日 ' + formatQty(row.yesterday_quantity) + ' ' + (row.unit || '')
+  return '昨日 ' + formatQty(row.yesterday_quantity)
 }
 
-function suggestedText(row) {
-  if (row.suggested_quantity === null || row.suggested_quantity === undefined) return ''
-  return '建议 ' + formatQty(row.suggested_quantity) + ' ' + (row.unit || '')
+function suggestedValue(row) {
+  const rawStock = stocks[row.id]
+  if (rawStock === '' || rawStock === null || rawStock === undefined) {
+    return row.suggested_quantity === null || row.suggested_quantity === undefined
+      ? '—'
+      : formatQty(row.suggested_quantity)
+  }
+  const value = suggestedQuantity(row.reference, {
+    safetyFactor: row.safety_factor,
+    currentStock: Number(rawStock),
+    orderStep: row.order_step,
+  })
+  return value === null ? '—' : formatQty(value)
 }
 
-function stockText(row) {
-  if (row.current_stock === null || row.current_stock === undefined) return '今天未盘'
-  return '已盘 ' + formatQty(row.current_stock) + ' ' + (row.unit || '')
+function positionText(row) {
+  if (!row.positions || !row.positions.length) return '未挂岗位'
+  return row.positions.map((item) => item.name).join('、')
+}
+
+function isStockMissing(row) {
+  if (!row.need_stock_check) return false
+  const value = stocks[row.id]
+  return value === '' || value === null || value === undefined
 }
 
 function stepOf(row) {
   const step = Number(row.order_step)
   return Number.isFinite(step) && step > 0 ? step : 1
+}
+
+function stepLabel(row, factor) {
+  const value = stepOf(row) * factor
+  return (factor > 0 ? '+' : '') + formatQty(value)
 }
 
 function roundValue(value, step) {
@@ -195,8 +274,29 @@ function adjustNumber(key, row, direction) {
   store[row.id] = next > 0 ? next : ''
 }
 
+function roundStock(value) {
+  return Math.round(value * 10) / 10
+}
+
 function adjustStock(row, direction) {
-  adjustNumber('stock', row, direction)
+  const raw = stocks[row.id]
+  const current = raw === '' || raw === null || raw === undefined ? 0 : Number(raw)
+  const base = Number.isFinite(current) ? current : 0
+  // 库存的减号减到 0 就停在 0，不能变成空值（空值代表还没盘）。
+  stocks[row.id] = Math.max(0, roundStock(base + direction * stepOf(row)))
+}
+
+function limitStockInput(row) {
+  const raw = String(stocks[row.id] ?? '')
+  if (!raw) return
+  let cleaned = raw.replace(/[^\d.]/g, '')
+  const dot = cleaned.indexOf('.')
+  if (dot >= 0) {
+    cleaned =
+      cleaned.slice(0, dot + 1) +
+      cleaned.slice(dot + 1).replace(/\./g, '').slice(0, 1)
+  }
+  if (cleaned !== raw) stocks[row.id] = cleaned
 }
 
 function adjustQuantity(row, direction) {
@@ -205,37 +305,29 @@ function adjustQuantity(row, direction) {
 
 function normalizeNumber(key, row) {
   const store = key === 'stock' ? stocks : quantities
-  const value = Number(store[row.id])
-  if (!Number.isFinite(value) || value <= 0) {
+  const raw = store[row.id]
+  if (raw === '' || raw === null || raw === undefined) return
+  const value = Number(raw)
+  if (!Number.isFinite(value)) {
+    store[row.id] = ''
+    return
+  }
+  if (key === 'stock') {
+    // 盘点库存只保留小数点后一位；0 是有效值，不能当空值。
+    store[row.id] = Math.max(0, roundStock(value))
+    return
+  }
+  if (value <= 0) {
     store[row.id] = ''
     return
   }
   store[row.id] = roundValue(value, stepOf(row))
 }
 
-function useSuggested(row) {
-  const value = Number(row.suggested_quantity)
-  if (!Number.isFinite(value) || value <= 0) return
-  quantities[row.id] = value
-}
-
-function fillSuggested() {
-  let count = 0
-  for (const row of filteredRows.value) {
-    const value = Number(row.suggested_quantity)
-    if (row.need_stock_check && Number.isFinite(value) && value > 0) {
-      quantities[row.id] = value
-      count += 1
-    }
-  }
-  notice.value = count
-    ? '已按建议填 ' + count + ' 项需盘商品，可以再手改。'
-    : '当前筛选里没有可填的需盘建议量。'
-}
-
-function clearQuantities() {
+function clearInputs() {
   for (const key of Object.keys(quantities)) quantities[key] = ''
-  notice.value = '已清空下单数量（盘点库存保留）。'
+  for (const key of Object.keys(stocks)) stocks[key] = ''
+  notice.value = '已清空下单数量和盘点库存。'
 }
 
 function resetInputs(list, useDraft = true) {
@@ -243,8 +335,8 @@ function resetInputs(list, useDraft = true) {
   for (const key of Object.keys(stocks)) delete stocks[key]
   for (const row of list) {
     quantities[row.id] = ''
-    stocks[row.id] =
-      row.current_stock === null || row.current_stock === undefined ? '' : row.current_stock
+    // 盘点默认空着，必须由下单人自己填；草稿里保存过的再恢复。
+    stocks[row.id] = ''
   }
   if (useDraft) applyDraft()
 }
@@ -429,34 +521,42 @@ onMounted(loadMeta)
   <div class="po-page">
     <PurchaseNav active="order" />
 
-    <header class="po-head">
-      <div>
-        <h1>厨房采购</h1>
-        <p class="po-sub">
-          今天 {{ today }} {{ weekday }} · 「全部」只用于浏览和填数，提交前要选一个岗位
+    <header class="po-hero">
+      <div class="po-hero-main">
+        <span class="po-hero-eyebrow">厨房采购</span>
+        <strong class="po-hero-date">{{ monthDay }} <em>{{ weekday }}</em></strong>
+        <p class="po-hero-sub">
+          次日 {{ nextDayLabel }}<template v-if="targetTag"> · 标签 {{ targetTag }}</template>
+          · 参考 7 天
         </p>
       </div>
-      <span class="po-pill">{{ selectedPosition ? selectedPosition.name : '全部' }}</span>
+      <div class="po-hero-side">
+        <span class="po-hero-pill">{{ selectedPosition ? selectedPosition.name : '全部岗位' }}</span>
+        <span class="po-hero-count">{{ rows.length }} 项商品</span>
+      </div>
     </header>
 
     <p v-if="errorText" class="po-banner" role="alert">{{ errorText }}</p>
     <p v-else-if="notice" class="po-banner po-banner-soft">{{ notice }}</p>
 
-    <section class="po-card">
+    <section class="po-card po-position-card">
       <div class="po-card-head">
-        <h2>采购岗位</h2>
+        <div>
+          <h2>采购岗位</h2>
+          <p class="po-hint">先选岗位看商品；提交时会再确认一次。</p>
+        </div>
         <span class="po-hint">
-          {{ rows.length }} 项商品 · 需盘点 {{ needStockRows.length }} 项
+          {{ rows.length }} 项 · 需盘点 {{ needStockRows.length }} 项
         </span>
       </div>
       <div v-if="loadingMeta" class="po-empty">正在加载岗位…</div>
       <div v-else-if="!positions.length" class="po-empty">
         还没有可下单的采购岗位：请店长在「商品与供应商」里建岗位并给商品挂上。
       </div>
-      <div v-else class="po-chips">
+      <div v-else class="po-position-grid">
         <button
           type="button"
-          class="po-chip"
+          class="po-position-button"
           :class="{ 'is-active': selectedPositionId === 0 }"
           @click="choosePosition(0)"
         >
@@ -466,7 +566,7 @@ onMounted(loadMeta)
           v-for="position in positions"
           :key="position.id"
           type="button"
-          class="po-chip"
+          class="po-position-button"
           :class="{ 'is-active': position.id === selectedPositionId }"
           @click="choosePosition(position.id)"
         >
@@ -484,19 +584,8 @@ onMounted(loadMeta)
           placeholder="搜商品 / 编码 / 供应商"
           aria-label="搜商品"
         />
-        <button type="button" class="po-btn" @click="fillSuggested">按建议填需盘</button>
-        <button type="button" class="po-btn po-btn-ghost" @click="clearQuantities">清空数量</button>
+        <button type="button" class="po-btn po-btn-ghost" @click="clearInputs">清空数量</button>
       </div>
-      <p class="po-note">
-        <template v-if="selectedPosition">
-          提交时会把「{{ selectedPosition.name }}」下<strong>所有需盘点商品</strong>的库存写成今天的盘点，
-          没填的按 0；同一天再提交一次会覆盖上一次的盘点。
-        </template>
-        <template v-else>
-          现在看的是全部商品。提交前会让你选一个岗位，只提交那个岗位的商品和盘点；
-          其他岗位填的数量会留在本页草稿里。
-        </template>
-      </p>
     </section>
 
     <div v-if="loadingRows" class="po-empty">正在算参考值…</div>
@@ -512,83 +601,71 @@ onMounted(loadMeta)
       </header>
 
       <article v-for="row in group.items" :key="row.id" class="po-product">
-        <div class="po-product-main">
+        <header class="po-product-head">
           <div class="po-product-title">
             <strong>{{ row.name }}</strong>
-            <span v-if="row.specification" class="po-spec">{{ row.specification }}</span>
             <span v-if="row.is_long_cycle" class="po-badge po-badge-soft">长周期</span>
+                      </div>
+          <div v-if="row.need_stock_check" class="po-flag" :title="'安全系数 ' + formatQty(row.safety_factor)">
+            <span>盘</span>
+            <span>{{ formatQty(row.safety_factor) }}</span>
           </div>
-          <p class="po-product-meta">
-            <span class="po-code">{{ rowCode(row) }}</span>
-            <span>{{ row.category_name || '未分分类' }}</span>
-            <span v-if="row.need_stock_check" class="po-badge">需盘点</span>
-            <span v-if="row.positions && row.positions.length" class="po-positions">
-              {{ row.positions.map((item) => item.name).join('、') }}
-            </span>
-          </p>
-          <p class="po-product-ref">
-            <span :class="{ 'po-ref-warn': row.reference === '!' }">{{ referenceText(row) }}</span>
-            <span> · {{ yesterdayText(row) }}</span>
-            <template v-if="row.target_tag"> · 标签 {{ row.target_tag }}</template>
-            <template v-if="row.current_stock !== null && row.current_stock !== undefined">
-              · 今日库存 {{ formatQty(row.current_stock) }}
-            </template>
-          </p>
+        </header>
+
+        <div class="po-pills">
+          <span class="po-pill"><em>单位</em><strong>{{ row.unit || '—' }}</strong></span>
+          <span v-if="row.specification" class="po-pill"><em>规格</em><strong>{{ row.specification }}</strong></span>
+          <span class="po-pill"><em>岗位</em><strong>{{ positionText(row) }}</strong></span>
         </div>
 
-        <div class="po-controls" :class="{ 'is-single': !row.need_stock_check }">
-          <div v-if="row.need_stock_check" class="po-control">
-            <div class="po-control-head">
-              <span>盘点库存</span>
-              <em>{{ stockText(row) }}</em>
+        <p v-if="row.remark" class="po-remark"><em>备注</em>{{ row.remark }}</p>
+
+        <div class="po-product-body">
+          <template v-if="row.need_stock_check">
+            <div class="po-info po-info-stock">
+              <strong>库存<i class="po-required">*</i></strong>
             </div>
-            <div class="po-stepper">
-              <button type="button" class="po-step" @click="adjustStock(row, -10)">-10</button>
-              <button type="button" class="po-step" @click="adjustStock(row, -1)">-1</button>
+            <div class="po-stepper-row">
+              <button type="button" class="po-step po-step-dec10" @click="adjustStock(row, -10)">{{ stepLabel(row, -10) }}</button>
+              <button type="button" class="po-step po-step-dec1" @click="adjustStock(row, -1)">{{ stepLabel(row, -1) }}</button>
               <input
                 v-model="stocks[row.id]"
+                class="po-step-input"
+                :class="{ 'is-required-empty': isStockMissing(row) }"
                 type="number"
                 inputmode="decimal"
                 min="0"
                 step="any"
-                placeholder="未填按 0"
+                :placeholder="isStockMissing(row) ? '必填' : '0'"
                 :aria-label="row.name + ' 盘点库存'"
+                @input="limitStockInput(row)"
                 @blur="normalizeNumber('stock', row)"
               />
-              <button type="button" class="po-step" @click="adjustStock(row, 1)">+1</button>
-              <button type="button" class="po-step" @click="adjustStock(row, 10)">+10</button>
+              <button type="button" class="po-step po-step-inc1" @click="adjustStock(row, 1)">{{ stepLabel(row, 1) }}</button>
+              <button type="button" class="po-step po-step-inc10" @click="adjustStock(row, 10)">{{ stepLabel(row, 10) }}</button>
             </div>
-          </div>
+          </template>
 
-          <div class="po-control">
-            <div class="po-control-head">
-              <span>下单数量</span>
-              <em v-if="suggestedText(row)">{{ suggestedText(row) }}</em>
-            </div>
-            <div class="po-stepper">
-              <button type="button" class="po-step" @click="adjustQuantity(row, -10)">-10</button>
-              <button type="button" class="po-step" @click="adjustQuantity(row, -1)">-1</button>
-              <input
-                v-model="quantities[row.id]"
-                type="number"
-                inputmode="decimal"
-                min="0"
-                step="any"
-                placeholder="0"
-                :aria-label="row.name + ' 下单数量'"
-                @blur="normalizeNumber('quantity', row)"
-              />
-              <button type="button" class="po-step" @click="adjustQuantity(row, 1)">+1</button>
-              <button type="button" class="po-step" @click="adjustQuantity(row, 10)">+10</button>
-            </div>
-            <button
-              v-if="row.suggested_quantity !== null && row.suggested_quantity !== undefined"
-              type="button"
-              class="po-suggest"
-              @click="useSuggested(row)"
-            >
-              用建议 {{ formatQty(row.suggested_quantity) }}
-            </button>
+          <div class="po-info">
+            <span class="po-info-label">{{ yesterdayText(row) }}</span>
+            <strong :class="{ 'po-ref-warn': row.reference === '!' }">{{ referenceText(row) }}</strong>
+          </div>
+          <div class="po-stepper-row">
+            <button type="button" class="po-step po-step-dec10" @click="adjustQuantity(row, -10)">{{ stepLabel(row, -10) }}</button>
+            <button type="button" class="po-step po-step-dec1" @click="adjustQuantity(row, -1)">{{ stepLabel(row, -1) }}</button>
+            <input
+              v-model="quantities[row.id]"
+              class="po-step-input"
+              type="number"
+              inputmode="decimal"
+              min="0"
+              step="any"
+              placeholder="0"
+              :aria-label="row.name + ' 下单数量'"
+              @blur="normalizeNumber('quantity', row)"
+            />
+            <button type="button" class="po-step po-step-inc1" @click="adjustQuantity(row, 1)">{{ stepLabel(row, 1) }}</button>
+            <button type="button" class="po-step po-step-inc10" @click="adjustQuantity(row, 10)">{{ stepLabel(row, 10) }}</button>
           </div>
         </div>
       </article>
@@ -639,6 +716,56 @@ onMounted(loadMeta)
             <p v-if="confirmMissingStock" class="po-dialog-warn">
               有 {{ confirmMissingStock }} 个需盘商品还没填库存，提交后按 0 记。
             </p>
+
+            <div class="po-preview">
+              <div class="po-preview-head">
+                <strong>下单预览</strong>
+                <span>共 {{ confirmItems.length }} 项</span>
+              </div>
+              <div class="po-preview-scroll">
+                <div v-for="group in previewOrderedGroups" :key="'ordered-' + group.supplierName">
+                  <div class="po-preview-supplier">
+                    {{ group.supplierName }}<span>{{ group.items.length }} 项</span>
+                  </div>
+                  <div v-for="row in group.items" :key="row.id" class="po-preview-item">
+                    <div class="po-preview-name">
+                      {{ row.name }}
+                      <small v-if="row.specification">{{ row.specification }}</small>
+                    </div>
+                    <div class="po-preview-meta">
+                      <span v-if="previewStock(row)" class="po-preview-stock">{{ previewStock(row) }}</span>
+                      <strong class="po-preview-qty">{{ previewQuantity(row) }} {{ row.unit }}</strong>
+                    </div>
+                  </div>
+                </div>
+
+                <template v-if="previewNotOrderedGroups.length">
+                  <div class="po-preview-divider">未下单</div>
+                  <div v-for="group in previewNotOrderedGroups" :key="'not-' + group.supplierName">
+                    <div class="po-preview-supplier is-muted">
+                      {{ group.supplierName }}<span>{{ group.items.length }} 项</span>
+                    </div>
+                    <div v-for="row in group.items" :key="row.id" class="po-preview-item is-muted">
+                      <div class="po-preview-name">
+                        {{ row.name }}
+                        <small v-if="row.specification">{{ row.specification }}</small>
+                      </div>
+                      <div class="po-preview-meta">
+                        <span v-if="previewStock(row)" class="po-preview-stock">{{ previewStock(row) }}</span>
+                        <strong class="po-preview-qty is-zero">- {{ row.unit }}</strong>
+                      </div>
+                    </div>
+                  </div>
+                </template>
+
+                <p
+                  v-if="!previewOrderedGroups.length && !previewNotOrderedGroups.length"
+                  class="po-preview-empty"
+                >
+                  这个岗位下还没有商品。
+                </p>
+              </div>
+            </div>
           </template>
           <p v-else class="po-dialog-note">先选岗位，才会计算要提交哪些商品和盘点。</p>
 
@@ -679,6 +806,103 @@ onMounted(loadMeta)
   font-size: var(--fs-14);
   line-height: 1.45;
 }
+/* 小程序那套「大日期 + 次日标签」的头图，换成工作台的纸色和橙色。 */
+.po-hero {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 2px 0 14px;
+  padding: 18px 18px 16px;
+  overflow: hidden;
+  border: 1px solid var(--line-strong);
+  border-radius: 18px;
+  background: linear-gradient(135deg, var(--surface-1), var(--wb-tint-08));
+  box-shadow: var(--paper-shadow-sm);
+}
+.po-hero-main {
+  min-width: 0;
+}
+.po-hero-eyebrow {
+  display: block;
+  color: var(--ink);
+  font-size: var(--fs-12);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  opacity: 0.62;
+}
+.po-hero-date {
+  display: block;
+  margin-top: 2px;
+  font-size: var(--fs-24);
+  line-height: 1.2;
+}
+.po-hero-date em {
+  font-style: normal;
+  font-size: var(--fs-14);
+  font-weight: 500;
+  opacity: 0.62;
+}
+.po-hero-sub {
+  margin: 6px 0 0;
+  color: var(--ink);
+  font-size: var(--fs-12);
+  opacity: 0.68;
+}
+.po-hero-side {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+.po-hero-pill {
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: var(--action);
+  color: var(--action-ink);
+  font-size: var(--fs-12);
+  font-weight: 600;
+}
+.po-hero-count {
+  color: var(--ink);
+  font-size: var(--fs-11);
+  opacity: 0.58;
+}
+.po-position-card {
+  padding: 12px;
+}
+.po-position-card .po-card-head {
+  align-items: flex-start;
+}
+.po-position-card .po-hint {
+  margin: 2px 0 0;
+  font-size: var(--fs-11);
+}
+.po-position-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 5px;
+}
+.po-position-button {
+  min-height: 44px;
+  padding: 5px 2px;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  background: var(--surface-2);
+  color: var(--ink);
+  font: inherit;
+  font-size: var(--fs-12);
+  line-height: 1.2;
+  cursor: pointer;
+}
+.po-position-button.is-active {
+  border-color: var(--action);
+  background: var(--action);
+  color: var(--action-ink);
+  font-weight: 700;
+}
 .po-head {
   display: flex;
   align-items: flex-start;
@@ -717,14 +941,20 @@ onMounted(loadMeta)
   border-color: var(--line-strong);
   background: var(--surface-1);
 }
-.po-card,
-.po-supplier {
+.po-card {
   margin: 0 0 12px;
   padding: 12px;
   border: 1px solid var(--line);
   border-radius: 14px;
   background: var(--surface-1);
   box-shadow: var(--paper-shadow-sm);
+}
+.po-supplier {
+  margin: 0 0 14px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
 }
 .po-card-head {
   display: flex;
@@ -782,23 +1012,17 @@ onMounted(loadMeta)
   font: inherit;
   font-size: var(--fs-14);
 }
-.po-note {
-  margin: 10px 0 0;
-  padding: 8px 10px;
-  border-left: 3px solid var(--action);
-  border-radius: 0 8px 8px 0;
-  background: var(--wb-tint-08);
-  font-size: var(--fs-12);
-  opacity: 0.78;
-}
 .po-supplier-head {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
   gap: 8px;
-  margin-bottom: 4px;
-  padding-bottom: 8px;
-  border-bottom: 1px solid var(--line);
+  margin-bottom: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--action);
+  border-radius: 10px;
+  background: var(--wb-tint-08);
 }
 .po-supplier-head h2 {
   font-size: var(--fs-14);
@@ -809,43 +1033,53 @@ onMounted(loadMeta)
   opacity: 0.55;
 }
 .po-product {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(300px, 380px);
-  gap: 12px;
-  padding: 12px 0;
-  border-bottom: 1px dashed var(--line);
+  margin-bottom: 8px;
+  padding: 14px 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface-1);
+  box-shadow: var(--paper-shadow-sm);
 }
 .po-product:last-child {
-  border-bottom: 0;
-  padding-bottom: 0;
+  margin-bottom: 0;
+}
+.po-product-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
 }
 .po-product-title {
   display: flex;
   align-items: baseline;
-  gap: 7px;
+  gap: 6px;
   flex-wrap: wrap;
+  min-width: 0;
 }
 .po-product-title strong {
-  font-size: var(--fs-14);
+  font-size: var(--fs-20);
 }
-.po-spec {
+.po-remark {
+  margin: 8px 0 0;
+  padding: 6px 8px;
+  border-left: 2px solid var(--action);
+  border-radius: 0 8px 8px 0;
+  background: var(--wb-tint-08);
   color: var(--ink);
   font-size: var(--fs-12);
+  line-height: 1.5;
+}
+.po-remark em {
+  margin-right: 6px;
+  font-style: normal;
   opacity: 0.6;
 }
-.po-product-meta {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px;
-  margin: 4px 0 0;
-  color: var(--ink);
-  font-size: var(--fs-12);
-  opacity: 0.68;
-}
 .po-code {
+  color: var(--ink);
+  font-size: var(--fs-11);
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.4px;
+  opacity: 0.45;
 }
 .po-badge {
   padding: 1px 6px;
@@ -858,92 +1092,149 @@ onMounted(loadMeta)
 .po-badge-soft {
   background: var(--wb-tint-14);
 }
-.po-positions {
+.po-flag {
+  display: flex;
+  flex: 0 0 auto;
   overflow: hidden;
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  font-size: var(--fs-12);
+  font-weight: 700;
+  line-height: 1;
+}
+.po-flag span {
+  padding: 6px 8px;
+}
+.po-flag span:first-child {
+  background: var(--action);
+  color: var(--action-ink);
+}
+.po-flag span:last-child {
+  border-left: 1px solid var(--line-strong);
+  background: var(--surface-2);
+  color: var(--ink);
+}
+.po-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 7px;
+}
+.po-pill {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface-2);
+  font-size: var(--fs-12);
+}
+.po-pill em {
+  color: var(--ink);
+  font-style: normal;
+  opacity: 0.5;
+}
+.po-pill strong {
+  font-weight: 600;
+}
+.po-product-body {
+  display: grid;
+  grid-template-columns: 112px minmax(0, 1fr);
+  gap: 8px 10px;
+  margin-top: 10px;
+  align-items: stretch;
+}
+.po-info {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 1px;
+  min-width: 0;
+  min-height: 60px;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface-2);
+  font-size: var(--fs-11);
+  line-height: 1.25;
+}
+.po-info-stock {
+  border-color: var(--wb-tint-45);
+  background: var(--wb-tint-08);
+}
+.po-info-label {
+  color: var(--ink);
+  opacity: 0.58;
+}
+.po-info strong {
+  overflow: hidden;
+  color: var(--ink);
+  font-size: var(--fs-14);
+  font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
-  max-width: 100%;
 }
-.po-product-ref {
-  margin: 5px 0 0;
-  color: var(--ink);
-  font-size: var(--fs-12);
-  opacity: 0.62;
+.po-required {
+  margin-left: 1px;
+  color: var(--danger-bright);
+  font-style: normal;
 }
 .po-ref-warn {
   color: var(--danger-bright);
-  font-weight: 700;
   opacity: 1;
 }
-.po-controls {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  gap: 10px;
-  align-items: start;
-}
-.po-controls.is-single {
-  grid-template-columns: minmax(0, 1fr);
-}
-.po-control {
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-  min-width: 0;
-}
-.po-control-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 6px;
-  color: var(--ink);
-  font-size: var(--fs-11);
-  opacity: 0.65;
-}
-.po-control-head em {
-  font-style: normal;
-  white-space: nowrap;
-}
-.po-stepper {
+.po-stepper-row {
   display: grid;
   grid-template-columns: 44px 44px minmax(0, 1fr) 44px 44px;
-  gap: 4px;
-}
-.po-stepper input {
-  min-width: 0;
-  min-height: 44px;
-  padding: 7px 6px;
-  border: 1px solid var(--line-strong);
-  border-radius: 9px;
-  background: var(--surface-2);
-  color: var(--ink);
-  font: inherit;
-  font-size: var(--fs-14);
-  font-variant-numeric: tabular-nums;
-  text-align: right;
+  gap: 6px;
+  align-items: stretch;
+  max-width: 480px;
 }
 .po-step {
-  min-height: 44px;
+  min-height: 52px;
   padding: 0;
   border: 1px solid var(--line-strong);
   border-radius: 9px;
   background: var(--surface-2);
   color: var(--ink);
   font: inherit;
-  font-size: var(--fs-12);
+  font-size: var(--fs-14);
   cursor: pointer;
 }
-.po-suggest {
-  align-self: flex-start;
-  min-height: 44px;
-  padding: 4px 8px;
-  border: 1px dashed var(--line-strong);
-  border-radius: 8px;
-  background: transparent;
+.po-step-dec10 {
+  border-color: var(--wb-danger-a45);
+  background: var(--wb-danger-a16);
+  color: var(--danger-bright);
+}
+.po-step-dec1 {
+  border-color: var(--wb-warn-a45);
+  background: var(--wb-warn-a16);
+}
+.po-step-inc10 {
+  border-color: var(--wb-ok-a45);
+  background: var(--wb-ok-a16);
+}
+.po-step-input {
+  min-width: 0;
+  min-height: 52px;
+  padding: 7px 6px;
+  border: 1px solid var(--line-strong);
+  border-radius: 9px;
+  background: var(--surface-1);
   color: var(--ink);
   font: inherit;
-  font-size: var(--fs-11);
-  white-space: nowrap;
-  cursor: pointer;
+  font-size: var(--fs-16);
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+.po-step-input.is-required-empty {
+  border-color: var(--danger-bright);
+  color: var(--danger-bright);
+}
+.po-step-input.is-required-empty::placeholder {
+  color: var(--danger-bright);
+  opacity: 1;
 }
 .po-btn {
   min-height: 44px;
@@ -1062,6 +1353,112 @@ onMounted(loadMeta)
   color: var(--danger-bright);
   font-size: var(--fs-12);
 }
+.po-preview {
+  margin-top: 12px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface-2);
+}
+.po-preview-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+  font-size: var(--fs-14);
+}
+.po-preview-head span {
+  color: var(--ink);
+  font-size: var(--fs-11);
+  opacity: 0.55;
+}
+.po-preview-scroll {
+  max-height: 34vh;
+  overflow: auto;
+  padding-right: 2px;
+}
+.po-preview-supplier {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 8px 0 2px;
+  padding-left: 7px;
+  border-left: 3px solid var(--action);
+  color: var(--ink);
+  font-size: var(--fs-12);
+}
+.po-preview-supplier span {
+  font-size: var(--fs-11);
+  opacity: 0.5;
+}
+.po-preview-supplier.is-muted {
+  border-left-color: var(--line);
+  opacity: 0.55;
+}
+.po-preview-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 8px;
+  padding: 6px 0;
+  border-bottom: 1px dashed var(--line);
+}
+.po-preview-item:last-child {
+  border-bottom: 0;
+}
+.po-preview-item.is-muted {
+  opacity: 0.55;
+}
+.po-preview-name {
+  min-width: 0;
+  font-size: var(--fs-13);
+}
+.po-preview-name small {
+  margin-left: 4px;
+  color: var(--ink);
+  font-size: var(--fs-11);
+  opacity: 0.55;
+}
+.po-preview-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  white-space: nowrap;
+}
+.po-preview-stock {
+  color: var(--ink);
+  font-size: var(--fs-11);
+  opacity: 0.6;
+}
+.po-preview-qty {
+  font-size: var(--fs-13);
+}
+.po-preview-qty.is-zero {
+  opacity: 0.6;
+}
+.po-preview-divider {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 12px 0 2px;
+  color: var(--ink);
+  font-size: var(--fs-11);
+  opacity: 0.55;
+}
+.po-preview-divider::before,
+.po-preview-divider::after {
+  content: '';
+  flex: 1;
+  border-top: 1px solid var(--line);
+}
+.po-preview-empty {
+  margin: 8px 0 0;
+  color: var(--ink);
+  font-size: var(--fs-12);
+  opacity: 0.55;
+}
 .po-position-picker {
   margin: 0 0 12px;
   padding: 10px;
@@ -1075,11 +1472,6 @@ onMounted(loadMeta)
   gap: 8px;
   margin-top: 14px;
 }
-@media (max-width: 900px) {
-  .po-product {
-    grid-template-columns: minmax(0, 1fr);
-  }
-}
 @media (max-width: 560px) {
   .po-page {
     padding-bottom: 132px;
@@ -1087,11 +1479,27 @@ onMounted(loadMeta)
   .po-head h1 {
     font-size: var(--fs-20);
   }
-  .po-controls {
-    grid-template-columns: minmax(0, 1fr);
+  .po-product {
+    padding: 10px 10px 11px;
   }
-  .po-stepper {
-    grid-template-columns: 44px 44px minmax(0, 1fr) 44px 44px;
+  .po-product-title strong {
+    font-size: var(--fs-16);
+  }
+  .po-product-body {
+    grid-template-columns: 88px minmax(0, 1fr);
+    gap: 7px 6px;
+  }
+  .po-info {
+    min-height: 52px;
+    padding: 4px 6px;
+  }
+  .po-step {
+    min-height: 48px;
+    font-size: var(--fs-12);
+  }
+  .po-step-input {
+    min-height: 48px;
+    font-size: var(--fs-14);
   }
   .po-sticky-text {
     font-size: var(--fs-12);

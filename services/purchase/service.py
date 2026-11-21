@@ -239,7 +239,9 @@ def _group_summary(rows: Sequence[Mapping[str, Any]]) -> dict:
         total_quantity += quantity
         supplier_name = str(row.get("supplier_name") or "未分供应商")
         category_name = str(row.get("category_name") or "未分类")
-        position_name = str(row.get("position_name") or "")
+        # 历史导入的订单可能没有岗位；商品层与顶层都用同一个兜底名，别一边空串
+        # 一边「未分岗位」，小程序就得多写一套判空。
+        position_name = str(row.get("position_name") or "") or "未分岗位"
         product_key = int(row.get("product_id") or 0) or str(row.get("product_code") or "")
         supplier = suppliers.setdefault(
             supplier_name,
@@ -277,8 +279,8 @@ def _group_summary(rows: Sequence[Mapping[str, Any]]) -> dict:
             }
         )
         position = positions.setdefault(
-            position_name or "未分岗位",
-            {"position_name": position_name or "未分岗位", "quantity": 0.0},
+            position_name,
+            {"position_name": position_name, "quantity": 0.0},
         )
         position["quantity"] += quantity
 
@@ -347,17 +349,6 @@ class PurchaseService:
     def _can_cancel(self, actor: PurchaseActor, order: Mapping[str, Any]) -> bool:
         if str(order.get("status")) != PENDING or order.get("deleted_at"):
             return False
-        if actor.is_admin:
-            return True
-        submitter = order.get("submitter_employee_id")
-        return (
-            actor.kind == "staff"
-            and actor.employee_id is not None
-            and submitter is not None
-            and int(submitter) == int(actor.employee_id)
-        )
-
-    def _visible(self, actor: PurchaseActor, order: Mapping[str, Any]) -> bool:
         if actor.is_admin:
             return True
         submitter = order.get("submitter_employee_id")
@@ -568,24 +559,24 @@ class PurchaseService:
         end = _parse_date(day_to, start)
         if end < start:
             raise PurchaseError("bad_date", "结束日期不能早于开始日期")
-        submitter = None
-        if not actor.is_admin:
-            submitter = actor.employee_id
-            if submitter is None:
-                raise _forbidden("员工身份缺少花名册 id，不能查自己的采购单")
+        # 2026-11-22 用户裁定：勾了 purchase 的员工也能看全店的采购单（不再按提交人过滤）；
+        # 取消仍只限本人或管理端，由 _can_cancel 单独判。
         rows = await store.orders(
             start=start,
             end=end + timedelta(days=1),
             status=status or None,
             position_id=int(position_id) if position_id else None,
-            submitter_employee_id=submitter,
         )
         total = len(rows)
         page = max(1, int(page or 1))
         page_size = min(200, max(1, int(page_size or 50)))
         offset = (page - 1) * page_size
+        page_rows = rows[offset:offset + page_size]
+        items_by_order = await store.order_items_for([row["id"] for row in page_rows])
+        for row in page_rows:
+            row["items"] = items_by_order.get(int(row["id"]), [])
         return {
-            "orders": rows[offset:offset + page_size],
+            "orders": page_rows,
             "total": total,
             "page": page,
             "page_size": page_size,
@@ -599,8 +590,8 @@ class PurchaseService:
         order = await store.order_by_id(int(order_id))
         if order is None or order.get("deleted_at"):
             raise PurchaseError("order_not_found", "采购单 " + str(order_id) + " 不存在")
-        if not self._visible(actor, order):
-            raise _forbidden("这不是你的采购单")
+        # 能进到这里说明 _require_reader 已放行：管理端与勾了 purchase 的员工都能看全店
+        # 单据；能不能取消由下面的 can_cancel 按提交人单独判。
         items = await store.order_items(int(order_id))
         events = await store.order_events(int(order_id))
         return {
@@ -947,6 +938,20 @@ class PurchaseService:
     async def summary(self, db, actor: PurchaseActor, *, day: Any = None,
                       position_ids: Optional[Sequence[int]] = None) -> dict:
         self._require_reader(actor)
+        return await self._summary(db, day=day, position_ids=position_ids)
+
+    async def public_summary(self, db, *, day: Any = None,
+                             position_ids: Optional[Sequence[int]] = None) -> dict:
+        """对外公开的今日汇总：不算身份，只算聚合。
+
+        调用方是 `GET /api/purchase/public/summary`（小程序免登录读）。口径与
+        `summary` 共用同一个实现（未取消、未软删、按提交自然日），两条路径的
+        数字天然一致；**不要**在这里加权限判断或写操作。
+        """
+        return await self._summary(db, day=day, position_ids=position_ids)
+
+    async def _summary(self, db, *, day: Any = None,
+                       position_ids: Optional[Sequence[int]] = None) -> dict:
         store = self._store(db)
         target_day = _parse_date(day, store.today())
         ids = sorted({int(value) for value in (position_ids or [])})
@@ -1073,15 +1078,22 @@ class PurchaseService:
         )
         last_purchase: dict[int, date] = {}
         last_quantity: dict[int, float] = {}
+        last_submitters: dict[int, list[str]] = {}
         for row in history:
             product_id = int(row["product_id"])
             day_value = _date_of(row, "purchase_date")
             quantity = float(row.get("quantity") or 0.0)
             if quantity and day_value <= target_day:
                 previous = last_purchase.get(product_id)
+                names = [
+                    name.strip()
+                    for name in str(row.get("submitter_names") or "").split("、")
+                    if name.strip()
+                ]
                 if previous is None or day_value > previous:
                     last_purchase[product_id] = day_value
                     last_quantity[product_id] = quantity
+                    last_submitters[product_id] = names
                 elif day_value == previous:
                     last_quantity[product_id] = last_quantity.get(product_id, 0.0) + quantity
 
@@ -1112,6 +1124,7 @@ class PurchaseService:
                                 "category_name": product.get("category_name"),
                                 "last_ordered": last.isoformat(),
                                 "last_quantity": round(last_quantity.get(product_id, 0.0), 2),
+                                "last_submitters": last_submitters.get(product_id, []),
                                 "days": gap,
                                 "severity": (
                                     "high" if gap >= 14 else ("normal" if gap >= 7 else "low")
