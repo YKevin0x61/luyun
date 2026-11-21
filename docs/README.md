@@ -66,5 +66,6 @@
 | 文档 | 内容 |
 |------|------|
 | `workbench/staff-meal-usage.md` | **员工餐采购操作使用流程**（角色与权限、超管月度导入、员工每日填单、推送时机、异常处理、FAQ；配总览流程图 `workbench/images/staff-meal-usage-flow.svg`） |
+| `workbench/purchase-miniprogram-api.md` | **厨房采购小程序 API 对接契约**（只一个接口：免登录读今日汇总 `GET /api/purchase/public/summary`；请求参数、响应口径、错误码、小程序接法与公开面隐私边界） |
 
 日常启动与 API 说明见项目根目录 [README.md](../README.md)。
