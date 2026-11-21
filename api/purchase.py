@@ -279,6 +279,7 @@ async def purchase_products(
 async def purchase_reference(
     position_id: Optional[int] = Query(None),
     day: Optional[str] = Query(None),
+    days: Optional[int] = Query(None),
     identity: dict = Depends(require_any_identity_session),
     db=Depends(get_db),
 ) -> dict:
@@ -288,7 +289,16 @@ async def purchase_reference(
         _actor(identity),
         position_id=position_id,
         day=day,
+        days=days,
     )
+
+
+@reader_router.get("/weather")
+async def purchase_weather(
+    identity: dict = Depends(require_any_identity_session),
+    db=Depends(get_db),
+) -> dict:
+    return await _run(purchase_service.weather, db, _actor(identity))
 
 
 @reader_router.get("/stock")

@@ -232,6 +232,40 @@ class QWeatherClient:
             "precip": _to_float(entry.get("precip")),
         }
 
+    async def daily_range(
+        self,
+        location_id: str,
+        api_key: str,
+        url: str = QWEATHER_DAILY_URL,
+    ) -> list[Dict[str, Any]]:
+        """一次拉回 3 天预报（下单页头部用），字段比 daily 多湿度/风向/图标。
+
+        只读、不落库；调用方自己决定缓存与失败降级。和风 3d 接口一次返回三天，
+        不要按天循环请求三次。
+        """
+        payload = await self._get_json(
+            url, {"location": location_id, "key": api_key}
+        )
+        daily = payload.get("daily") or []
+        result: list[Dict[str, Any]] = []
+        for entry in daily:
+            if not isinstance(entry, dict):
+                continue
+            result.append(
+                {
+                    "date": str(entry.get("fxDate") or ""),
+                    "text": str(entry.get("textDay") or ""),
+                    "temp_max": _to_float(entry.get("tempMax")),
+                    "temp_min": _to_float(entry.get("tempMin")),
+                    "precip": _to_float(entry.get("precip")),
+                    "humidity": _to_int(entry.get("humidity")),
+                    "wind_dir": str(entry.get("windDirDay") or ""),
+                    "wind_scale": str(entry.get("windScaleDay") or ""),
+                    "icon": str(entry.get("iconDay") or ""),
+                }
+            )
+        return result
+
 
 class PrepPlanContextService:
     """读写 `prep_plan_context`。`weather_client` 只为测试注入，生产用默认客户端。"""

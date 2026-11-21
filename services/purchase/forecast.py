@@ -3,7 +3,7 @@
 """采购参考值与建议量的纯函数（spec §5，沿用 worktool2 小程序的口径）。
 
 这一套与备货计划的参考值（services/prep_plan_forecast.py，ADR 0137）**是两套独立
-模型**（ADR 0157）：这里照搬门店原来的「日期标签 + 同标签加权 + 近 7 天 WMA」，
+模型**（ADR 0157）：这里照搬门店原来的「日期标签 + 同标签加权 + 近 N 天 WMA」，
 不改用量、不校准、不共享参数。采购页显示的建议量只能是参考，最终由师傅按现场改。
 
 函数全部无数据库、无时钟：调用方把「今天的日期、历史盘点、历史采购、标签」传进来，
@@ -118,9 +118,14 @@ def _purchase_series(purchases: Iterable[tuple[date, float]]) -> dict[date, floa
 
 
 def _base_wma(usage: Mapping[date, float], purchases: Mapping[date, float],
-              today: date) -> tuple[float, int]:
-    """近 7 天用量 ≥3 天走用量 WMA，否则退回采购量序列（spec §5.3）。"""
-    window_start = today - timedelta(days=REFERENCE_DAYS)
+              today: date, reference_days: int = REFERENCE_DAYS) -> tuple[float, int]:
+    """近 N 天用量 ≥3 天走用量 WMA，否则退回同一窗口的采购量序列。
+
+    N 由下单页的「参考 N 天」决定（3–90，默认 7）；同标签 60 天、CV 30 天不随
+    这个值变（用户 2026-11-22 裁定）。用量与采购兜底都只看这个窗口，窗口外
+    的历史不能把参考值抬高。
+    """
+    window_start = today - timedelta(days=reference_days)
     values = [
         float(usage[day])
         for day in sorted(usage)
@@ -134,7 +139,7 @@ def _base_wma(usage: Mapping[date, float], purchases: Mapping[date, float],
     purchase_values = [
         float(purchases[day])
         for day in sorted(purchases)
-        if day < today and purchases[day] > 0
+        if window_start <= day < today and purchases[day] > 0
     ]
     if len(purchase_values) >= 2:
         return _wma(purchase_values), 0
@@ -193,6 +198,7 @@ def reference_for_product(
     date_tags: Optional[Mapping[date, str]] = None,
     weekday_defaults: Optional[Mapping[int, str]] = None,
     is_long_cycle: bool = False,
+    reference_days: int = REFERENCE_DAYS,
 ) -> ProductReference:
     """算一个商品在 today 提交时给明天看的参考值。
 
@@ -204,8 +210,9 @@ def reference_for_product(
     purchase_map = _purchase_series(purchases)
     target = today + timedelta(days=1)
     target_tag = effective_tag(target, tags, weekdays)
+    reference_days = max(3, min(90, int(reference_days or REFERENCE_DAYS)))
 
-    start = today - timedelta(days=max(SAME_TAG_DAYS, CV_DAYS, REFERENCE_DAYS) + 2)
+    start = today - timedelta(days=max(SAME_TAG_DAYS, CV_DAYS, reference_days) + 2)
     usage = daily_usage_series(stocks, purchase_map, start, today)
     usage_days = sum(1 for day in usage if day < today)
     purchase_days = sum(1 for day in purchase_map if day < today and purchase_map[day] > 0)
@@ -231,7 +238,7 @@ def reference_for_product(
             reason="long_cycle", usage_days=usage_days, purchase_days=purchase_days,
         )
 
-    base, base_samples = _base_wma(usage, purchase_map, today)
+    base, base_samples = _base_wma(usage, purchase_map, today, reference_days)
     if base <= 0:
         return ProductReference(
             None, target_tag, base_wma=0.0, reason="no_base",

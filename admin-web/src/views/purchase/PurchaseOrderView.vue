@@ -9,17 +9,43 @@
  *  - 需要盘点的商品不再单列建议量：参考值就是按库存算出的下单量，
  *    公式为参考值 × 安全系数 − 库存，按步长向上取整；库存一改就实时重算。
  */
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { api } from '../../api/client.js'
 import { purchaseOrderPath } from '../../utils/purchasePaths.js'
-import { formatMonthDay, formatQty, suggestedQuantity, todayText } from './purchaseUi.js'
+import {
+  formatClock,
+  formatMonthDay,
+  formatMonthDayChinese,
+  formatQty,
+  lunarMonthDay,
+  suggestedQuantity,
+  todayText,
+} from './purchaseUi.js'
 import PurchaseNav from './PurchaseNav.vue'
 
 const router = useRouter()
 
 const POSITION_STORAGE_KEY = 'luyun:purchase:position'
 const DRAFT_PREFIX = 'luyun:purchase:draft:'
+const REFERENCE_DAYS_KEY = 'luyun:purchase:reference-days'
+const REFERENCE_DAYS_MIN = 3
+const REFERENCE_DAYS_MAX = 90
+const REFERENCE_DAYS_DEFAULT = 7
+const WEATHER_REFRESH_MS = 30 * 60 * 1000
+const WEATHER_LABELS = ['今天', '明天', '后天']
+
+function readReferenceDays() {
+  try {
+    const value = Number(window.localStorage.getItem(REFERENCE_DAYS_KEY))
+    if (Number.isInteger(value) && value >= REFERENCE_DAYS_MIN && value <= REFERENCE_DAYS_MAX) {
+      return value
+    }
+  } catch (err) {
+    // localStorage 不可用时按默认 7 天。
+  }
+  return REFERENCE_DAYS_DEFAULT
+}
 
 const meta = ref({ positions: [] })
 const selectedPositionId = ref(0)
@@ -38,6 +64,14 @@ const confirmOpen = ref(false)
 
 const today = todayText()
 const draftKey = DRAFT_PREFIX + today
+const referenceDays = ref(readReferenceDays())
+const referenceDayOptions = Array.from(
+  { length: REFERENCE_DAYS_MAX - REFERENCE_DAYS_MIN + 1 },
+  (_, index) => REFERENCE_DAYS_MIN + index,
+)
+const weather = ref({ configured: false, available: false, days: [], fetched_at: '' })
+const weatherLoading = ref(true)
+let weatherTimer = 0
 
 const weekday = computed(() => {
   const value = new Date(today + 'T00:00:00')
@@ -45,7 +79,8 @@ const weekday = computed(() => {
   return ['周日', '周一', '周二', '周三', '周四', '周五', '周六'][value.getDay()] || ''
 })
 
-const monthDay = computed(() => formatMonthDay(today))
+const dateLabel = computed(() => formatMonthDayChinese(today))
+const lunarLabel = computed(() => lunarMonthDay(today))
 
 const nextDayLabel = computed(() => {
   const value = new Date(today + 'T00:00:00')
@@ -59,7 +94,9 @@ const nextDayLabel = computed(() => {
   return formatMonthDay(iso) + ' ' + ['周日', '周一', '周二', '周三', '周四', '周五', '周六'][value.getDay()]
 })
 
+const targetTagValue = ref('')
 const targetTag = computed(() => {
+  if (targetTagValue.value) return targetTagValue.value
   const row = rows.value.find((item) => item.target_tag)
   return row ? row.target_tag : ''
 })
@@ -73,6 +110,58 @@ const positions = computed(() =>
 const selectedPosition = computed(
   () => positions.value.find((position) => position.id === selectedPositionId.value) || null,
 )
+
+function offsetDateText(offset) {
+  const value = new Date(today + 'T12:00:00')
+  if (Number.isNaN(value.getTime())) return ''
+  value.setDate(value.getDate() + offset)
+  return todayText(value)
+}
+
+function weatherTemp(day) {
+  if (!day) return '—'
+  const min = day.temp_min
+  const max = day.temp_max
+  if ((min === null || min === undefined) && (max === null || max === undefined)) return '—'
+  if (min === null || min === undefined) return max + '℃'
+  if (max === null || max === undefined) return min + '℃'
+  return min + '~' + max + '℃'
+}
+
+function weatherMeta(day) {
+  if (!day) return ''
+  const parts = []
+  if (day.humidity !== null && day.humidity !== undefined && day.humidity !== '') {
+    parts.push('湿度 ' + day.humidity + '%')
+  }
+  const wind = [day.wind_dir, day.wind_scale].filter(Boolean).join(' ')
+  if (wind) parts.push(wind.endsWith('级') ? wind : wind + '级')
+  return parts.join(' · ')
+}
+
+const weatherCards = computed(() =>
+  WEATHER_LABELS.map((label, index) => {
+    const day = (weather.value.days || [])[index] || null
+    const dateText = day && day.date ? day.date : offsetDateText(index)
+    return {
+      label,
+      dateLabel: formatMonthDayChinese(dateText),
+      temp: weatherTemp(day),
+      text: day && day.text ? day.text : weatherLoading.value ? '正在读天气…' : '天气暂不可用',
+      meta: weatherMeta(day),
+      placeholder: !day || !day.text,
+    }
+  }),
+)
+
+const weatherTimeText = computed(() => {
+  if (weather.value.available && weather.value.fetched_at) {
+    return '更新于 ' + formatClock(weather.value.fetched_at)
+  }
+  if (weatherLoading.value) return '正在读天气…'
+  if (!weather.value.configured) return '天气未配置'
+  return '天气暂不可用'
+})
 
 const confirmPosition = computed(
   () => positions.value.find((position) => position.id === submitPositionId.value) || null,
@@ -417,6 +506,36 @@ function clearDraftForPosition(positionId) {
   }
 }
 
+async function loadWeather() {
+  try {
+    const data = await api.get('/api/purchase/weather')
+    if (data && Array.isArray(data.days)) weather.value = data
+  } catch (err) {
+    // 天气只是头部信息：失败保留上一次成功的预报，第一次失败就画占位卡。
+    if (!weather.value.days.length) {
+      // 拿不到响应时不知道门店有没有配 Key，按「暂不可用」显示，不误导成未配置。
+      weather.value = { configured: true, available: false, days: [], fetched_at: '' }
+    }
+  } finally {
+    weatherLoading.value = false
+  }
+}
+
+function changeReferenceDays(event) {
+  const parsed = Number(event.target.value)
+  const value =
+    Number.isInteger(parsed) && parsed >= REFERENCE_DAYS_MIN && parsed <= REFERENCE_DAYS_MAX
+      ? parsed
+      : REFERENCE_DAYS_DEFAULT
+  referenceDays.value = value
+  try {
+    window.localStorage.setItem(REFERENCE_DAYS_KEY, String(value))
+  } catch (err) {
+    // localStorage 不可用时只影响下次打开，不影响本次计算。
+  }
+  loadReference()
+}
+
 async function loadMeta() {
   loadingMeta.value = true
   errorText.value = ''
@@ -439,10 +558,11 @@ async function loadReference() {
   errorText.value = ''
   notice.value = ''
   try {
-    const params = { day: today }
+    const params = { day: today, days: referenceDays.value }
     if (selectedPositionId.value) params.position_id = selectedPositionId.value
     const data = await api.get('/api/purchase/reference', params)
     rows.value = data.products || []
+    targetTagValue.value = data.target_tag || ''
     resetInputs(rows.value)
     window.localStorage.setItem(POSITION_STORAGE_KEY, String(selectedPositionId.value))
   } catch (err) {
@@ -495,6 +615,7 @@ async function submitOrder() {
       position_id: submitPositionId.value,
       items,
       stock,
+      reference_days: referenceDays.value,
     })
     const orderId = data && data.order ? data.order.id : 0
     confirmOpen.value = false
@@ -514,7 +635,16 @@ async function submitOrder() {
 
 watch([quantities, stocks], saveDraft, { deep: true })
 
-onMounted(loadMeta)
+onMounted(async () => {
+  await loadMeta()
+  loadWeather()
+  weatherTimer = window.setInterval(loadWeather, WEATHER_REFRESH_MS)
+})
+
+onBeforeUnmount(() => {
+  if (weatherTimer) window.clearInterval(weatherTimer)
+  weatherTimer = 0
+})
 </script>
 
 <template>
@@ -522,19 +652,52 @@ onMounted(loadMeta)
     <PurchaseNav active="order" />
 
     <header class="po-hero">
-      <div class="po-hero-main">
-        <span class="po-hero-eyebrow">厨房采购</span>
-        <strong class="po-hero-date">{{ monthDay }} <em>{{ weekday }}</em></strong>
-        <p class="po-hero-sub">
-          次日 {{ nextDayLabel }}<template v-if="targetTag"> · 标签 {{ targetTag }}</template>
-          · 参考 7 天
-        </p>
+      <h1 class="po-sr-only">厨房采购</h1>
+      <div class="po-date-row">
+        <div class="po-date-block">
+          <strong class="po-date">{{ dateLabel }} <em>{{ weekday }}</em></strong>
+          <span v-if="lunarLabel" class="po-lunar">{{ lunarLabel }}</span>
+        </div>
+        <div class="po-factor">
+          <span class="po-factor-pill">次日 {{ nextDayLabel }}</span>
+          <span v-if="targetTag" class="po-factor-pill po-factor-tag">{{ targetTag }}</span>
+          <label class="po-days">
+            <span>参考</span>
+            <select
+              class="po-days-select"
+              :value="String(referenceDays)"
+              aria-label="参考天数"
+              @change="changeReferenceDays"
+            >
+              <option v-for="days in referenceDayOptions" :key="days" :value="String(days)">
+                {{ days }} 天
+              </option>
+            </select>
+          </label>
+        </div>
       </div>
-      <div class="po-hero-side">
-        <span class="po-hero-pill">{{ selectedPosition ? selectedPosition.name : '全部岗位' }}</span>
-        <span class="po-hero-count">{{ rows.length }} 项商品</span>
+      <div class="po-weather-grid">
+        <article
+          v-for="card in weatherCards"
+          :key="card.label"
+          class="po-weather-card"
+          :class="{ 'is-placeholder': card.placeholder }"
+        >
+          <div class="po-weather-head">
+            <span class="po-weather-label">{{ card.label }}</span>
+            <span class="po-weather-date">{{ card.dateLabel }}</span>
+          </div>
+          <strong class="po-weather-temp">{{ card.temp }}</strong>
+          <span class="po-weather-text">{{ card.text }}</span>
+          <span v-if="card.meta" class="po-weather-meta">{{ card.meta }}</span>
+        </article>
       </div>
+      <p class="po-weather-time">{{ weatherTimeText }}</p>
     </header>
+
+    <p class="po-context">
+      当前 {{ selectedPosition ? selectedPosition.name : '全部岗位' }} · {{ rows.length }} 项商品
+    </p>
 
     <p v-if="errorText" class="po-banner" role="alert">{{ errorText }}</p>
     <p v-else-if="notice" class="po-banner po-banner-soft">{{ notice }}</p>
@@ -806,69 +969,150 @@ onMounted(loadMeta)
   font-size: var(--fs-14);
   line-height: 1.45;
 }
-/* 小程序那套「大日期 + 次日标签」的头图，换成工作台的纸色和橙色。 */
+/* 小程序那套「日期 + 农历 + 次日标签 + 三天天气」的头图，换成工作台的纸色和橙色。 */
 .po-hero {
   position: relative;
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-  margin: 2px 0 14px;
-  padding: 18px 18px 16px;
+  margin: 2px 0 12px;
+  padding: 16px;
   overflow: hidden;
   border: 1px solid var(--line-strong);
   border-radius: 18px;
   background: linear-gradient(135deg, var(--surface-1), var(--wb-tint-08));
   box-shadow: var(--paper-shadow-sm);
 }
-.po-hero-main {
+.po-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+.po-date-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.po-date-block {
   min-width: 0;
 }
-.po-hero-eyebrow {
+.po-date {
   display: block;
-  color: var(--ink);
-  font-size: var(--fs-12);
-  font-weight: 600;
-  letter-spacing: 0.08em;
-  opacity: 0.62;
-}
-.po-hero-date {
-  display: block;
-  margin-top: 2px;
   font-size: var(--fs-24);
-  line-height: 1.2;
+  line-height: 1.15;
 }
-.po-hero-date em {
+.po-date em {
   font-style: normal;
   font-size: var(--fs-14);
   font-weight: 500;
   opacity: 0.62;
 }
-.po-hero-sub {
-  margin: 6px 0 0;
-  color: var(--ink);
+.po-lunar {
+  display: block;
+  margin-top: 4px;
   font-size: var(--fs-12);
-  opacity: 0.68;
+  opacity: 0.62;
 }
-.po-hero-side {
+.po-factor {
   display: flex;
-  flex-direction: column;
-  align-items: flex-end;
+  flex-wrap: wrap;
+  align-items: center;
   gap: 8px;
-  flex: 0 0 auto;
+  flex: 0 1 auto;
 }
-.po-hero-pill {
-  padding: 6px 10px;
-  border-radius: 999px;
-  background: var(--action);
-  color: var(--action-ink);
+.po-factor-pill {
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-1);
   font-size: var(--fs-12);
   font-weight: 600;
 }
-.po-hero-count {
+.po-factor-tag {
+  background: var(--wb-tint-08);
+}
+.po-days {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--fs-12);
+}
+.po-days-select {
+  min-height: 44px;
+  padding: 0 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  background: var(--surface-1);
   color: var(--ink);
+  font-size: var(--fs-13);
+  font-weight: 600;
+}
+.po-weather-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 14px;
+}
+.po-weather-card {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface-1);
+}
+.po-weather-card.is-placeholder {
+  opacity: 0.62;
+}
+.po-weather-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 4px;
+}
+.po-weather-label {
+  font-size: var(--fs-12);
+  font-weight: 600;
+}
+.po-weather-date {
+  font-size: var(--fs-11);
+  opacity: 0.6;
+  white-space: nowrap;
+}
+.po-weather-temp {
+  font-size: var(--fs-16);
+  line-height: 1.2;
+  font-weight: 700;
+}
+.po-weather-text {
+  font-size: var(--fs-13);
+  font-weight: 500;
+}
+.po-weather-meta {
+  margin-top: 2px;
+  font-size: var(--fs-11);
+  line-height: 1.5;
+  opacity: 0.64;
+}
+.po-weather-time {
+  margin: 8px 0 0;
+  text-align: right;
   font-size: var(--fs-11);
   opacity: 0.58;
+}
+.po-context {
+  margin: -2px 0 12px;
+  padding: 0 4px;
+  color: var(--ink);
+  font-size: var(--fs-12);
+  opacity: 0.7;
 }
 .po-position-card {
   padding: 12px;
@@ -1479,6 +1723,36 @@ onMounted(loadMeta)
   .po-head h1 {
     font-size: var(--fs-20);
   }
+  .po-hero {
+    padding: 14px 12px 12px;
+  }
+  .po-date-row {
+    gap: 8px;
+  }
+  .po-factor {
+    gap: 6px;
+  }
+  .po-factor-pill {
+    padding: 7px 8px;
+    font-size: var(--fs-11);
+  }
+  .po-days {
+    gap: 4px;
+  }
+  .po-days-select {
+    padding: 0 6px;
+    font-size: var(--fs-12);
+  }
+  .po-weather-grid {
+    gap: 6px;
+  }
+  .po-weather-card {
+    padding: 8px;
+    gap: 2px;
+  }
+  .po-weather-temp {
+    font-size: var(--fs-14);
+  }
   .po-product {
     padding: 10px 10px 11px;
   }
@@ -1486,15 +1760,26 @@ onMounted(loadMeta)
     font-size: var(--fs-16);
   }
   .po-product-body {
-    grid-template-columns: 88px minmax(0, 1fr);
+    /* 信息格随屏宽收窄，把余宽留给中间的数字输入框：360px 宽时输入框约 72px，
+       不会再被四颗固定按钮挤成一条线。 */
+    grid-template-columns: clamp(68px, 20vw, 88px) minmax(0, 1fr);
     gap: 7px 6px;
   }
   .po-info {
     min-height: 52px;
     padding: 4px 6px;
   }
+  .po-stepper-row {
+    /* 两侧按钮随屏宽略收，输入框吃剩余宽度；3px 间距比 6px 多留 12px 给输入框。 */
+    grid-template-columns:
+      repeat(2, clamp(34px, 10.5vw, 44px))
+      minmax(0, 1fr)
+      repeat(2, clamp(34px, 10.5vw, 44px));
+    gap: 3px;
+  }
   .po-step {
     min-height: 48px;
+    min-width: 0;
     font-size: var(--fs-12);
   }
   .po-step-input {

@@ -681,6 +681,62 @@ def test_reference_all_view_tags_bulk_and_position_visibility(purchase_http):
     assert only_first["order_count"] == 1
 
 
+def test_reference_days_validation_and_weather(purchase_http, monkeypatch):
+    client, accounts = purchase_http
+    _admin_cookie(client)
+    _setup_catalog(client)
+
+    # 页面可调 3–90 天；越界与小数都在服务层挡成 400，不把请求打到参考值计算。
+    for bad in (2, 91):
+        response = client.get("/api/purchase/reference", params={"days": bad})
+        assert response.status_code == 400, response.text
+        assert response.headers.get("X-Error-Code") == "bad_request"
+    ok = client.get("/api/purchase/reference", params={"days": 30})
+    assert ok.status_code == 200, ok.text
+    body = ok.json()
+    assert body["reference_days"] == 30
+    assert body["target_tag"]
+    assert body["products"]
+
+    # 天气只读配置，失败也不报错；这里用假实现钉住响应形状与权限。
+    import services.purchase.service as purchase_service_module
+
+    async def fake_weather(db):
+        return {
+            "configured": True,
+            "available": True,
+            "city": "广州",
+            "fetched_at": "2026-11-21T10:00:00+08:00",
+            "days": [
+                {
+                    "date": "2026-11-21",
+                    "label": "今天",
+                    "text": "多云",
+                    "temp_max": 26,
+                    "temp_min": 18,
+                    "humidity": 70,
+                    "wind_dir": "北",
+                    "wind_scale": "1-3",
+                    "icon": "101",
+                }
+            ],
+        }
+
+    monkeypatch.setattr(purchase_service_module, "purchase_weather", fake_weather)
+    weather = client.get("/api/purchase/weather")
+    assert weather.status_code == 200, weather.text
+    assert weather.json()["days"][0]["label"] == "今天"
+
+    _employee(accounts, caps=["purchase"])
+    _staff_cookie(client, accounts)
+    assert client.get("/api/purchase/weather").status_code == 200
+    assert client.get("/api/purchase/reference", params={"days": 30}).status_code == 200
+
+    _employee(accounts, phone=PHONE2, name=NAME2, caps=[])
+    _staff_cookie(client, accounts, PHONE2)
+    assert client.get("/api/purchase/weather").status_code == 403
+
+
 # ── 网页全量迁移 ─────────────────────────────────────────────────────────
 
 

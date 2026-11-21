@@ -55,6 +55,64 @@ export function formatMonthDay(raw) {
   return match ? match[2] + '-' + match[3] : ''
 }
 
+/** ISO 日期 -> M月D日（下单页头部与天气卡用）。 */
+export function formatMonthDayChinese(raw) {
+  const match = String(raw || '').match(/^(\d{4})-(\d{2})-(\d{2})/)
+  if (!match) return ''
+  return Number(match[2]) + '月' + Number(match[3]) + '日'
+}
+
+/** ISO 时间 -> HH:mm（天气「更新于」）。 */
+export function formatClock(raw) {
+  const match = String(raw || '').match(/[T ](\d{2}):(\d{2})/)
+  return match ? match[1] + ':' + match[2] : ''
+}
+
+const LUNAR_DIGITS = ['', '一', '二', '三', '四', '五', '六', '七', '八', '九']
+
+function lunarDayText(value) {
+  const day = Number(value)
+  if (!Number.isInteger(day) || day <= 0 || day > 30) return ''
+  if (day < 10) return '初' + LUNAR_DIGITS[day]
+  if (day === 10) return '初十'
+  if (day < 20) return '十' + LUNAR_DIGITS[day % 10]
+  if (day === 20) return '二十'
+  if (day < 30) return '廿' + LUNAR_DIGITS[day % 10]
+  return '三十'
+}
+
+const LUNAR_FORMATTER =
+  typeof Intl !== 'undefined' && typeof Intl.DateTimeFormat === 'function'
+    ? new Intl.DateTimeFormat('zh-CN-u-ca-chinese', {
+        timeZone: 'Asia/Shanghai',
+        month: 'long',
+        day: 'numeric',
+      })
+    : null
+
+/**
+ * 真实农历的「月日」，如 2026-11-22 -> 十月十四。
+ * 固定用北京时间取农历（农历按东八区换日）；浏览器不支持中国农历时返回空串，
+ * 页面只隐藏这一行，不影响下单。
+ */
+export function lunarMonthDay(raw) {
+  const match = String(raw || '').match(/^(\d{4})-(\d{2})-(\d{2})/)
+  if (!match || !LUNAR_FORMATTER) return ''
+  try {
+    // 北京中午对应 UTC 04:00，避开任何时区的换日边界。
+    const instant = new Date(
+      Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]), 4),
+    )
+    if (Number.isNaN(instant.getTime())) return ''
+    const parts = LUNAR_FORMATTER.formatToParts(instant)
+    const month = (parts.find((part) => part.type === 'month') || {}).value || ''
+    const day = (parts.find((part) => part.type === 'day') || {}).value || ''
+    return month + lunarDayText(day)
+  } catch (err) {
+    return ''
+  }
+}
+
 export function weekdayText(weekday) {
   return ['周日', '周一', '周二', '周三', '周四', '周五', '周六'][Number(weekday)] || ''
 }

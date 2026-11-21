@@ -34,12 +34,15 @@ from db_core.write_gate import write_unit
 from services.identity.capabilities import CAP_PURCHASE, has_cap
 from services.purchase.forecast import (
     DEFAULT_SAFETY_FACTOR,
+    REFERENCE_DAYS,
     ProductReference,
     daily_usage_series,
+    effective_tag,
     reference_for_product,
     suggested_quantity,
 )
 from services.purchase.store import PurchaseError, PurchaseStore, TAG_VALUES
+from services.purchase.weather import purchase_weather
 
 logger = logging.getLogger(__name__)
 
@@ -168,6 +171,19 @@ def _parse_date(raw: Any, default: Optional[date] = None) -> date:
         return date.fromisoformat(str(raw).strip())
     except ValueError as exc:
         raise PurchaseError("bad_date", "日期格式不对：" + str(raw)) from exc
+
+
+def _reference_days(raw: Any) -> int:
+    """下单页的「参考 N 天」：3–90 的整数；空值回默认 7。"""
+    if raw is None or raw == "":
+        return REFERENCE_DAYS
+    try:
+        value = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise PurchaseError("bad_request", "参考天数必须是 3–90 的整数") from exc
+    if value < 3 or value > 90:
+        raise PurchaseError("bad_request", "参考天数要在 3–90 天之间")
+    return value
 
 
 def _int_or_none(raw: Any) -> Optional[int]:
@@ -363,11 +379,14 @@ class PurchaseService:
 
     async def _reference_map(self, store: PurchaseStore,
                              products: Sequence[Mapping[str, Any]],
-                             day: date) -> dict[int, ProductReference]:
+                             day: date,
+                             reference_days: int = REFERENCE_DAYS) -> dict[int, ProductReference]:
         ids = [int(product["id"]) for product in products]
         if not ids:
             return {}
-        start = day - timedelta(days=62)
+        # 基础窗口最长 90 天；同标签 60 天与 CV 30 天不随参考天数变。
+        history_days = max(62, int(reference_days) + 2)
+        start = day - timedelta(days=history_days)
         purchases = await store.purchase_history(ids, start, day)
         stocks = await store.stock_series(ids, start, day)
         tags = await store.all_date_tags(day - timedelta(days=61), day + timedelta(days=1))
@@ -392,14 +411,16 @@ class PurchaseService:
                 date_tags=tags,
                 weekday_defaults=weekdays,
                 is_long_cycle=bool(product.get("is_long_cycle")),
+                reference_days=int(reference_days),
             )
         return result
 
     async def _reference_rows(self, store: PurchaseStore,
                               products: Sequence[Mapping[str, Any]],
-                              day: date) -> list[dict]:
+                              day: date,
+                              reference_days: int = REFERENCE_DAYS) -> list[dict]:
         ids = [int(product["id"]) for product in products]
-        refs = await self._reference_map(store, products, day)
+        refs = await self._reference_map(store, products, day, reference_days)
         counts = await store.stock_counts(day, ids)
         yesterday_rows = await store.purchase_history(
             ids, day - timedelta(days=1), day - timedelta(days=1)
@@ -442,6 +463,11 @@ class PurchaseService:
             "weekday_defaults": await store.weekday_defaults(),
         }
 
+    async def weather(self, db, actor: PurchaseActor) -> dict:
+        """下单页头部的三天天气；沿用备货复盘的和风配置，失败只给空占位。"""
+        self._require_reader(actor)
+        return await purchase_weather(db)
+
     async def date_tags(self, db, actor: PurchaseActor, *, start: Any = None,
                         end: Any = None) -> dict:
         """分析 / 目录页要的日期标签与星期默认（只认管理端）。"""
@@ -476,10 +502,12 @@ class PurchaseService:
         return {"products": rows}
 
     async def reference(self, db, actor: PurchaseActor, *,
-                        position_id: Optional[int] = None, day: Any = None) -> dict:
+                        position_id: Optional[int] = None, day: Any = None,
+                        days: Any = None) -> dict:
         self._require_reader(actor)
         store = self._store(db)
         target_day = _parse_date(day, store.today())
+        reference_days = _reference_days(days)
         position = None
         if position_id is not None:
             position = await store.position_by_id(int(position_id))
@@ -490,8 +518,24 @@ class PurchaseService:
             position_id=int(position_id) if position_id is not None else None,
             active_only=True,
         )
-        enriched = await self._reference_rows(store, rows, target_day)
-        return {"date": target_day.isoformat(), "position": position, "products": enriched}
+        enriched = await self._reference_rows(store, rows, target_day, reference_days)
+        # 空列表也要能显示「次日 标签」；有行时直接复用第一行的目标标签。
+        if enriched:
+            target_tag = str(enriched[0].get("target_tag") or "")
+        else:
+            tags = await store.all_date_tags(
+                target_day - timedelta(days=61), target_day + timedelta(days=1)
+            )
+            target_tag = effective_tag(
+                target_day + timedelta(days=1), tags, await store.weekday_defaults()
+            )
+        return {
+            "date": target_day.isoformat(),
+            "position": position,
+            "reference_days": reference_days,
+            "target_tag": target_tag,
+            "products": enriched,
+        }
 
     async def stock(self, db, actor: PurchaseActor, *, day: Any = None,
                     position_id: Optional[int] = None) -> dict:
@@ -668,7 +712,10 @@ class PurchaseService:
                         stock_payload[product_id] = value
 
         today = store.today()
-        refs = await self._reference_map(store, list(product_by_id.values()), today)
+        reference_days = _reference_days(payload.get("reference_days"))
+        refs = await self._reference_map(
+            store, list(product_by_id.values()), today, reference_days
+        )
         now = store._now_dt()
 
         async with write_unit(db):
