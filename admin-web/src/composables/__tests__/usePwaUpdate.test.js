@@ -321,7 +321,7 @@ describe('usePwaUpdate', () => {
     await controller.initialize()
     expect(await controller.apply()).toBe(false)
     expect(reload).not.toHaveBeenCalled()
-    expect(controller.error.value).toContain('还没准备好')
+    expect(controller.error.value).toContain('还没切换')
     expect(controller.visible.value).toBe(true)
     expect(controller.applying.value).toBe(false)
   })
@@ -351,8 +351,39 @@ describe('usePwaUpdate', () => {
     expect(oldWaiting.postMessage).not.toHaveBeenCalled()
     expect(newWorker.postMessage).not.toHaveBeenCalled()
     expect(reload).not.toHaveBeenCalled()
-    expect(controller.error.value).toContain('还没准备好')
+    expect(controller.error.value).toContain('正在下载')
     expect(controller.visible.value).toBe(true)
     expect(controller.applying.value).toBe(false)
+  })
+
+  it('registration.update() 一直不返回时到点就继续，按钮不会永久卡在「更新中…」', async () => {
+    const serviceWorker = new FakeServiceWorkerContainer()
+    serviceWorker.controller = {}
+    const waitingWorker = {
+      state: 'installed',
+      postMessage: vi.fn(() => serviceWorker.emit('controllerchange')),
+    }
+    const registration = new FakeRegistration({ waiting: waitingWorker })
+    // 慢网/已有安装卡住时 update() 可以几十秒都不 resolve
+    registration.update = vi.fn(() => new Promise(() => {}))
+    serviceWorker.register.mockResolvedValue(registration)
+    const reload = vi.fn()
+    const controller = createPwaUpdateController({
+      serviceWorker,
+      locationRef: { protocol: 'https:', hostname: 'shop.example' },
+      enabled: true,
+      reload,
+      updateTimeoutMs: 10,
+    })
+
+    // initialize 自己也会调 update()：同样不能挂在它上面
+    await controller.initialize()
+    expect(controller.visible.value).toBe(true)
+
+    expect(await controller.apply()).toBe(true)
+    expect(waitingWorker.postMessage).toHaveBeenCalledWith({ type: 'SKIP_WAITING' })
+    expect(reload).toHaveBeenCalledTimes(1)
+    expect(controller.applying.value).toBe(false)
+    expect(controller.error.value).toBe('')
   })
 })

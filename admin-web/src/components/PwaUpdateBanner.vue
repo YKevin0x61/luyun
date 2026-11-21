@@ -2,7 +2,7 @@
   <aside v-if="visible" class="pwa-update-banner" role="status" aria-live="polite">
     <div class="pwa-update-copy">
       <strong>新版本已准备好</strong>
-      <span>{{ error || '更新后会重新加载当前页面' }}</span>
+      <span>{{ error || status || '更新后会重新加载当前页面' }}</span>
     </div>
     <div class="pwa-update-actions">
       <button type="button" class="pwa-update-primary" :disabled="busy" @click="$emit('apply')">
@@ -20,6 +20,7 @@ defineProps({
   visible: { type: Boolean, default: false },
   busy: { type: Boolean, default: false },
   error: { type: String, default: '' },
+  status: { type: String, default: '' },
 })
 
 defineEmits(['apply', 'dismiss'])

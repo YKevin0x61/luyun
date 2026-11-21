@@ -24,7 +24,11 @@ export function createPwaUpdateController({
   // 这时 registration.waiting 还是上一版（用户上次点「稍后」留下的），先激活
   // 它只会刷回同一个旧页面，新版本装完提示条又出现 —— 用户看到的就是「点了
   // 两次才更新」。等安装完成再发 SKIP_WAITING，一次点到位。
-  installTimeoutMs = 20000,
+  installTimeoutMs = 12000,
+  // `registration.update()` 在「已有安装进行中」时会等这次安装结束才 resolve
+  // （Chrome 的行为），慢网下能挂几十秒。点击后不能一直卡在「更新中…」：
+  // 最多等这么久，查不到就用手上现成的 worker 继续。
+  updateTimeoutMs = 3000,
   setTimer = setTimeout,
   clearTimer = clearTimeout,
   // 开发环境（Vite dev server，:5173）不注册：那份 worker 只在构建时生成
@@ -38,6 +42,8 @@ export function createPwaUpdateController({
   const needRefresh = ref(false)
   const applying = ref(false)
   const error = ref('')
+  // 更新过程中给用户看的阶段文案：等在安装/切换时，按钮上的「更新中…」太笼统。
+  const status = ref('')
   const dismissed = ref(false)
   const supported = isSecurePwaContext(locationRef, serviceWorker)
   // 当前注册的是哪个 App 的 worker（票 09 起一个页面可能先后注册两份：从管理面
@@ -99,13 +105,32 @@ export function createPwaUpdateController({
       error.value = ''
       observeRegistration(nextRegistration)
       if (nextRegistration.update) {
-        await nextRegistration.update().catch(() => {})
+        await withTimeout(nextRegistration.update(), updateTimeoutMs)
       }
       return true
     } catch (registerError) {
       console.warn('[PWA] Service Worker 注册失败:', registerError)
       return false
     }
+  }
+
+  /** 给任意 Promise 加超时：到点 resolve(null)，不抛错、不阻塞调用方。 */
+  function withTimeout(promise, timeoutMs) {
+    return new Promise((resolve) => {
+      let settled = false
+      let timer = null
+      function finish(value) {
+        if (settled) return
+        settled = true
+        if (timer) clearTimer(timer)
+        resolve(value)
+      }
+      timer = setTimer(() => finish(null), timeoutMs)
+      Promise.resolve(promise).then(
+        (value) => finish(value),
+        () => finish(null),
+      )
+    })
   }
 
   function waitForWorkerInstalled(worker, timeoutMs) {
@@ -181,24 +206,34 @@ export function createPwaUpdateController({
     }
     applying.value = true
     error.value = ''
+    status.value = '正在检查新版本…'
     try {
       // 先主动查一次最新版本：提示条可能来自上一版 waiting，而本次发布的新
       // worker 还没被浏览器发现。查完再看 installing —— 它一定比 waiting 新。
-      await registration?.update?.().catch(() => {})
+      // update() 本身可能因为「安装进行中」而长时间不 resolve，最多等
+      // updateTimeoutMs，超时就用手上现成的 worker 继续，别卡住按钮。
+      await withTimeout(registration?.update?.(), updateTimeoutMs)
       let worker = registration?.installing || registration?.waiting || null
-      if (worker && worker.state === 'installing') {
+      if (!worker) {
+        applying.value = false
+        error.value = '新版本还没下载好，请稍后再试'
+        return false
+      }
+      if (worker.state === 'installing') {
+        status.value = '正在下载新版本…'
         const installed = await waitForWorkerInstalled(worker, installTimeoutMs)
         if (!installed) {
           applying.value = false
-          error.value = '新版本还没准备好，请稍后再试'
+          error.value = '新版本正在下载，完成后会再提示你更新'
           return false
         }
         worker = installed
       }
+      status.value = '正在切换页面…'
       const applied = await waitForControllerChange(worker)
       if (!applied) {
         applying.value = false
-        error.value = '新版本还没准备好，请稍后再试'
+        error.value = '新版本已下载，但页面还没切换，请再点一次'
         return false
       }
       reload()
@@ -208,6 +243,8 @@ export function createPwaUpdateController({
       applying.value = false
       error.value = updateError?.message || '更新失败，请检查网络后重试'
       return false
+    } finally {
+      status.value = ''
     }
   }
 
@@ -220,6 +257,7 @@ export function createPwaUpdateController({
     needRefresh,
     applying,
     error,
+    status,
     supported,
     initialize,
     apply,

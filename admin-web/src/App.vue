@@ -91,6 +91,7 @@ watch(
       :visible="pwaUpdate.visible.value"
       :busy="pwaUpdate.applying.value"
       :error="pwaUpdate.error.value"
+      :status="pwaUpdate.status.value"
       @apply="pwaUpdate.apply"
       @dismiss="pwaUpdate.dismiss"
     />
