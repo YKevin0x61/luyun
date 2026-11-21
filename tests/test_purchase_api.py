@@ -649,6 +649,13 @@ def test_reference_all_view_tags_bulk_and_position_visibility(purchase_http):
         params={"start": TODAY, "end": "2026-11-22"},
     ).json()["date_tags"]
     assert {row["tag_date"] for row in tags} == {TODAY, "2026-11-22"}
+    # 下单页显示的是「次日」标签，不是今天的；这里 11-22 同时有指定日期标签。
+    tagged = client.get("/api/purchase/reference", params={"day": TODAY}).json()
+    assert tagged["target_tag"] == "6万"
+    assert tagged["target_tag_date"] == "2026-11-22"
+    assert tagged["target_tag_source"] == "date"
+
+    # 指定日期删掉后回落到星期默认；日期标签优先级仍然最高。
     cleared = client.delete(
         "/api/purchase/admin/date-tags",
         params={"start": TODAY, "end": "2026-11-22"},
@@ -659,6 +666,34 @@ def test_reference_all_view_tags_bulk_and_position_visibility(purchase_http):
         "/api/purchase/admin/date-tags",
         params={"start": TODAY, "end": "2026-11-22"},
     ).json()["date_tags"] == []
+
+    # 星期键按前端 Date.getDay()：0=周日；TODAY 的次日 2026-11-22 是周日。
+    weekday = client.put(
+        "/api/purchase/admin/weekday-defaults",
+        json={"weekday": 0, "tag": "4万"},
+    )
+    assert weekday.status_code == 200, weekday.text
+    fallback = client.get("/api/purchase/reference", params={"day": TODAY}).json()
+    assert fallback["target_tag"] == "4万"
+    assert fallback["target_tag_source"] == "weekday"
+    # 周一用 1，不是 0；否则整周会错一天（线上「周一显示周日 6万」的根因）。
+    client.put(
+        "/api/purchase/admin/weekday-defaults",
+        json={"weekday": 1, "tag": "5万"},
+    )
+    monday = client.get(
+        "/api/purchase/reference", params={"day": "2026-11-22"}
+    ).json()
+    assert monday["target_tag"] == "5万"
+    assert monday["target_tag_date"] == "2026-11-23"
+    assert monday["target_tag_source"] == "weekday"
+    client.put(
+        "/api/purchase/admin/date-tags",
+        json={"tag_date": "2026-11-22", "tag": "3万"},
+    )
+    override = client.get("/api/purchase/reference", params={"day": TODAY}).json()
+    assert override["target_tag"] == "3万"
+    assert override["target_tag_source"] == "date"
 
     # 汇总能按岗位过滤；另一个岗位没有单时汇总为空。
     _employee(accounts, caps=["purchase"])

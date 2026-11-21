@@ -95,10 +95,25 @@ const nextDayLabel = computed(() => {
 })
 
 const targetTagValue = ref('')
+const targetTagDate = ref('')
+const targetTagSource = ref('')
 const targetTag = computed(() => {
   if (targetTagValue.value) return targetTagValue.value
   const row = rows.value.find((item) => item.target_tag)
   return row ? row.target_tag : ''
+})
+const targetTagSourceText = computed(
+  () =>
+    ({
+      date: '指定日期',
+      weekday: '星期默认',
+      default: '默认 3万',
+    })[targetTagSource.value] || '',
+)
+const targetTagHint = computed(() => {
+  if (!targetTag.value) return ''
+  const day = targetTagDate.value ? formatMonthDay(targetTagDate.value) : nextDayLabel.value
+  return targetTagSourceText.value ? '标签取 ' + day + ' · ' + targetTagSourceText.value : '标签取 ' + day
 })
 
 const positions = computed(() =>
@@ -563,6 +578,8 @@ async function loadReference() {
     const data = await api.get('/api/purchase/reference', params)
     rows.value = data.products || []
     targetTagValue.value = data.target_tag || ''
+    targetTagDate.value = data.target_tag_date || ''
+    targetTagSource.value = data.target_tag_source || ''
     resetInputs(rows.value)
     window.localStorage.setItem(POSITION_STORAGE_KEY, String(selectedPositionId.value))
   } catch (err) {
@@ -571,6 +588,12 @@ async function loadReference() {
   } finally {
     loadingRows.value = false
   }
+}
+
+async function refreshReference() {
+  if (loadingRows.value) return
+  await loadReference()
+  if (!errorText.value) notice.value = '参考值和日期标签已刷新。'
 }
 
 function choosePosition(positionId) {
@@ -660,7 +683,17 @@ onBeforeUnmount(() => {
         </div>
         <div class="po-factor">
           <span class="po-factor-pill">次日 {{ nextDayLabel }}</span>
-          <span v-if="targetTag" class="po-factor-pill po-factor-tag">{{ targetTag }}</span>
+          <span
+            v-if="targetTag"
+            class="po-factor-pill po-factor-tag"
+            :title="targetTagHint"
+          >{{ targetTag }}</span>
+          <button
+            type="button"
+            class="po-factor-refresh"
+            :disabled="loadingRows"
+            @click="refreshReference"
+          >刷新</button>
           <label class="po-days">
             <span>参考</span>
             <select
@@ -697,6 +730,7 @@ onBeforeUnmount(() => {
 
     <p class="po-context">
       当前 {{ selectedPosition ? selectedPosition.name : '全部岗位' }} · {{ rows.length }} 项商品
+      <span v-if="targetTagHint" class="po-tag-hint">· {{ targetTagHint }}</span>
     </p>
 
     <p v-if="errorText" class="po-banner" role="alert">{{ errorText }}</p>
@@ -1035,6 +1069,24 @@ onBeforeUnmount(() => {
 }
 .po-factor-tag {
   background: var(--wb-tint-08);
+}
+.po-factor-refresh {
+  min-height: 44px;
+  padding: 0 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: var(--fs-12);
+  cursor: pointer;
+}
+.po-factor-refresh:disabled {
+  cursor: progress;
+  opacity: 0.55;
+}
+.po-tag-hint {
+  display: inline;
 }
 .po-days {
   display: inline-flex;
@@ -1768,6 +1820,16 @@ onBeforeUnmount(() => {
   .po-info {
     min-height: 52px;
     padding: 4px 6px;
+  }
+  .po-info strong {
+    /* 参考值必须完整露出：字号收到 12px，放不下时允许在「参考」与数字之间换行，
+       不再用省略号截断。 */
+    overflow: visible;
+    font-size: var(--fs-12);
+    line-height: 1.2;
+    overflow-wrap: anywhere;
+    text-overflow: clip;
+    white-space: normal;
   }
   .po-stepper-row {
     /* 两侧按钮随屏宽略收，输入框吃剩余宽度；3px 间距比 6px 多留 12px 给输入框。 */

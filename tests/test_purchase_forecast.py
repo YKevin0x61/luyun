@@ -20,11 +20,22 @@ from services.purchase.forecast import (
 
 def test_effective_tag_priority():
     day = date(2026, 11, 21)
+    js_weekday = (day.weekday() + 1) % 7
     assert effective_tag(day, {}, {}) == DEFAULT_TAG
-    assert effective_tag(day, {}, {day.weekday(): "5万"}) == "5万"
-    assert effective_tag(day, {day: "8万"}, {day.weekday(): "5万"}) == "8万"
+    assert effective_tag(day, {}, {js_weekday: "5万"}) == "5万"
+    assert effective_tag(day, {day: "8万"}, {js_weekday: "5万"}) == "8万"
     # 非法标签不生效，继续往下退。
-    assert effective_tag(day, {day: "9万"}, {day.weekday(): "4万"}) == "4万"
+    assert effective_tag(day, {day: "9万"}, {js_weekday: "4万"}) == "4万"
+
+
+def test_effective_tag_uses_frontend_sunday_zero_convention():
+    """前端 Date.getDay() 是 0=周日；后端 Python weekday 是 0=周一，不能混用。"""
+    sunday = date(2026, 11, 22)
+    monday = date(2026, 11, 23)
+    assert effective_tag(sunday, {}, {0: "6万"}) == "6万"
+    assert effective_tag(monday, {}, {1: "3万"}) == "3万"
+    # 周一不能误用周日的键；没有周一默认时落到 3万。
+    assert effective_tag(monday, {}, {0: "6万"}) == DEFAULT_TAG
 
 
 def test_daily_usage_needs_two_stock_days_and_clamps_negative():

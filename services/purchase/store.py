@@ -710,6 +710,7 @@ class PurchaseStore:
 
     @_needs_migration
     async def set_weekday_default(self, weekday: int, tag: str, now: datetime) -> None:
+        """weekday 用前端 Date.getDay()：0=周日、1=周一 … 6=周六。"""
         if not 0 <= int(weekday) <= 6:
             raise PurchaseError('bad_weekday', str(weekday))
         if tag not in TAG_VALUES:

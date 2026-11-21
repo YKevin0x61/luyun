@@ -38,6 +38,7 @@ from services.purchase.forecast import (
     ProductReference,
     daily_usage_series,
     effective_tag,
+    effective_tag_detail,
     reference_for_product,
     suggested_quantity,
 )
@@ -519,21 +520,22 @@ class PurchaseService:
             active_only=True,
         )
         enriched = await self._reference_rows(store, rows, target_day, reference_days)
-        # 空列表也要能显示「次日 标签」；有行时直接复用第一行的目标标签。
-        if enriched:
-            target_tag = str(enriched[0].get("target_tag") or "")
-        else:
-            tags = await store.all_date_tags(
-                target_day - timedelta(days=61), target_day + timedelta(days=1)
-            )
-            target_tag = effective_tag(
-                target_day + timedelta(days=1), tags, await store.weekday_defaults()
-            )
+        # 目标标签固定取次日；同时把来源一起给页面，避免「明明是 3 万却显示 6 万」时
+        # 只能靠猜。指定日期优先，其次星期默认，最后 3 万。
+        tag_day = target_day + timedelta(days=1)
+        tags = await store.all_date_tags(
+            target_day - timedelta(days=61), tag_day
+        )
+        target_tag, target_tag_source = effective_tag_detail(
+            tag_day, tags, await store.weekday_defaults()
+        )
         return {
             "date": target_day.isoformat(),
             "position": position,
             "reference_days": reference_days,
             "target_tag": target_tag,
+            "target_tag_date": tag_day.isoformat(),
+            "target_tag_source": target_tag_source,
             "products": enriched,
         }
 

@@ -73,16 +73,26 @@ def _round1(value: float) -> float:
     return round(float(value) + 1e-9, 1)
 
 
+def effective_tag_detail(day: date, date_tags: Mapping[date, str],
+                         weekday_defaults: Mapping[int, str]) -> tuple[str, str]:
+    """返回 (标签, 来源)。来源是 date / weekday / default，页面用来解释标签怎么来的。
+
+    星期键统一用前端与云开发的 Date.getDay() 约定：0=周日、1=周一 … 6=周六。
+    Python 的 date.weekday() 是 0=周一，这里必须换算，否则整周错一天。
+    """
+    tag = date_tags.get(day)
+    if tag in TAG_VALUES:
+        return tag, "date"
+    tag = weekday_defaults.get((day.weekday() + 1) % 7)
+    if tag in TAG_VALUES:
+        return tag, "weekday"
+    return DEFAULT_TAG, "default"
+
+
 def effective_tag(day: date, date_tags: Mapping[date, str],
                   weekday_defaults: Mapping[int, str]) -> str:
     """指定日期 > 星期默认 > 3万（spec §5.2）。"""
-    tag = date_tags.get(day)
-    if tag in TAG_VALUES:
-        return tag
-    tag = weekday_defaults.get(day.weekday())
-    if tag in TAG_VALUES:
-        return tag
-    return DEFAULT_TAG
+    return effective_tag_detail(day, date_tags, weekday_defaults)[0]
 
 
 def daily_usage_series(stock_by_date: Mapping[date, float],
