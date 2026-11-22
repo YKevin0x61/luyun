@@ -32,6 +32,7 @@ import asyncpg
 
 from db_core.write_gate import write_unit
 from services.identity.capabilities import CAP_PURCHASE, has_cap
+from services.purchase import notify
 from services.purchase.forecast import (
     DEFAULT_SAFETY_FACTOR,
     REFERENCE_DAYS,
@@ -718,9 +719,20 @@ class PurchaseService:
         refs = await self._reference_map(
             store, list(product_by_id.values()), today, reference_days
         )
+        # 预警要和「采购分析 · 异常预警」同一个口径：当天已落库的有效采购量（取消 /
+        # 软删不计）。放在写单元里取，避免两个并发提交都读到「本单之前」而重复提醒。
+        previous_quantities: dict[int, float] = {}
         now = store._now_dt()
 
         async with write_unit(db):
+            for row in await store.items_between(today, today + timedelta(days=1)):
+                product_id = _int_or_none(row.get("product_id"))
+                if not product_id:
+                    continue
+                previous_quantities[product_id] = (
+                    previous_quantities.get(product_id, 0.0)
+                    + float(row.get("quantity") or 0.0)
+                )
             order_no = await store.next_order_no(today)
             order_id = await store.insert_order(
                 {
@@ -803,6 +815,24 @@ class PurchaseService:
             "厨房采购单 %s 提交：岗位 %s，%s 项，操作者 %s",
             order_no, position.get("name"), len(items), actor.display_name,
         )
+        # 群通知放在写单元之外：采购单已经落库，预警发不出去也只记日志，不回滚提交。
+        try:
+            await notify.notify_purchase_anomalies(
+                db,
+                order={
+                    "id": order_id,
+                    "order_no": order_no,
+                    "position_name": str(position.get("name") or ""),
+                    "submitter_name": actor.display_name,
+                    "submitted_at": now,
+                },
+                products=[item["product"] for item in items],
+                quantities={item["product_id"]: item["quantity"] for item in items},
+                references=refs,
+                previous_quantities=previous_quantities,
+            )
+        except Exception:  # noqa: BLE001 - 与 notify 内部的兜底同一条底线
+            logger.warning("厨房采购单 %s 的企微预警调用失败", order_no, exc_info=True)
         return await self.order_detail(db, actor, order_id)
 
     async def update_items(self, db, actor: PurchaseActor, order_id: int,

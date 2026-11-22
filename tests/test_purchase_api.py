@@ -327,6 +327,94 @@ def test_submit_only_counts_the_selected_position(purchase_http):
     assert detail["items"][0]["product_code"] == "0101999"
 
 
+def _subscribe_purchase_anomaly(db, name="门店群"):
+    async def _scenario():
+        now = FIXED_NOW.isoformat()
+        cursor = await db._conn.execute(
+            "INSERT INTO wecom_push_webhooks"
+            " (name, webhook_url_encrypted, webhook_url_masked, enabled, notes,"
+            "  created_at, updated_at)"
+            " VALUES (?, ?, ?, 1, '', ?, ?) RETURNING id",
+            (name, "encrypted-placeholder", "masked", now, now),
+        )
+        channel_id = int((await cursor.fetchone())["id"])
+        await db._conn.execute(
+            "INSERT INTO wecom_push_subscriptions"
+            " (topic_id, target_channel_id, enabled, created_at, updated_at)"
+            " VALUES (?, ?, 1, ?, ?)",
+            ("purchase_anomaly", channel_id, now, now),
+        )
+        await db._conn.commit()
+        return channel_id
+
+    return _run(_scenario())
+
+
+def _outbox_rows(db):
+    async def _scenario():
+        cursor = await db._conn.execute(
+            "SELECT topic_id, idempotency_key, params_json, content_summary"
+            " FROM wecom_push_outbox ORDER BY id"
+        )
+        return [dict(row) for row in await cursor.fetchall()]
+
+    return _run(_scenario())
+
+
+def test_submit_enqueues_purchase_anomaly_push(purchase_http, monkeypatch):
+    """员工提交后，超量商品进企微出站；推送本身出错也不能影响提交。"""
+    from types import SimpleNamespace
+
+    from services.purchase import notify
+    from services.purchase.service import PurchaseService
+
+    client, accounts = purchase_http
+    _admin_cookie(client)
+    _supplier, _category, first, _second, product, _other = _setup_catalog(client)
+    db = get_runtime().db
+    _subscribe_purchase_anomaly(db)
+
+    async def fixed_reference_map(self, store, products, day, reference_days):
+        return {int(row["id"]): SimpleNamespace(reference=2.0) for row in products}
+
+    monkeypatch.setattr(PurchaseService, "_reference_map", fixed_reference_map)
+    _employee(accounts, caps=["purchase"])
+    _staff_cookie(client, accounts)
+
+    created = _post(
+        client,
+        "/api/purchase/orders",
+        {
+            "position_id": first["id"],
+            "items": [{"product_id": product["id"], "quantity": 10}],
+        },
+    )
+    order_id = created["order"]["id"]
+
+    rows = [row for row in _outbox_rows(db) if row["topic_id"] == "purchase_anomaly"]
+    assert len(rows) == 1
+    row = rows[0]
+    assert str(order_id) in row["idempotency_key"]
+    assert row["content_summary"].startswith("【厨房采购预警】")
+    payload = json.loads(row["params_json"])
+    assert "土豆" in payload["text"]
+    assert "超量（>1.5 倍）" in payload["text"]
+
+    # 出站层真的炸掉时，service 的兜底要保证订单仍然 200、不把已提交的单带崩。
+    async def boom(*args, **kwargs):
+        raise RuntimeError("企微不可达")
+
+    monkeypatch.setattr(notify, "notify_purchase_anomalies", boom)
+    again = client.post(
+        "/api/purchase/orders",
+        json={
+            "position_id": first["id"],
+            "items": [{"product_id": product["id"], "quantity": 1}],
+        },
+    )
+    assert again.status_code == 200, again.text
+
+
 def test_complete_cancel_and_employee_visibility(purchase_http):
     client, accounts = purchase_http
     _admin_cookie(client)

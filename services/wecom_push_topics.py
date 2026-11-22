@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""推送内容类型注册表：八类可订阅的推送内容在**一处**声明（ADR 0097）。
+"""推送内容类型注册表：可订阅的推送内容在**一处**声明（ADR 0097）。
 
 每一类声明：稳定 id、显示名、触发方式（定时 / 事件，**同一个内容类型可以两者都支持**）、
 参数 pydantic 模型（JSON Schema 由它生成）、uischema（控件与标签）、定时侧的默认推送
@@ -409,6 +409,21 @@ class WorkTaskParams(_EventParams):
     )
 
 
+class PurchaseAnomalyParams(_EventParams):
+    """厨房采购超量 / 低量预警：员工提交采购单后推给店长。
+
+    正文由 `services/purchase/notify.py` 渲染（订单头 + 超量 / 低量分组），只支持
+    事件触发：预警跟着提交发生，没有「每天定时发一次」的时间表。
+    """
+
+    text: str = Field(
+        ...,
+        min_length=1,
+        title="正文",
+        json_schema_extra={"x-ui-control": CONTROL_TEXT},
+    )
+
+
 # ── 注册表 ──────────────────────────────────────────────────────────────────
 
 TOPIC_SALES_REPORT = "sales_report"
@@ -425,6 +440,7 @@ TOPIC_OVERTIME_REQUEST = "overtime_request"
 TOPIC_STAFF_MEAL_PURCHASE = "staff_meal_purchase"
 TOPIC_WORK_TASK = "work_task"
 TOPIC_DAILY_OPS_REPORT = "daily_ops_report"
+TOPIC_PURCHASE_ANOMALY = "purchase_anomaly"
 
 
 def _format_errors(exc: ValidationError) -> str:
@@ -660,7 +676,7 @@ def validate_params(
     return topic.validate_params(params, trigger=trigger)
 
 
-# ── 八类内容类型（声明顺序 = 页面上订阅矩阵的行序）─────────────────────────
+# ── 内容类型（声明顺序 = 页面上订阅矩阵的行序）───────────────────────────
 register_topic(PushTopic(
     id=TOPIC_SALES_REPORT,
     name="销售报表",
@@ -759,4 +775,13 @@ register_topic(PushTopic(
     name="工作任务",
     triggers=frozenset({PushTrigger.EVENT}),
     event_params_model=WorkTaskParams,
+))
+# 厨房采购提交后按「当天累计」比对参考值，只把这一单新跨过阈值（超量 >1.5 倍 /
+# 低量 <0.5 倍）的商品推给店长。口径与采购分析的「异常预警」一致，见
+# `services/purchase/notify.py`。
+register_topic(PushTopic(
+    id=TOPIC_PURCHASE_ANOMALY,
+    name="厨房采购超量/低量预警",
+    triggers=frozenset({PushTrigger.EVENT}),
+    event_params_model=PurchaseAnomalyParams,
 ))

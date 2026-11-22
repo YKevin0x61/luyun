@@ -57,11 +57,10 @@ class FakeOpsParams(BaseModel):
     )
 
 
-# 十四类内容类型：id / 显示名 / 触发方式（按声明顺序）。前八类的来源是票面与迁移 0016
-# 的头注释，第九类「下周排班表」是后加的（同一张订阅矩阵，不需要新迁移）；最后三类
-# 「请假申请」「加班/补钟申请」「员工餐采购计划」也是纯注册表新增（员工提交时入队，
-# 同样不需要迁移）。第十四类「运营日报」同样是纯注册表新增（ADR 0144）：复用订阅与
-# 出站两张表，没有结构变更。只有对账差异告警两种触发方式都支持。
+# 十五类内容类型：id / 显示名 / 触发方式（按声明顺序）。前八类的来源是票面与迁移 0016
+# 的头注释；其余各类都是纯注册表新增（复用订阅与出站两张表，没有结构变更），
+# 新增时同步这张清单即可。只有对账差异告警两种触发方式都支持；最后新增的
+# 「厨房采购超量/低量预警」由采购单提交时入队。
 EXPECTED_TOPICS = [
     ("sales_report", "销售报表", ("scheduled",)),
     ("daily_ops_report", "运营日报", ("scheduled",)),
@@ -77,6 +76,7 @@ EXPECTED_TOPICS = [
     ("overtime_request", "加班/补钟申请", ("event",)),
     ("staff_meal_purchase", "员工餐采购计划", ("event",)),
     ("work_task", "工作任务", ("event",)),
+    ("purchase_anomaly", "厨房采购超量/低量预警", ("event",)),
 ]
 
 TOPIC_IDS = [row[0] for row in EXPECTED_TOPICS]
@@ -131,6 +131,7 @@ EXPECTED_PARAMS = {
     "overtime_request": {"text": ("text", True)},
     "staff_meal_purchase": {"text": ("text", True)},
     "work_task": {"text": ("text", True)},
+    "purchase_anomaly": {"text": ("text", True)},
 }
 
 # 前端 `admin-web/src/utils/jsonFormsControls.js` 要能画出这四种；多出来的控件
