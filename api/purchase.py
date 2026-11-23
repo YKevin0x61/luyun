@@ -45,6 +45,13 @@ from services.export_jobs import (
     JobResult,
     export_jobs,
 )
+from services.printer import service as printer_service
+from services.printer.config import (
+    describe as describe_printer,
+    load_config as load_printer_config,
+    save_config as save_printer_config,
+)
+from services.printer.service import PrinterError
 from services.purchase.analysis_xlsx import (
     analysis_filename,
     build_analysis_workbook,
@@ -388,6 +395,121 @@ async def purchase_summary_export(
         media_type=_XLSX_MEDIA_TYPE,
         headers={"Content-Disposition": 'attachment; filename="' + filename + '"'},
     )
+
+
+# ── 小票打印（商鹏云云打印） ─────────────────────────────────
+#
+# 只打「今日汇总」这一张票：页面点按钮才发，不做定时任务。配置存 app_settings
+# 的 purchase_printer，密钥加密；GET 对员工开放但只回「有没有填」，不回原值。
+#
+# 打印走 reader（员工在采购页也能给自己打一张当天的汇总），改配置与发测试票
+# 走 manager —— 前者动的是全店的出票口，后者会真出纸。
+
+_PRINTER_ERROR_STATUS = {
+    "not_configured": 400,
+    "disabled": 409,
+    "empty": 409,
+    "bind_failed": 502,
+    "print_failed": 502,
+    "status_failed": 502,
+}
+
+
+def _printer_http_error(exc: PrinterError) -> HTTPException:
+    logger.info("采购小票打印失败: code=%s", exc.code)
+    return HTTPException(
+        status_code=_PRINTER_ERROR_STATUS.get(exc.code, 400),
+        detail=exc.message or "打印失败",
+        headers={"X-Error-Code": exc.code},
+    )
+
+
+async def _run_printer(call, *args, **kwargs):
+    try:
+        return await call(*args, **kwargs)
+    except PrinterError as exc:
+        raise _printer_http_error(exc) from exc
+
+
+async def _summary_for_print(db, identity: dict, day, position_ids) -> dict:
+    return await _run(
+        purchase_service.summary,
+        db,
+        _actor(identity),
+        day=day,
+        position_ids=_parse_ids(position_ids),
+    )
+
+
+@reader_router.get("/printer")
+async def purchase_printer_config(
+    identity: dict = Depends(require_any_identity_session),
+    db=Depends(get_db),
+) -> dict:
+    """当前打印配置（密钥脱敏）。前端用 enabled/configured 决定按钮状态。"""
+    config = await load_printer_config(db)
+    return config.public()
+
+
+@manager_router.put("/printer")
+async def purchase_printer_save(
+    payload: dict[str, Any] = Body(...),
+    identity: dict = Depends(require_any_identity_session),
+    db=Depends(get_db),
+) -> dict:
+    """保存配置。密钥字段留空=保留原值；clear_secret=true 才清空。"""
+    _ensure_admin(identity)
+    config = await save_printer_config(db, payload)
+    logger.info("采购小票打印配置已更新: %s", describe_printer(config))
+    return config.public()
+
+
+@manager_router.get("/printer/info")
+async def purchase_printer_info(
+    identity: dict = Depends(require_any_identity_session),
+    db=Depends(get_db),
+) -> dict:
+    """设备在线状态 / 待打张数 / 型号。设置页点「检查设备」时调。"""
+    _ensure_admin(identity)
+    return await _run_printer(printer_service.device_status, db)
+
+
+@manager_router.post("/printer/test")
+async def purchase_printer_test(
+    identity: dict = Depends(require_any_identity_session),
+    db=Depends(get_db),
+) -> dict:
+    """打一张固定内容的测试票，用来先撞出签名/绑定/在线问题。"""
+    _ensure_admin(identity)
+    return await _run_printer(printer_service.send_test_ticket, db)
+
+
+@reader_router.get("/summary/ticket/preview")
+async def purchase_summary_ticket_preview(
+    day: Optional[str] = Query(None),
+    position_ids: Optional[str] = Query(None),
+    identity: dict = Depends(require_any_identity_session),
+    db=Depends(get_db),
+) -> dict:
+    """只排版不发送：返回会打出去的原文与统计，设置页的预览用。"""
+    data = await _summary_for_print(db, identity, day, position_ids)
+    config = await load_printer_config(db)
+    return {
+        "date": data.get("date"),
+        **printer_service.preview_ticket(data, config),
+    }
+
+
+@reader_router.post("/summary/ticket")
+async def purchase_summary_ticket(
+    day: Optional[str] = Query(None),
+    position_ids: Optional[str] = Query(None),
+    identity: dict = Depends(require_any_identity_session),
+    db=Depends(get_db),
+) -> dict:
+    """把今日汇总推到打印机。**每次调用都会真出纸**，前端按钮需防连点。"""
+    data = await _summary_for_print(db, identity, day, position_ids)
+    return await _run_printer(printer_service.print_summary, db, data)
 
 
 # ── 公开：今日汇总（免登录） ──────────────────────────────────
