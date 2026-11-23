@@ -17,10 +17,11 @@ bound_at 写回配置，之后每张票只发一次 print，省一次往返，�
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Mapping, Optional
 
 from database import CHINA_TZ
+from services.staff_meal.store import StaffMealError, StaffMealStore
 from services.printer.config import PrinterConfig, load_config, mark_bound
 from services.printer.spyun import SpyunClient, SpyunError
 from services.printer.ticket import (
@@ -37,6 +38,7 @@ __all__ = [
     "PrinterError",
     "build_test_ticket",
     "device_status",
+    "next_day_staff_meal",
     "preview_ticket",
     "print_summary",
     "send_test_ticket",
@@ -73,6 +75,7 @@ def _summary_of(ticket: Ticket, config: PrinterConfig) -> dict:
         "paper_width": config.paper_width,
         "times": config.times,
         "font_scale": ticket.scale,
+        "staff_meal_date": ticket.staff_meal_date,
     }
 
 
@@ -96,7 +99,61 @@ async def _ensure_bound(db, config: PrinterConfig, client: SpyunClient) -> Print
     return await mark_bound(db, config, _now_text())
 
 
-def preview_ticket(summary: Mapping[str, Any], config: Optional[PrinterConfig] = None) -> dict:
+WEEKDAY_TEXT = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
+
+
+def _next_day(summary: Mapping[str, Any]) -> Optional[str]:
+    """票面采购日期的第二天。日期不合法就不附员工餐，别让一张票整个失败。"""
+    day = str(summary.get("date") or "").strip()
+    try:
+        return (datetime.strptime(day, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+    except ValueError:
+        return None
+
+
+async def next_day_staff_meal(db, summary: Mapping[str, Any]) -> Optional[dict]:
+    """次日的员工餐**采购清单**：提交人 + 他在员工餐页填的采购条目。
+
+    票上附它的理由：采购汇总在早上打，员工餐的货要提前一天备；两者同一张纸上
+    拣货的人才不会漏。内容和企微那条「【员工餐】采购计划」是同一份数据
+    （summary_rows 按品名+单位合并），没有条目就返回 None —— 空标题只占纸。
+    """
+    target = _next_day(summary)
+    if not target:
+        return None
+    store = StaffMealStore(db)
+    try:
+        order = await store.order_by_date(target)
+        items = await store.summary_rows(int(order["id"])) if order else []
+    except StaffMealError as exc:
+        # 员工餐迁移还没应用 / 表不存在：小票照打，只是少这一段。
+        logger.info("次日员工餐清单读不到 %s：%s", target, exc)
+        return None
+    rows = [
+        {
+            "name": str(row.get("item_name") or "").strip(),
+            "quantity": row.get("quantity"),
+            "unit": str(row.get("unit") or "").strip(),
+        }
+        for row in items
+        if str(row.get("item_name") or "").strip()
+    ]
+    if not rows:
+        return None
+    date_value = datetime.strptime(target, "%Y-%m-%d")
+    return {
+        "date": target,
+        "weekday": WEEKDAY_TEXT[date_value.weekday()],
+        "submitter": str((order or {}).get("submitter_name") or "").strip(),
+        "items": rows,
+    }
+
+
+def preview_ticket(
+    summary: Mapping[str, Any],
+    config: Optional[PrinterConfig] = None,
+    staff_meal: Optional[Mapping[str, Any]] = None,
+) -> dict:
     """只排版不发送——设置页里「看看长什么样」用。"""
     effective = config or PrinterConfig()
     ticket = build_ticket(
@@ -104,6 +161,7 @@ def preview_ticket(summary: Mapping[str, Any], config: Optional[PrinterConfig] =
         paper_width=effective.paper_width,
         line_break=effective.line_break,
         scale=effective.font_scale,
+        staff_meal=staff_meal,
     )
     return {"text": ticket.text, **_summary_of(ticket, effective)}
 
@@ -116,16 +174,19 @@ async def print_summary(db, summary: Mapping[str, Any]) -> dict:
     if not config.enabled:
         raise PrinterError("disabled", "小票打印没开启，请点本页「打印机」勾上「开启小票打印」")
 
+    staff_meal = await next_day_staff_meal(db, summary)
     ticket = build_ticket(
         summary,
         paper_width=config.paper_width,
         line_break=config.line_break,
         scale=config.font_scale,
+        staff_meal=staff_meal,
     )
-    if not ticket.printed_products:
+    # 今天没采购单也不算空：次日员工餐要买的东西一样值得打一张。
+    if not ticket.printed_products and not ticket.staff_meal_date:
         raise PrinterError(
             "empty",
-            str(summary.get("date") or "") + " 没有采购单，没有要打的内容",
+            str(summary.get("date") or "") + " 没有采购单，次日员工餐也没有登记要买的货",
         )
 
     client = _client(config)

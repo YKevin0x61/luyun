@@ -157,6 +157,8 @@ class Ticket:
     total_products: int = 0
     truncated_products: int = 0
     scale: str = "normal"
+    #: 附在票尾的员工餐日期（空串 = 这张票没带员工餐）。
+    staff_meal_date: str = ""
 
     @property
     def truncated(self) -> bool:
@@ -231,6 +233,75 @@ def _supplier_block(supplier: Mapping[str, Any], width: int) -> Tuple[list[Tuple
     return items, type_count
 
 
+#: 员工餐段里「要买的东西」最多打这么多行：条目是员工手填的，理论上能到 300 项，
+#: 全打会把 5000 字节的预算吃光、把上面的采购汇总挤光。超出的只报个数。
+MAX_MEAL_ITEMS = 20
+
+
+def _short_date(value: Any) -> str:
+    """`2026-11-22` → `11-22`。
+
+    58mm 放大档只剩 14 列，`2026-11-22 周日` 是 15 列，会把星期单独甩到下一行；
+    年份在票头已经有了，这里只留月-日。
+    """
+    text = _escape(value or "")
+    if len(text) == 10 and text[4] == "-" and text[7] == "-":
+        return text[5:]
+    return text
+
+
+def _staff_item_text(item: Mapping[str, Any]) -> str:
+    """一条员工餐采购项：`土豆 6.5斤`（数量为空就只写名字，同推送文案）。"""
+    name = str(item.get("name") or "").strip()
+    quantity = format_qty(item.get("quantity"))
+    unit = str(item.get("unit") or "").strip()
+    if not quantity:
+        return name + (" " + unit if unit else "")
+    return name + " " + quantity + unit
+
+
+def _staff_meal_lines(section: Mapping[str, Any], width: int) -> list[str]:
+    """票尾的「员工餐采购清单」：提交人 + 他要买的货。
+
+    数据由 services.printer.service 去员工餐域取，这里只排版 —— 打印小票
+    不该为了一个附录去认识员工餐的权限模型，下面这些键就是全部契约：
+    {date, weekday, submitter, items:[{name, quantity, unit}]}。
+    没有条目就整段不打（一个只有标题的段落只会占纸）。
+    """
+    items = [
+        item
+        for item in (section.get("items") or [])
+        if str(item.get("name") or "").strip()
+    ]
+    if not items:
+        return []
+    lines: list[str] = list(wrap_text("【员工餐】采购计划", width))
+    caption = " ".join(
+        part
+        for part in (
+            _short_date(section.get("date") or ""),
+            _escape(section.get("weekday") or ""),
+        )
+        if part
+    )
+    if caption:
+        lines.extend(wrap_text(caption, width))
+    submitter = str(section.get("submitter") or "").strip()
+    if submitter:
+        lines.extend(wrap_text("提交人：" + _escape(submitter), width))
+    lines.append(_rule(width, "-"))
+    for item in items[:MAX_MEAL_ITEMS]:
+        lines.extend(wrap_text(_escape(_staff_item_text(item)), width))
+    if len(items) > MAX_MEAL_ITEMS:
+        lines.extend(
+            wrap_text(
+                "还有 " + str(len(items) - MAX_MEAL_ITEMS) + " 项没打，见员工餐页",
+                width,
+            )
+        )
+    return lines
+
+
 def _count_products(summary: Mapping[str, Any]) -> Tuple[int, int]:
     suppliers = 0
     products = 0
@@ -275,8 +346,14 @@ def build_ticket(
     max_bytes: int = DEFAULT_BUDGET_BYTES,
     cut: Optional[bool] = None,
     scale: Any = DEFAULT_FONT_SCALE,
+    staff_meal: Optional[Mapping[str, Any]] = None,
 ) -> Ticket:
-    """把 /api/purchase/summary 的结构排成小票。"""
+    """把 /api/purchase/summary 的结构排成小票。
+
+    ``staff_meal`` 是次日员工餐的采购清单（见 ``_staff_meal_lines``），给了就附在
+    尾部的总计之后、打印时间之前 —— 用户要的是「打今天的货，顺便把明天员工餐
+    要买的也一起拣了」。
+    """
     base_width = PAPER_WIDTHS.get(int(paper_width or 58), PAPER_WIDTHS[58])
     scale_key = normalize_scale(scale)
     if scale_key == "huge" and base_width < 40:
@@ -307,24 +384,39 @@ def build_ticket(
     submitters = _submitters(summary)
     if submitters:
         head.extend(wrap_text("下单人员：" + "、".join(submitters), width))
-    head.append(_rule(width, "="))
+        head.append(_rule(width, "="))
+    elif total_suppliers or total_products:
+        head.append(_rule(width, "="))
     head.append("")
 
+    staff_lines = _staff_meal_lines(staff_meal, width) if staff_meal else []
+
     def tail_lines(suppliers: int, products: int, missing: int) -> list[str]:
-        lines = [""]
+        # 空日 head 末尾已经留了一个空行，这里不再补；合计那两条横线也省掉，
+        # 免得票面一上来就是三条 ====。
+        blank_day = not suppliers and not products and not missing
+        lines: list[str] = [] if blank_day else [""]
         if missing:
             lines.append("还有 " + str(missing) + " 项没放下")
             lines.append("全量请看 Excel 导出")
             lines.append("")
+        if blank_day:
+            # 今天一单都没有（可能只剩员工餐要买的货）：别打「0 家 / 0 种」，
+            # 那看着像打坏了。
+            lines.append("今天没有采购单")
+        else:
+            lines.append(_rule(width, "="))
+            # 字放大后一行放不下「采购种类总数：12 种」，固定标签也得走折行，
+            # 否则这几行会比别的行宽出去、被机器裁掉尾巴。
+            for text in (
+                "供应商总数：" + str(suppliers) + " 家",
+                "采购种类总数：" + str(products) + " 种",
+            ):
+                lines.extend(wrap_text(text, width))
         lines.append(_rule(width, "="))
-        # 字放大后一行放不下「采购种类总数：12 种」，固定标签也得走折行，
-        # 否则这几行会比别的行宽出去、被机器裁掉尾巴。
-        for text in (
-            "供应商总数：" + str(suppliers) + " 家",
-            "采购种类总数：" + str(products) + " 种",
-        ):
-            lines.extend(wrap_text(text, width))
-        lines.append(_rule(width, "="))
+        if staff_lines:
+            lines.extend(staff_lines)
+            lines.append(_rule(width, "="))
         # 时间戳绝不拆行：放大字号后一行放不下 19 列的「2026/11/23 09:05:00」，
         # 硬折会变成「2026/1」+「1/23 09:05:00」，读完不知道是哪天。
         stamp = _stamp(now)
@@ -402,4 +494,6 @@ def build_ticket(
         total_suppliers=total_suppliers,
         total_products=total_products,
         truncated_products=max(0, total_products - printed_products),
+        # 只有真打出这一段时才有日期：空清单（只有菜单）不算。
+        staff_meal_date=str((staff_meal or {}).get("date") or "") if staff_lines else "",
     )

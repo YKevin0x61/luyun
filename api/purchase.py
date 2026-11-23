@@ -494,9 +494,11 @@ async def purchase_summary_ticket_preview(
     """只排版不发送：返回会打出去的原文与统计，设置页的预览用。"""
     data = await _summary_for_print(db, identity, day, position_ids)
     config = await load_printer_config(db)
+    # 预览必须和真打的一致：票尾的次日员工餐走同一个取数函数。
+    staff_meal = await printer_service.next_day_staff_meal(db, data)
     return {
         "date": data.get("date"),
-        **printer_service.preview_ticket(data, config),
+        **printer_service.preview_ticket(data, config, staff_meal),
     }
 
 
