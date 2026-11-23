@@ -353,9 +353,9 @@ class WeComStorageAndSchedulerTest(unittest.IsolatedAsyncioTestCase):
         return await self.db.wecom_job_create({
             "name": "每日报表",
             "topic_id": topic_id,
-            "params_json": json.dumps(params or {
-                "schedule_time": schedule_time, "date_range_mode": "today", "station": "",
-            }),
+            "params_json": json.dumps(params or {}),
+            # schedule_time 列只为兼容还没读 slots_json 的地方留着（v6 起调度读 slots）。
+            "slots_json": json.dumps([{"weekday": None, "time": schedule_time}]),
             "schedule_time": schedule_time,
             "last_sent_date": last_sent_date,
         })
@@ -437,10 +437,7 @@ class WeComStorageAndSchedulerTest(unittest.IsolatedAsyncioTestCase):
         """对账差异告警的定时侧（原「数据质量日报」）同样按订阅投递、同样按营业日排重。"""
         channel_id = await self._channel("告警群")
         await self._subscribe("reconcile_diff", channel_id)
-        job_id = await self._job(
-            "reconcile_diff", "22:10",
-            params={"schedule_time": "22:10", "date_range_mode": "today"},
-        )
+        job_id = await self._job("reconcile_diff", "22:10")
         now = datetime(2026, 5, 2, 22, 10, tzinfo=CHINA_TZ)
 
         self.assertEqual(await wecom_push_service.dispatch_due_jobs(self.db, now=now), 1)

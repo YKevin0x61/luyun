@@ -120,8 +120,8 @@ def _create_topic_job(api: WecomAdmin, name="每日报表"):
         json={
             "name": name,
             "topic_id": "sales_report",
-            "params": {"schedule_time": "21:30", "date_range_mode": "today", "station": ""},
-            "schedule_time": "21:30",
+            "params": {"station": ""},
+            "slots": [{"weekday": None, "time": "21:30"}],
             "enabled": True,
             "notes": "",
         },

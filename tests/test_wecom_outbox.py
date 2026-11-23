@@ -1196,7 +1196,7 @@ class OutboxScheduledReportTest(OutboxTestCase):
         return await self.outbox.enqueue_topic(
             self.db,
             TOPIC_SALES_REPORT,
-            params={"schedule_time": "21:30", "date_range_mode": "today", "station": ""},
+            params={"station": ""},
             trigger=PushTrigger.SCHEDULED,
             business_reference=reference,
             summary="每日销售报表",

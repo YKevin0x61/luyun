@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 // 票 08 页面那一半的验收：定时任务表单的数据来源是 `/meta` 的注册表（内容类型下拉 +
-// 参数区），请求体是新形状（内容类型 + 参数 + 时间，没有收件人），任务卡片显示的是
+// 参数区），请求体是新形状（内容类型 + 参数 + 触发点，没有收件人），任务卡片显示的是
 // 「订阅目标数」而不是某个群名。
 //
 // 断言的是**页面发出去的请求体**与**纯函数的输出**：选项从哪来、参数怎么初始化、确认框
@@ -23,6 +23,7 @@ vi.mock('../../api/client', () => ({
 
 const {
   useWecomPush, scheduledTopics, defaultJobParams, jobPayload,
+  normalizeJobSlots, defaultJobSlots, jobParamsForTopic, jobMissedLabel, jobLastSentLabel,
   sendNowConfirmText, canSendNow, jobTodayStateLabel,
 } = await import('../useWecomPush.js')
 
@@ -33,17 +34,11 @@ const TOPICS = [
     name: '销售报表',
     triggers: ['scheduled'],
     default_schedule_time: '21:30',
+    default_weekday: null,
     params_schema: {
       type: 'object',
       additionalProperties: false,
       properties: {
-        schedule_time: { type: 'string', default: '21:30', title: '推送时间' },
-        date_range_mode: {
-          type: 'string',
-          default: 'today',
-          title: '日期口径',
-          oneOf: [{ const: 'today', title: '当天' }, { const: 'yesterday', title: '昨天' }],
-        },
         station: {
           type: 'string',
           default: '',
@@ -59,19 +54,22 @@ const TOPICS = [
     name: '对账差异告警',
     triggers: ['scheduled', 'event'],
     default_schedule_time: '22:10',
+    default_weekday: null,
     params_schema: {
       type: 'object',
       additionalProperties: false,
-      properties: {
-        schedule_time: { type: 'string', default: '22:10', title: '推送时间' },
-        date_range_mode: {
-          type: 'string',
-          default: 'today',
-          title: '日期口径',
-          oneOf: [{ const: 'today', title: '当天' }, { const: 'yesterday', title: '昨天' }],
-        },
-      },
+      properties: {},
     },
+    uischema: { type: 'VerticalLayout', elements: [] },
+  },
+  {
+    id: 'weekly_schedule',
+    name: '下周排班表',
+    triggers: ['scheduled'],
+    weekly: true,
+    default_schedule_time: '13:00',
+    default_weekday: 6,
+    params_schema: { type: 'object', additionalProperties: false, properties: {} },
     uischema: { type: 'VerticalLayout', elements: [] },
   },
   {
@@ -79,6 +77,7 @@ const TOPICS = [
     name: '验收照片',
     triggers: ['event'],
     default_schedule_time: null,
+    default_weekday: null,
     params_schema: { type: 'object', properties: {} },
     uischema: { type: 'VerticalLayout', elements: [] },
   },
@@ -90,10 +89,14 @@ function jobFixture(overrides = {}) {
     name: '每日销售报表',
     topic_id: 'sales_report',
     topic_name: '销售报表',
-    params: { schedule_time: '21:30', date_range_mode: 'today', station: '' },
+    params: { station: '' },
+    slots: [{ weekday: null, time: '21:30' }],
     schedule_time: '21:30',
+    schedule_text: '每天 21:30',
     enabled: true,
     last_sent_date: '',
+    last_sent_at: '',
+    missed_slots: [],
     notes: '',
     target_count: 2,
     ...overrides,
@@ -101,7 +104,7 @@ function jobFixture(overrides = {}) {
 }
 
 function metaPayload() {
-  return { success: true, api_version: 'v2', topics: TOPICS, job_templates: [] }
+  return { success: true, api_version: 'v6', topics: TOPICS, job_templates: [] }
 }
 
 beforeEach(() => {
@@ -121,17 +124,18 @@ beforeEach(() => {
 describe('定时任务表单的内容类型下拉', () => {
   it('只列支持定时触发的内容类型（事件类不进下拉）', () => {
     expect(scheduledTopics({ topics: TOPICS }).map((topic) => topic.id))
-      .toEqual(['sales_report', 'reconcile_diff'])
+      .toEqual(['sales_report', 'reconcile_diff', 'weekly_schedule'])
     expect(scheduledTopics({})).toEqual([])
   })
 })
 
 describe('任务的请求体', () => {
-  it('新形状：内容类型 + 参数 + 时间，没有任何收件人字段', () => {
+  it('新形状：内容类型 + 参数 + 触发点，没有任何收件人字段', () => {
     const payload = jobPayload({
       name: ' 每日销售报表 ',
       topicId: 'sales_report',
-      params: { schedule_time: '21:30', date_range_mode: 'today', station: 'shulong' },
+      params: { station: 'shulong' },
+      slots: [{ weekday: null, time: '21:30' }],
       notes: ' 早班 ',
       enabled: true,
     }, TOPICS)
@@ -139,7 +143,8 @@ describe('任务的请求体', () => {
     expect(payload).toEqual({
       name: '每日销售报表',
       topic_id: 'sales_report',
-      params: { schedule_time: '21:30', date_range_mode: 'today', station: 'shulong' },
+      params: { station: 'shulong' },
+      slots: [{ weekday: null, time: '21:30' }],
       schedule_time: '21:30',
       enabled: true,
       notes: '早班',
@@ -150,43 +155,80 @@ describe('任务的请求体', () => {
     expect(payload.date_range_mode).toBeUndefined()
   })
 
-  it('顶层时间取自参数区那个时间控件（页面上只有这一个时间入口）', () => {
-    const payload = jobPayload({ topicId: 'sales_report', params: { schedule_time: '09:05' } }, TOPICS)
+  it('时间不再进内容参数：参数里那几个键是这一类的 schema 说了算', () => {
+    const payload = jobPayload({
+      topicId: 'sales_report',
+      params: { station: '' },
+      slots: [{ weekday: null, time: '09:05' }],
+    }, TOPICS)
 
     expect(payload.schedule_time).toBe('09:05')
-    expect(payload.params.schedule_time).toBe('09:05')
+    expect(payload.params.schedule_time).toBeUndefined()
+    expect(payload.slots).toEqual([{ weekday: null, time: '09:05' }])
   })
 
-  it('参数里没有时间时退回注册表的默认时间', () => {
-    expect(jobPayload({ topicId: 'reconcile_diff', params: {} }, TOPICS).schedule_time).toBe('22:10')
-    expect(jobPayload({ topicId: 'sales_report', params: {} }, TOPICS).schedule_time).toBe('21:30')
+  it('一条任务可以有好几个触发点，星期几照原样上送', () => {
+    const payload = jobPayload({
+      topicId: 'sales_report',
+      slots: [{ weekday: null, time: '11:30' }, { weekday: 2, time: '21:30' }],
+    }, TOPICS)
+
+    expect(payload.slots).toEqual([{ weekday: null, time: '11:30' }, { weekday: 2, time: '21:30' }])
+    // 兼容字段只带第一条：旧后端不认 slots 时至少还能发一次
+    expect(payload.schedule_time).toBe('11:30')
+  })
+
+  it('没填时间的行被丢掉；全空时退回注册表的默认时间', () => {
+    expect(normalizeJobSlots([{ weekday: null, time: '' }, { weekday: 1, time: ' 09:05:00 ' }]))
+      .toEqual([{ weekday: 1, time: '09:05' }])
+    const payload = jobPayload({ topicId: 'reconcile_diff', slots: [] }, TOPICS)
+    expect(payload.slots).toEqual([{ weekday: null, time: '22:10' }])
+  })
+
+  it('参数里还塞着旧的时间（旧调用方）时，把它当成一行触发点', () => {
+    const payload = jobPayload({ topicId: 'sales_report', params: { station: '', schedule_time: '09:05' } }, TOPICS)
+
+    expect(payload.slots).toEqual([{ weekday: null, time: '09:05' }])
+    expect(payload.schedule_time).toBe('09:05')
   })
 })
 
-describe('切换内容类型时的参数区', () => {
+describe('切换内容类型时的参数区与推送时间', () => {
   it('参数按该类型的 schema 默认值初始化（前端不写死字段名）', () => {
-    expect(defaultJobParams(TOPICS[0])).toEqual({
-      schedule_time: '21:30', date_range_mode: 'today', station: '',
-    })
-    expect(defaultJobParams(TOPICS[1])).toEqual({
-      schedule_time: '22:10', date_range_mode: 'today',
-    })
+    expect(defaultJobParams(TOPICS[0])).toEqual({ station: '' })
+    expect(defaultJobParams(TOPICS[1])).toEqual({})
     expect(defaultJobParams(undefined)).toEqual({})
   })
 
-  it('选一个内容类型就把参数换成它的默认值', async () => {
+  it('推送时间铺一行默认值：周任务带星期，其余是每天', () => {
+    expect(defaultJobSlots(TOPICS[0])).toEqual([{ weekday: null, time: '21:30' }])
+    expect(defaultJobSlots(TOPICS[2])).toEqual([{ weekday: 6, time: '13:00' }])
+  })
+
+  it('存量任务参数里 v6 之前的键被过滤掉（extra=forbid 会 400）', () => {
+    expect(jobParamsForTopic(TOPICS[0], {
+      schedule_time: '21:30', date_range_mode: 'today', station: 'shulong',
+    })).toEqual({ station: 'shulong' })
+    expect(jobParamsForTopic(TOPICS[1], { schedule_time: '22:10' })).toEqual({})
+    expect(jobParamsForTopic(undefined, { station: '' })).toEqual({})
+  })
+
+  it('选一个内容类型就把参数与推送时间换成它的默认值', async () => {
     const { loadMeta, pickJobTopic, jobForm } = useWecomPush()
     await loadMeta()
 
     pickJobTopic('reconcile_diff')
-
     expect(jobForm.topic_id).toBe('reconcile_diff')
-    expect(jobForm.params).toEqual({ schedule_time: '22:10', date_range_mode: 'today' })
+    expect(jobForm.params).toEqual({})
+    expect(jobForm.slots).toEqual([{ weekday: null, time: '22:10' }])
+
+    pickJobTopic('weekly_schedule')
+    expect(jobForm.slots).toEqual([{ weekday: 6, time: '13:00' }])
   })
 })
 
 describe('保存任务', () => {
-  it('新建走 POST /jobs，请求体是新形状', async () => {
+  it('新建走 POST /jobs，请求体带触发点列表', async () => {
     const { loadMeta, pickJobTopic, jobForm, saveJob } = useWecomPush()
     await loadMeta()
     pickJobTopic('sales_report')
@@ -200,41 +242,63 @@ describe('保存任务', () => {
     expect(payload).toMatchObject({
       name: '每日销售报表',
       topic_id: 'sales_report',
-      schedule_time: '21:30',
+      slots: [{ weekday: null, time: '21:30' }],
       notes: '早班',
       enabled: true,
     })
-    expect(payload.params.schedule_time).toBe('21:30')
+    expect(payload.params.schedule_time).toBeUndefined()
     expect(payload.webhook_id).toBeUndefined()
     // 保存后重新拉列表（卡片上的订阅目标数要跟着刷）
     expect(apiGet).toHaveBeenCalledWith('/api/wecom-push/jobs')
   })
 
-  it('编辑既有任务：填回它的内容类型与参数，保存走 PUT', async () => {
+  it('编辑既有任务：填回它的内容类型、参数与触发点，保存走 PUT', async () => {
     const { loadMeta, editJob, jobForm, saveJob } = useWecomPush()
     await loadMeta()
     editJob(jobFixture({
       id: 9,
       topic_id: 'reconcile_diff',
       topic_name: '对账差异告警',
-      params: { schedule_time: '22:10', date_range_mode: 'yesterday' },
+      params: {},
+      slots: [{ weekday: null, time: '22:10' }],
       name: '对账差异日报',
     }))
 
-    expect(jobForm.params).toEqual({ schedule_time: '22:10', date_range_mode: 'yesterday' })
+    expect(jobForm.params).toEqual({})
+    expect(jobForm.slots).toEqual([{ weekday: null, time: '22:10' }])
 
     await saveJob()
 
     const [url, payload] = apiPut.mock.calls[0]
     expect(url).toBe('/api/wecom-push/jobs/9')
     expect(payload.topic_id).toBe('reconcile_diff')
-    expect(payload.params.date_range_mode).toBe('yesterday')
+    expect(payload.slots).toEqual([{ weekday: null, time: '22:10' }])
     expect(payload.schedule_time).toBe('22:10')
+  })
+
+  it('老响应只有 schedule_time 时，编辑页仍铺出一行', async () => {
+    const { loadMeta, editJob, jobForm } = useWecomPush()
+    await loadMeta()
+    const legacy = jobFixture()
+    delete legacy.slots
+    editJob(legacy)
+
+    expect(jobForm.slots).toEqual([{ weekday: null, time: '21:30' }])
+  })
+
+  it('一个时间都没有时不发请求，当场报错', async () => {
+    const { loadMeta, pickJobTopic, jobForm, saveJob } = useWecomPush()
+    await loadMeta()
+    pickJobTopic('sales_report')
+    Object.assign(jobForm, { name: '空时间', slots: [] })
+
+    await expect(saveJob()).rejects.toThrow('推送时间')
+    expect(apiPost).not.toHaveBeenCalled()
   })
 
   it('没选内容类型时不发请求，当场报错', async () => {
     const { jobForm, saveJob } = useWecomPush()
-    Object.assign(jobForm, { name: '没类型', topic_id: '', params: {} })
+    Object.assign(jobForm, { name: '没类型', topic_id: '', params: {}, slots: [] })
 
     await expect(saveJob()).rejects.toThrow('内容类型')
     expect(apiPost).not.toHaveBeenCalled()
@@ -256,6 +320,28 @@ describe('任务卡片的订阅目标数', () => {
 
     expect(jobs.value[0].target_count).toBe(3)
     expect(jobs.value[0].topic_name).toBe('销售报表')
+  })
+})
+
+// 一天可以有多个点：卡片上「上次发送」与「漏了哪个点」都必须报时刻，否则 11:30 与
+// 21:30 两个点只看日期分不出是谁。
+describe('任务卡上的发送痕迹（v6）', () => {
+  it('上次发送报日期与时刻', () => {
+    expect(jobLastSentLabel({ last_sent_at: '2026-11-23T21:30:04+08:00' })).toBe('上次发送：11-23 21:30')
+  })
+
+  it('没有记录时留白（页面自己写「未发送」）', () => {
+    expect(jobLastSentLabel({})).toBe('')
+    expect(jobLastSentLabel({ last_sent_at: '不是时间' })).toBe('')
+    expect(jobLastSentLabel(null)).toBe('')
+  })
+
+  it('漏了几个点就点名几个时刻', () => {
+    expect(jobMissedLabel({ missed_slots: ['11:30'] })).toBe('今天 11:30 漏发')
+    expect(jobMissedLabel({ missed_slots: ['11:30', '21:30'] })).toBe('今天 11:30、21:30 漏发')
+    expect(jobMissedLabel({ missed_slots: [] })).toBe('')
+    expect(jobMissedLabel({})).toBe('')
+    expect(jobMissedLabel(null)).toBe('')
   })
 })
 
@@ -308,9 +394,9 @@ describe('立即发送的确认文案', () => {
 
 // 票 10：任务卡上「今天这一次到点了没发」。
 //
-// 判断在后端（`WeComPushService.today_state`，营业日 06:00 切、周规则、`last_sent_date`
-// 都用调度循环同一把尺子），前端只负责把它说成一句人话 —— 所以这里钉的是文案与
-// 「未知值一律留白」，不重复测营业日。
+// 判断在后端（`WeComPushService.today_schedule`，营业日 06:00 切、周规则、每个触发点
+// 各自的状态都用调度循环同一把尺子），前端只负责把它说成一句人话 —— 所以这里钉的是
+// 文案与「未知值一律留白」，不重复测营业日。
 describe('任务卡上的「今天发没发」（票 10）', () => {
   it('漏了、还没到点、已发各有各的说法', () => {
     expect(jobTodayStateLabel('missed')).toBe('今日未发送')

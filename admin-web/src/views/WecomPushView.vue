@@ -3,6 +3,7 @@ import { computed, getCurrentInstance, nextTick, onBeforeUnmount, onMounted, ref
 import {
   useWecomPush, WECOM_PUSH_API_VERSION, MATRIX_CHANNEL_LIMIT, scheduledTopics,
   unschedulableTopics, topicTriggerLabel, jobTodayStateLabel,
+  jobMissedLabel, jobLastSentLabel,
   channelDeleteConfirmText, channelGroupNames, channelTopicNames, formatSentAt,
   canSendNow, sendNowConfirmText, sendNowTargetNames, testChannelConfirmText,
   DELIVERY_STATUS_OPTIONS,
@@ -721,8 +722,25 @@ async function copyPreview() {
   flash('预览内容已复制', 'success')
 }
 function handlePickJobTopic(topicId) {
-  // 换内容类型就是换一整套参数：直接按新类型的 schema 默认值铺满参数区。
+  // 换内容类型就是换一整套参数：直接按新类型的 schema 默认值铺满参数区，
+  // 推送时间也回到这一类内容的默认（周排班是「每周日 13:00」）。
   pickJobTopic(topicId)
+}
+
+// 推送时间（v6）：一条任务可以有好几个触发点。上限与后端 SCHEDULE_SLOT_LIMIT 一致，
+// 前端先拦住能少一趟 400；后端仍然会校验（另有 422 的静态上限）。
+const SLOT_LIMIT = 12
+const WEEKDAY_LABELS = ['周一', '周二', '周三', '周四', '周五', '周六', '周日']
+function addJobSlot() {
+  if (jobForm.slots.length >= SLOT_LIMIT) return
+  const last = jobForm.slots[jobForm.slots.length - 1]
+  // 新行沿用上一行的时刻与星期：多数人多半只想再加一个别的钟点，先给个能改的起点。
+  jobForm.slots.push({ weekday: last ? last.weekday : null, time: last ? last.time : '' })
+}
+function removeJobSlot(index) {
+  // 至少留一行：全删光后表单会变成「没有推送时间」，保存只能报错。
+  if (jobForm.slots.length <= 1) return
+  jobForm.slots.splice(index, 1)
 }
 function handleApplyPreset(topicId) {
   try {
@@ -1234,6 +1252,49 @@ onMounted(async () => {
                 </optgroup>
               </select>
             </div>
+            <!-- 推送时间（v6）：一条任务可以有好几个触发点，每行 = 星期几 + 时刻。
+                 它与内容参数分开摆：参数说「发什么」，这块说「什么时候发几次」。
+                 不选内容类型也能先填（要新建时才套默认值）。 -->
+            <div class="form-row">
+              <label>推送时间</label>
+              <div class="wp-slot-list">
+                <div v-for="(slot, index) in jobForm.slots" :key="index" class="wp-slot-row">
+                  <select
+                    class="select"
+                    v-model="slot.weekday"
+                    :aria-label="`第 ${index + 1} 个推送时间的星期`"
+                  >
+                    <option :value="null">每天</option>
+                    <option v-for="(label, day) in WEEKDAY_LABELS" :key="day" :value="day">{{ label }}</option>
+                  </select>
+                  <input
+                    class="input"
+                    type="time"
+                    v-model="slot.time"
+                    :aria-label="`第 ${index + 1} 个推送时刻`"
+                  />
+                  <button
+                    class="btn btn-sm"
+                    type="button"
+                    :disabled="jobForm.slots.length <= 1"
+                    @click="removeJobSlot(index)"
+                  >删除</button>
+                </div>
+                <!-- 还没选内容类型时这一块是空的：不写一句说明，看着像漏了控件。 -->
+                <div v-if="!jobForm.slots.length" class="wp-job-hint">
+                  选内容类型后会自动带一个默认时间；也可以直接点下面的「+ 加一个时间」。
+                </div>
+                <div class="wp-slot-foot">
+                  <button
+                    class="btn btn-sm"
+                    type="button"
+                    :disabled="jobForm.slots.length >= SLOT_LIMIT"
+                    @click="addJobSlot"
+                  >+ 加一个时间</button>
+                  <span class="wp-job-hint">同一份内容发几次；每次都会单独出现在发送记录里。</span>
+                </div>
+              </div>
+            </div>
             <!-- 参数区：字段名、标签、下拉选项、默认值全部来自这一类内容的 `params_schema` +
                  `uischema`（ADR 0097）。页面不认识任何一类内容 —— 注册表加一类就是加一个
                  下拉项和一套它的字段，前端零改动。 -->
@@ -1297,16 +1358,18 @@ onMounted(async () => {
               <div style="color:var(--text-dim);font-size:var(--fs-12)">
                 订阅目标：{{ item.target_count ? `${item.target_count} 个群` : '暂无群订阅，不会投递' }}
               </div>
-              <div style="color:var(--text-dim);font-size:var(--fs-12);display:flex;align-items:center;gap:6px">
-                <span>上次定时发送日期：{{ item.last_sent_date || '未发送' }}</span>
+              <div style="color:var(--text-dim);font-size:var(--fs-12);display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+                <!-- 一天可以有多个点，只报日期看不出是哪个点发的（v6）→ 报具体时刻；
+                     还没有任何一次时说实话「未发送」，别留空。 -->
+                <span>{{ jobLastSentLabel(item) || '上次发送：未发送' }}</span>
                 <!-- 今天这一次到点了没发（票 10）：调度器在那一分钟没跑到，当天就漏了，
-                     第二天才自动恢复。只看「上次发送日期」时，今天还没到点与今天漏了
-                     长得一模一样，所以两种都说一句；真漏了才用警示色。 -->
+                     第二天才自动恢复。只看「上次发送」时，今天还没到点与今天漏了
+                     长得一模一样，所以两种都说一句；真漏了才用警示色，并点名是哪个时刻。 -->
                 <span
-                  v-if="jobTodayStateLabel(item.today_state)"
+                  v-if="jobMissedLabel(item) || jobTodayStateLabel(item.today_state)"
                   class="badge"
                   :style="item.today_state === 'missed' ? 'color:var(--yellow);border-color:var(--yellow)' : ''"
-                >{{ jobTodayStateLabel(item.today_state) }}</span>
+                >{{ jobMissedLabel(item) || jobTodayStateLabel(item.today_state) }}</span>
               </div>
               <div style="display:flex;gap:6px;margin-top:8px" @click.stop>
                 <button class="btn btn-sm" @click="editJob(item)">编辑</button>
@@ -1820,6 +1883,19 @@ onMounted(async () => {
   line-height: 1.5;
   color: var(--text-dim);
 }
+
+/* 推送时间列表（v6）：一条任务可以有好几个触发点，每行「星期 + 时刻 + 删除」。
+   星期列定宽、时刻列吃满，删除按钮按内容宽 —— 行与行之间对齐才不会看成两条记录。 */
+.wp-slot-list { display: flex; flex-direction: column; gap: 6px; }
+.wp-slot-row {
+  display: grid;
+  grid-template-columns: 84px minmax(0, 1fr) auto;
+  gap: 6px;
+  align-items: center;
+}
+.wp-slot-row .select,
+.wp-slot-row .input { width: 100%; min-width: 0; }
+.wp-slot-foot { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 
 /* 预览失效的原因（票 01）：与「字节数」同一处视线里，说清「立即发送」为什么变灰。 */
 .wp-preview-stale {

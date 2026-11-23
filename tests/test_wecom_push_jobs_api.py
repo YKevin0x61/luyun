@@ -127,7 +127,7 @@ def _job_payload(**overrides) -> dict:
     payload = {
         "name": "每日销售报表",
         "topic_id": "sales_report",
-        "params": {"schedule_time": "21:30", "date_range_mode": "today", "station": ""},
+        "params": {"station": ""},
         "schedule_time": "21:30",
         "enabled": True,
         "notes": "",
@@ -161,7 +161,7 @@ def test_a_job_carries_a_topic_and_params_instead_of_a_recipient(api):
     job = _create_job(
         api,
         name="早市销售报表",
-        params={"schedule_time": "14:30", "date_range_mode": "today", "station": "shulong"},
+        params={"station": "shulong"},
         schedule_time="14:30",
     )
 
@@ -175,31 +175,88 @@ def test_a_job_carries_a_topic_and_params_instead_of_a_recipient(api):
         assert gone not in job, f"{gone} 不该再出现在任务形状里"
 
 
-def test_the_top_level_time_wins_over_the_one_in_the_params(api):
-    """页面上只有一个时间控件（参数区那个 time 控件），顶层是它的投影。
+def test_the_legacy_top_level_time_becomes_one_daily_slot(api):
+    """旧 bundle 只发一个顶层 schedule_time：收下、当成「每天该时刻」一行。
 
-    两处对不上时以顶层为准，避免「列里 21:30、参数里 09:00」这种各说各话的存档。
+    这条兼容路径只在 slots 为空时生效；时间不进参数，所以 params 里既没有
+    schedule_time 也没有 date_range_mode。
     """
-    job = _create_job(
-        api,
-        params={"schedule_time": "09:00", "date_range_mode": "today", "station": ""},
-        schedule_time="09:05",
-    )
+    job = _create_job(api, params={"station": ""}, schedule_time="09:05")
 
     assert job["schedule_time"] == "09:05"
-    assert job["params"]["schedule_time"] == "09:05"
+    assert job["slots"] == [{"weekday": None, "time": "09:05"}]
+    assert "schedule_time" not in job["params"]
+
+
+def test_a_job_can_carry_several_slots_a_day(api):
+    """一条任务多个触发点：内容只存一份，时刻可以有多个（v6）。"""
+    job = _create_job(
+        api,
+        slots=[
+            {"weekday": None, "time": "11:30"},
+            {"weekday": None, "time": "21:30"},
+        ],
+    )
+
+    assert [slot["time"] for slot in job["slots"]] == ["11:30", "21:30"]
+    # 兼容列取第一条；卡片文案列出全部。
+    assert job["schedule_time"] == "11:30"
+    assert job["schedule_labels"] == ["每天 11:30", "每天 21:30"]
+    assert job["schedule_text"] == "每天 11:30、21:30"
+
+
+def test_a_job_can_be_pinned_to_weekdays(api):
+    """weekday 给了就只在那天推：周一 09:00 与周三 21:00。"""
+    job = _create_job(
+        api,
+        slots=[
+            {"weekday": 0, "time": "09:00"},
+            {"weekday": 2, "time": "21:00"},
+        ],
+    )
+
+    assert job["schedule_labels"] == ["周一 09:00", "周三 21:00"]
+    assert job["schedule_text"] == "周一 09:00、周三 21:00"
+
+
+def test_a_job_without_any_slot_is_refused(api):
+    refused = api.as_session(
+        "POST",
+        f"{API_PREFIX}/jobs",
+        json={"name": "no time", "topic_id": "sales_report", "params": {}},
+    )
+
+    assert refused.status_code == 422, refused.text
+    assert _jobs(api) == []
+
+
+def test_duplicate_slots_are_refused(api):
+    refused = api.as_session(
+        "POST",
+        f"{API_PREFIX}/jobs",
+        json=_job_payload(
+            slots=[
+                {"weekday": None, "time": "09:00"},
+                {"weekday": None, "time": "09:00"},
+            ]
+        ),
+    )
+
+    assert refused.status_code == 400, refused.text
+    assert "重复" in refused.json()["detail"]
+    assert _jobs(api) == []
 
 
 def test_the_same_topic_can_have_several_jobs(api):
     first = _create_job(api, name="早市", schedule_time="14:30",
-                        params={"schedule_time": "14:30", "date_range_mode": "today", "station": ""})
+                        params={"station": ""})
     second = _create_job(api, name="晚市", schedule_time="21:30",
-                         params={"schedule_time": "21:30", "date_range_mode": "yesterday", "station": "shulong"})
+                         params={"station": "shulong"})
 
     listed = {job["id"]: job for job in _jobs(api)}
     assert set(listed) == {first["id"], second["id"]}
-    assert listed[first["id"]]["params"]["date_range_mode"] == "today"
-    assert listed[second["id"]]["params"]["date_range_mode"] == "yesterday"
+    assert listed[first["id"]]["params"]["station"] == ""
+    assert listed[second["id"]]["params"]["station"] == "shulong"
 
     # 改一条不影响另一条
     resp = api.as_session(
@@ -208,7 +265,7 @@ def test_the_same_topic_can_have_several_jobs(api):
         json=_job_payload(
             name="早市（改）",
             schedule_time="15:00",
-            params={"schedule_time": "15:00", "date_range_mode": "today", "station": ""},
+            params={"station": ""},
         ),
     )
     assert resp.status_code == 200, resp.text
@@ -226,10 +283,10 @@ def test_the_job_list_keeps_a_stable_id_order_when_a_time_changes(api):
     另一条任务上（真的把 21:30 写进了 id=2 的任务）。顺序只跟创建顺序走，时间只在卡上显示。
     """
     first = _create_job(api, name="每日销售报表", schedule_time="21:30",
-                        params={"schedule_time": "21:30", "date_range_mode": "today", "station": ""})
+                        params={"station": ""})
     second = _create_job(api, name="日终对账差异", schedule_time="22:10",
                          topic_id="reconcile_diff",
-                         params={"schedule_time": "22:10", "date_range_mode": "today"})
+                         params={})
 
     before = [job["id"] for job in _jobs(api)]
     assert before == [first["id"], second["id"]]
@@ -241,7 +298,7 @@ def test_the_job_list_keeps_a_stable_id_order_when_a_time_changes(api):
         json=_job_payload(
             name="每日销售报表",
             schedule_time="23:55",
-            params={"schedule_time": "23:55", "date_range_mode": "today", "station": ""},
+            params={"station": ""},
         ),
     )
     assert resp.status_code == 200, resp.text
@@ -313,7 +370,7 @@ def test_another_topic_counts_its_own_targets(api):
         api,
         name="对账差异日报",
         topic_id="reconcile_diff",
-        params={"schedule_time": "22:10", "date_range_mode": "today"},
+        params={},
         schedule_time="22:10",
     )
 
@@ -389,7 +446,7 @@ def test_params_are_checked_by_the_topic_schema(api):
     refused = api.as_session(
         "POST",
         f"{API_PREFIX}/jobs",
-        json=_job_payload(params={"schedule_time": "21:30", "nope": "x"}),
+        json=_job_payload(params={"nope": "x"}),
     )
 
     assert refused.status_code == 400, refused.text
@@ -449,7 +506,7 @@ def test_preview_renders_a_reconcile_diff_job(api):
         api,
         name="对账差异日报",
         topic_id="reconcile_diff",
-        params={"schedule_time": "22:10", "date_range_mode": "yesterday"},
+        params={},
         schedule_time="22:10",
     )
 
@@ -600,4 +657,4 @@ def test_the_page_contract_version_moved_for_the_new_job_shape(api):
     """
     meta = api.as_session("GET", f"{API_PREFIX}/meta").json()
 
-    assert meta["api_version"] == "v5"
+    assert meta["api_version"] == "v6"

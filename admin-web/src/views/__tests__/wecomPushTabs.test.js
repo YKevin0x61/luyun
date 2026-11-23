@@ -13,7 +13,7 @@ import WecomPushView from '../WecomPushView.vue'
 // 路径仍是 `/wecom-push`：`pageRoutes.json` / `main.py` / 反代一个字没动，所以这里也只验
 // query。装了 router 的用例才验 URL（没装 router 时 tab 只存在内存里，见视图里的注释）。
 
-const API_VERSION = 'v5'
+const API_VERSION = 'v6'
 
 function channel(id, name) {
   return {

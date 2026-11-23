@@ -79,6 +79,9 @@ SHIFT_PALETTE: Tuple[Tuple[str, str], ...] = (
 )
 
 MAX_IMAGE_BYTES = 2 * 1024 * 1024
+# 手动推送的页脚左侧文字与右侧「由某某推送」之间至少留这么多像素：不留就会两段
+# 文字叠在一起（Pillow 不会替你换行，也不会报警）。
+FOOTER_GAP = 16
 
 
 def _draw_half_rest_dot(draw: ImageDraw.ImageDraw, cell_right: int, bottom: int, color: str) -> None:
@@ -157,7 +160,11 @@ def _schedule_rows(grid: Mapping[str, Any]) -> List[Mapping[str, Any]]:
 
 
 def render_weekly_schedule_png(
-    grid: Mapping[str, Any], *, generated_at: Optional[datetime] = None
+    grid: Mapping[str, Any],
+    *,
+    generated_at: Optional[datetime] = None,
+    title: str = "",
+    pushed_by: str = "",
 ) -> Optional[bytes]:
     """周表 → PNG 字节；本机没有中文字体时返回 ``None``（调用方退文字消息）。"""
     if load_cjk_font(20) is None:
@@ -194,7 +201,7 @@ def render_weekly_schedule_png(
     title_font = load_cjk_font(34)
     draw.text(
         _at(MARGIN, TITLE_HEIGHT / 2 - 2),
-        "下周排班",
+        str(title or "下周排班"),
         font=title_font,
         fill=COLOR_TITLE_TEXT,
         anchor="lm",
@@ -334,18 +341,49 @@ def render_weekly_schedule_png(
             draw.text(_at(center_x, center_y), label, font=font, fill=color, anchor="mm")
 
     # ── 页脚 ────────────────────────────────────────────────────────────
-    footer_font = load_cjk_font(15)
-    stamp = (generated_at or datetime.now()).strftime("%Y-%m-%d %H:%M")
+    footer_y = height - MARGIN + 6
     has_half_rest = any(state.half_rest for row in rows for state in row["states"])
     legend = " · ● 为半天" if has_half_rest else ""
-    footer = f"共 {len(rows)} 人{legend} · 排班以「工作台 → 班次表」为准 · 生成于 {stamp}"
-    draw.text(
-        _at(MARGIN, height - MARGIN + 6),
-        footer,
-        font=footer_font,
-        fill=COLOR_FOOTER,
-        anchor="lm",
-    )
+    moment = generated_at or datetime.now()
+    if pushed_by:
+        # 手动推送多一段「谁推的」：群里看到图先问「谁发的」，写在图上比在消息里
+        # 说一句更不容易被漏掉。时间缩成 11-22 13:20 —— 满宽一行放不下两段；
+        # 先按两段总宽缩字号（最小仍 14），仍放不下就截左句，右句永远完整。
+        left_text = (
+            f"共 {len(rows)} 人{legend} · 排班以「工作台 → 班次表」为准"
+            f" · 生成于 {moment.strftime('%m-%d %H:%M')}"
+        )
+        right_text = f"由{pushed_by}推送"
+        avail = width - MARGIN * 2
+        footer_font, _ = _fit_font(15, left_text + right_text, avail, draw)
+        right_width = int(draw.textlength(right_text, font=footer_font))
+        left_width = max(0, avail - right_width - FOOTER_GAP)
+        draw.text(
+            _at(MARGIN, footer_y),
+            _truncate(draw, left_text, footer_font, left_width),
+            font=footer_font,
+            fill=COLOR_FOOTER,
+            anchor="lm",
+        )
+        draw.text(
+            _at(width - MARGIN, footer_y),
+            right_text,
+            font=footer_font,
+            fill=COLOR_FOOTER,
+            anchor="rm",
+        )
+    else:
+        # 定时任务那一发：页脚一字不改（它已经在群里跑了几周，换文案只会让人以为
+        # 换了一套东西）。
+        stamp = moment.strftime("%Y-%m-%d %H:%M")
+        footer = f"共 {len(rows)} 人{legend} · 排班以「工作台 → 班次表」为准 · 生成于 {stamp}"
+        draw.text(
+            _at(MARGIN, footer_y),
+            footer,
+            font=load_cjk_font(15),
+            fill=COLOR_FOOTER,
+            anchor="lm",
+        )
 
     buffer = io.BytesIO()
     image.save(buffer, format="PNG", optimize=True)

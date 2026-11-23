@@ -44,6 +44,7 @@ MODULE_REFUNDS = "refunds"
 MODULE_DATA_QUALITY = "data_quality"
 MODULE_TRAFFIC = "traffic"
 MODULE_WASTAGE = "wastage"
+MODULE_PURCHASE = "purchase"
 
 MODULE_LABELS: Dict[str, str] = {
     MODULE_ORDERS: "今日订单",
@@ -56,6 +57,7 @@ MODULE_LABELS: Dict[str, str] = {
     MODULE_DATA_QUALITY: "数据质量",
     MODULE_TRAFFIC: "客流",
     MODULE_WASTAGE: "损耗",
+    MODULE_PURCHASE: "厨房采购",
 }
 
 DEFAULT_MODULES: Tuple[str, ...] = tuple(MODULE_LABELS)
@@ -98,6 +100,20 @@ MAX_REFUND_REASONS = 6
 
 # 损耗卡一条一行（单位不统一，合计没有意义）。超过这个条数折成「其他 N 笔」。
 MAX_WASTAGE_ROWS = 7
+
+# 采购异常分四类，一类一行（标量 + 前几个例子），不逐条列：一天几十项，
+# 列全了卡片会有半屏高，而店长要的是「哪一类多」。
+#: 菜品 TOP10 的行高。10 行时 44px 刚好，48px 会把卡片撑到 480px。
+DISH_ROW_HEIGHT = 44
+PURCHASE_ROW_HEIGHT = 32
+#: 采购异常明细的总行数上限（含每类的标题行）。53 项是常态，故障日可能上百项。
+MAX_PURCHASE_ROWS = 60
+#: 采购明细两列之间的间距。
+PURCHASE_COL_GAP = 28
+#: 采购四类的标题行高（比明细行高，字号也大一档 —— 53 条明细里要能一眼分出四段）。
+PURCHASE_TITLE_HEIGHT = 46
+#: 纯文字版每类最多列几条（出图失败时的降级通道，受微信 2048 字节限制）。
+TEXT_PURCHASE_ITEMS = 3
 WASTAGE_ROW_HEIGHT = 32
 REFUND_ROW_HEIGHT = 30
 REFUND_REASON_HEIGHT = 28
@@ -127,6 +143,7 @@ class DailyOpsReport:
     data_quality: Optional[Dict[str, Any]] = None
     traffic: Optional[Dict[str, Any]] = None
     wastage: Optional[Dict[str, Any]] = None
+    purchase: Optional[Dict[str, Any]] = None
     # 模块 -> 这一块为什么是空的（折行右侧的小字）。
     empty_reason: Dict[str, str] = field(default_factory=dict)
 
@@ -214,7 +231,7 @@ async def _collect_hourly(db, business_date: str) -> Optional[List[Dict[str, Any
 async def _collect_dishes(db, business_date: str) -> Optional[List[Dict[str, Any]]]:
     report = await db.compute_sales_report(business_date, business_date)
     dishes = []
-    for row in (report.get("dish_sales") or [])[:5]:
+    for row in (report.get("dish_sales") or [])[:10]:
         name = _DISH_PREFIX.sub("", str(row.get("dish_name") or "").strip())
         qty = int(row.get("qty") or 0)
         if name and qty > 0:
@@ -449,6 +466,121 @@ async def _collect_traffic(db, business_date: str) -> Optional[Dict[str, Any]]:
     }
 
 
+#: 采购异常的四类，按「最该先看」排序；颜色区分严重度。
+PURCHASE_KINDS = (
+    ("over", "超量", COLOR_ACCENT),
+    ("under", "低量", COLOR_GOLD),
+    ("no_order", "未下单", COLOR_INK),
+    ("zero_stock", "零库存", COLOR_ACCENT),
+)
+
+
+def _purchase_detail(kind: str, row: Mapping[str, Any]) -> str:
+    """一条异常的可核对信息：实际 / 参考 + 单位 + 倍数，或天数，或库存。"""
+    if kind == "no_order":
+        return f"{int(row.get('days') or 0)} 天"
+    if kind == "zero_stock":
+        return "0"
+    parts = [
+        f"{_fmt_qty(row.get('quantity') or 0)} / {_fmt_qty(row.get('reference') or 0)}",
+        str(row.get("unit") or "").strip(),
+        f"{float(row.get('ratio') or 0):.1f}×",
+    ]
+    return " ".join(part for part in parts if part)
+
+
+def _purchase_sort_key(kind: str, row: Mapping[str, Any]) -> tuple:
+    """严重的在前；同类内超量按倍数降序、低量按倍数升序、未下单按天数降序。"""
+    high = 0 if row.get("severity") == "high" else 1
+    if kind == "over":
+        return (high, -float(row.get("ratio") or 0))
+    if kind == "under":
+        return (high, float(row.get("ratio") or 0))
+    if kind == "no_order":
+        return (high, -int(row.get("days") or 0))
+    return (high, 0)
+
+
+async def _collect_purchase(db, business_date: str) -> Optional[Dict[str, Any]]:
+    """厨房采购异常：超量 / 低量 / 长期未下单 / 盘点为零，四类逐条列明细。
+
+    口径直接复用采购分析的 ``PurchaseService.anomalies_for_day``（同一个函数体，
+    只是不判人）——日报不另算一套：阈值（1.5 / 0.5 / 3 天）一旦漂了，店长看到的
+    日报和采购分析页就会互相打脸。
+
+    采购按自然日、日报按营业日（06:00 切）：22:15 发的就是当天，两者同一天；
+    早上 8 点发的日报看的是前一天，采购侧也是那一天。
+
+    行数封顶 ``MAX_PURCHASE_ROWS``：53 项是常态（卡片约 1800px），但系统故障时
+    能刷出上百项，不封顶会把整张图撑到七八千像素、微信里滑不动。
+    """
+    from services.purchase.service import PurchaseService
+
+    data = await PurchaseService().anomalies_for_day(db, day=business_date)
+    prepared: List[Dict[str, Any]] = []
+    total = 0
+    high_total = 0
+    for kind, label, color in PURCHASE_KINDS:
+        rows = data.get(kind) or []
+        if not rows:
+            continue
+        ordered = sorted(rows, key=lambda row: _purchase_sort_key(kind, row))
+        high = sum(1 for row in ordered if row.get("severity") == "high")
+        items = []
+        for row in ordered:
+            submitter = ""
+            if kind in ("over", "under"):
+                names = [str(name).strip() for name in (row.get("submitters") or []) if str(name).strip()]
+                submitter = " · ".join(names[:2])
+            items.append(
+                {
+                    "name": str(row.get("name") or "").strip() or "未填品名",
+                    "detail": _purchase_detail(kind, row),
+                    "by": submitter,
+                    "high": row.get("severity") == "high",
+                }
+            )
+        prepared.append(
+            {
+                "kind": kind,
+                "label": label,
+                "color": color,
+                "count": len(ordered),
+                "high": high,
+                "items": items,
+            }
+        )
+        total += len(ordered)
+        high_total += high
+    if total <= 0:
+        return None
+
+    groups, folded = _cap_purchase_groups(prepared)
+    return {"total": total, "high": high_total, "groups": groups, "folded": folded}
+
+
+def _cap_purchase_groups(
+    prepared: Sequence[Mapping[str, Any]], budget: int = MAX_PURCHASE_ROWS
+) -> tuple:
+    """按 ``MAX_PURCHASE_ROWS``（含每类的标题行）截断，返回 (groups, 折掉的条数)。
+
+    按四类顺序吃预算：前一类的明细先占满，后面的类别可能整类被折走 —— 顺序本身就是
+    「最该先看」的优先级，被折掉的必然是最后那几类。
+    """
+    groups: List[Dict[str, Any]] = []
+    folded = 0
+    for group in prepared:
+        items = list(group.get("items") or [])
+        if budget <= 1:
+            folded += len(items)
+            continue
+        take = min(len(items), budget - 1)
+        groups.append(dict(group, items=items[:take]))
+        folded += len(items) - take
+        budget -= 1 + take
+    return groups, folded
+
+
 async def _collect_wastage(db, business_date: str) -> Optional[Dict[str, Any]]:
     """报损明细：一条一行（品名 · 数量单位 · 原因 · 提交人）。
 
@@ -508,6 +640,7 @@ async def collect_report(
         MODULE_DATA_QUALITY: lambda: _collect_data_quality(business_date),
         MODULE_TRAFFIC: lambda: _collect_traffic(db, business_date),
         MODULE_WASTAGE: lambda: _collect_wastage(db, business_date),
+        MODULE_PURCHASE: lambda: _collect_purchase(db, business_date),
     }
     for module in selected:
         collector = collectors.get(module)
@@ -540,6 +673,7 @@ def _empty_reason(module: str, selected: bool) -> str:
         MODULE_DATA_QUALITY: "暂无对账结果",
         MODULE_TRAFFIC: "暂无客流快照",
         MODULE_WASTAGE: "暂无报损记录",
+        MODULE_PURCHASE: "今日无采购异常",
     }.get(module, "暂无数据")
 
 
@@ -622,6 +756,23 @@ def render_text(report: DailyOpsReport) -> str:
             lines.append(
                 f"  {item['item']} {_fmt_qty(item['qty'])}{unit} · {item['reason']}{by}"
             )
+    if report.purchase:
+        head = f"厨房采购：{report.purchase['total']} 项异常"
+        if report.purchase.get("high"):
+            head += f"（{report.purchase['high']} 项严重）"
+        lines.append(head)
+        # 纯文字是出图失败时的降级通道：每类只带三条，剩下的折「等 N 项」——
+        # 53 行全写进正文约 4800 字节，微信单条上限 2048，会被拆成四五条连发。
+        for group in report.purchase.get("groups") or []:
+            lines.append(f"  {group['label']} {group['count']} 项")
+            items = group.get("items") or []
+            for item in items[:TEXT_PURCHASE_ITEMS]:
+                by = f" · {item['by']}" if item.get("by") else ""
+                lines.append(f"    {item['name']} {item['detail']}{by}")
+            if len(items) > TEXT_PURCHASE_ITEMS:
+                lines.append(f"    等 {len(items) - TEXT_PURCHASE_ITEMS} 项")
+        if report.purchase.get("folded"):
+            lines.append(f"  其余 {report.purchase['folded']} 项未列出")
     folded = [module for module in DEFAULT_MODULES if getattr(report, module) is None]
     if folded:
         lines.append("暂无数据：" + "、".join(MODULE_LABELS[module] for module in folded))
@@ -699,7 +850,7 @@ def _measure(report: DailyOpsReport, modules: Sequence[str]) -> _Canvas:
             # 柱图区 150 + 小时标签 30 + 数值上方的 4px
             canvas.add(module, report.hourly, _card_height(184))
         elif module == MODULE_DISHES:
-            canvas.add(module, report.dishes, _card_height(len(report.dishes or []) * 48 - 8))
+            canvas.add(module, report.dishes, _card_height(len(report.dishes or []) * DISH_ROW_HEIGHT - 4))
         elif module == MODULE_SCHEDULING:
             canvas.add(module, report.scheduling, _card_height(2 * 108 - 12))
         elif module == MODULE_REFUNDS:
@@ -713,6 +864,12 @@ def _measure(report: DailyOpsReport, modules: Sequence[str]) -> _Canvas:
                 module,
                 report.wastage,
                 _card_height(_wastage_body_height(report.wastage or {})),
+            )
+        elif module == MODULE_PURCHASE:
+            canvas.add(
+                module,
+                report.purchase,
+                _card_height(_purchase_body_height(report.purchase or {})),
             )
         elif module == MODULE_DATA_QUALITY:
             canvas.add(module, report.data_quality, _card_height(len(_quality_rows(report.data_quality)) * 34))
@@ -824,6 +981,7 @@ def _draw_module(draw: ImageDraw.ImageDraw, y: int, height: int, module: str, da
         MODULE_DATA_QUALITY: _draw_data_quality,
         MODULE_TRAFFIC: _draw_traffic,
         MODULE_WASTAGE: _draw_wastage,
+        MODULE_PURCHASE: _draw_purchase,
     }.get(module)
     if drawer is not None:
         drawer(draw, y, height, data, report)
@@ -888,16 +1046,17 @@ def _draw_hourly(draw: ImageDraw.ImageDraw, y: int, height: int, data: Sequence[
 
 
 def _draw_dishes(draw: ImageDraw.ImageDraw, y: int, height: int, data: Sequence[Mapping[str, Any]], report: DailyOpsReport) -> None:
-    top = _card_title(draw, y, "菜品销量 TOP 5", f"全店 {report.orders['dishes'] if report.orders else '—'} 道")
+    top = _card_title(draw, y, "菜品销量 TOP 10", f"全店 {report.orders['dishes'] if report.orders else '—'} 道")
     left = MARGIN + CARD_PAD
     usable = IMAGE_WIDTH - 2 * MARGIN - 2 * CARD_PAD
-    name_w = 210
+    # 10 名里有「皇上皇腊味萝卜糕」这种 8 字名，210 的列宽会让它压到条形图上。
+    name_w = 240
     qty_w = 54
     track_x = left + name_w + 16
     track_w = usable - name_w - qty_w - 32
     peak = max(item["qty"] for item in data)
     for index, item in enumerate(data, start=1):
-        row_y = top + (index - 1) * 48
+        row_y = top + (index - 1) * DISH_ROW_HEIGHT
         draw.text((left, row_y + 6), f"{index:02d}", font=load_cjk_font(FONT_SMALL), fill=COLOR_MUTED)
         draw.text(
             (left + 34, row_y + 4),
@@ -1128,6 +1287,67 @@ def _draw_wastage(draw: ImageDraw.ImageDraw, y: int, height: int, data: Mapping[
     if folded:
         draw.text((left, cursor), f"其他 {folded} 笔", font=small, fill=COLOR_MUTED)
         cursor += WASTAGE_ROW_HEIGHT
+
+
+def _purchase_body_height(data: Mapping[str, Any]) -> int:
+    """类标题一行（偏高）+ 明细两列竖向排（一半在左、一半在右）。"""
+    height = 0
+    for group in data.get("groups") or []:
+        items = len(group.get("items") or [])
+        height += PURCHASE_TITLE_HEIGHT + ((items + 1) // 2) * PURCHASE_ROW_HEIGHT
+    if data.get("folded"):
+        height += PURCHASE_ROW_HEIGHT
+    return height
+
+
+def _draw_purchase(draw: ImageDraw.ImageDraw, y: int, height: int, data: Mapping[str, Any], report: DailyOpsReport) -> None:
+    severe = int(data.get("high") or 0)
+    tag = f"{data['total']} 项 · {severe} 项严重" if severe else f"{data['total']} 项"
+    top = _card_title(draw, y, "厨房采购", tag, COLOR_ACCENT if severe else COLOR_INK2)
+    left = MARGIN + CARD_PAD
+    right = IMAGE_WIDTH - MARGIN - CARD_PAD
+    small = load_cjk_font(FONT_SMALL)
+    tiny = load_cjk_font(FONT_TINY)
+    label_font = load_cjk_font(FONT_BODY)
+    # 53 行单列会把卡片撑到 1800px，所以明细分两列：每类左列排一半、右列排另一半，
+    # 同一类里从上往下读仍然连续（不是左右左右交替）。
+    col_w = (right - left - PURCHASE_COL_GAP) // 2
+    cursor = top
+    for group in data.get("groups") or []:
+        # 类标题比明细大一档、带一块色条，还要双绘一遍补出「粗」——Pillow 的中文字体
+        # 只能按字号取，没有 weight 可用，0.6px 的偏移重绘是这里唯一能加粗的办法。
+        draw.rectangle([left, cursor + 5, left + 5, cursor + 30], fill=group["color"])
+        title = f"{group['label']} {group['count']} 项"
+        draw.text((left + 15, cursor + 2), title, font=label_font, fill=group["color"])
+        draw.text((left + 15.6, cursor + 2), title, font=label_font, fill=group["color"])
+        cursor += PURCHASE_TITLE_HEIGHT
+        items = group.get("items") or []
+        split = (len(items) + 1) // 2
+        for index, item in enumerate(items):
+            column = 0 if index < split else 1
+            row = index if column == 0 else index - split
+            x0 = left + column * (col_w + PURCHASE_COL_GAP)
+            yy = cursor + row * PURCHASE_ROW_HEIGHT
+            by = item.get("by") or ""
+            detail = item["detail"]
+            block = draw.textlength(detail, font=small)
+            if by:
+                block += 10 + draw.textlength(by, font=tiny)
+            detail_x = x0 + col_w - block
+            name = _truncate(draw, item["name"], small, max(48, detail_x - 8 - x0))
+            draw.text((x0, yy), name, font=small, fill=COLOR_ACCENT if item.get("high") else COLOR_INK)
+            draw.text(
+                (detail_x, yy), detail, font=small,
+                fill=COLOR_ACCENT if item.get("high") else COLOR_INK2,
+            )
+            if by:
+                draw.text(
+                    (detail_x + draw.textlength(detail, font=small) + 10, yy + 3),
+                    by, font=tiny, fill=COLOR_INK2,
+                )
+        cursor += max(split, len(items) - split) * PURCHASE_ROW_HEIGHT
+    if data.get("folded"):
+        draw.text((left, cursor), f"其余 {data['folded']} 项未列出", font=tiny, fill=COLOR_MUTED)
 
 
 # ── 统一出站上的渲染器 ──────────────────────────────────────────────────────

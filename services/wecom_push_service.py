@@ -9,7 +9,6 @@ import base64
 import hashlib
 import json
 import logging
-import re
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Mapping, Optional, Sequence
@@ -35,6 +34,14 @@ from services.wecom_push_topics import (
     get_topic,
     topic_display_name,
 )
+from services.wecom_push_slots import (
+    ScheduleSlot,
+    dump_last_sent,
+    last_sent_map,
+    record_last_sent,
+    slot_matches_day,
+    slots_from_row,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +53,8 @@ SALES_REPORT_PUSH_TYPE = "sales_report_text"
 DATA_QUALITY_PUSH_TYPE = "data_quality_alert"
 ALLOWED_PUSH_TYPES = frozenset({SALES_REPORT_PUSH_TYPE, DATA_QUALITY_PUSH_TYPE})
 SCHEDULER_INTERVAL_SECONDS = 30
+# 漏发宽限：失败补发是 +10 分钟，一过点就报「漏发」会闪出一条几分钟后自己消失的告警。
+MISSED_GRACE_MINUTES = 30
 SEND_TIMEOUT_SECONDS = 10
 
 
@@ -97,10 +106,14 @@ def mask_webhook_url(webhook_url: str) -> str:
 
 
 def validate_schedule_time(schedule_time: str) -> str:
-    normalized_time = (schedule_time or "").strip()
-    if not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", normalized_time):
-        raise ValueError("推送时间格式必须是 HH:MM")
-    return normalized_time
+    """推送时间必须是 HH:MM —— 与触发点列表共用 `wecom_push_slots.normalize_time` 一条规则。
+
+    接口层（`api/wecom_push.py` 的 `JobIn`）还留着这个历史名字；列表里的每一行也走
+    同一个函数，两边分家的话「单点任务能存、多点任务报错」会很莫名其妙。
+    """
+    from services.wecom_push_slots import normalize_time
+
+    return normalize_time(schedule_time)
 
 
 def job_params(job: Mapping[str, Any]) -> Dict[str, Any]:
@@ -256,6 +269,34 @@ def next_week_start(business_date: str) -> str:
     """
     anchor = date.fromisoformat(business_date)
     return (anchor - timedelta(days=anchor.weekday()) + timedelta(days=7)).isoformat()
+
+
+def week_start_of(day: str) -> str:
+    """把任意一天归一到它所在周的周一（手动推送的 week_start 口径）。
+
+    页面上翻到的是某一周，按钮只传那一周里的一天也行；接口与渲染器都按周一归一，
+    同一周怎么传都是同一张图、同一个幂等键前缀。
+    """
+    anchor = date.fromisoformat(str(day or "").strip())
+    return (anchor - timedelta(days=anchor.weekday())).isoformat()
+
+
+def weekly_schedule_title(week_start: str, *, today: Optional[date] = None) -> str:
+    """手动推送的图标题：按这一周与今天的关系说话。
+
+    本周 / 下周不写日期（群里天天看「11/17 – 11/23 排班」会累）；更早或更晚的周写
+    日期范围 —— 这张图可能用来对上周的班、也可能提前发节假日的班，光说「排班」没人
+    知道是哪一周。日期范围本来就在标题条右侧，这里只给一句人话。
+    """
+    start = date.fromisoformat(week_start_of(week_start))
+    anchor = today or datetime.now(CHINA_TZ).date()
+    this_monday = anchor - timedelta(days=anchor.weekday())
+    if start == this_monday:
+        return "本周排班"
+    if start == this_monday + timedelta(days=7):
+        return "下周排班"
+    end = start + timedelta(days=6)
+    return f"{start.month}/{start.day} – {end.month}/{end.day} 排班"
 
 
 def _schedule_cell_text(cell: Mapping[str, Any]) -> str:
@@ -518,6 +559,7 @@ class WeComPushService:
         *,
         business_date: str = "",
         now: Optional[datetime] = None,
+        week_start: str = "",
     ) -> Dict[str, Any]:
         """投递那一刻的「下一周」周表（文字版与图片版共用这一份数据）。
 
@@ -534,7 +576,8 @@ class WeComPushService:
             await store.expand()
         except Exception as exc:  # noqa: BLE001 —— 补排失败不该让整条推送发不出去
             logger.warning("下周排班推送前补排失败（继续用已有行）：%s", exc)
-        return await store.week_grid(start=next_week_start(base))
+        start = week_start_of(week_start) if week_start else next_week_start(base)
+        return await store.week_grid(start=start)
 
     async def build_weekly_schedule_message(
         self,
@@ -542,13 +585,16 @@ class WeComPushService:
         *,
         business_date: str = "",
         now: Optional[datetime] = None,
+        week_start: str = "",
     ) -> RenderedMessage:
         """「下一周」排班表的**文字**版（字体缺失时的降级、以及老的调用方）。
 
         群机器人正常收到的是图片版（见 `build_weekly_schedule_image`）：文字版在
         20 人的店也要一百多行，群里要往下翻。
         """
-        grid = await self._weekly_grid(db, business_date=business_date, now=now)
+        grid = await self._weekly_grid(
+            db, business_date=business_date, now=now, week_start=week_start
+        )
         return render_weekly_schedule_text(grid)
 
     async def build_weekly_schedule_image(
@@ -557,6 +603,9 @@ class WeComPushService:
         *,
         business_date: str = "",
         now: Optional[datetime] = None,
+        week_start: str = "",
+        title: str = "",
+        pushed_by: str = "",
     ) -> Optional[bytes]:
         """「下一周」排班表的**图片**版；本机没有中文字体时返回 ``None``（调用方退文字）。
 
@@ -566,8 +615,10 @@ class WeComPushService:
         """
         from services.wecom_schedule_image import render_weekly_schedule_png
 
-        grid = await self._weekly_grid(db, business_date=business_date, now=now)
-        return render_weekly_schedule_png(grid)
+        grid = await self._weekly_grid(
+            db, business_date=business_date, now=now, week_start=week_start
+        )
+        return render_weekly_schedule_png(grid, title=title, pushed_by=pushed_by)
 
     async def _daily_ops_report(
         self,
@@ -631,15 +682,18 @@ class WeComPushService:
         topic_id = str(job.get("topic_id") or "")
         params = job_params(job)
         if topic_id == TOPIC_SALES_REPORT:
+            # 营业日按**这次的触发时刻**推断（ADR 0144）：一条任务可能 11:30 与 21:30
+            # 各推一次，早上那次推上一营业日、晚上那次推当天，任务级固定成「昨天」会让
+            # 早上那次拿到一份还没打完烊的报表。
             return await self.build_sales_report_message(
                 db,
-                date_range_mode=str(params.get("date_range_mode") or "today"),
+                business_date=daily_ops_business_date(now),
                 station=str(params.get("station") or ""),
             )
         if topic_id == TOPIC_RECONCILE_DIFF:
             return await self.build_data_quality_message(
                 db,
-                date_range_mode=str(params.get("date_range_mode") or "today"),
+                business_date=daily_ops_business_date(now),
             )
         if topic_id == TOPIC_WEEKLY_SCHEDULE:
             # 预览 / 立即发送用**此刻**的营业日：「下一周」对现在这一刻有意义。
@@ -716,6 +770,7 @@ class WeComPushService:
         business_reference: str,
         targets: Optional[List[Any]] = None,
         now: Optional[datetime] = None,
+        slot_time: str = "",
     ) -> List[int]:
         """把一条推送任务按它的内容类型入队，收件人来自订阅（票 08）。
 
@@ -723,7 +778,8 @@ class WeComPushService:
         `schedule_id` = 任务 id，定时类「失败当天补发一次」的状态机就挂在这上面。
 
         ``now`` 传给入队那一步去冻结营业日：调度循环算 `last_sent_date` 与冻结参数用的
-        必须是同一个时刻（假时钟才穿得过去）。
+        必须是同一个时刻（假时钟才穿得过去）。``slot_time`` 是这次命中的触发点时刻，只
+        用来在发送记录里区分「同一条任务的 11:30 与 21:30 两封」。
         """
         # 延迟导入：出站服务要用本模块的发送器与拆分函数，模块级互相 import 会成环。
         from services.wecom_outbox import wecom_outbox
@@ -732,6 +788,8 @@ class WeComPushService:
         topic = get_topic(topic_id)
         if topic is None:
             raise ValueError(f"未知的推送内容类型: {topic_id}")
+        job_name = str(job.get("name") or "")
+        summary_text = f"{job_name} · {slot_time}" if slot_time else job_name
         return await wecom_outbox.enqueue_topic(
             db,
             topic_id,
@@ -741,8 +799,8 @@ class WeComPushService:
             targets=targets,
             schedule_id=int(job["id"]),
             # 发送记录页悬停能认出这是哪一封：报表类的正文在发送时才渲染，入队时拿不到
-            # 首行，用任务名做摘要。
-            summary=str(job.get("name") or ""),
+            # 首行，用「任务名 · 触发时刻」做摘要（同一任务多个触发点时两者缺一不可）。
+            summary=summary_text,
             now=now,
         )
 
@@ -776,11 +834,12 @@ class WeComPushService:
             )
 
         # 手工发送每次都是新的一次外发（连点两次就是两封），所以引用里带时刻；定时投递
-        # 用的是营业日，两者不会撞在同一个幂等键上。
+        # 用的是「营业日#任务#触发点」，两者不会撞在同一个幂等键上。任务 id 也进引用：
+        # 两条任务同时点「立即发送」是两次真实外发，不该被幂等键吞掉一条。
         outbox_ids = await self.enqueue_job(
             db,
             job,
-            business_reference=f"{business_date_of(moment)}#manual#{moment.isoformat()}",
+            business_reference=f"{business_date_of(moment)}#manual#{job_id}#{moment.isoformat()}",
             targets=targets,
             now=moment,
         )
@@ -841,7 +900,7 @@ class WeComPushService:
         }
 
     async def dispatch_due_jobs(self, db: DatabaseManager, now: Optional[datetime] = None) -> int:
-        """到点就把这条任务**按订阅入队**，但每个营业日只入队一次。
+        """到点就把这条任务**按订阅入队**，但每个营业日的每个触发点只入队一次。
 
         收件人来自订阅（票 08）：任务只描述「内容类型 + 参数 + 时间」，一次投递一个目标
         一行出站记录，真正发出去由统一出站的状态机负责（节流、失败当天补发都在那儿）。
@@ -857,18 +916,23 @@ class WeComPushService:
         current_time = now or datetime.now(CHINA_TZ)
         current_date = business_date_of(current_time)
         current_minute = current_time.strftime("%H:%M")
+        business_day = date.fromisoformat(current_date)
         jobs = await db.wecom_jobs_all(include_disabled=False)
         dispatched_count = 0
         for job in jobs:
-            if job.get("schedule_time") != current_minute:
+            due_slots = self._due_slots(job, business_day, current_minute, business_date=current_date)
+            if not due_slots:
                 continue
-            if job.get("last_sent_date") == current_date:
-                continue
-            if not self._weekly_due(job, current_date):
-                continue
+            # 同一分钟命中多个点（「每天 09:00」+「周一 09:00」）只入队一次：同一营业日
+            # 同一时刻推两遍一模一样的内容没有意义，而触发点列表本来允许这样叠。
+            slot = due_slots[0]
             try:
                 outbox_ids = await self.enqueue_job(
-                    db, job, business_reference=current_date, now=current_time
+                    db,
+                    job,
+                    business_reference=f"{current_date}#{job.get('id')}#{slot.time}",
+                    slot_time=slot.time,
+                    now=current_time,
                 )
                 if not outbox_ids:
                     logger.warning(
@@ -877,79 +941,147 @@ class WeComPushService:
                         job.get("topic_id"),
                     )
                     continue
-                await db.wecom_job_mark_sent(int(job["id"]), current_date)
+                sent_map = record_last_sent(
+                    last_sent_map(job), current_date, slot.time, current_time
+                )
+                await db.wecom_job_update(
+                    int(job["id"]),
+                    {
+                        "last_sent_date": current_date,
+                        "last_sent_json": dump_last_sent(sent_map),
+                    },
+                )
                 dispatched_count += 1
             except Exception as exc:
                 logger.error("企微定时推送任务失败 job_id=%s: %s", job.get("id"), exc)
         return dispatched_count
 
     @staticmethod
-    def _weekly_due(job: Mapping[str, Any], business_date: str) -> bool:
-        """这条任务今天该不该触发（每周触发的内容类型）。
+    def _slot_moment(business_date: str, slot_time: str) -> Optional[datetime]:
+        """营业日里某个触发点对应的**真实时刻**（06:00 切日的换算）。
 
-        每天到点就推的内容类型永远该触发。``PushTopic.weekly`` 的那一类则由参数里的
-        ``weekday`` 决定：只在周表的那一天入队，其余六天直接跳过 —— 跳过**不写**
-        `last_sent_date`，所以那一天到了照样会发。
-
-        营业日而不是日历日：任务的 `schedule_time` 可以落在 00:00–06:00（营业日算前一天），
-        那种情况下「每周日」指的是**营业日**的周日，与 `last_sent_date` 用的是同一把尺子
-        （CORR-05）。
-
-        参数缺失 / 认不出来时**不发**（记一条警告）：默认成某一天会让一条配错的任务悄悄
-        每周发一次，而店长在页面上看到的是一个空的下拉。
+        营业日 D 从 D 06:00 起算，所以 00:00–05:59 的点其实落在 D+1 凌晨；漏发判定
+        必须跟真实时刻比，否则半夜那条永远显示「还没到」。
         """
-        topic = get_topic(str(job.get("topic_id") or ""))
-        if topic is None or not topic.weekly:
-            return True
-        raw = job_params(job).get("weekday")
         try:
-            weekday = int(raw)
+            day = date.fromisoformat(business_date)
+            hour = int(slot_time[:2])
+            minute = int(slot_time[3:])
         except (TypeError, ValueError):
-            logger.warning(
-                "每周推送任务的参数里没有合法的 weekday（任务 %s，值 %r），本次跳过",
-                job.get("id"),
-                raw,
-            )
-            return False
-        if weekday not in WEEKDAY_LABELS:
-            logger.warning(
-                "每周推送任务的 weekday 越界（任务 %s，值 %r），本次跳过",
-                job.get("id"),
-                raw,
-            )
-            return False
-        return date.fromisoformat(business_date).weekday() == weekday
+            return None
+        moment = datetime.combine(day, datetime.min.time(), tzinfo=CHINA_TZ)
+        moment += timedelta(hours=hour, minutes=minute)
+        if hour < 6:
+            moment += timedelta(days=1)
+        return moment
 
     @staticmethod
-    def today_state(job: Mapping[str, Any], now: Optional[datetime] = None) -> str:
-        """这条任务**今天这一次**到点了没发 —— 只读判断，不参与任何投递逻辑。
+    def _slot_applies(slot: "ScheduleSlot", topic: Optional[Any]) -> bool:
+        """这个触发点对这个内容类型有没有意义。
 
-        `missed` 是给页面用的：调度器在 `schedule_time == current_minute` 那一分钟没跑到，
-        当天就漏了，第二天自动恢复（重启、部署、出站一轮吃满超时都会让那一分钟错过）。
-        页面上原本只有一行 12px 灰字「上次定时发送日期」，店长看不出「今天到点没发」。
-
-        取值：
-        - `sent`    —— 今天（营业日）已经发过；
-        - `pending` —— 今天还没到点；
-        - `missed`  —— 到点了，但今天没发（或发了没成功入队）；
-        - `off`     —— 任务停用，或按周规则今天本来就不该发。
-
-        尺子与调度循环完全一致：营业日（06:00 切）来自 `business_date_of`，周规则复用
-        `_weekly_due`，`last_sent_date` 也是营业日（CORR-05）。页面与调度器各算一套就会
-        出现「页面说有漏、调度说没漏」。
+        `weekday=None` 的意思是「每天」，非周任务正是这样；但**周任务**的点没有星期
+        （迁移前的坏数据、手改了库）按「每天」发，会让每周一张的排班图变成每天一张，
+        所以跳过 —— 与旧版 `_weekly_due` 遇到坏 weekday 时一样保守。保存接口也会拒绝
+        这种写法，这里只是兜底。
         """
-        if not job.get("enabled"):
-            return "off"
-        schedule = str(job.get("schedule_time") or "").strip()
-        if not schedule:
-            return "off"
+        if topic is not None and topic.weekly and slot.weekday is None:
+            logger.debug("周任务的触发点 %s 没有星期，跳过", slot.time)
+            return False
+        return True
+
+    @classmethod
+    def _due_slots(
+        cls,
+        job: Mapping[str, Any],
+        business_day: date,
+        current_minute: str,
+        *,
+        business_date: str,
+    ) -> List["ScheduleSlot"]:
+        """这一分钟该触发的点：时刻相同、星期对得上、这个营业日还没发过。"""
+        slots = slots_from_row(job)
+        if not slots:
+            return []
+        topic = get_topic(str(job.get("topic_id") or ""))
+        sent_today = last_sent_map(job).get(business_date, {})
+        if not sent_today and str(job.get("last_sent_date") or "") == business_date:
+            # 0063 之前的行只记了日期、没记时刻（迁移回填给的是空串键）。这一天既然发过，
+            # 就不该在第一个到点的位置上再推一遍。
+            return []
+        return [
+            slot
+            for slot in slots
+            if slot.time == current_minute
+            and cls._slot_applies(slot, topic)
+            and slot_matches_day(slot, business_day)
+            and slot.time not in sent_today
+        ]
+
+    @classmethod
+    def today_schedule(
+        cls, job: Mapping[str, Any], now: Optional[datetime] = None
+    ) -> Dict[str, Any]:
+        """这条任务在**当前营业日**每个触发点的状态（只读，页面用）。
+
+        `missed` 只列「过点 30 分钟仍未发出」的点：失败的定时投递会在 +10 分钟补发一次，
+        一过点就报漏发，店长会看到一枚几分钟后自己消失的假告警。
+
+        尺子与调度循环一致：营业日来自 `business_date_of`（06:00 切），星期匹配走
+        `slot_matches_day`，已发记录读 `last_sent_json`（旧行回退 `last_sent_date`）。
+        """
         moment = now or datetime.now(CHINA_TZ)
         business_date = business_date_of(moment)
-        if str(job.get("last_sent_date") or "") == business_date:
-            return "sent"
-        if not WeComPushService._weekly_due(job, business_date):
-            return "off"
-        return "missed" if moment.strftime("%H:%M") >= schedule else "pending"
+        slots = slots_from_row(job)
+        enabled = bool(job.get("enabled"))
+        day = date.fromisoformat(business_date)
+        sent = last_sent_map(job).get(business_date, {})
+        flagged_today = str(job.get("last_sent_date") or "") == business_date
+        entries: List[Dict[str, Any]] = []
+        next_time = ""
+        topic = get_topic(str(job.get("topic_id") or ""))
+        for slot in slots:
+            due_at = cls._slot_moment(business_date, slot.time)
+            if not enabled or not cls._slot_applies(slot, topic) or not slot_matches_day(slot, day):
+                state = "off"
+            elif slot.time in sent or flagged_today:
+                state = "sent"
+            elif due_at is not None and moment >= due_at + timedelta(minutes=MISSED_GRACE_MINUTES):
+                state = "missed"
+            else:
+                state = "pending"
+                if due_at is not None and due_at > moment and not next_time:
+                    next_time = slot.time
+            entries.append({"time": slot.time, "weekday": slot.weekday, "state": state})
+        states = [entry["state"] for entry in entries]
+        if not enabled or not entries or all(state == "off" for state in states):
+            overall = "off"
+        elif "missed" in states:
+            overall = "missed"
+        elif all(state in ("sent", "off") for state in states):
+            overall = "sent"
+        else:
+            overall = "pending"
+        return {
+            "state": overall,
+            "business_date": business_date,
+            "slots": entries,
+            "missed": [entry["time"] for entry in entries if entry["state"] == "missed"],
+            "next_time": next_time,
+        }
+
+    @classmethod
+    def today_state(cls, job: Mapping[str, Any], now: Optional[datetime] = None) -> str:
+        """这条任务**今天这一次**到点了没发 —— 只读判断，不参与任何投递逻辑。
+
+        取值：
+        - `sent`    —— 今天（营业日）该发的点都发过了；
+        - `pending` —— 今天还有没到点的点；
+        - `missed`  —— 有点过点 30 分钟仍未发出；
+        - `off`     —— 任务停用，或按星期规则今天本来就不该发。
+
+        页面只显示一枚徽章，所以这里只给汇总值；哪个点漏了看 `today_schedule`。
+        """
+        return cls.today_schedule(job, now=now)["state"]
 
     async def scheduler_loop(self, db: DatabaseManager) -> None:
         """30 秒一轮：定时任务到点就推 + 运维事件 + 统一出站的兜底、派发与保留清理。
@@ -1078,7 +1210,22 @@ class WeeklyScheduleRenderer:
             moment = datetime.now(CHINA_TZ)
         if moment.tzinfo is None:
             moment = moment.replace(tzinfo=CHINA_TZ)
-        # 优先发图（用户要的就是截图）；出图失败退文字，别让当天一条都不发。
+        manual_week_start = str(params.get("week_start") or "").strip()
+        if manual_week_start:
+            # 手动推送（周表页的按钮）：人指定了周次，画的就是那一周。这一发点的是
+            # 「发图」，出图失败不能退文字 —— 一段上百行的文字甩进群里既不是他要的，
+            # 也看不出是哪一周；让这一行落 failed，发送记录里写明原因。
+            title = str(params.get("title") or "") or weekly_schedule_title(manual_week_start)
+            image = await self._service.build_weekly_schedule_image(
+                self._db,
+                week_start=manual_week_start,
+                title=title,
+                pushed_by=str(params.get("operator_name") or ""),
+            )
+            if not image:
+                raise ValueError("服务器缺中文字体，无法生成排班图")
+            return RenderedDelivery(image_bytes=image)
+        # 定时任务：优先发图（用户要的就是截图）；出图失败退文字，别让当天一条都不发。
         try:
             image = await self._service.build_weekly_schedule_image(
                 self._db, business_date=business_date_of(moment)

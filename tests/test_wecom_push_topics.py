@@ -97,24 +97,14 @@ SCHEDULED_TOPICS = list(EXPECTED_SCHEDULE_TIMES)
 # 表单字段（照片是例外：它的参数形状已经被迁移里那批出站行的 params_json 定死了；
 # 对账差异告警是两种触发方式都有，表单形状来自它的定时侧）。
 EXPECTED_PARAMS = {
-    "sales_report": {
-        "schedule_time": ("time", False),
-        "date_range_mode": ("select", False),
-        "station": ("select", False),
-    },
-    "reconcile_diff": {
-        "schedule_time": ("time", False),
-        "date_range_mode": ("select", False),
-    },
-    # 运营日报：只有推送时间与模块多选，**没有日期口径**（营业日由触发时间推断）。
-    "daily_ops_report": {
-        "schedule_time": ("time", False),
-        "modules": ("checkbox-group", False),
-    },
-    "weekly_schedule": {
-        "schedule_time": ("time", False),
-        "weekday": ("select", False),
-    },
+    "sales_report": {"station": ("select", False)},
+    # 对账差异告警的定时侧：没有表单参数（营业日按触发时刻推断）。
+    "reconcile_diff": {},
+    # 运营日报：只有模块多选，**没有时间、没有日期口径** —— 时间是任务级的一张表，
+    # 营业日由每个触发点自己的时刻推断。
+    "daily_ops_report": {"modules": ("checkbox-group", False)},
+    # 下周排班表：同样没有参数（哪天推由触发点的 weekday 决定）。
+    "weekly_schedule": {},
     "hygiene_photo": {
         "ref_key": ("text", True),
         "capture_id": ("text", True),
@@ -235,6 +225,8 @@ def test_each_topic_payload_exposes_a_consumable_schema_and_uischema(
         "params_schema",
         "uischema",
         "default_schedule_time",
+        # 新建任务第一条触发点带不带星期（下周排班表 = 周日）
+        "default_weekday",
         # 票 06：订阅视图上标「含员工实拍照片」用（判断依据是内容的性质，不是页面）
         "contains_employee_photos",
         # 下周排班表：每周一次（调度循环按参数里的 weekday 过滤）
@@ -293,15 +285,25 @@ def test_only_the_data_quality_daily_topics_support_the_scheduled_trigger():
 
 @pytest.mark.parametrize("topic_id", SCHEDULED_TOPICS)
 def test_every_scheduled_topic_declares_its_default_push_time(topic_id):
-    """定时类都有默认推送时间，schema 里也带着这个默认值（票 08 的表单直接用它）。"""
+    """定时类都有默认推送时间，但它**不在参数表单里**（v6 多触发点）。
+
+    时间是一张独立的表（哪天 + 几点，可多行），新建任务时第一行取这个默认值；参数区
+    只剩内容参数（档口、日报模块）。把时间塞回参数 = 一条任务只能有一个时刻。
+    """
     payload = _payload(topic_id)
 
     assert payload["default_schedule_time"] == EXPECTED_SCHEDULE_TIMES[topic_id]
-    assert _controls(payload)["schedule_time"] == "time"
+    assert "schedule_time" not in payload["params_schema"]["properties"]
+    assert "time" not in _controls(payload).values()
 
-    schedule_time = payload["params_schema"]["properties"]["schedule_time"]
-    assert schedule_time["default"] == EXPECTED_SCHEDULE_TIMES[topic_id]
-    assert schedule_time["pattern"] == r"^([01]\d|2[0-3]):[0-5]\d$"
+
+def test_weekly_schedule_defaults_to_sunday():
+    """排班表默认每周日推；其余定时类每天推（默认不带星期）。"""
+    weekly = _payload("weekly_schedule")
+
+    assert weekly["weekly"] is True
+    assert weekly["default_weekday"] == 6
+    assert _payload("sales_report")["default_weekday"] is None
 
 
 def test_reconcile_diff_supports_both_triggers():
@@ -317,8 +319,8 @@ def test_reconcile_diff_supports_both_triggers():
     assert payload["triggers"] == ["scheduled", "event"]
 
     assert payload["default_schedule_time"] == "22:10"
-    assert _controls(payload) == {"schedule_time": "time", "date_range_mode": "select"}
-    assert _one_of(payload, "date_range_mode") == {"today": "当天", "yesterday": "昨天"}
+    # 定时侧没有表单参数（时间在任务级的触发点表里，营业日按触发时刻推断）。
+    assert _controls(payload) == {}
 
 
 @pytest.mark.parametrize("topic_id", EVENT_ONLY_TOPICS)
@@ -332,23 +334,22 @@ def test_event_only_topics_have_no_push_time_parameter(topic_id):
     assert "time" not in _controls(payload).values()
 
 
-def test_the_time_rule_is_the_same_one_the_legacy_jobs_use():
-    """注册表的 HH:MM 规则与 services.wecom_push_service 的同一条：不能一边收一边拒。"""
-    for topic_id in SCHEDULED_TOPICS:
-        for value in ["21:30", "22:10", "00:00", "23:59", "24:00", "9:5", "2130", ""]:
-            try:
-                validate_schedule_time(value)
-                legacy_ok = True
-            except ValueError:
-                legacy_ok = False
-            try:
-                validate_params(
-                    topic_id, {"schedule_time": value}, trigger=PushTrigger.SCHEDULED
-                )
-                registry_ok = True
-            except ValueError:
-                registry_ok = False
-            assert registry_ok is legacy_ok, f"{topic_id} 上 {value!r} 两边判定不一致"
+def test_the_time_rule_is_the_same_one_the_slots_use():
+    """HH:MM 规则只有一份：`validate_schedule_time` 就是触发点模块那一个包装。"""
+    from services.wecom_push_slots import normalize_time
+
+    for value in ["21:30", "22:10", "00:00", "23:59", "24:00", "9:5", "2130", "", "21:30:00"]:
+        try:
+            validate_schedule_time(value)
+            job_ok = True
+        except ValueError:
+            job_ok = False
+        try:
+            normalize_time(value)
+            slot_ok = True
+        except ValueError:
+            slot_ok = False
+        assert job_ok is slot_ok, f"{value!r} 两边判定不一致"
 
 
 # ── 下拉选项与标签也来自后端 ────────────────────────────────────────────────
@@ -368,27 +369,15 @@ def test_station_dropdown_lists_the_kitchen_stations_minus_the_floor():
     }
 
 
-def test_date_range_dropdown_labels_come_from_the_backend():
-    assert _one_of(_payload("sales_report"), "date_range_mode") == {
-        "today": "当天",
-        "yesterday": "昨天",
-    }
-
 
 # ── 参数校验：与 schema 一致 ────────────────────────────────────────────────
 
 
 def test_validate_params_fills_the_defaults_of_a_form_topic():
-    assert validate_params("sales_report", {}) == {
-        "schedule_time": "21:30",
-        "date_range_mode": "today",
-        "station": "",
-    }
-    # 对账差异告警的定时侧（数据质量日报）：默认时间与旧任务模板一致（22:10 / 当天）。
-    assert validate_params("reconcile_diff", {}, trigger=PushTrigger.SCHEDULED) == {
-        "schedule_time": "22:10",
-        "date_range_mode": "today",
-    }
+    assert validate_params("sales_report", {}) == {"station": ""}
+    # 对账差异告警的定时侧（数据质量日报）没有表单参数：档口只属于销售报表，
+    # 时间与日期口径都不再是参数。
+    assert validate_params("reconcile_diff", {}, trigger=PushTrigger.SCHEDULED) == {}
 
 
 def test_a_dual_trigger_topic_requires_naming_the_trigger():
@@ -416,6 +405,7 @@ def test_validate_params_rejects_fields_the_schema_does_not_declare():
     "params",
     [
         {"station": "no_such_station"},
+        # 时间与日期口径已经不是参数：出现在请求里按未知字段拒绝。
         {"date_range_mode": "last_week"},
         {"schedule_time": "25:00"},
     ],

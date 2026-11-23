@@ -306,8 +306,8 @@ def _create_job(api: WecomAdmin, name="每日销售报表") -> dict:
     resp = api.as_session("POST", f"{API_PREFIX}/jobs", json={
         "name": name,
         "topic_id": "sales_report",
-        "params": {"schedule_time": "21:30", "date_range_mode": "today", "station": ""},
-        "schedule_time": "21:30",
+        "params": {"station": ""},
+        "slots": [{"weekday": None, "time": "21:30"}],
         "enabled": True,
         "notes": "",
     })

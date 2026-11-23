@@ -21,10 +21,19 @@ from api.security import require_session, verify_admin_token
 from database import get_db, DatabaseManager
 from services import auth_service, wecom_audit
 from services.wecom_outbox import ResolvedTarget, resolve_targets, wecom_outbox
+from services.wecom_push_slots import (
+    SCHEDULE_SLOT_LIMIT,
+    ScheduleSlot,
+    dump_slots,
+    parse_slots,
+    row_last_sent_at,
+    schedule_text as schedule_text_of,
+    slot_labels,
+    slots_from_row,
+)
 from services.wecom_push_topics import (
     TOPIC_MANUAL_SEND,
     TOPIC_TEST_MESSAGE,
-    WEEKDAY_LABELS,
     WECOM_PUSH_API_VERSION,
     PushTopic,
     PushTrigger,
@@ -161,6 +170,9 @@ async def _job_snapshot(db: DatabaseManager, job_id: int) -> Optional[Dict[str, 
         "name": job.get("name", ""),
         "topic_id": str(job.get("topic_id") or ""),
         "schedule_time": job.get("schedule_time", ""),
+        # 一组触发点才看得出「改时间」到底改了什么；只记首行会让 11:30 → 21:30
+        # 这种改动在变更历史里看起来毫无变化。
+        "slots": [slot.as_dict() for slot in slots_from_row(job)],
         "enabled": bool(job.get("enabled")),
     }
 
@@ -261,6 +273,18 @@ class WebhookIn(BaseModel):
         return validate_webhook_url(value)
 
 
+class JobSlotIn(BaseModel):
+    """一个触发点：weekday 省略 = 每天都推，给了 0-6 就只在那天推。"""
+
+    weekday: Optional[int] = Field(None, ge=0, le=6)
+    time: str = Field(..., min_length=1, max_length=8)
+
+    @field_validator("time")
+    @classmethod
+    def normalize_time(cls, value: str) -> str:
+        return validate_schedule_time(value)
+
+
 class JobIn(BaseModel):
     """推送任务的新形状（票 08）：内容类型 + 参数 + 时间。
 
@@ -274,7 +298,10 @@ class JobIn(BaseModel):
     # 参数形状由内容类型的 schema 决定（注册表是唯一入口）：这里原样收下对象，校验交给
     # `topic.validate_params` —— 那边的错误文案才带得上字段名（"station: 档口不存在"）。
     params: Dict[str, Any] = Field(default_factory=dict)
-    schedule_time: str
+    # 触发点：一条任务可以一天推两次（11:30 + 21:30），也可以只在周一、周三推。
+    slots: List[JobSlotIn] = Field(default_factory=list)
+    # 旧 bundle 只发一个时刻：当成「每天该时刻」一行，保存时写进 slots_json。
+    schedule_time: str = ""
     enabled: bool = True
     notes: str = Field("", max_length=200)
 
@@ -289,7 +316,16 @@ class JobIn(BaseModel):
     @field_validator("schedule_time")
     @classmethod
     def normalize_schedule_time(cls, value: str) -> str:
-        return validate_schedule_time(value)
+        text = (value or "").strip()
+        return validate_schedule_time(text) if text else ""
+
+    @model_validator(mode="after")
+    def check_slots(self) -> "JobIn":
+        if len(self.slots) > SCHEDULE_SLOT_LIMIT:
+            raise ValueError(f"一条任务最多 {SCHEDULE_SLOT_LIMIT} 个推送时间")
+        if not self.slots and not self.schedule_time:
+            raise ValueError("请至少填一个推送时间")
+        return self
 
 
 # 旧形状（页面已更新，浏览器里还缓存着旧 bundle）的字段：请求体里出现任一个，就认定
@@ -700,7 +736,9 @@ def _job_payload(row: Dict[str, Any], targets: List[ResolvedTarget]) -> Dict[str
     except ValueError:
         params = {}
     params = params if isinstance(params, dict) else {}
-    schedule_time = row.get("schedule_time", "")
+    slots = slots_from_row(row)
+    schedule_time = slots[0].time if slots else str(row.get("schedule_time") or "")
+    state = wecom_push_service.today_schedule(row)
     return {
         "id": int(row["id"]),
         "name": row.get("name", ""),
@@ -708,16 +746,26 @@ def _job_payload(row: Dict[str, Any], targets: List[ResolvedTarget]) -> Dict[str
         # 注册表里没有这个 id（内容类型下过线）就退回 id：页面要看得见这一行。
         "topic_name": _topic_name(topic_id),
         "params": params,
+        "slots": [slot.as_dict() for slot in slots],
+        # 兼容字段：旧 bundle 只认一个时刻，取第一条触发点。
         "schedule_time": schedule_time,
+        # 每行的独立标签（「周一 09:00」「每天 11:30」），供卡片按行展示。
+        "schedule_labels": slot_labels(slots),
         # 卡片上那一枚时间徽章：每周触发的内容类型写成「每周日 13:00」—— 只写 13:00
         # 会让店长以为它每天都推。中文名与注册表同一份（`WEEKDAY_LABELS`）。
-        "schedule_text": _job_schedule_text(topic_id, params, schedule_time),
+        "schedule_text": schedule_text_of(slots),
         "enabled": bool(row.get("enabled")),
         "last_sent_date": row.get("last_sent_date", ""),
+        # 卡片上「上次发送：11-23 21:30」用的具体时刻（只记到日期看不出是哪一次）。
+        "last_sent_at": row_last_sent_at(row),
         # 今天这一次到点了没发：`sent` / `pending` / `missed` / `off`。
         # 只读判断，与调度循环用同一把尺子（`WecomPushService.today_state`）—— 页面自己
         # 算营业日会与调度器各说一套。
-        "today_state": wecom_push_service.today_state(row),
+        "today_state": state["state"],
+        # 今天哪几个点漏发了：卡片只在这一栏有货时提示，正常不显示。
+        "missed_slots": state["missed"],
+        # 下一个要触发的时刻（HH:MM），今天已全部发完时为空。
+        "next_time": state["next_time"],
         "notes": row.get("notes", ""),
         "created_at": row.get("created_at"),
         "updated_at": row.get("updated_at"),
@@ -725,23 +773,6 @@ def _job_payload(row: Dict[str, Any], targets: List[ResolvedTarget]) -> Dict[str
         "target_count": len(targets),
     }
 
-
-def _job_schedule_text(
-    topic_id: str, params: Dict[str, Any], schedule_time: str
-) -> str:
-    """任务卡片上的时间文案（纯函数，便于测试断言）。"""
-    time_text = str(schedule_time or "")
-    topic = get_topic(topic_id)
-    if topic is None or not topic.weekly:
-        return time_text
-    try:
-        weekday = int(params.get("weekday"))
-    except (TypeError, ValueError):
-        return time_text
-    label = WEEKDAY_LABELS.get(weekday)
-    if not label:
-        return time_text
-    return f"每{label} {time_text}".strip()
 
 
 def _job_topic(payload: JobIn) -> PushTopic:
@@ -759,20 +790,49 @@ def _job_topic(payload: JobIn) -> PushTopic:
     return topic
 
 
-def _job_params(topic: PushTopic, payload: JobIn) -> Dict[str, Any]:
-    """参数按注册表校验（内容类型的 schema 是唯一入口），并把顶层时间对齐进去。
+def _job_slots(payload: JobIn) -> List[ScheduleSlot]:
+    """请求体 → 触发点列表：去重、上限、格式校验都在 `parse_slots` 里一并把关。
 
-    页面上只有一个时间控件（参数区里那个 time 控件，由 uischema 驱动），顶层
-    `schedule_time` 是它的投影、也是调度列的值：两处必须一样，所以这里以顶层为准写回
-    参数，避免「列里 21:30、参数里 09:00」这种各说各话的存档。
+    顶层 `schedule_time` 是旧 bundle 的字段，只在 `slots` 为空时当作「每天该时刻」一行。
     """
     try:
-        params = topic.validate_params(payload.params, trigger=PushTrigger.SCHEDULED)
+        return parse_slots(
+            [slot.model_dump() for slot in payload.slots],
+            fallback_time=payload.schedule_time,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    if "schedule_time" in params:
-        params["schedule_time"] = payload.schedule_time
-    return params
+
+
+def _require_weekly_slots(topic: PushTopic, slots: List[ScheduleSlot]) -> None:
+    """每周任务必须给每个触发点选星期几。
+
+    `weekday=None` 是「每天」：用在周任务上等于把一周一张的排班图变成每天一张。这里
+    保存时就拒 —— 让调度侧静默跳过虽然也不会发错，但店长看不到原因。
+    """
+    if not topic.weekly:
+        return
+    for slot in slots:
+        if slot.weekday is None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"「{topic.name}」是每周任务，每个推送时间都要选星期几"
+                    f"（现在 {slot.time} 是每天）"
+                ),
+            )
+
+
+def _job_params(topic: PushTopic, payload: JobIn) -> Dict[str, Any]:
+    """参数按注册表校验（内容类型的 schema 是唯一入口）。
+
+    时间**不在参数里**：一条任务的时间和它推的内容是两回事，多个触发点共享同一份
+    参数（档口、日报模块），时刻存在 `slots_json`。
+    """
+    try:
+        return topic.validate_params(payload.params, trigger=PushTrigger.SCHEDULED)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 @router.get("/webhooks")
@@ -1289,11 +1349,15 @@ async def create_job(
     """新建推送任务：内容类型 + 参数 + 时间。收件人由订阅决定。"""
     topic = _job_topic(payload)
     params = _job_params(topic, payload)
+    slots = _job_slots(payload)
+    _require_weekly_slots(topic, slots)
     new_id = await db.wecom_job_create({
         "name": payload.name,
         "topic_id": payload.topic_id,
         "params_json": json.dumps(params, ensure_ascii=False),
-        "schedule_time": payload.schedule_time,
+        # schedule_time 列留第一条，只为兼容还读这一列的旧代码；调度与页面都读 slots_json。
+        "schedule_time": slots[0].time,
+        "slots_json": dump_slots(slots),
         "enabled": payload.enabled,
         "notes": payload.notes,
     })
@@ -1324,12 +1388,15 @@ async def update_job(
         raise HTTPException(status_code=404, detail="推送任务不存在")
     topic = _job_topic(payload)
     params = _job_params(topic, payload)
+    slots = _job_slots(payload)
+    _require_weekly_slots(topic, slots)
     before = await _job_snapshot(db, job_id)
     ok = await db.wecom_job_update(job_id, {
         "name": payload.name,
         "topic_id": payload.topic_id,
         "params_json": json.dumps(params, ensure_ascii=False),
-        "schedule_time": payload.schedule_time,
+        "schedule_time": slots[0].time,
+        "slots_json": dump_slots(slots),
         "enabled": payload.enabled,
         "notes": payload.notes,
         # `last_sent_date` 不在写请求里：改任务不该让今天已经推过的那一次「重新可推」。

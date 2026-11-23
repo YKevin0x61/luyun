@@ -15,7 +15,7 @@ import WecomPushView from '../WecomPushView.vue'
 // 里，下拉里就有它、选中之后参数区就渲染出它自己的字段。哪天有人把某一类内容的字段名
 // 写进前端，这条就会红。
 
-const API_VERSION = 'v2'
+const API_VERSION = 'v6'
 
 const SALES_TOPIC = {
   id: 'sales_report',
@@ -23,17 +23,11 @@ const SALES_TOPIC = {
   triggers: ['scheduled'],
   contains_employee_photos: false,
   default_schedule_time: '21:30',
+  default_weekday: null,
   params_schema: {
     type: 'object',
     additionalProperties: false,
     properties: {
-      schedule_time: { type: 'string', default: '21:30', title: '推送时间' },
-      date_range_mode: {
-        type: 'string',
-        default: 'today',
-        title: '日期口径',
-        oneOf: [{ const: 'today', title: '当天' }, { const: 'yesterday', title: '昨天' }],
-      },
       station: {
         type: 'string',
         default: '',
@@ -45,8 +39,6 @@ const SALES_TOPIC = {
   uischema: {
     type: 'VerticalLayout',
     elements: [
-      { type: 'Control', scope: '#/properties/schedule_time', label: '推送时间', options: { control: 'time' } },
-      { type: 'Control', scope: '#/properties/date_range_mode', label: '日期口径', options: { control: 'select' } },
       { type: 'Control', scope: '#/properties/station', label: '档口', options: { control: 'select' } },
     ],
   },
@@ -59,6 +51,7 @@ const PHOTO_TOPIC = {
   triggers: ['event'],
   contains_employee_photos: true,
   default_schedule_time: null,
+  default_weekday: null,
   params_schema: { type: 'object', properties: {} },
   uischema: { type: 'VerticalLayout', elements: [] },
 }
@@ -70,11 +63,11 @@ const FAKE_TOPIC = {
   triggers: ['scheduled'],
   contains_employee_photos: false,
   default_schedule_time: '07:15',
+  default_weekday: null,
   params_schema: {
     type: 'object',
     additionalProperties: false,
     properties: {
-      schedule_time: { type: 'string', default: '07:15', title: '推送时间' },
       watermark_level: {
         type: 'string',
         default: 'warn',
@@ -87,7 +80,6 @@ const FAKE_TOPIC = {
   uischema: {
     type: 'VerticalLayout',
     elements: [
-      { type: 'Control', scope: '#/properties/schedule_time', label: '推送时间', options: { control: 'time' } },
       { type: 'Control', scope: '#/properties/watermark_level', label: '水位等级', options: { control: 'select' } },
       { type: 'Control', scope: '#/properties/note_text', label: '附加说明', options: { control: 'text' } },
     ],
@@ -101,10 +93,13 @@ function job(id, name, scheduleTime, overrides = {}) {
     name,
     topic_id: 'sales_report',
     topic_name: '销售报表',
-    params: { schedule_time: scheduleTime, date_range_mode: 'today', station: '' },
+    params: { station: '' },
+    slots: [{ weekday: null, time: scheduleTime }],
     schedule_time: scheduleTime,
+    schedule_text: `每天 ${scheduleTime}`,
     enabled: true,
     last_sent_date: '2026-10-06',
+    last_sent_at: '2026-10-06T21:30:02+08:00',
     notes: '',
     target_count: 2,
     ...overrides,
@@ -220,11 +215,13 @@ describe('定时任务 tab 的表单', () => {
     await flushPromises()
 
     expect(wrapper.find('.wp-params-form').exists()).toBe(true)
-    expect(wrapper.find('input[type="time"]').exists()).toBe(true)
+    // 时间不再是某一类内容的参数，而是表单里独立的「推送时间」块（v6）：
+    // 参数区只有这一类的业务字段（档口），时刻控件在自己那块的每一行里。
+    expect(wrapper.find('.wp-params-form input[type="time"]').exists()).toBe(false)
+    expect(wrapper.find('.wp-slot-row input[type="time"]').exists()).toBe(true)
     const text = wrapper.find('.wp-params-form').text()
-    expect(text).toContain('推送时间')
-    expect(text).toContain('日期口径')
     expect(text).toContain('档口')
+    expect(text).not.toContain('推送时间')
   })
 
   it('夹具里的假内容类型：前端零改动就能渲染它的参数区', async () => {
@@ -268,12 +265,12 @@ describe('定时任务 tab 的表单', () => {
     expect(payload).toMatchObject({
       name: '每日销售报表',
       topic_id: 'sales_report',
-      schedule_time: '21:30',
+      slots: [{ weekday: null, time: '21:30' }],
       enabled: true,
     })
     expect(payload.webhook_id).toBeUndefined()
     expect(payload.push_type).toBeUndefined()
-    expect(payload.params.schedule_time).toBe('21:30')
+    expect(payload.params.schedule_time).toBeUndefined()
   })
 })
 
@@ -287,7 +284,7 @@ describe('任务卡片', () => {
     expect(text).toContain('销售报表')
     expect(text).toContain('订阅目标')
     expect(text).toContain('2 个群')
-    expect(text).toContain('2026-10-06')
+    expect(text).toContain('上次发送：10-06 21:30')
   })
 })
 

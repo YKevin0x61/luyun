@@ -242,6 +242,7 @@ export const COLUMN_LABELS = {
   'wecom_push_jobs.push_type': '推送类型', 'wecom_push_jobs.schedule_time': '定时时间',
   'wecom_push_jobs.date_range_mode': '日期范围', 'wecom_push_jobs.station': '档口',
   'wecom_push_jobs.enabled': '是否启用', 'wecom_push_jobs.last_sent_date': '上次发送日期',
+  'wecom_push_jobs.slots_json': '触发点', 'wecom_push_jobs.last_sent_json': '各触发点发送记录',
   'wecom_push_jobs.notes': '备注', 'wecom_push_jobs.created_at': '创建时间',
   'wecom_push_jobs.updated_at': '更新时间', 'wecom_push_jobs.rowid': '序号',
   'wecom_push_logs.job_id': '任务ID', 'wecom_push_logs.webhook_id': 'Webhook ID',

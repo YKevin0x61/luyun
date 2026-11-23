@@ -319,21 +319,21 @@ def test_job_create_disable_edit_delete_are_recorded(api):
     """票面覆盖范围：任务的增删改（表单里的「启用定时推送」同样是启停）。"""
     created = api.post(f"{API_PREFIX}/jobs", json={
         "name": "每日报表", "topic_id": "sales_report",
-        "params": {"schedule_time": "21:30", "date_range_mode": "today", "station": ""},
-        "schedule_time": "21:30", "enabled": True, "notes": "",
+        "params": {"station": ""},
+        "slots": [{"weekday": None, "time": "21:30"}], "enabled": True, "notes": "",
     })
     assert created.status_code == 200, created.text
     job_id = created.json()["job"]["id"]
 
     api.put(f"{API_PREFIX}/jobs/{job_id}", json={
         "name": "每日报表", "topic_id": "sales_report",
-        "params": {"schedule_time": "21:30", "date_range_mode": "today", "station": ""},
-        "schedule_time": "21:30", "enabled": False, "notes": "",
+        "params": {"station": ""},
+        "slots": [{"weekday": None, "time": "21:30"}], "enabled": False, "notes": "",
     })
     api.put(f"{API_PREFIX}/jobs/{job_id}", json={
         "name": "每日报表（改点）", "topic_id": "sales_report",
-        "params": {"schedule_time": "22:45", "date_range_mode": "yesterday", "station": ""},
-        "schedule_time": "22:45", "enabled": False, "notes": "",
+        "params": {"station": ""},
+        "slots": [{"weekday": None, "time": "22:45"}], "enabled": False, "notes": "",
     })
     api.delete(f"{API_PREFIX}/jobs/{job_id}")
 

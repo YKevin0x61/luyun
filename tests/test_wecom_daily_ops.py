@@ -24,6 +24,7 @@ from services.wecom_daily_ops import (
     MODULE_ORDERS,
     MODULE_SCHEDULING,
     MODULE_WASTAGE,
+    MODULE_PURCHASE,
     DailyOpsReport,
     normalize_modules,
     render_png,
@@ -47,8 +48,8 @@ def test_topic_is_registered_with_its_own_default_time():
     assert topic.name == "运营日报"
     # 22:15 是在对账（22:05）之后：日报里的数据质量必须是终态，不能一边推一边还在对账。
     assert topic.default_schedule_time == "22:15"
-    # 日期口径不进参数，由触发时间推断。
-    assert topic.auto_business_date is True
+    # 日期口径不进参数：每个触发点入队时按自己的时刻推断营业日（12:00 切），所以一条
+    # 任务可以 11:30 推上一营业日、21:30 推当天。
     assert "date_range_mode" not in topic.params_schema["properties"]
 
 
@@ -63,7 +64,7 @@ def test_modules_field_is_checkbox_group_with_every_module_as_an_option():
 def test_modules_default_is_in_the_schema_so_a_new_job_starts_checked():
     """参数表单的初始值只认 JSON Schema 的 `default`（`defaultJobParams`）。
 
-    用 `default_factory` 时 pydantic 不会把它写进 schema，新建任务就是十个空框 ——
+    用 `default_factory` 时 pydantic 不会把它写进 schema，新建任务就是十一个空框 ——
     页面上看起来像「默认什么都不推」。
     """
     schema = get_topic(TOPIC_DAILY_OPS_REPORT).params_schema["properties"]["modules"]
@@ -71,10 +72,10 @@ def test_modules_default_is_in_the_schema_so_a_new_job_starts_checked():
     assert DailyOpsReportParams().modules is not DailyOpsReportParams().modules
 
 
-def test_default_modules_are_all_ten():
+def test_default_modules_are_all_eleven():
     params = validate_params(TOPIC_DAILY_OPS_REPORT, {})
     assert params["modules"] == list(DEFAULT_MODULES)
-    assert len(params["modules"]) == 10
+    assert len(params["modules"]) == 11
 
 
 def test_collect_report_isolates_one_failed_module(monkeypatch):
@@ -188,6 +189,22 @@ def _sample_report() -> DailyOpsReport:
                 "present": [{"reason": "员工餐", "lines": 2, "money": 56.0}],
             },
         },
+        purchase={
+            "total": 3,
+            "high": 1,
+            "folded": 0,
+            "groups": [
+                {"kind": "over", "label": "超量", "color": "#b8432f", "count": 2,
+                 "high": 1,
+                 "items": [
+                     {"name": "黄柠檬", "detail": "5 / 0.8 斤 6.2×", "by": "彭灼洪", "high": True},
+                     {"name": "小油条", "detail": "8 / 2.6 包 3.1×", "by": "", "high": False},
+                 ]},
+                {"kind": "no_order", "label": "未下单", "color": "#6f6252", "count": 1,
+                 "high": 0,
+                 "items": [{"name": "小海鲜", "detail": "16 天", "by": "", "high": False}]},
+            ],
+        },
         empty_reason={"wastage": "暂无报损记录"},
     )
 
@@ -256,6 +273,41 @@ def test_render_png_grows_with_wastage_entries():
 
     with Image.open(BytesIO(single)) as a, Image.open(BytesIO(many)) as b:
         assert b.size[1] - a.size[1] == (5 - 1) * 32
+
+
+def test_render_text_lists_purchase_anomalies_by_kind():
+    """采购异常逐条列出：类标题一行，明细带数量/参考/倍数与提交人。"""
+    text = render_text(_sample_report())
+    assert "厨房采购：3 项异常（1 项严重）" in text
+    assert "  超量 2 项" in text
+    assert "    黄柠檬 5 / 0.8 斤 6.2× · 彭灼洪" in text
+    assert "    小油条 8 / 2.6 包 3.1×" in text
+    assert "  未下单 1 项" in text
+    assert "    小海鲜 16 天" in text
+
+
+def test_render_png_grows_with_purchase_groups():
+    two = _sample_report()
+    one = _sample_report()
+    one.purchase = {
+        "total": 2,
+        "high": 1,
+        "folded": 0,
+        "groups": [one.purchase["groups"][0]],
+    }
+    a = render_png(one, modules=[MODULE_PURCHASE])
+    b = render_png(two, modules=[MODULE_PURCHASE])
+    if a is None or b is None:
+        pytest.skip("本机没有中文字体")
+    from io import BytesIO
+
+    from PIL import Image
+
+    from services.wecom_daily_ops import PURCHASE_ROW_HEIGHT, PURCHASE_TITLE_HEIGHT
+
+    with Image.open(BytesIO(a)) as ia, Image.open(BytesIO(b)) as ib:
+        # 多一组 = 一个类标题（比明细高）+ 一条明细
+        assert ib.size[1] - ia.size[1] == PURCHASE_TITLE_HEIGHT + PURCHASE_ROW_HEIGHT
 
 
 def test_render_text_handles_an_empty_day():
@@ -329,3 +381,31 @@ def test_render_png_grows_with_refund_reason_rows():
     if short is None or tall is None:
         pytest.skip("本机没有中文字体")
     assert _png_height(tall) - _png_height(short) == 5 * 28
+
+
+def test_cap_purchase_groups_keeps_earlier_kinds_first():
+    """60 行封顶（含类标题）：把四类各 20 条塞进去，只装得下前三类的一部分。"""
+    from services.wecom_daily_ops import _cap_purchase_groups
+
+    prepared = [
+        {
+            "kind": kind,
+            "label": kind,
+            "count": 20,
+            "high": 0,
+            "items": [{"name": f"{kind}{i}", "detail": "1", "by": "", "high": False} for i in range(20)],
+        }
+        for kind in ("over", "under", "no_order", "zero_stock")
+    ]
+    groups, folded = _cap_purchase_groups(prepared)
+    assert [len(group["items"]) for group in groups] == [20, 20, 17]
+    assert folded == 23
+
+
+def test_cap_purchase_groups_folds_everything_when_budget_is_one():
+    from services.wecom_daily_ops import _cap_purchase_groups
+
+    prepared = [{"kind": "over", "label": "超量", "count": 3, "high": 0, "items": [{"name": "a"}] * 3}]
+    groups, folded = _cap_purchase_groups(prepared, budget=1)
+    assert groups == []
+    assert folded == 3

@@ -12,7 +12,7 @@ import { api } from '../api/client'
  * `admin-web/src/composables/__tests__/useWecomPushSubscriptions.test.js`
  * 与 `tests/test_wecom_push_channels_api.py`。
  */
-export const WECOM_PUSH_API_VERSION = 'v5'
+export const WECOM_PUSH_API_VERSION = 'v6'
 
 /**
  * 订阅视图切「多选列表」的渠道数阈值。
@@ -723,6 +723,27 @@ export function jobTodayStateLabel(state) {
 }
 
 /**
+ * 漏了哪一个触发点：`今天 11:30 漏发`。
+ *
+ * 一条任务一天可能有 11:30 与 21:30 两个点，只说「今日未发送」会让店长分不清是早报
+ * 没发还是晚报没发。没漏就返回空串（页面不显示）。
+ */
+export function jobMissedLabel(job) {
+  const times = (job && Array.isArray(job.missed_slots) ? job.missed_slots : [])
+    .map((time) => String(time || '').trim())
+    .filter(Boolean)
+  return times.length ? `今天 ${times.join('、')} 漏发` : ''
+}
+
+/** 卡片上「上次发送：11-23 21:30」：日期之外还要报时刻，一天多个点才对得上号。 */
+export function jobLastSentLabel(job) {
+  const stamp = String((job && job.last_sent_at) || '')
+  const matched = stamp.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/)
+  if (!matched) return ''
+  return `上次发送：${matched[2]}-${matched[3]} ${matched[4]}:${matched[5]}`
+}
+
+/**
  * 某类内容类型的参数默认值：直接取它的 JSON Schema 里每个字段的 `default`。
  *
  * 切换内容类型时用它把参数区铺满（下拉要有选中项），所以**字段名一个都不写死** ——
@@ -742,21 +763,74 @@ export function defaultJobParams(topic) {
 }
 
 /**
- * 任务的请求体（票 08 的形状）：内容类型 + 参数 + 时间。
+ * 把一条任务存着的参数收成**这一类内容认识的那几个键**。
  *
- * 顶层 `schedule_time` 是**调度列**的值，取自参数区那个时间控件（页面上只有这一个
- * 时间入口）；参数里没有它时退回注册表声明的默认时间。收件人不在请求体里 —— 它由
- * 该内容类型的订阅决定，带上旧的 `webhook_id` 会被后端明确拒绝。
+ * 存量任务的 `params_json` 里还留着 v6 之前的 `schedule_time` / `date_range_mode`
+ * （时间搬去了 slots、日期口径改成按触发点推断）。参数模型是 extra=forbid，原样回传
+ * 会被 400；所以编辑时按 schema 过滤一遍 —— 页面不认识的键就是这一类内容不认识的键。
+ * 一条任务换了内容类型时也一样：旧类型留下的参数不该混进新类型。
  */
-export function jobPayload({ name = '', topicId = '', params = {}, notes = '', enabled = true } = {}, topics = []) {
+export function jobParamsForTopic(topic, params) {
+  const properties = (topic && topic.params_schema && topic.params_schema.properties) || {}
+  const source = params || {}
+  const picked = {}
+  for (const field of Object.keys(properties)) {
+    if (Object.prototype.hasOwnProperty.call(source, field)) picked[field] = source[field]
+  }
+  return picked
+}
+
+/**
+ * 触发点列表（v6）：一条任务可以有好几个「哪天 + 几点」。
+ *
+ * 归一在这一个函数里做完 —— 表单里加了一行空时间、星期选的是空串、`<input type=time>`
+ * 交上来 `21:30:00`，都先变成后端认得的形状再上送。空时间的那一行直接丢掉：它只是
+ * 用户点了「加一个时间」还没填，不该让保存报错。
+ */
+export function normalizeJobSlots(slots) {
+  return (Array.isArray(slots) ? slots : [])
+    .map((slot) => ({
+      weekday: slot && slot.weekday !== null && slot.weekday !== undefined && slot.weekday !== ''
+        ? Number(slot.weekday)
+        : null,
+      time: String((slot && slot.time) || '').trim().slice(0, 5),
+    }))
+    .filter((slot) => slot.time)
+    .map((slot) => ({
+      weekday: Number.isInteger(slot.weekday) ? slot.weekday : null,
+      time: slot.time,
+    }))
+}
+
+/** 新建任务时的那一行：时间与星期取注册表的默认值（周排班是「每周日 13:00」）。 */
+export function defaultJobSlots(topic) {
+  const time = String((topic && topic.default_schedule_time) || '')
+  const weekday = topic && topic.weekly ? Number(topic.default_weekday) : null
+  return [{ weekday: Number.isInteger(weekday) ? weekday : null, time }]
+}
+
+/**
+ * 任务的请求体（v6）：内容类型 + 参数 + 触发点列表。
+ *
+ * 时间不进内容参数：一条任务的两份不同内容要建两条任务，而一条任务的两个时间点
+ * 是同一份内容的两次投递。`schedule_time` 仍带上第一条，只为兼容还没升级的旧后端。
+ * 收件人不在请求体里 —— 它由该内容类型的订阅决定，带上旧的 `webhook_id` 会被明确拒绝。
+ */
+export function jobPayload({ name = '', topicId = '', params = {}, slots = [], notes = '', enabled = true } = {}, topics = []) {
   const topic = (topics || []).find((item) => item.id === topicId)
-  const timeFromParams = String((params || {}).schedule_time || '')
-  const scheduleTime = timeFromParams || String((topic && topic.default_schedule_time) || '')
+  let rows = normalizeJobSlots(slots)
+  if (!rows.length) {
+    // 旧调用方（参数里还塞着 schedule_time）：表单里已经没有那个控件，这里退回一行。
+    const legacy = String((params || {}).schedule_time || '')
+    if (legacy) rows = [{ weekday: null, time: legacy }]
+    else if (topic) rows = normalizeJobSlots(defaultJobSlots(topic))
+  }
   return {
     name: String(name || '').trim(),
     topic_id: topicId,
     params: { ...params },
-    schedule_time: scheduleTime,
+    slots: rows,
+    schedule_time: rows.length ? rows[0].time : '',
     enabled: !!enabled,
     notes: String(notes || '').trim(),
   }
@@ -923,7 +997,8 @@ export function useWecomPush() {
     return { id: '', name: '', notes: '', enabled: true }
   }
   function emptyJobForm() {
-    return { id: '', name: '', topic_id: '', params: {}, notes: '', enabled: true }
+    // `slots` 是触发点列表（v6）：选内容类型后按它的默认时间铺一行，之后可以再加。
+    return { id: '', name: '', topic_id: '', params: {}, slots: [], notes: '', enabled: true }
   }
 
   function resetChannelForm() { Object.assign(channelForm, emptyChannelForm()) }
@@ -1288,22 +1363,27 @@ export function useWecomPush() {
   // ── 定时任务与发送记录（票 08 重做定时任务那一半）──────────────────────────
   function editJob(item) {
     selectedJobId.value = item.id
+    const topic = (meta.value.topics || []).find((entry) => entry.id === item.topic_id)
     Object.assign(jobForm, {
       id: item.id,
       name: item.name,
       topic_id: item.topic_id || '',
       // 参数按注册表的默认值铺底，再用任务自己的参数覆盖：这样即便某类内容新加了字段，
-      // 老任务也能在表单里看到它（而不是缺一块控件）。
+      // 老任务也能在表单里看到它（而不是缺一块控件）。覆盖前先按 schema 收一遍 ——
+      // 老任务的 params 里还留着 v6 之前的 schedule_time / date_range_mode。
       params: {
-        ...defaultJobParams((meta.value.topics || []).find((t) => t.id === item.topic_id)),
-        ...(item.params || {}),
+        ...defaultJobParams(topic),
+        ...jobParamsForTopic(topic, item.params),
       },
+      // 触发点：后端给 `slots`；更老的响应只有 schedule_time，退回一行每天。
+      slots: normalizeJobSlots(
+        Array.isArray(item.slots) && item.slots.length
+          ? item.slots
+          : [{ weekday: (item.params || {}).weekday ?? null, time: item.schedule_time || '' }],
+      ),
       notes: item.notes || '',
       enabled: !!item.enabled,
     })
-    if (!jobForm.params.schedule_time && item.schedule_time) {
-      jobForm.params.schedule_time = item.schedule_time
-    }
   }
 
   /** 选一类内容类型：参数区立刻按它的 schema 铺满默认值。 */
@@ -1311,6 +1391,7 @@ export function useWecomPush() {
     const topic = (meta.value.topics || []).find((item) => item.id === topicId)
     jobForm.topic_id = topicId
     jobForm.params = defaultJobParams(topic)
+    jobForm.slots = defaultJobSlots(topic)
   }
 
   /** 一键填入某类内容的默认参数（原来是写死的「模板」，现在模板就是注册表的默认值）。 */
@@ -1325,14 +1406,21 @@ export function useWecomPush() {
   async function saveJob() {
     const id = jobForm.id
     if (!jobForm.topic_id) throw new Error('请选择推送内容类型')
+    // 校验用**表单里的原始行**，不用 jobPayload 补齐后的结果：补齐是给旧调用方的兜底，
+    // 而表单里一行时间都没填就是没填，静默补一条默认时间等于替用户改了推送时刻。
+    const rows = normalizeJobSlots(jobForm.slots)
+    if (!rows.length) throw new Error('请至少填一个推送时间')
+    if (rows.some((slot) => !/^([01]\d|2[0-3]):[0-5]\d$/.test(slot.time))) {
+      throw new Error('推送时间格式不对（要 HH:MM）')
+    }
     const payload = jobPayload({
       name: jobForm.name,
       topicId: jobForm.topic_id,
       params: jobForm.params,
+      slots: jobForm.slots,
       notes: jobForm.notes,
       enabled: jobForm.enabled,
     }, meta.value.topics)
-    if (!payload.schedule_time) throw new Error('请填写推送时间')
     const data = await api[id ? 'put' : 'post'](
       id ? `/api/wecom-push/jobs/${id}` : '/api/wecom-push/jobs', payload)
     selectedJobId.value = (data.job && data.job.id) || Number(id) || selectedJobId.value

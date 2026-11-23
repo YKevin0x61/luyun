@@ -155,7 +155,8 @@ class _WecomRepoMixin:
         try:
             tdb = self._connection.table("wecom_push_jobs")
             sql = """SELECT id, name, topic_id, params_json, schedule_time,
-                            enabled, last_sent_date, notes, created_at, updated_at
+                            slots_json, enabled, last_sent_date, last_sent_json,
+                            notes, created_at, updated_at
                      FROM wecom_push_jobs"""
             params: List[Any] = []
             if not include_disabled:
@@ -176,7 +177,8 @@ class _WecomRepoMixin:
             async with tdb.conn.cursor() as cursor:
                 await cursor.execute(
                     """SELECT id, name, topic_id, params_json, schedule_time,
-                              enabled, last_sent_date, notes, created_at, updated_at
+                              slots_json, enabled, last_sent_date, last_sent_json,
+                              notes, created_at, updated_at
                        FROM wecom_push_jobs WHERE id = ?""",
                     (job_id,),
                 )
@@ -194,16 +196,18 @@ class _WecomRepoMixin:
             async with tdb.conn.cursor() as cursor:
                 await cursor.execute(
                     """INSERT INTO wecom_push_jobs
-                       (name, topic_id, params_json, schedule_time, enabled,
-                        last_sent_date, notes, created_at, updated_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       (name, topic_id, params_json, schedule_time, slots_json, enabled,
+                        last_sent_date, last_sent_json, notes, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         item["name"],
                         str(item["topic_id"]),
                         str(item.get("params_json") or "{}"),
                         item["schedule_time"],
+                        str(item.get("slots_json") or "[]"),
                         1 if item.get("enabled", True) else 0,
                         item.get("last_sent_date", ""),
+                        str(item.get("last_sent_json") or "{}"),
                         item.get("notes", ""),
                         now,
                         now,
@@ -227,15 +231,18 @@ class _WecomRepoMixin:
                 await cursor.execute(
                     """UPDATE wecom_push_jobs
                        SET name = ?, topic_id = ?, params_json = ?, schedule_time = ?,
-                           enabled = ?, last_sent_date = ?, notes = ?, updated_at = ?
+                           slots_json = ?, enabled = ?, last_sent_date = ?,
+                           last_sent_json = ?, notes = ?, updated_at = ?
                        WHERE id = ?""",
                     (
                         item.get("name", existing["name"]),
                         str(item.get("topic_id", existing["topic_id"])),
                         str(item.get("params_json", existing.get("params_json") or "{}")),
                         item.get("schedule_time", existing["schedule_time"]),
+                        str(item.get("slots_json", existing.get("slots_json") or "[]")),
                         1 if item.get("enabled", bool(existing["enabled"])) else 0,
                         item.get("last_sent_date", existing.get("last_sent_date", "")),
+                        str(item.get("last_sent_json", existing.get("last_sent_json") or "{}")),
                         item.get("notes", existing.get("notes", "")),
                         now,
                         job_id,

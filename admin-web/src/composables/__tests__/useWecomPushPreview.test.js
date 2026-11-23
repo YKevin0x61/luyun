@@ -29,17 +29,15 @@ const TOPICS = [
     name: '销售报表',
     triggers: ['scheduled'],
     default_schedule_time: '21:30',
-    params_schema: {
-      type: 'object',
-      properties: { schedule_time: { type: 'string', default: '21:30' } },
-    },
+    default_weekday: null,
+    params_schema: { type: 'object', properties: {} },
     uischema: {},
   },
 ]
 
 const JOBS = [
-  { id: 1, name: '早报', topic_id: 'sales_report', params: { schedule_time: '21:30' }, enabled: true, target_count: 2 },
-  { id: 2, name: '晚报', topic_id: 'sales_report', params: { schedule_time: '22:30' }, enabled: true, target_count: 2 },
+  { id: 1, name: '早报', topic_id: 'sales_report', params: {}, slots: [{ weekday: null, time: '21:30' }], enabled: true, target_count: 2 },
+  { id: 2, name: '晚报', topic_id: 'sales_report', params: {}, slots: [{ weekday: null, time: '22:30' }], enabled: true, target_count: 2 },
 ]
 
 function previewPayload(content = '早报正文第一行\n第二行') {
@@ -101,7 +99,7 @@ describe('预览失效（票 01）', () => {
     await state.previewSelectedJob()
 
     Object.assign(state.jobForm, {
-      id: 1, name: '早报', topic_id: 'sales_report', params: { schedule_time: '21:30' },
+      id: 1, name: '早报', topic_id: 'sales_report', params: {}, slots: [{ weekday: null, time: '21:30' }],
     })
     apiPut.mockResolvedValueOnce({ success: true, job: { id: 1 } })
     await state.saveJob()

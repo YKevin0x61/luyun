@@ -62,7 +62,7 @@ AUTO_DATE_SWITCH_HOUR = 12
 
 
 def auto_business_date_mode(now: "datetime") -> str:
-    """``auto_business_date`` 的内容类型按触发时间选日期口径（ADR 0144）。
+    """定时类内容按触发点的时刻选日期口径（ADR 0144，多触发点见 ADR 0159）。
 
     返回 ``"today"`` / ``"yesterday"``，直接交给 ``resolve_report_dates``：
     「最近一个已结束的营业日」在 22:15 就是当天，在早上 8 点就是昨天。
@@ -108,7 +108,12 @@ WEEKDAY_SHORT_LABELS = {value: label.replace("周", "") for value, label in WEEK
 #
 # 前端那一半在 `admin-web/src/composables/useWecomPush.js`（`WECOM_PUSH_API_VERSION`），
 # 两处由 `admin-web/src/composables/__tests__/useWecomPushSubscriptions.test.js` 钉住。
-WECOM_PUSH_API_VERSION = "v5"
+# v6（多触发点）：一条任务可以有多个「哪天 + 几点」（slots_json），定时任务的
+# 参数里不再有 schedule_time / weekday / date_range_mode；/jobs 每一行多了 slots
+# （完整列表）与 schedule_text（前三个 + 「等 N 个」），/meta 每一类多了
+# default_schedule_time（新建任务第一条时间的默认值）。页面要换表单与徽章才显示得对，
+# 所以 +1。
+WECOM_PUSH_API_VERSION = "v6"
 
 
 
@@ -131,13 +136,6 @@ def _station_choices() -> Dict[str, str]:
 
 _STATION_CHOICES = _station_choices()
 
-
-def _weekday_choices() -> Dict[str, str]:
-    """每周触发的日子下拉：值就是 ``date.weekday()`` 的字符串形式。"""
-    return {str(value): label for value, label in WEEKDAY_LABELS.items()}
-
-
-_WEEKDAY_CHOICES = _weekday_choices()
 
 
 class PushTrigger(str, Enum):
@@ -178,46 +176,14 @@ class _EventParams(BaseModel):
     model_config = ConfigDict(extra="allow")
 
 
-def _schedule_time_field(default: str) -> Any:
-    """推送时间字段：控件、HH:MM 规则与文案只有这一处声明。
+class SalesReportParams(_FormParams):
+    """销售报表：只选档口。
 
-    定时类内容类型之间只差默认时间（销售报表 21:30、对账差异告警 22:10），字段
-    照抄一份就会漏改其中之一，所以默认值当参数传。
+    推送时间与日期口径都不在参数里（v6 多触发点）：时间属于**触发点**（一条任务可以
+    有多个「哪天 + 几点」，见 ``services/wecom_push_slots.py``），营业日由触发时刻推断
+    （12:00 之前推上一个营业日，之后推当天）——同一份内容参数在 11:30 与 21:30 两个
+    点各推一次，也不该让店长去改两次口径。
     """
-    return Field(
-        default,
-        pattern=_SCHEDULE_TIME_PATTERN,
-        title="推送时间",
-        description="每天在这个时间推送（营业日口径）。",
-        json_schema_extra={"x-ui-control": CONTROL_TIME},
-    )
-
-
-class _ScheduleFormParams(_FormParams):
-    """定时侧表单的公共字段：推送时间 + 日期口径。
-
-    ``date_range_mode`` 与 ``wecom_push_jobs.date_range_mode`` 同义（今天 = 当前营业日，
-    昨天 = 上一个营业日），取值与标签就是 ``DATE_RANGE_LABELS``。
-    """
-
-    schedule_time: str = _schedule_time_field("21:30")
-    date_range_mode: str = Field(
-        "today",
-        title="日期口径",
-        description="今天 = 当前营业日；昨天 = 上一个营业日。",
-        json_schema_extra=_select_extras(DATE_RANGE_LABELS),
-    )
-
-    @field_validator("date_range_mode")
-    @classmethod
-    def _check_date_range_mode(cls, value: str) -> str:
-        if value not in DATE_RANGE_LABELS:
-            raise ValueError("日期口径只支持 today 或 yesterday")
-        return value
-
-
-class SalesReportParams(_ScheduleFormParams):
-    """销售报表：日期口径 + 档口 + 推送时间。"""
 
     station: str = Field(
         "",
@@ -234,21 +200,20 @@ class SalesReportParams(_ScheduleFormParams):
         return value
 
 
-class ReconcileDiffScheduleParams(_ScheduleFormParams):
-    """对账差异告警的定时侧（原「数据质量日报」）：推送时间 + 日期口径。
+class ReconcileDiffScheduleParams(_FormParams):
+    """对账差异告警的定时侧（原「数据质量日报」）：没有内容参数。
 
-    默认 22:10 / 当天，与 ``/meta`` 旧字段 ``job_templates`` 里的 ``data_quality_daily``
-    逐字一致（日终对账 22:05 之后）。
+    默认 22:10 在注册表的 ``default_schedule_time`` 上，与 ``/meta`` 旧字段
+    ``job_templates`` 里的 ``data_quality_daily`` 逐字一致（日终对账 22:05 之后）。
     """
-
-    schedule_time: str = _schedule_time_field("22:10")
 
 
 class DailyOpsReportParams(_FormParams):
-    """运营日报：推送时间 + 勾选模块（ADR 0144）。
+    """运营日报：只勾模块（ADR 0144）。
 
-    **没有日期口径参数**：营业日由触发时间推断（``PushTopic.auto_business_date``）——
-    22:15 推当天、改成早上 8 点就推上一个营业日。多一个下拉只会多一个「忘了改」的坑，
+    **没有时间、也没有日期口径**：营业日由每一个触发时刻自己推断（12:00 之前推上一个
+    营业日，之后推当天），所以一条任务挂「11:30 + 21:30」两个点，早上那次推的是昨天、
+    晚上那次推的是今天，一份内容参数就够。多一个下拉只会多一个「忘了改」的坑，
     而店长真正要选的是「这张日报里放哪几块」。
 
     ``modules`` 的值就是 ``services/wecom_daily_ops.py`` 的模块 id；默认全勾（九个模块
@@ -256,7 +221,6 @@ class DailyOpsReportParams(_FormParams):
     所以「勾了但今天没数据」与「没勾」在图上分得清。
     """
 
-    schedule_time: str = _schedule_time_field("22:15")
     # 用 `default=` 而不是 `default_factory=`：参数表单的默认值取自 JSON Schema 的
     # `default`（`defaultJobParams` 只认它），而 pydantic 的 `default_factory` 不会
     # 出现在 schema 里 —— 用 factory 的话新建任务时九个模块一个都不勾。pydantic 校验
@@ -283,32 +247,41 @@ class DailyOpsReportParams(_FormParams):
 
 
 class WeeklyScheduleParams(_FormParams):
-    """下一周排班表：每周固定某一天推「从下一个周一开始」的那一周。
+    """下一周排班表：没有内容参数。
 
-    ``weekday`` 不是内容参数，而是**调度参数**：它决定这条任务一周里哪一天触发
-    （``PushTopic.weekly`` 为真时调度循环按它过滤）。放在参数里而不是加一列，是因为
-    它随任务一起存档、随出站行一起冻结 —— 排查「这周为什么没推」时能直接看到
-    当时配的是哪一天。默认周日 13:00（门店这周排完、群里先知会下周）。
-
-    「下一周」固定是下一个周一那一周，不给参数：周日推「明天开始的那一周」，
-    周三推「下周一开始」，都是同一句话。
+    「下一周」固定是下一个周一那一周，不给参数：周日推「明天开始的那一周」，周三推
+    「下周一开始」，都是同一句话。「周几几点触发」是**触发点**的事（slots 里的
+    weekday），默认周日 13:00 见注册表的 ``default_schedule_time`` 与
+    ``default_weekday``。
     """
 
-    schedule_time: str = _schedule_time_field("13:00")
-    weekday: str = Field(
-        "6",
-        title="每周推送日",
-        description="每周的这一天推送下一周（下周一起）的排班表。",
-        json_schema_extra=_select_extras(_WEEKDAY_CHOICES),
-    )
 
-    @field_validator("weekday")
-    @classmethod
-    def _check_weekday(cls, value: str) -> str:
-        normalized = str(value or "").strip()
-        if normalized not in _WEEKDAY_CHOICES:
-            raise ValueError("推送日只支持周一至周日")
-        return normalized
+class WeeklyScheduleManualParams(BaseModel):
+    """手动推送那一发的参数（周表页的「推送到企微」按钮）。
+
+    与定时侧分开声明，不是偷懒：`WeeklyScheduleParams` 问的是「周几几点自动推」，
+    这里问的是「这次点的是哪一周、谁点的」。合进一个模型，定时任务的表单上就会冒出
+    `week_start` 这种自动推送没有意义的字段；分开之后手动参数也不参与 `/meta`
+    的触发矩阵（见 `PushTopic.manual_params_model`）。
+
+    `extra="forbid"` 与表单侧同一条理由：参数由服务端构造，多出字段是接线错误，
+    该在入队前炸掉，而不是随出站行一起存下来。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    week_start: str = Field(
+        ...,
+        pattern=r"^\d{4}-\d{2}-\d{2}$",
+        description="这一周的周一（YYYY-MM-DD）。",
+    )
+    title: str = Field("", description="图标题（本周排班 / 下周排班 / 10/13 – 10/19 排班）。")
+    operator_name: str = Field("", description="点按钮的人，进页脚与发送记录。")
+    operator_kind: str = Field("", description="admin / staff。")
+    operator_employee_id: Optional[int] = Field(
+        None, description="员工会话的身份 id（店长会话为空）。"
+    )
+    manual: bool = Field(True, description="标记这是手动推送（不是定时任务那一发）。")
 
 
 class ReconcileDiffParams(_EventParams):
@@ -464,16 +437,22 @@ class PushTopic:
     triggers: FrozenSet[PushTrigger]
     schedule_params_model: Optional[Type[BaseModel]] = None
     event_params_model: Optional[Type[BaseModel]] = None
+    # 手动推送（页面上点一次发一发）的参数模型。**不是第三种触发方式**：手动那一发
+    # 走的仍是这个内容类型既有的触发方式，triggers 与 /meta 的订阅矩阵不受影响；
+    # 它只给「入队时按它校验参数」用 —— 手动参数与自动参数形状不同，混成一个模型
+    # 会让两边的字段互相污染（定时侧的表单会冒出 week_start 这种没意义的字段）。
+    manual_params_model: Optional[Type[BaseModel]] = None
     # 含员工实拍照片：订阅视图上要标注「含员工实拍照片」（用户故事 11）。
     # 判断依据是**这一类内容的性质**，不是渲染器怎么实现 —— 放在注册表里，页面零硬编码。
     contains_employee_photos: bool = False
-    # 每周触发一次（不是每天）：调度循环按参数里的 ``weekday`` 过滤，只在那一周的那一天
-    # 入队。别的定时内容类型照旧每天到点就推。
+    # 每周触发一次（不是每天）：新建任务时第一条触发点默认带上 ``default_weekday``
+    # （下周排班表 = 周日），省得店长每次都去点那一下。是否「今天该推」由每个触发点
+    # 自己的 weekday 决定，与这个标记无关。
     weekly: bool = False
-    # 日期口径**不进参数**、由触发时间推断（运营日报，ADR 0144）：22 点档发当天，
-    # 店长把时间改到早上就发上一个营业日。这样页面上少一个下拉，而「早上发的日报
-    # 不该是空的」也不必靠店长记得改口径。
-    auto_business_date: bool = False
+    # 新建任务时第一条触发点的时间 / 星期。同一个内容类型的默认时间只有这一处声明，
+    # 参数模型里不再有 schedule_time（v6 多触发点）。
+    default_schedule_time: Optional[str] = None
+    default_weekday: Optional[int] = None
 
     def __post_init__(self) -> None:
         if not self.id:
@@ -526,16 +505,6 @@ class PushTopic:
             ],
         }
 
-    @property
-    def default_schedule_time(self) -> Optional[str]:
-        """定时侧的默认推送时间；不支持定时触发的内容类型没有（``None``）。
-
-        取值就是定时侧参数模型里 ``schedule_time`` 的默认值——默认时间只有这一处声明。
-        """
-        if self.schedule_params_model is None:
-            return None
-        field = self.schedule_params_model.model_fields.get("schedule_time")
-        return None if field is None else str(field.default)
 
     def payload(self) -> Dict[str, Any]:
         """`/meta` 里这一类内容类型的形状（前端只认它）。
@@ -550,6 +519,9 @@ class PushTopic:
             "params_schema": self.params_schema,
             "uischema": self.uischema,
             "default_schedule_time": self.default_schedule_time,
+            # 新建任务时第一条触发点带不带星期（下周排班表 = 周日）。表单照它生成
+            # 第一行，不用在页面里再写一遍「哪些内容类型是每周的」。
+            "default_weekday": self.default_weekday,
             "contains_employee_photos": self.contains_employee_photos,
             "weekly": self.weekly,
         }
@@ -571,9 +543,19 @@ class PushTopic:
             f"「{self.name}」同时支持{labels}触发，校验参数时要指明触发方式"
         )
 
-    def params_model_for(self, trigger: PushTrigger) -> Type[BaseModel]:
-        """这种触发方式用哪个参数模型（没声明过这种触发方式就报错）。"""
+    def params_model_for(
+        self, trigger: PushTrigger, *, manual: bool = False
+    ) -> Type[BaseModel]:
+        """这种触发方式用哪个参数模型（没声明过这种触发方式就报错）。
+
+        manual=True 取手动推送那一发专用的模型；触发方式仍按 trigger 归一 ——
+        手动推送只是同一类内容的另一种入队来源，不是第三种触发方式。
+        """
         resolved = self._resolve_trigger(trigger)
+        if manual:
+            if self.manual_params_model is None:
+                raise ValueError(f"「{self.name}」不支持手动推送")
+            return self.manual_params_model
         model = (
             self.schedule_params_model
             if resolved is PushTrigger.SCHEDULED
@@ -588,6 +570,7 @@ class PushTopic:
         params: Optional[Mapping[str, Any]] = None,
         *,
         trigger: Optional[PushTrigger] = None,
+        manual: bool = False,
     ) -> Dict[str, Any]:
         """按这个类**这一种触发方式**的参数模型校验，返回规范化后的参数字典。
 
@@ -597,7 +580,9 @@ class PushTopic:
         """
         resolved = self._resolve_trigger(trigger)
         try:
-            model = self.params_model_for(resolved).model_validate(dict(params or {}))
+            model = self.params_model_for(resolved, manual=manual).model_validate(
+                dict(params or {})
+            )
         except ValidationError as exc:
             raise ValueError(f"{self.name}的参数不合法：{_format_errors(exc)}") from exc
         return model.model_dump(mode="json")
@@ -665,6 +650,7 @@ def validate_params(
     params: Optional[Mapping[str, Any]] = None,
     *,
     trigger: Optional[PushTrigger] = None,
+    manual: bool = False,
 ) -> Dict[str, Any]:
     """按 ``topic_id`` 那一类内容类型的参数模型校验参数（入队前唯一的校验入口）。
 
@@ -673,7 +659,7 @@ def validate_params(
     topic = get_topic(topic_id)
     if topic is None:
         raise ValueError(f"未知的推送内容类型: {topic_id}")
-    return topic.validate_params(params, trigger=trigger)
+    return topic.validate_params(params, trigger=trigger, manual=manual)
 
 
 # ── 内容类型（声明顺序 = 页面上订阅矩阵的行序）───────────────────────────
@@ -682,27 +668,32 @@ register_topic(PushTopic(
     name="销售报表",
     triggers=frozenset({PushTrigger.SCHEDULED}),
     schedule_params_model=SalesReportParams,
+    # 与 /meta 旧字段 job_templates 的 sales_report_daily 逐字一致（日终 21:30）。
+    default_schedule_time="21:30",
 ))
 # 每周一次的下周排班表：周日 13:00 把「下周一那一周」所有人的班次推到群里。
-# 一周只触发一次由 `weekly` 声明，调度循环按参数里的 weekday 过滤（见
-# `WeComPushService.dispatch_due_jobs`）。
+# 默认带上周日（`default_weekday`），新建任务时店长不用再点那一下；改天就改触发点。
 # 运营日报：一天结束把「营收外的九块」拼成一张图（ADR 0144）。与销售报表分开成两类，
 # 因为受众不同（店长看经营面：订单、排班、加班补钟、卫生、数据质量），而且销售报表里
 # 有金额、日报明确不要金额——同一个内容类型做两个开关只会让参数含义随勾选变化。
-# 日期口径由触发时间推断（``auto_business_date``），所以这里没有 date_range_mode。
+# 日期口径由触发点的时刻推断（ADR 0159），所以这里没有 date_range_mode。
 register_topic(PushTopic(
     id=TOPIC_DAILY_OPS_REPORT,
     name="运营日报",
     triggers=frozenset({PushTrigger.SCHEDULED}),
     schedule_params_model=DailyOpsReportParams,
-    auto_business_date=True,
+    default_schedule_time="22:15",
 ))
 register_topic(PushTopic(
     id=TOPIC_WEEKLY_SCHEDULE,
     name="下周排班表",
     triggers=frozenset({PushTrigger.SCHEDULED}),
     schedule_params_model=WeeklyScheduleParams,
+    # 周表页的「推送到企微」：同一张图、同一批订阅，只是由人指定周次并发一次。
+    manual_params_model=WeeklyScheduleManualParams,
     weekly=True,
+    default_schedule_time="13:00",
+    default_weekday=6,
 ))
 # 唯一一个两种触发方式都有的内容类型：定时侧承载原「数据质量日报」（22:10 / 当天），
 # 事件侧是日终对账差异告警（迁移 0016 把旧 push_type `data_quality_alert` 映射到它）。
@@ -712,6 +703,8 @@ register_topic(PushTopic(
     triggers=frozenset({PushTrigger.SCHEDULED, PushTrigger.EVENT}),
     schedule_params_model=ReconcileDiffScheduleParams,
     event_params_model=ReconcileDiffParams,
+    # 与 /meta 旧字段 job_templates 的 data_quality_daily 逐字一致（日终对账 22:05 后）。
+    default_schedule_time="22:10",
 ))
 register_topic(PushTopic(
     id=TOPIC_UNMAPPED_DISH,

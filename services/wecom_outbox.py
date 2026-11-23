@@ -301,6 +301,7 @@ class WeComOutbox:
         scheduled_at: Optional[str] = None,
         commit: bool = True,
         now: Optional[datetime] = None,
+        manual: bool = False,
     ) -> List[int]:
         """一类内容 → 每个目标渠道一行出站记录，返回这些行的 id。
 
@@ -319,12 +320,14 @@ class WeComOutbox:
         （那要单独提交，会把调用方的事务切开）——停用的渠道由下一轮派发标成 skipped，
         终态与原因一样，只是晚 30 秒。
         """
-        validated = validate_params(topic_id, params, trigger=trigger)
+        validated = validate_params(topic_id, params, trigger=trigger, manual=manual)
         moment = now or self._now()
-        topic = get_topic(topic_id)
+        # 定时类内容一律按「这次入队发生在什么时刻」推断营业日（12 点切）：一条任务
+        # 可以有 11:30 与 21:30 两个触发点，11:30 那次该推上一个营业日。事件类内容
+        # 自己带着当时的业务日，不推断。
         auto_mode = (
             auto_business_date_mode(moment)
-            if topic is not None and topic.auto_business_date
+            if trigger is PushTrigger.SCHEDULED and not manual
             else ""
         )
         frozen = freeze_business_date(validated, moment, auto_mode=auto_mode)

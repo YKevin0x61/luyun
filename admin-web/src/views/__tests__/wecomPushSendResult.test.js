@@ -16,7 +16,7 @@ import WecomPushView from '../WecomPushView.vue'
 //
 // 「是否真的发出去了」不在这一层验证：这里连的都是假 fetch，不碰任何企微接口。
 
-const API_VERSION = 'v5'
+const API_VERSION = 'v6'
 
 const JOBS = [{
   id: 7,

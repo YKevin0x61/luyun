@@ -16,8 +16,9 @@
 
 from __future__ import annotations
 
-from datetime import datetime
-from typing import Any, Dict, List
+import json
+from datetime import date, datetime
+from typing import Any, Dict, List, Optional
 
 import pytest
 from fastapi.testclient import TestClient
@@ -25,6 +26,7 @@ from fastapi.testclient import TestClient
 from config import settings
 from database import CHINA_TZ
 from services.wecom_push_service import (
+    WeComPushService,
     WeeklyScheduleRenderer,
     expand_messages,
     next_week_start,
@@ -252,13 +254,20 @@ def test_long_weeks_split_on_person_boundaries():
 # ── 每周触发的判定（纯函数） ────────────────────────────────────────────────
 
 
-def _weekly_job(weekday: str = "6") -> Dict[str, Any]:
+def _weekly_job(weekday: Optional[int] = 6) -> Dict[str, Any]:
     return {
         "id": 1,
         "topic_id": "weekly_schedule",
-        "params_json": f'{{"schedule_time": "13:00", "weekday": "{weekday}"}}',
+        "params_json": "{}",
         "schedule_time": "13:00",
+        "slots_json": json.dumps([{"weekday": weekday, "time": "13:00"}]),
     }
+
+
+def _due(api_job: Dict[str, Any], business_date: str, minute: str = "13:00") -> List[Any]:
+    return WeComPushService._due_slots(
+        api_job, date.fromisoformat(business_date), minute, business_date=business_date
+    )
 
 
 @pytest.mark.parametrize(
@@ -270,30 +279,37 @@ def _weekly_job(weekday: str = "6") -> Dict[str, Any]:
     ],
 )
 def test_a_weekly_job_only_fires_on_its_weekday(business_date, should_fire):
-    assert wecom_push_service._weekly_due(_weekly_job(), business_date) is should_fire
+    assert bool(_due(_weekly_job(), business_date)) is should_fire
 
 
 def test_a_daily_topic_fires_every_day():
     job = {
         "id": 2,
         "topic_id": "sales_report",
-        "params_json": '{"schedule_time": "21:30", "date_range_mode": "today", "station": ""}',
+        "params_json": "{}",
         "schedule_time": "21:30",
+        "slots_json": "[]",
     }
     for business_date in ("2026-10-25", "2026-10-26", "2026-10-31"):
-        assert wecom_push_service._weekly_due(job, business_date) is True
+        assert bool(_due(job, business_date, "21:30")) is True
 
 
-@pytest.mark.parametrize("params_json", ['{}', '{"weekday": "x"}', '{"weekday": "9"}'])
-def test_a_broken_weekday_does_not_fire(params_json):
-    """参数坏了宁可不发（记警告）：默认成周日会悄悄每周发一次。"""
+def test_a_weekly_slot_without_a_weekday_does_not_fire():
+    """周任务的点没有星期（坏数据）宁可不发：按「每天」发会变成每天一张排班图。"""
+    job = _weekly_job(weekday=None)
+    assert _due(job, "2026-10-25") == []
+
+
+def test_a_broken_slot_is_treated_as_no_trigger():
+    """触发点解析不出来时这条任务当天跳过，而不是把整个调度循环带崩。"""
     job = {
         "id": 3,
         "topic_id": "weekly_schedule",
-        "params_json": params_json,
+        "params_json": "{}",
         "schedule_time": "13:00",
+        "slots_json": json.dumps([{"weekday": 9, "time": "13:00"}]),
     }
-    assert wecom_push_service._weekly_due(job, "2026-10-25") is False
+    assert _due(job, "2026-10-25") == []
 
 
 def test_the_registry_marks_the_topic_weekly_and_defaults_to_sunday_1300():
@@ -302,9 +318,10 @@ def test_the_registry_marks_the_topic_weekly_and_defaults_to_sunday_1300():
     assert topic is not None
     assert topic.weekly is True
     assert topic.payload()["weekly"] is True
-    params = topic.validate_params({}, trigger=None)
-    assert params["weekday"] == "6"
-    assert params["schedule_time"] == "13:00"
+    # 时间与星期都不再进参数模型：它们是任务的触发点（slots），不是内容参数。
+    assert topic.default_schedule_time == "13:00"
+    assert topic.default_weekday == 6
+    assert topic.validate_params({}, trigger=None) == {}
 
 
 # ── 渲染器：补发不跨周 ──────────────────────────────────────────────────────
@@ -330,7 +347,7 @@ def test_the_renderer_freezes_the_business_day_on_the_outbox_row():
 
     delivery = asyncio.run(renderer.render(
         {"created_at": "2026-10-25T13:00:05+08:00", "topic_id": "weekly_schedule"},
-        {"schedule_time": "13:00", "weekday": "6"},
+        {},
     ))
 
     assert delivery.text == "x"
@@ -398,8 +415,7 @@ def _setup_weekly_job(api: WecomAdmin) -> int:
         json={
             "name": "下周排班表",
             "topic_id": "weekly_schedule",
-            "params": {"schedule_time": "13:00", "weekday": "6"},
-            "schedule_time": "13:00",
+            "slots": [{"weekday": 6, "time": "13:00"}],
             "enabled": True,
             "notes": "",
         },
@@ -603,3 +619,200 @@ def test_the_preview_endpoint_returns_the_image_as_a_data_url(api):
         # 没有中文字体的机器：退文字版，预览仍要能看到正文。
         assert data["content"]
         assert data["image_data_url"] == ""
+
+
+# ── 手动推送：周次归一、标题、署名（周表页的「推送到企微」）───────────────────
+#
+# 手动推送复用「下周排班表」这一条出站，只是由人指定周次：同一批订阅、同一个渲染器。
+# 下面两层分别钉住「周次怎么归一 / 图长什么样」与「点下去那一发落到出站里是什么样」。
+
+
+@pytest.mark.parametrize(
+    "day,expected",
+    [
+        ("2026-11-18", "2026-11-16"),  # 周三 → 那周一
+        ("2026-11-16", "2026-11-16"),  # 周一 → 自己
+        ("2026-11-22", "2026-11-16"),  # 周日 → 那周一（不是下周一）
+        ("2026-11-23", "2026-11-23"),
+    ],
+)
+def test_week_start_of_snaps_any_day_to_its_monday(day, expected):
+    from services.wecom_push_service import week_start_of
+
+    assert week_start_of(day) == expected
+
+
+@pytest.mark.parametrize(
+    "week_start,expected",
+    [
+        ("2026-11-16", "本周排班"),
+        ("2026-11-23", "下周排班"),
+        ("2026-11-09", "11/9 – 11/15 排班"),
+        ("2026-11-30", "11/30 – 12/6 排班"),
+    ],
+)
+def test_the_manual_title_is_read_against_today(week_start, expected):
+    from datetime import date
+
+    from services.wecom_push_service import weekly_schedule_title
+
+    # 2026-11-22 是周日：本周 11-16，下周 11-23；更远的周写日期范围。
+    assert weekly_schedule_title(week_start, today=date(2026, 11, 22)) == expected
+
+
+def test_the_manual_image_titles_the_week_and_signs_the_pusher():
+    """手动推送那一发：标题写的是这一周，页脚右侧多一句「由谁推送」。
+
+    定时任务那张图一字不改（同一个渲染器），所以这里比的是**同一份数据**下两张图：
+    宽高一样、字节不一样 —— 只换了字，没有改版。
+    """
+    import io
+
+    from PIL import Image
+
+    from services.wecom_schedule_image import render_weekly_schedule_png
+
+    grid = _two_people_grid()
+    moment = datetime(2026, 11, 22, 13, 20)
+    plain = render_weekly_schedule_png(grid, generated_at=moment)
+    if plain is None:
+        pytest.skip("本机没有可用中文字体")
+    signed = render_weekly_schedule_png(
+        grid, generated_at=moment, title="11/9 – 11/15 排班", pushed_by="张三"
+    )
+
+    assert signed is not None
+    assert signed[:8] == b"\x89PNG\r\n\x1a\n"
+    assert signed != plain
+    assert Image.open(io.BytesIO(signed)).size == Image.open(io.BytesIO(plain)).size
+
+
+class _FakeWeeklyService:
+    """只记「渲染器要了哪一周」，不真连库。"""
+
+    def __init__(self, image: Any = b"\x89PNG_fake") -> None:
+        self.image = image
+        self.calls: List[Dict[str, Any]] = []
+
+    async def build_weekly_schedule_image(self, db, **kwargs):
+        self.calls.append(kwargs)
+        return self.image
+
+
+def test_the_renderer_draws_the_week_the_operator_picked():
+    import asyncio
+
+    fake = _FakeWeeklyService()
+    renderer = WeeklyScheduleRenderer(db=None, service=fake)
+
+    delivery = asyncio.run(renderer.render(
+        {"created_at": "2026-11-22T13:20:00+08:00", "topic_id": "weekly_schedule"},
+        {
+            "week_start": "2026-11-16",
+            "title": "本周排班",
+            "operator_name": "张三",
+            "manual": True,
+        },
+    ))
+
+    assert delivery.image_bytes == b"\x89PNG_fake"
+    assert fake.calls == [
+        {"week_start": "2026-11-16", "title": "本周排班", "pushed_by": "张三"}
+    ]
+
+
+def test_a_manual_push_fails_instead_of_sending_text_without_a_font():
+    """缺字体不能退文字：这一发点的是「发图」，一段文字不是他要的，也说不出是哪一周。"""
+    import asyncio
+
+    renderer = WeeklyScheduleRenderer(db=None, service=_FakeWeeklyService(image=None))
+
+    with pytest.raises(ValueError, match="中文字体"):
+        asyncio.run(renderer.render(
+            {"created_at": "2026-11-22T13:20:00+08:00", "topic_id": "weekly_schedule"},
+            {"week_start": "2026-11-16", "manual": True},
+        ))
+
+
+# ── 真 app：预览 → 点下去 → 出站行 → 周表页那行状态 ────────────────────────
+
+
+def _subscribe_weekly_topic(api: WecomAdmin) -> int:
+    """建一个渠道并订阅「下周排班表」—— 手动推送的收件人就是这批订阅。"""
+    resp = api.request(
+        "POST",
+        f"{API_PREFIX}/webhooks",
+        json={"name": "门店群", "webhook_url": WEBHOOK_URL, "enabled": True, "notes": ""},
+    )
+    assert resp.status_code == 200, resp.text
+    channel_id = int(resp.json()["channel"]["id"])
+    resp = api.request(
+        "POST",
+        f"{API_PREFIX}/subscriptions",
+        json={"topic_id": "weekly_schedule", "target_channel_id": channel_id, "enabled": True},
+    )
+    assert resp.status_code == 200, resp.text
+    return channel_id
+
+
+async def _recent_weekly_rows(db):
+    return await db.wecom_outbox_recent(limit=10, topic_id="weekly_schedule")
+
+
+def test_a_manual_push_queues_one_row_per_group_and_shows_it_on_the_week_page(api):
+    _subscribe_weekly_topic(api)
+
+    preview = api.request(
+        "GET",
+        "/api/scheduling/weekly-schedule/push-preview",
+        params={"week_start": "2026-11-18"},
+    )
+    assert preview.status_code == 200, preview.text
+    data = preview.json()
+    assert data["week_start"] == "2026-11-16"
+    assert data["week_end"] == "2026-11-22"
+    assert data["title"]
+    assert data["operator"]["name"] == ADMIN_USERNAME
+    assert [item["name"] for item in data["targets"]] == ["门店群"]
+
+    pushed = api.request(
+        "POST", "/api/scheduling/weekly-schedule/push", json={"week_start": "2026-11-18"}
+    )
+    assert pushed.status_code == 200, pushed.text
+    body = pushed.json()
+    assert body["queued"] == 1
+    assert body["week_start"] == "2026-11-16"
+
+    from services.app_runtime import get_runtime
+    from services.wecom_outbox import parse_params
+
+    rows = api.client.portal.call(_recent_weekly_rows, get_runtime().db)
+    assert len(rows) == 1
+    params = parse_params(rows[0])
+    assert params["manual"] is True
+    assert params["week_start"] == "2026-11-16"
+    assert params["operator_name"] == ADMIN_USERNAME
+    assert "手动推送" in rows[0]["content_summary"]
+    assert rows[0]["status"] == "pending"
+
+    last = api.request("GET", "/api/scheduling/weekly-schedule/last-push")
+    assert last.status_code == 200, last.text
+    state = last.json()["last"]
+    assert state["total"] == 1
+    assert state["status"] == "pending"
+    assert state["week_start"] == "2026-11-16"
+
+
+def test_a_manual_push_without_any_subscription_is_a_400(api):
+    """零订阅要说没发出去：点按钮的人要的是「发出去了」，静默成功等于骗他。"""
+    resp = api.request(
+        "POST", "/api/scheduling/weekly-schedule/push", json={"week_start": "2026-11-16"}
+    )
+    assert resp.status_code == 400, resp.text
+    assert "企微推送页" in resp.json()["detail"]
+
+
+def test_last_push_is_empty_before_the_first_manual_push(api):
+    resp = api.request("GET", "/api/scheduling/weekly-schedule/last-push")
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["last"] is None
