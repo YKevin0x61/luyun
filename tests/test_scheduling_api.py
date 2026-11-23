@@ -3401,6 +3401,21 @@ def _management_calls(client, employee_id, counter):
         ("GET", lambda: "/api/scheduling/inbox", None, 200),
         ("POST", lambda: "/api/scheduling/inbox/999999/approve", None, 404),
         ("POST", lambda: "/api/scheduling/inbox/999999/reject", None, 404),
+        # 周表页的手动推送三条：预览 / 推送 / 最近一次。没有订阅时「推送」是 400
+        # （要说没发出去），其余两条照常 200。
+        (
+            "GET",
+            lambda: "/api/scheduling/weekly-schedule/push-preview?week_start=2026-09-24",
+            None,
+            200,
+        ),
+        (
+            "POST",
+            lambda: "/api/scheduling/weekly-schedule/push",
+            lambda: {"week_start": "2026-09-24"},
+            400,
+        ),
+        ("GET", lambda: "/api/scheduling/weekly-schedule/last-push", None, 200),
     ]
 
 
@@ -3426,13 +3441,16 @@ def _refused_management_calls():
         ("GET", "/api/scheduling/inbox", None),
         ("POST", "/api/scheduling/inbox/1/approve", None),
         ("POST", "/api/scheduling/inbox/1/reject", None),
+        ("GET", "/api/scheduling/weekly-schedule/push-preview?week_start=2026-09-24", None),
+        ("POST", "/api/scheduling/weekly-schedule/push", {"week_start": "2026-09-24"}),
+        ("GET", "/api/scheduling/weekly-schedule/last-push", None),
     ]
 
 
 def test_every_management_route_is_behind_the_schedule_edit_action(
     scheduling_http, monkeypatch
 ):
-    """管理面 19 条 = 一个动作门：admin 放行、员工看「人事管理」能力，匿名 401。
+    """管理面 22 条 = 一个动作门：admin 放行、员工看「人事管理」能力，匿名 401。
 
     放行的两个身份还要照旧拿到业务响应（200 / `unknown_request` 404）—— 门换了，
     门后面那条路没换。被拒的 403 带 `capability_required`、401 是裸的，文案逐字。
@@ -3444,7 +3462,7 @@ def test_every_management_route_is_behind_the_schedule_edit_action(
     counter = [0]
 
     allowed = _management_calls(client, employee_id, counter)
-    assert len(allowed) == 19
+    assert len(allowed) == 22
     for method, path, body, expected in allowed:
         response = client.request(method, path(), json=body() if body else None)
         assert response.status_code == expected, (method, path(), response.text)
@@ -3460,7 +3478,7 @@ def test_every_management_route_is_behind_the_schedule_edit_action(
         assert response.status_code == expected, (method, path(), response.text)
 
     refused = _refused_management_calls()
-    assert len(refused) == 19
+    assert len(refused) == 22
 
     # 员工会话在、能力不在：每一条都 403，文案逐字，头是能力门那一枚。
     _run(accounts.set_admin_caps(employee_id, []))
@@ -3551,3 +3569,60 @@ def test_every_staff_route_is_behind_the_staff_door(scheduling_http, monkeypatch
     assert swap.status_code == 200, swap.text
     assert client.post(f"/api/scheduling/me/swaps/{accept_id}/accept").status_code == 200
     assert client.post(f"/api/scheduling/me/swaps/{reject_id}/reject").status_code == 200
+
+
+def test_the_week_pages_last_push_only_shows_the_employees_own_push(
+    scheduling_http, monkeypatch
+):
+    """周表页那行「最近一次」按人分：员工只看自己推的，店长看全部。
+
+    只取「最近一条手动推送」的话，同事推过之后员工那行会显示同事的名字与结果 ——
+    既不是他要的信息，也把别人的动作时序漏给了他（与卫生 / 排班 nudge 的 scope
+    过滤同一个理由）。
+    """
+    import json
+
+    client, db, accounts = scheduling_http
+    employee_id = _employee_id(accounts)
+    _run(accounts.set_admin_caps(employee_id, ["schedule"]))
+    _wire_staff_accounts(monkeypatch, accounts)
+    admin = _admin_cookie(client)
+
+    channel_id = _run(db.wecom_webhook_create({
+        "name": "门店群",
+        "webhook_url_encrypted": "encrypted",
+        "webhook_url_masked": "***",
+    }))
+    assert channel_id
+
+    def enqueue(reference, created_at, operator_id, operator_name, week_start):
+        params = json.dumps({
+            "week_start": week_start,
+            "title": "本周排班",
+            "operator_name": operator_name,
+            "operator_kind": "staff" if operator_id else "admin",
+            "operator_employee_id": operator_id,
+            "manual": True,
+        })
+        _run(db.wecom_outbox_enqueue({
+            "topic_id": "weekly_schedule",
+            "params_json": params,
+            "target_channel_id": channel_id,
+            "content_summary": "手动推送 · " + operator_name,
+            "idempotency_key": "weekly_schedule:" + reference + ":" + str(channel_id),
+            "scheduled_at": created_at,
+            "created_at": created_at,
+        }))
+
+    enqueue("own-ref", "2026-09-24T09:00:00+08:00", employee_id, "张三", "2026-09-21")
+    enqueue("peer-ref", "2026-09-24T10:00:00+08:00", 999999, "李四", "2026-09-28")
+
+    _staff_cookie(client, accounts)
+    own = client.get("/api/scheduling/weekly-schedule/last-push").json()["last"]
+    assert own["operator_name"] == "张三"
+    assert own["week_start"] == "2026-09-21"
+
+    _as_manager(client, admin)
+    everyone = client.get("/api/scheduling/weekly-schedule/last-push").json()["last"]
+    assert everyone["operator_name"] == "李四"
+    assert everyone["week_start"] == "2026-09-28"

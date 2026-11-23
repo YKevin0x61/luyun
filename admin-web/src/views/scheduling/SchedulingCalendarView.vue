@@ -124,6 +124,7 @@ const {
   pickBusy,
   refreshNotes,
   roster,
+  sayNotice,
   selectedDate,
   setView,
   shifts,
@@ -578,6 +579,135 @@ async function loadWeek(start) {
   // 应用完接着点下一列继续刷，正是这个交互的意义（ADR 0107 决策 3）。
   if (previousStart && weekStart.value !== previousStart) clearPick(true)
   syncQuery()
+  // 「最近一次推送」跟着周表一起刷：它说的是这一页主操作发生了什么，不进 board（那边只管
+  // 排班本身）。读不到就不显示那一行，见 loadPushState —— 附注不该拖垮周表。
+  void loadPushState()
+}
+
+// ── 手动推送到企微（2026-11-22）────────────────────────────────────────────
+// 为什么有这个按钮：「下周排班表」那个定时任务只在周日 13:00 发下周 —— 临时换了班、
+// 或想让群里现在就看到本周（甚至某一周）的排班，就得有一个手动的口。发送仍然走统一
+// 出站（services/wecom_outbox）：订阅、渠道、重试、发送记录全部复用，底下仍是同一个
+// 内容类型；另开一个类型会让订阅要配两遍、发送记录也要分两处看。
+//
+// 图由服务端画（Pillow + 中文字体）：标题「本周 / 下周 / 10/13 – 10/19 排班」与页脚
+// 「由谁推送」都在那边算，这一层只拿状态 —— 画不出第二份，也就不会跟图漂开。
+const PUSH_API = '/api/scheduling/weekly-schedule'
+const pushOpen = ref(false)
+const pushBusy = ref(false)
+const pushPreview = ref(null) // { week_start, week_end, title, operator, targets }
+const pushState = ref(null) // GET .../last-push 的 last；null = 还没手动推过
+
+const pushTargets = computed(() => (pushPreview.value && pushPreview.value.targets) || [])
+const pushWeekLabel = computed(() => {
+  const data = pushPreview.value
+  return data ? shortDate(data.week_start) + '–' + shortDate(data.week_end) : ''
+})
+
+/** 这一周是不是已经过去了：确认框要补一句实话（图上仍是当时排的班）。 */
+const pushWeekPassed = computed(() => Boolean(
+  pushPreview.value && today.value && pushPreview.value.week_end < today.value,
+))
+
+/** 确认框那一段话：谁、哪一周、发去哪几个群、会不会真发。
+ *  员工与店长口径不同 —— 员工那句要先说清身份（发送记录里记的也是他）。 */
+const pushConfirmText = computed(() => {
+  const data = pushPreview.value
+  if (!data) return ''
+  const names = pushTargets.value.map((item) => item.name).filter(Boolean).join('、')
+  const groups = pushTargets.value.length
+  const who = data.operator && data.operator.kind === 'staff'
+  const head = who
+    ? '你将以员工身份把 ' + pushWeekLabel.value + ' 的排班表发到 ' + groups + ' 个门店群（' + names + '）。'
+    : '把 ' + pushWeekLabel.value + ' 这一周的排班表生成图片，发到 ' + groups + ' 个门店群（' + names + '）。'
+  const tail = who
+    ? '发送记录里会记下是你的操作。'
+    : '发送记录里会记「手动推送 · ' + pushWeekLabel.value + '」。'
+  const passed = pushWeekPassed.value ? '这一周已经过去，图上仍是当时排的班。' : ''
+  return head + '图片点下去就发，不等定时任务。' + tail + passed
+})
+
+const PUSH_STATUS_LABEL = {
+  pending: '等待发出',
+  sent: '已发出',
+  partial: '部分群失败',
+  failed: '发送失败',
+  skipped: '没有发出',
+}
+
+/** 出站时间 → 「今天 13:20」/「昨天 09:05」/「11/3 13:20」。
+ *  用浏览器本地时区：看这行字的人在店里，他关心的是「刚才那一发」而不是 UTC。 */
+function pushTimeText(value) {
+  const moment = new Date(value)
+  if (!value || Number.isNaN(moment.getTime())) return ''
+  const clock = String(moment.getHours()).padStart(2, '0') + ':' + String(moment.getMinutes()).padStart(2, '0')
+  const day = isoDate(moment)
+  if (day === today.value) return '今天 ' + clock
+  if (/^\d{4}-\d{2}-\d{2}$/.test(today.value || '')) {
+    const yesterday = toLocalDate(today.value)
+    yesterday.setDate(yesterday.getDate() - 1)
+    if (day === isoDate(yesterday)) return '昨天 ' + clock
+  }
+  return (moment.getMonth() + 1) + '/' + moment.getDate() + ' ' + clock
+}
+
+/** 按钮旁那行小字：这一行是附注，读不到就不显示，不拿它拖垮周表。 */
+const pushStateText = computed(() => {
+  const data = pushState.value
+  if (!data) return ''
+  const at = pushTimeText(data.at)
+  if (!at) return ''
+  const label = PUSH_STATUS_LABEL[data.status] || data.status
+  return '最近一次：' + at + ' · ' + data.total + ' 个群 · ' + label
+})
+
+async function loadPushState() {
+  try {
+    const data = await api.get(PUSH_API + '/last-push')
+    pushState.value = (data && data.last) || null
+  } catch (_err) {
+    pushState.value = null
+  }
+}
+
+/** 点按钮：先问服务端「会发去哪、标题是什么」，再开确认框。
+ *  零订阅当场说清楚（而不是等点「推送」才 400），因为这一步最该在点下去之前知道。 */
+async function openPushDialog() {
+  if (pushBusy.value) return
+  pushBusy.value = true
+  try {
+    const data = await api.get(PUSH_API + '/push-preview', {
+      week_start: (week.value && week.value.start) || weekStart.value || '',
+    })
+    if (!data || !(data.targets || []).length) {
+      sayNotice('还没有群订阅「下周排班表」：请店长先在企微推送页配置', [], true)
+      return
+    }
+    pushPreview.value = data
+    pushOpen.value = true
+  } catch (err) {
+    sayNotice(String((err && err.message) || '推送准备失败，请稍后再试'), [], true)
+  } finally {
+    pushBusy.value = false
+  }
+}
+
+/** 确认之后入队：真正发送在服务端的出站循环里（30 秒一轮），这里只等「排进去了」。 */
+async function sendPush() {
+  const data = pushPreview.value
+  if (!data || pushBusy.value) return
+  pushBusy.value = true
+  try {
+    const result = await api.post(PUSH_API + '/push', { week_start: data.week_start })
+    pushOpen.value = false
+    sayNotice('已入队 ' + result.queued + ' 个群，30 秒内发出，可在发送记录查看')
+    await loadPushState()
+  } catch (err) {
+    pushOpen.value = false
+    sayNotice(String((err && err.message) || '推送失败，请稍后再试'), [], true)
+  } finally {
+    pushBusy.value = false
+  }
 }
 
 const weekDays = computed(() => (week.value && week.value.days) || [])
@@ -2034,6 +2164,17 @@ useNudgePull({
                 <button class="gBtn" type="button" @click="loadWeek(mondayOf(today))">本周</button>
                 <button class="gBtn" type="button" @click="loadWeek(shiftWeek(weekStart, 1))">下周 ›</button>
               </div>
+              <!-- 手动推送（2026-11-22）：定时任务是周日 13:00 发下周，临时换班或想让
+                   群里现在就看到某一周，就从这里发一张同款图片（订阅 / 发送记录照旧）。 -->
+              <div class="gPush">
+                <button
+                  class="gBtn gPushBtn"
+                  type="button"
+                  :disabled="pushBusy || !week"
+                  @click="openPushDialog()"
+                >{{ pushBusy ? '准备中…' : '推送到企微' }}</button>
+                <span v-if="pushStateText" class="gPushState">{{ pushStateText }}</span>
+              </div>
             </div>
           <!-- 悬浮球（2026-10-29 用户要求）：笔栏常驻太占地方，收成右下角一颗球，点球才展开。
                球面写当前那支笔（班次名 / 休 / 休半天 / 清），收起也一眼知道下一笔会写什么。 -->
@@ -2658,6 +2799,19 @@ useNudgePull({
         @confirm="confirmPast()"
         @cancel="cancelPast()"
       />
+
+      <!-- 手动推送周表：点下去就真发到群里，所以先弹一次并点名「哪一周、哪几个群」。
+           群里的人看不到这个按钮，图发出去也收不回 —— 这道确认是唯一一道闸门（与
+           /wecom-push 的「立即发送」同一个口径）。 -->
+      <ConfirmDialog
+        v-if="pushOpen"
+        title="推送到企微"
+        :message="pushConfirmText"
+        :confirm-label="pushBusy ? '推送中…' : '推送到群'"
+        cancel-label="再想想"
+        @confirm="sendPush()"
+        @cancel="pushOpen = false"
+      />
     </div>
   </div>
 </template>
@@ -2737,6 +2891,15 @@ useNudgePull({
 }
 .gPanel-hint { margin-left: auto; font-family: var(--font-mono); font-size: 9.5px; line-height: 1; color: var(--ink-faint); }
 .gPanel-more { font-size: 10.5px; color: var(--ink-dim); }
+/* 推送到企微（2026-11-22）：主操作在卡片头最右，状态那行在它下面 —— 「最近一次」
+   比按钮长，两行比挤一行好读（小屏再换成一整行，见 @media 720px）。 */
+.gPush { display: flex; flex-direction: column; align-items: flex-end; gap: 3px; }
+.gPushBtn { white-space: nowrap; }
+/* 字号走令牌（设计护栏只认 7 档 --fs-11…--fs-24，不许写死 px）。 */
+.gPushState {
+  font-family: var(--font-mono); font-size: var(--fs-11); line-height: 1.2;
+  color: var(--ink-faint); text-align: right;
+}
 /* 月历 / 周表全宽；名单面板沿用 gB-card 的挂点。 */
 .gWeekPanel { overflow: visible; }
 /* ── 月历：主面板 + 右侧当天名单 ──────────────────────────────────────── */
@@ -3466,6 +3629,12 @@ useNudgePull({
   .gSeg { margin-left: 0; }
   .gNav--head { display: flex; margin-left: auto; }
   .gNav--panel { display: none; }
+  /* 周表卡片头的推送按钮在手机上先试同一行右端：h2 + 日期 + 按钮在 390 宽度上放得下，
+     卡片头就不必多一行（多一行时按钮下面会留一大片白）。真放不下（状态那行最长能到
+     「最近一次：11/22 13:20 · 3 个群 · 部分群失败」）才整列换到第二行，仍靠右。 */
+  .gWeekPanel .gPanel-hd { flex-wrap: wrap; column-gap: 9px; row-gap: 5px; }
+  .gPush { margin-left: auto; align-items: flex-end; }
+  .gPushState { text-align: right; }
   .gB-d { min-height: 56px; padding: 5px 4px 4px; }
   .gB-d .cItem { font-size: 9px; }
   /* 当天名单走底部抽屉：点日期后从底部升起，点遮罩或「收起」关闭。 */

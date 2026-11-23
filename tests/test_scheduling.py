@@ -4207,6 +4207,11 @@ class SchedulingLayeringTest(unittest.TestCase):
             # 这里是路径集合，所以每个路径只列一次。配目标是店长的事，员工只被提示。
             "/api/scheduling/demand/defaults",
             "/api/scheduling/demand/day",
+            # 2026-11-22：周表手动推送到企微。三个都挂在店长这扇门（schedule_edit）上 ——
+            # 有「人事管理」能力的员工也用员工会话点得到，所以不是员工那扇 /me。
+            "/api/scheduling/weekly-schedule/push-preview",
+            "/api/scheduling/weekly-schedule/push",
+            "/api/scheduling/weekly-schedule/last-push",
         }
         self.assertEqual(
             {route.path for route in router.routes}, staff_paths | manager_paths

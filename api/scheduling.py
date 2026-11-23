@@ -5,7 +5,9 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional
+from datetime import date, datetime, timedelta
+from typing import Any, List, Optional
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -16,7 +18,8 @@ from api.workbench_boundary import (
     require_action,
     staff_actor,
 )
-from database import get_db
+from database import CHINA_TZ, get_db
+from services.auth_service import get_admin_username
 from services.realtime.hub import realtime_hub
 from services.realtime.workbench import nudge_scheduling as _scheduling_nudge
 from services.scheduling import MAX_CYCLE_DAYS, MAX_REQUEST_NOTE, MAX_SHIFT_NAME
@@ -29,6 +32,9 @@ from services.scheduling.store import (
     SchedulingError,
     SchedulingStore,
 )
+from services.wecom_outbox import parse_params, resolve_targets, wecom_outbox
+from services.wecom_push_service import week_start_of, weekly_schedule_title, wecom_push_service
+from services.wecom_push_topics import TOPIC_WEEKLY_SCHEDULE, PushTrigger
 from services.wecom_request_notice import notify_leave_decision, notify_leave_request
 
 logger = logging.getLogger(__name__)
@@ -882,6 +888,217 @@ async def week(
         "past_days": BACKFILL_DAYS,
     }
     return data
+
+
+# ── 手动推送周表（周表页的「推送到企微」）───────────────────────────────────
+# 三个端点共用同一套口径：week_start 归一到周一。手动推送走的是「下周排班表」这一类
+# 内容的**同一条出站**（同一批订阅、同一个渲染器），只是由人指定周次、并发一次 ——
+# 不另开内容类型：否则订阅要配两遍，发送记录也会分成两处。
+class WeeklySchedulePushRequest(BaseModel):
+    week_start: Optional[str] = Field(
+        None, description="这一周里的任意一天（YYYY-MM-DD）：按所在周的周一归一"
+    )
+
+
+def _manual_week_start(value: Optional[str]) -> str:
+    """请求里的日期 → 那一周的周一；格式坏是 400（不静默当本周）。"""
+    raw = str(value or "").strip()
+    if not raw:
+        raw = datetime.now(CHINA_TZ).date().isoformat()
+    try:
+        return week_start_of(raw)
+    except ValueError as exc:
+        raise HTTPException(400, "周起始日应该是 YYYY-MM-DD") from exc
+
+
+def _week_end(week_start: str) -> str:
+    return (date.fromisoformat(week_start) + timedelta(days=6)).isoformat()
+
+
+def _week_short(day: str) -> str:
+    value = date.fromisoformat(day)
+    return f"{value.month}/{value.day}"
+
+
+async def _push_operator(actor: WorkbenchActor) -> dict:
+    """这次手动推送记在谁名下：店长用登录名，员工用花名册姓名。
+
+    发送记录里「谁推的」比「哪个账号推的」有用；员工会话的 name 就是花名册姓名，
+    店长会话没有姓名（_actor 给的是「管理端」），所以回查 admin_user 的用户名。
+    """
+    if actor.kind == "admin":
+        name = (await get_admin_username()) or "管理员"
+        return {"name": name, "kind": "admin", "employee_id": None}
+    return {"name": actor.name or "员工", "kind": "staff", "employee_id": actor.employee_id}
+
+
+def _manual_outbox_reference(row) -> tuple:
+    """出站行的（业务引用, 参数）；不是手动推送的行返回空串与空字典。
+
+    业务引用从幂等键里取（topic:reference:channel）—— 出站行没有单独的列存它，
+    而手动推送的每一次点击都是一个新 uuid，按它分组才是「这一次推送的 N 个群」。
+    """
+    try:
+        params = parse_params(row)
+    except ValueError:
+        return "", {}
+    if not params.get("manual"):
+        return "", {}
+    key = str(row.get("idempotency_key") or "")
+    parts = key.split(":")
+    return (parts[1] if len(parts) >= 3 else key), params
+
+
+def _manual_push_status(statuses: List[str]) -> str:
+    """一组出站行的整体状态（前端照着说一句话）。"""
+    pending = sum(1 for item in statuses if item in ("pending", "sending"))
+    sent = statuses.count("sent")
+    failed = statuses.count("failed")
+    skipped = statuses.count("skipped")
+    if pending:
+        return "pending"
+    if failed and sent:
+        return "partial"
+    if failed:
+        return "failed"
+    if skipped and not sent:
+        return "skipped"
+    return "sent"
+
+
+def _targets_payload(targets) -> list:
+    return [
+        {"channel_id": target.channel_id, "name": target.channel_name, "enabled": target.enabled}
+        for target in targets
+    ]
+
+
+@router.get("/weekly-schedule/push-preview")
+async def weekly_schedule_push_preview(
+    start: Optional[str] = Query(None, alias="week_start", description="YYYY-MM-DD"),
+    db=Depends(get_db),
+    actor: WorkbenchActor = Depends(_schedule_edit),
+) -> dict:
+    """手动推送前的确认信息：周范围、图标题、会发到哪几个群。
+
+    只读、不 expand：确认框不该为了显示群名而写库（补排是点下去那一刻的事）。
+    零订阅照常返回空的 targets —— 由前端当场说清「去企微推送页配」，而不是点下去才炸。
+    """
+    week_start = _manual_week_start(start)
+    targets = await resolve_targets(db, TOPIC_WEEKLY_SCHEDULE)
+    return {
+        "week_start": week_start,
+        "week_end": _week_end(week_start),
+        "title": weekly_schedule_title(week_start),
+        "operator": await _push_operator(actor),
+        "targets": _targets_payload(targets),
+    }
+
+
+@router.post("/weekly-schedule/push")
+async def weekly_schedule_push(
+    payload: WeeklySchedulePushRequest,
+    db=Depends(get_db),
+    actor: WorkbenchActor = Depends(_schedule_edit),
+) -> dict:
+    """把这一周的排班表图片推到「下周排班表」的所有订阅群。
+
+    先真画一遍再入队：缺中文字体 / 图超限在这一步就回给点按钮的人（503 / 400），
+    而不是让每个群各落一行「正文渲染失败」。画出来的字节不传下去 —— 出站行里本来
+    就没有正文，发送时由渲染器按参数现算（与定时任务同一条路）。
+
+    零订阅是 400 而不是成功：点按钮的人要的是「发出去了」，没发出去就得说没发。
+    """
+    week_start = _manual_week_start(payload.week_start)
+    operator = await _push_operator(actor)
+    title = weekly_schedule_title(week_start)
+    # 先确认有人要：零订阅就不必画（画一张没人收的图，还得为缺字体去解释 503）。
+    targets = await resolve_targets(db, TOPIC_WEEKLY_SCHEDULE)
+    if not targets:
+        raise HTTPException(400, "没有任何群订阅「下周排班表」：请店长先在企微推送页配置订阅")
+    image = await wecom_push_service.build_weekly_schedule_image(
+        db, week_start=week_start, title=title, pushed_by=operator["name"]
+    )
+    if not image:
+        raise HTTPException(503, "服务器缺中文字体，无法生成排班图，请联系管理员")
+    week_end = _week_end(week_start)
+    outbox_ids = await wecom_outbox.enqueue_topic(
+        db,
+        TOPIC_WEEKLY_SCHEDULE,
+        params={
+            "week_start": week_start,
+            "title": title,
+            "operator_name": operator["name"],
+            "operator_kind": operator["kind"],
+            "operator_employee_id": operator["employee_id"],
+            "manual": True,
+        },
+        trigger=PushTrigger.SCHEDULED,
+        manual=True,
+        business_reference=uuid4().hex,
+        targets=targets,
+        summary=f"手动推送 · {_week_short(week_start)}–{_week_short(week_end)} · {operator['name']}",
+    )
+    logger.info(
+        "手动推送周表：week=%s operator=%s 入队 %d 个群",
+        week_start,
+        operator["name"],
+        len(outbox_ids),
+    )
+    return {
+        "queued": len(outbox_ids),
+        "week_start": week_start,
+        "week_end": week_end,
+        "title": title,
+        "targets": _targets_payload(targets),
+    }
+
+
+@router.get("/weekly-schedule/last-push")
+async def weekly_schedule_last_push(
+    db=Depends(get_db),
+    actor: WorkbenchActor = Depends(_schedule_edit),
+) -> dict:
+    """最近一次**手动**推送的状态（周表页按钮旁那行小字读它）。
+
+    员工只看自己推的，店长看全部：这行字是「我刚点的那一发到哪一步了」，把同事的
+    动作混进来既没用、又多暴露一层（谁在什么时候推了排班）。
+    """
+    rows = await db.wecom_outbox_recent(limit=200, topic_id=TOPIC_WEEKLY_SCHEDULE)
+    head_reference = ""
+    head_params: dict = {}
+    head_at = ""
+    for row in rows:
+        reference, params = _manual_outbox_reference(row)
+        if not reference:
+            continue
+        if actor.kind != "admin" and params.get("operator_employee_id") != actor.employee_id:
+            continue
+        head_reference, head_params = reference, params
+        head_at = str(row.get("created_at") or "")
+        break
+    if not head_reference:
+        return {"last": None}
+    statuses: List[str] = []
+    for row in rows:
+        reference, _ = _manual_outbox_reference(row)
+        if reference == head_reference:
+            statuses.append(str(row.get("status") or ""))
+    week_start = str(head_params.get("week_start") or "")
+    return {
+        "last": {
+            "at": head_at,
+            "status": _manual_push_status(statuses),
+            "total": len(statuses),
+            "sent": statuses.count("sent"),
+            "failed": statuses.count("failed"),
+            "skipped": statuses.count("skipped"),
+            "pending": sum(1 for item in statuses if item in ("pending", "sending")),
+            "week_start": week_start,
+            "week_end": _week_end(week_start) if week_start else "",
+            "operator_name": str(head_params.get("operator_name") or ""),
+        }
+    }
 
 
 @router.get("/roster")
