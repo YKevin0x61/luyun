@@ -1090,3 +1090,100 @@ def test_web_migration_accepts_zip_and_rejects_bad_archive(purchase_http):
     assert bad.status_code == 400
     assert bad.headers.get("x-error-code") == "bad_archive"
     assert "zip" in bad.json()["detail"]
+
+
+def test_summary_orders_suppliers_and_categories_by_code(purchase_http):
+    """打印顺序照旧小程序：供应商 / 分类按目录编码，商品按编码数字序。
+
+    名称的 Unicode 码点与编码故意相反（「东海冻品」<「阿强水产」、「干货」<「豆制品」、
+    「豆干」<「豆腐」），确保钉住的是编码口径而不是名称口径。
+    """
+    client, accounts = purchase_http
+    _admin_cookie(client)
+    _supplier, _category, first, _second, _product, _other = _setup_catalog(client)
+    aqiang = _post(
+        client, "/api/purchase/admin/suppliers", {"name": "阿强水产", "code": "11"}
+    )["supplier"]
+    tofu_category = _post(
+        client,
+        "/api/purchase/admin/categories",
+        {"supplier_id": aqiang["id"], "name": "豆制品", "code": "01"},
+    )["category"]
+    dry_category = _post(
+        client,
+        "/api/purchase/admin/categories",
+        {"supplier_id": aqiang["id"], "name": "干货", "code": "02"},
+    )["category"]
+    donghai = _post(
+        client, "/api/purchase/admin/suppliers", {"name": "东海冻品", "code": "12"}
+    )["supplier"]
+    frozen_category = _post(
+        client,
+        "/api/purchase/admin/categories",
+        {"supplier_id": donghai["id"], "name": "冻品", "code": "01"},
+    )["category"]
+
+    def _product(supplier, category, name):
+        return _post(
+            client,
+            "/api/purchase/admin/products",
+            {
+                "supplier_id": supplier["id"],
+                "category_id": category["id"],
+                "name": name,
+                "unit": "斤",
+                "position_ids": [first["id"]],
+            },
+        )["product"]
+
+    tofu = _product(aqiang, tofu_category, "豆腐")
+    dried = _product(aqiang, tofu_category, "豆干")
+    mushroom = _product(aqiang, dry_category, "木耳")
+    shrimp = _product(donghai, frozen_category, "冻虾")
+    assert [
+        tofu["product_code"],
+        dried["product_code"],
+        mushroom["product_code"],
+        shrimp["product_code"],
+    ] == ["1101001", "1101002", "1102001", "1201001"]
+
+    _employee(accounts, caps=["purchase"])
+    _staff_cookie(client, accounts)
+    _post(
+        client,
+        "/api/purchase/orders",
+        {
+            "position_id": first["id"],
+            "items": [
+                {"product_id": tofu["id"], "quantity": 1},
+                {"product_id": dried["id"], "quantity": 2},
+                {"product_id": mushroom["id"], "quantity": 3},
+                {"product_id": shrimp["id"], "quantity": 4},
+            ],
+            "stock": {},
+        },
+    )
+
+    def _assert_print_order(summary):
+        assert [s["supplier_name"] for s in summary["suppliers"]] == [
+            "阿强水产",
+            "东海冻品",
+        ]
+        aqiang_node = summary["suppliers"][0]
+        assert [c["category_name"] for c in aqiang_node["categories"]] == [
+            "豆制品",
+            "干货",
+        ]
+        assert [
+            p["name"] for p in aqiang_node["categories"][0]["products"]
+        ] == ["豆腐", "豆干"]
+
+    _admin_cookie(client)
+    private = client.get("/api/purchase/summary", params={"day": TODAY})
+    assert private.status_code == 200, private.text
+    _assert_print_order(private.json())
+
+    client.cookies.clear()
+    public = client.get("/api/purchase/public/summary", params={"day": TODAY})
+    assert public.status_code == 200, public.text
+    _assert_print_order(public.json())

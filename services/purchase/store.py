@@ -1054,16 +1054,25 @@ class PurchaseStore:
         rows = await self._rows(
             'SELECT i.product_id, i.product_code, i.name, i.specification, i.unit,'
             ' i.supplier_id, i.supplier_name, i.category_name, i.position_name,'
+            " COALESCE(sc.code, CASE WHEN i.product_code ~ '^[0-9]{7}$'"
+            '  THEN substring(i.product_code from 1 for 2) END) AS supplier_code,'
+            " COALESCE(cc.code, CASE WHEN i.product_code ~ '^[0-9]{7}$'"
+            '  THEN substring(i.product_code from 3 for 2) END) AS category_code,'
             ' SUM(i.quantity) AS quantity, COUNT(DISTINCT i.order_id) AS order_count,'
             ' MAX(i.stock_qty) AS stock_qty,'
             " STRING_AGG(DISTINCT o.submitter_name, '、') AS submitters"
             ' FROM purchase_order_items i'
             ' JOIN purchase_orders o ON o.id = i.order_id'
+            ' LEFT JOIN purchase_products p ON p.id = i.product_id'
+            ' LEFT JOIN purchase_categories cc ON cc.id = p.category_id'
+            ' LEFT JOIN purchase_suppliers sc'
+            '  ON sc.id = COALESCE(i.supplier_id, p.supplier_id)'
             ' WHERE o.submitted_at >= ? AND o.submitted_at < ?'
             "  AND o.status <> 'cancelled' AND o.deleted_at IS NULL"
             + position_clause
             + ' GROUP BY i.product_id, i.product_code, i.name, i.specification, i.unit,'
-            '  i.supplier_id, i.supplier_name, i.category_name, i.position_name'
+            '  i.supplier_id, i.supplier_name, i.category_name, i.position_name,'
+            '  sc.code, cc.code'
             ' ORDER BY i.supplier_name, i.category_name, i.name',
             tuple(params),
         )

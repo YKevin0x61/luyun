@@ -247,6 +247,23 @@ def _reference_json(product: Mapping[str, Any], ref: ProductReference,
     }
 
 
+def _code_sort_key(code: Any, name: str) -> tuple[int, str, str]:
+    """按目录编码排；缺码的排最后，同码再按名称。"""
+    clean = str(code or "").strip()
+    return (0, clean, name) if clean else (1, "", name)
+
+
+def _product_sort_key(item: Mapping[str, Any]) -> tuple[int, int, str, str]:
+    """商品按编码数字序（旧小程序打印的口径），非数字码与空码排后。"""
+    code = str(item.get("product_code") or "").strip()
+    name = str(item.get("name") or "")
+    if code.isdigit():
+        return (0, int(code), code, name)
+    if code:
+        return (1, 0, code, name)
+    return (2, 0, "", name)
+
+
 def _group_summary(rows: Sequence[Mapping[str, Any]]) -> dict:
     """把按商品 + 岗位聚合的订单行折成 供应商 → 分类 → 商品 → 岗位 的树。"""
     suppliers: dict[str, dict] = {}
@@ -263,11 +280,22 @@ def _group_summary(rows: Sequence[Mapping[str, Any]]) -> dict:
         product_key = int(row.get("product_id") or 0) or str(row.get("product_code") or "")
         supplier = suppliers.setdefault(
             supplier_name,
-            {"supplier_name": supplier_name, "quantity": 0.0, "categories": {}},
+            {
+                "supplier_name": supplier_name,
+                "supplier_code": row.get("supplier_code"),
+                "quantity": 0.0,
+                "categories": {},
+            },
         )
         supplier["quantity"] += quantity
         category = supplier["categories"].setdefault(
-            category_name, {"category_name": category_name, "quantity": 0.0, "products": {}}
+            category_name,
+            {
+                "category_name": category_name,
+                "category_code": row.get("category_code"),
+                "quantity": 0.0,
+                "products": {},
+            },
         )
         category["quantity"] += quantity
         product = category["products"].setdefault(
@@ -303,10 +331,7 @@ def _group_summary(rows: Sequence[Mapping[str, Any]]) -> dict:
         position["quantity"] += quantity
 
     def _product_list(category: dict) -> list[dict]:
-        products = sorted(
-            category["products"].values(),
-            key=lambda item: str(item.get("product_code") or ""),
-        )
+        products = sorted(category["products"].values(), key=_product_sort_key)
         for product in products:
             product["quantity"] = round(product["quantity"], 2)
             product["positions"] = sorted(
@@ -316,10 +341,18 @@ def _group_summary(rows: Sequence[Mapping[str, Any]]) -> dict:
         return products
 
     rendered = []
-    for supplier_name in sorted(suppliers):
+    for supplier_name in sorted(
+        suppliers,
+        key=lambda name: _code_sort_key(suppliers[name].get("supplier_code"), name),
+    ):
         supplier = suppliers[supplier_name]
         categories = []
-        for category_name in sorted(supplier["categories"]):
+        for category_name in sorted(
+            supplier["categories"],
+            key=lambda name: _code_sort_key(
+                supplier["categories"][name].get("category_code"), name
+            ),
+        ):
             category = supplier["categories"][category_name]
             categories.append(
                 {
@@ -1129,6 +1162,20 @@ class PurchaseService:
                                  under_ratio: float = 0.5,
                                  history_days: int = 21) -> dict:
         self._require_admin(actor)
+        return await self.anomalies_for_day(
+            db, day=day, no_order_days=no_order_days, over_ratio=over_ratio,
+            under_ratio=under_ratio, history_days=history_days,
+        )
+
+    async def anomalies_for_day(self, db, *, day: Any = None, no_order_days: int = 3,
+                                over_ratio: float = 1.5, under_ratio: float = 0.5,
+                                history_days: int = 21) -> dict:
+        """不经过人的版本：运营日报（系统定时任务）按营业日直接算异常。
+
+        口径与 `analysis_anomalies` **完全一致**（同一个函数体），只是不做权限判断 ——
+        日报是系统行为，没有「某个人」在调用它；再走一遍 actor 只会让调用方伪造一个
+        管理端身份，权限反而更难读。
+        """
         store = self._store(db)
         target_day = _parse_date(day, store.today())
         no_order_days = max(1, int(no_order_days or 3))

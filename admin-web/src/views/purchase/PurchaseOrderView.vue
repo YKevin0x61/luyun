@@ -23,6 +23,7 @@ import {
   todayText,
 } from './purchaseUi.js'
 import PurchaseNav from './PurchaseNav.vue'
+import PurchasePositionSelect from './PurchasePositionSelect.vue'
 
 const router = useRouter()
 
@@ -82,17 +83,25 @@ const weekday = computed(() => {
 const dateLabel = computed(() => formatMonthDayChinese(today))
 const lunarLabel = computed(() => lunarMonthDay(today))
 
-const nextDayLabel = computed(() => {
+const nextDayParts = computed(() => {
   const value = new Date(today + 'T00:00:00')
-  if (Number.isNaN(value.getTime())) return ''
+  if (Number.isNaN(value.getTime())) return { date: '', weekday: '' }
   value.setDate(value.getDate() + 1)
   const iso = [
     value.getFullYear(),
     String(value.getMonth() + 1).padStart(2, '0'),
     String(value.getDate()).padStart(2, '0'),
   ].join('-')
-  return formatMonthDay(iso) + ' ' + ['周日', '周一', '周二', '周三', '周四', '周五', '周六'][value.getDay()]
+  return {
+    date: formatMonthDay(iso),
+    weekday: ['周日', '周一', '周二', '周三', '周四', '周五', '周六'][value.getDay()],
+  }
 })
+const nextDayDateLabel = computed(() => nextDayParts.value.date)
+const nextDayWeekday = computed(() => nextDayParts.value.weekday)
+const nextDayLabel = computed(() =>
+  [nextDayDateLabel.value, nextDayWeekday.value].filter(Boolean).join(' '),
+)
 
 const targetTagValue = ref('')
 const targetTagDate = ref('')
@@ -590,12 +599,6 @@ async function loadReference() {
   }
 }
 
-async function refreshReference() {
-  if (loadingRows.value) return
-  await loadReference()
-  if (!errorText.value) notice.value = '参考值和日期标签已刷新。'
-}
-
 function choosePosition(positionId) {
   if (positionId === selectedPositionId.value) return
   selectedPositionId.value = positionId
@@ -682,20 +685,15 @@ onBeforeUnmount(() => {
           <span v-if="lunarLabel" class="po-lunar">{{ lunarLabel }}</span>
         </div>
         <div class="po-factor">
-          <span class="po-factor-pill">次日 {{ nextDayLabel }}</span>
+          <span class="po-factor-pill po-next-day" :title="nextDayLabel">次日 {{ nextDayDateLabel }}<span
+            class="po-next-weekday"
+          > {{ nextDayWeekday }}</span></span>
           <span
             v-if="targetTag"
             class="po-factor-pill po-factor-tag"
             :title="targetTagHint"
           >{{ targetTag }}</span>
-          <button
-            type="button"
-            class="po-factor-refresh"
-            :disabled="loadingRows"
-            @click="refreshReference"
-          >刷新</button>
-          <label class="po-days">
-            <span>参考</span>
+          <span class="po-days">
             <select
               class="po-days-select"
               :value="String(referenceDays)"
@@ -706,7 +704,7 @@ onBeforeUnmount(() => {
                 {{ days }} 天
               </option>
             </select>
-          </label>
+          </span>
         </div>
       </div>
       <div class="po-weather-grid">
@@ -742,7 +740,7 @@ onBeforeUnmount(() => {
           <h2>采购岗位</h2>
           <p class="po-hint">先选岗位看商品；提交时会再确认一次。</p>
         </div>
-        <span class="po-hint">
+        <span class="po-hint po-count">
           {{ rows.length }} 项 · 需盘点 {{ needStockRows.length }} 项
         </span>
       </div>
@@ -750,30 +748,17 @@ onBeforeUnmount(() => {
       <div v-else-if="!positions.length" class="po-empty">
         还没有可下单的采购岗位：请店长在「商品与供应商」里建岗位并给商品挂上。
       </div>
-      <div v-else class="po-position-grid">
-        <button
-          type="button"
-          class="po-position-button"
-          :class="{ 'is-active': selectedPositionId === 0 }"
-          @click="choosePosition(0)"
-        >
-          全部
-        </button>
-        <button
-          v-for="position in positions"
-          :key="position.id"
-          type="button"
-          class="po-position-button"
-          :class="{ 'is-active': position.id === selectedPositionId }"
-          @click="choosePosition(position.id)"
-        >
-          {{ position.name }}
-        </button>
-      </div>
-    </section>
-
-    <section class="po-card">
-      <div class="po-tools">
+      <div v-else class="po-controls">
+        <div class="po-position-field">
+          <PurchasePositionSelect
+            id="po-position-select"
+            :model-value="selectedPositionId"
+            :positions="positions"
+            allow-all
+            aria-label="采购岗位"
+            @update:model-value="choosePosition"
+          />
+        </div>
         <input
           v-model="search"
           class="po-search"
@@ -781,7 +766,6 @@ onBeforeUnmount(() => {
           placeholder="搜商品 / 编码 / 供应商"
           aria-label="搜商品"
         />
-        <button type="button" class="po-btn po-btn-ghost" @click="clearInputs">清空数量</button>
       </div>
     </section>
 
@@ -871,12 +855,17 @@ onBeforeUnmount(() => {
     <div class="po-sticky">
       <div class="po-sticky-text">
         <strong>{{ filledRows.length }}</strong> 项 · 合计 {{ formatQty(filledQuantity) }}
-        <span v-if="selectedPosition"> · 盘点已填 {{ filledStockCount }} / {{ needStockRows.length }}</span>
-        <span v-else> · 全部浏览</span>
+        <span v-if="selectedPosition" class="po-sticky-stock"> · 盘点 {{ filledStockCount }}/{{ needStockRows.length }}</span>
+        <span v-else class="po-sticky-browse"> · 全部浏览</span>
       </div>
-      <button class="po-btn po-btn-primary po-submit" type="button" @click="openConfirm">
-        提交采购单
-      </button>
+      <div class="po-sticky-actions">
+        <button class="po-btn po-btn-ghost po-clear" type="button" title="清空下单数量和盘点库存" @click="clearInputs">
+          清空
+        </button>
+        <button class="po-btn po-btn-primary po-submit" type="button" @click="openConfirm">
+          提交采购单
+        </button>
+      </div>
     </div>
 
     <Teleport to="body">
@@ -885,18 +874,19 @@ onBeforeUnmount(() => {
           <h2>提交这张采购单？</h2>
 
           <div v-if="!selectedPosition" class="po-position-picker">
-            <p class="po-dialog-label">选一个岗位提交（一张单只属于一个岗位）</p>
-            <div class="po-chips">
-              <button
-                v-for="position in positions"
-                :key="position.id"
-                type="button"
-                class="po-chip"
-                :class="{ 'is-active': position.id === submitPositionId }"
-                @click="submitPositionId = position.id"
-              >
-                {{ position.name }}
-              </button>
+            <label class="po-dialog-label" for="po-dialog-position">
+              选一个岗位提交（一张单只属于一个岗位）
+            </label>
+            <div class="po-position-field">
+              <PurchasePositionSelect
+                id="po-dialog-position"
+                :model-value="submitPositionId"
+                :positions="positions"
+                placeholder="请选择岗位"
+                aria-label="选择岗位"
+                inline
+                @update:model-value="submitPositionId = $event"
+              />
             </div>
           </div>
 
@@ -1027,18 +1017,23 @@ onBeforeUnmount(() => {
 }
 .po-date-row {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: 10px;
   flex-wrap: wrap;
 }
 .po-date-block {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
   min-width: 0;
+  flex: 0 1 auto;
 }
 .po-date {
-  display: block;
+  display: inline;
   font-size: var(--fs-24);
   line-height: 1.15;
+  white-space: nowrap;
 }
 .po-date em {
   font-style: normal;
@@ -1047,19 +1042,23 @@ onBeforeUnmount(() => {
   opacity: 0.62;
 }
 .po-lunar {
-  display: block;
-  margin-top: 4px;
+  display: inline;
+  margin-top: 0;
   font-size: var(--fs-12);
   opacity: 0.62;
+  white-space: nowrap;
 }
 .po-factor {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   align-items: center;
   gap: 8px;
-  flex: 0 1 auto;
+  flex: 0 0 auto;
 }
 .po-factor-pill {
+  display: inline-flex;
+  align-items: center;
+  height: 36px;
   padding: 8px 10px;
   border: 1px solid var(--line);
   border-radius: 10px;
@@ -1070,39 +1069,45 @@ onBeforeUnmount(() => {
 .po-factor-tag {
   background: var(--wb-tint-08);
 }
-.po-factor-refresh {
-  min-height: 44px;
-  padding: 0 12px;
-  border: 1px solid var(--line-strong);
-  border-radius: 10px;
-  background: transparent;
-  color: var(--ink);
-  font: inherit;
-  font-size: var(--fs-12);
-  cursor: pointer;
-}
-.po-factor-refresh:disabled {
-  cursor: progress;
-  opacity: 0.55;
-}
 .po-tag-hint {
   display: inline;
 }
 .po-days {
+  position: relative;
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  font-size: var(--fs-12);
+}
+.po-days::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  right: 11px;
+  width: 6px;
+  height: 6px;
+  border-right: 1.5px solid var(--ink);
+  border-bottom: 1.5px solid var(--ink);
+  opacity: 0.55;
+  transform: translateY(-70%) rotate(45deg);
+  pointer-events: none;
 }
 .po-days-select {
-  min-height: 44px;
-  padding: 0 8px;
+  width: 72px;
+  height: 36px;
+  padding: 0 24px 0 10px;
   border: 1px solid var(--line-strong);
   border-radius: 10px;
   background: var(--surface-1);
   color: var(--ink);
-  font-size: var(--fs-13);
+  font: inherit;
+  font-size: var(--fs-12);
   font-weight: 600;
+  appearance: none;
+  -webkit-appearance: none;
+  cursor: pointer;
+}
+.po-days-select:focus-visible {
+  outline: 2px solid var(--action);
+  outline-offset: 2px;
 }
 .po-weather-grid {
   display: grid;
@@ -1176,28 +1181,15 @@ onBeforeUnmount(() => {
   margin: 2px 0 0;
   font-size: var(--fs-11);
 }
-.po-position-grid {
-  display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
-  gap: 5px;
+.po-position-card .po-count {
+  flex: none;
+  white-space: nowrap;
 }
-.po-position-button {
-  min-height: 44px;
-  padding: 5px 2px;
-  border: 1px solid var(--line-strong);
-  border-radius: 10px;
-  background: var(--surface-2);
-  color: var(--ink);
-  font: inherit;
-  font-size: var(--fs-12);
-  line-height: 1.2;
-  cursor: pointer;
+.po-position-field {
+  max-width: 420px;
 }
-.po-position-button.is-active {
-  border-color: var(--action);
-  background: var(--action);
-  color: var(--action-ink);
-  font-weight: 700;
+.po-position-picker .po-position-field {
+  max-width: none;
 }
 .po-head {
   display: flex;
@@ -1270,35 +1262,19 @@ onBeforeUnmount(() => {
   font-size: var(--fs-12);
   opacity: 0.6;
 }
-.po-chips {
+.po-controls {
   display: flex;
-  flex-wrap: wrap;
-  gap: 7px;
-}
-.po-chip {
-  min-height: 44px;
-  padding: 7px 14px;
-  border: 1px solid var(--line-strong);
-  border-radius: 999px;
-  background: var(--surface-2);
-  color: var(--ink);
-  font: inherit;
-  font-size: var(--fs-13);
-  cursor: pointer;
-}
-.po-chip.is-active {
-  border-color: var(--action);
-  background: var(--action);
-  color: var(--action-ink);
-  font-weight: 600;
-}
-.po-tools {
-  display: flex;
-  flex-wrap: wrap;
+  align-items: center;
   gap: 8px;
 }
+.po-controls .po-position-field {
+  /* 岗位在左、搜索在右：窄屏按视口收窄，桌面封顶 220px，给搜索留出余量。 */
+  flex: 0 0 clamp(112px, 34vw, 220px);
+  max-width: none;
+}
 .po-search {
-  flex: 1 1 180px;
+  flex: 1 1 0;
+  min-width: 0;
   min-height: 44px;
   padding: 8px 12px;
   border: 1px solid var(--line-strong);
@@ -1584,10 +1560,26 @@ onBeforeUnmount(() => {
   box-shadow: 0 -8px 24px var(--wb-ink-a08);
 }
 .po-sticky-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
   font-size: var(--fs-13);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .po-sticky-text strong {
   font-size: var(--fs-16);
+}
+.po-sticky-actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+}
+.po-clear {
+  min-height: 44px;
+  padding: 9px 16px;
+  font-size: var(--fs-14);
 }
 .po-submit {
   min-height: 44px;
@@ -1762,6 +1754,10 @@ onBeforeUnmount(() => {
   border-radius: 12px;
   background: var(--surface-2);
 }
+.po-position-picker .po-dialog-label {
+  display: block;
+  margin-bottom: 6px;
+}
 .po-dialog-actions {
   display: flex;
   justify-content: flex-end;
@@ -1772,6 +1768,16 @@ onBeforeUnmount(() => {
   .po-page {
     padding-bottom: 132px;
   }
+  .po-position-field {
+    max-width: none;
+  }
+  .po-controls {
+    gap: 6px;
+  }
+  .po-search {
+    padding: 8px 10px;
+    font-size: var(--fs-13);
+  }
   .po-head h1 {
     font-size: var(--fs-20);
   }
@@ -1779,21 +1785,40 @@ onBeforeUnmount(() => {
     padding: 14px 12px 12px;
   }
   .po-date-row {
-    gap: 8px;
-  }
-  .po-factor {
     gap: 6px;
   }
-  .po-factor-pill {
-    padding: 7px 8px;
+  .po-date-block {
+    display: block;
+  }
+  .po-date {
+    font-size: var(--fs-20);
+  }
+  .po-date em {
+    font-size: var(--fs-12);
+  }
+  .po-lunar {
+    display: block;
+    margin-top: 1px;
     font-size: var(--fs-11);
   }
-  .po-days {
+  .po-factor {
     gap: 4px;
   }
+  .po-factor-pill {
+    height: 30px;
+    padding: 5px 6px;
+    font-size: var(--fs-11);
+  }
+  .po-days::after {
+    right: 7px;
+    width: 5px;
+    height: 5px;
+  }
   .po-days-select {
-    padding: 0 6px;
-    font-size: var(--fs-12);
+    width: 60px;
+    height: 30px;
+    padding: 0 18px 0 8px;
+    font-size: var(--fs-11);
   }
   .po-weather-grid {
     gap: 6px;
@@ -1848,11 +1873,36 @@ onBeforeUnmount(() => {
     min-height: 48px;
     font-size: var(--fs-14);
   }
+  .po-sticky {
+    gap: 8px;
+  }
   .po-sticky-text {
     font-size: var(--fs-12);
   }
+  .po-sticky-actions {
+    gap: 6px;
+  }
+  .po-clear {
+    padding: 9px 12px;
+  }
   .po-submit {
     padding: 9px 14px;
+  }
+}
+@media (max-width: 430px) {
+  /* 手机上一行放不下「次日 11-24 周二」；完整日期仍保留在 title。 */
+  .po-next-weekday {
+    display: none;
+  }
+  /* 清空和提交占了底栏右侧，浏览态不再重复写「全部浏览」；盘点进度仍保留。 */
+  .po-sticky-browse {
+    display: none;
+  }
+  /* 320 宽时底栏只够「项数 + 合计」，盘点进度换到第二行，不省略。 */
+  .po-sticky-text {
+    overflow: visible;
+    line-height: 1.25;
+    white-space: normal;
   }
 }
 </style>

@@ -14,16 +14,16 @@
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { api } from '../../api/client.js'
-import { formatMonthDay, formatQty, pad2, todayText, weekdayText } from './purchaseUi.js'
+import { formatMonthDay, pad2, todayText, weekdayText } from './purchaseUi.js'
 import { PURCHASE_MIGRATION_PATH } from '../../utils/purchasePaths.js'
 import PurchaseNav from './PurchaseNav.vue'
 
 const router = useRouter()
 
 const TABS = [
-  { key: 'products', label: '商品' },
-  { key: 'suppliers', label: '供应商与分类' },
-  { key: 'positions', label: '岗位' },
+  { key: 'products', label: '商品管理' },
+  { key: 'suppliers', label: '供应商管理' },
+  { key: 'categories', label: '分类管理' },
   { key: 'tags', label: '日期标签' },
 ]
 const TAG_VALUES = ['2万', '3万', '4万', '5万', '6万', '7万', '8万']
@@ -45,6 +45,7 @@ const tagsLoading = ref(false)
 const keyword = ref('')
 const supplierFilter = ref(0)
 const positionFilter = ref(0)
+const categorySupplierFilter = ref(0)
 const page = ref(1)
 
 const dialogKind = ref('')
@@ -116,6 +117,21 @@ function dateWeekday(value) {
 
 const suppliers = computed(() => meta.value.suppliers || [])
 const categories = computed(() => meta.value.categories || [])
+
+function supplierById(id) {
+  return suppliers.value.find((row) => Number(row.id) === Number(id)) || null
+}
+
+function categoryFullCode(row) {
+  const supplier = supplierById(row && row.supplier_id)
+  return (supplier ? pad2(supplier.code) : '--') + pad2(row && row.code)
+}
+
+const filteredCategories = computed(() =>
+  categories.value.filter(
+    (row) => !categorySupplierFilter.value || Number(row.supplier_id) === Number(categorySupplierFilter.value),
+  ),
+)
 
 const positionsSorted = computed(() =>
   [...(meta.value.positions || [])].sort(
@@ -194,6 +210,12 @@ function positionUsageCount(positionId) {
 
 function supplierCategories(supplierId) {
   return categories.value.filter((row) => Number(row.supplier_id) === Number(supplierId))
+}
+
+function clearProductFilters() {
+  keyword.value = ''
+  supplierFilter.value = 0
+  positionFilter.value = 0
 }
 
 function selectableCategories(supplierId, keepId) {
@@ -1096,29 +1118,30 @@ onUnmounted(() => {
 
     <header class="cat-hero">
       <div class="cat-hero-top">
-        <div>
-          <h1 class="cat-title">商品与供应商</h1>
+        <div class="cat-hero-copy">
+          <p class="cat-eyebrow">厨房采购 · 目录</p>
+          <h1 class="cat-title">{{ activeTab === 'positions' ? '岗位管理' : '商品管理' }}</h1>
           <p class="cat-sub">
-            先建供应商和分类，再建商品；编码是供应商 2 位 + 分类 2 位 + 序号 3 位。
-            商品挂上岗位后才会出现在下单页；目录不物理删除，统一停用保留历史。
+            {{ activeTab === 'positions'
+              ? '岗位决定下单页看到哪些商品；序号决定顺序，停用保留历史。'
+              : '供应商 → 分类 → 商品；编码 2 + 2 + 3，停用保留历史。' }}
           </p>
         </div>
-        <button type="button" class="btn cat-refresh" :disabled="loading" @click="loadAll">
-          {{ loading ? '刷新中…' : '刷新' }}
+        <button v-if="activeTab !== 'positions'" type="button" class="cat-pos-link" @click="activeTab = 'positions'">
+          岗位管理 <span aria-hidden="true">›</span>
         </button>
       </div>
-      <div class="cat-hero-actions">
-        <button type="button" class="btn" @click="activeTab = 'positions'">岗位管理</button>
-        <button type="button" class="btn" @click="openImportDialog">批量导入</button>
-        <button type="button" class="btn" @click="downloadCatalog">批量导出</button>
-        <button type="button" class="btn" @click="router.push(PURCHASE_MIGRATION_PATH)">备份/迁移</button>
+      <div v-if="activeTab !== 'positions'" class="cat-hero-actions">
+        <button type="button" class="cat-hero-btn" @click="openImportDialog">批量导入</button>
+        <button type="button" class="cat-hero-btn" @click="downloadCatalog">批量导出</button>
+        <button type="button" class="cat-hero-btn" @click="router.push(PURCHASE_MIGRATION_PATH)">备份/迁移</button>
       </div>
     </header>
 
     <p v-if="errorText" class="banner" role="alert">{{ errorText }}</p>
     <p v-else-if="notice" class="banner banner-soft">{{ notice }}</p>
 
-    <nav class="tabs" role="tablist" aria-label="目录分区">
+    <nav v-if="activeTab !== 'positions'" class="tabs" role="tablist" aria-label="目录分区">
       <button
         v-for="tab in TABS"
         :key="tab.key"
@@ -1136,40 +1159,66 @@ onUnmounted(() => {
     <p v-if="loading && !products.length" class="empty">正在加载目录…</p>
 
     <template v-else>
-      <section v-if="activeTab === 'products'" class="tab-panel" role="tabpanel" aria-label="商品">
-        <div class="toolbar">
-          <div class="toolbar-filters">
+      <section v-if="activeTab === 'products'" class="tab-panel products-panel" role="tabpanel" aria-label="商品">
+        <div class="product-tools">
+          <div class="search-box">
             <input
               v-model="keyword"
-              class="input search"
+              class="input product-search"
               type="search"
               placeholder="搜编码 / 名称 / 供应商"
               aria-label="搜索商品"
             />
-            <select v-model.number="supplierFilter" class="select" aria-label="按供应商筛选">
-              <option :value="0">全部供应商</option>
+            <svg class="search-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <circle cx="11" cy="11" r="6.5" />
+              <path d="m16 16 4 4" />
+            </svg>
+          </div>
+          <div class="filter-row">
+            <select
+              v-model.number="supplierFilter"
+              class="filter-chip"
+              :class="{ 'is-on': supplierFilter }"
+              aria-label="按供应商筛选"
+            >
+              <option :value="0">供应商</option>
               <option v-for="supplier in suppliers" :key="supplier.id" :value="supplier.id">
                 {{ supplier.name }}{{ supplier.active ? '' : '（停用）' }}
               </option>
             </select>
-            <select v-model.number="positionFilter" class="select" aria-label="按岗位筛选">
-              <option :value="0">全部岗位</option>
+            <select
+              v-model.number="positionFilter"
+              class="filter-chip"
+              :class="{ 'is-on': positionFilter }"
+              aria-label="按岗位筛选"
+            >
+              <option :value="0">岗位</option>
               <option v-for="position in positionsSorted" :key="position.id" :value="position.id">
                 {{ position.name }}{{ position.active ? '' : '（停用）' }}
               </option>
             </select>
-          </div>
-          <div class="toolbar-actions">
-            <button type="button" class="btn btn-primary" @click="openProductDialog(null)">+ 新建商品</button>
-            <button type="button" class="btn" @click="openImportDialog">导入 Excel</button>
-            <button type="button" class="btn" @click="downloadCatalog">导出</button>
-            <button type="button" class="btn" @click="downloadTemplate">模板</button>
+            <button
+              v-if="keyword || supplierFilter || positionFilter"
+              type="button"
+              class="filter-clear"
+              @click="clearProductFilters"
+            >
+              清除筛选
+            </button>
+            <button type="button" class="btn btn-primary product-add-desktop" @click="openProductDialog(null)">
+              + 新建商品
+            </button>
           </div>
         </div>
 
         <div class="list-meta">
           <span>共 {{ products.length }} 个商品 · 筛选后 {{ filteredProducts.length }} 个</span>
-          <span v-if="filteredProducts.length">第 {{ currentPage }} / {{ pageCount }} 页</span>
+          <span class="list-meta-right">
+            <span v-if="filteredProducts.length">第 {{ currentPage }} / {{ pageCount }} 页</span>
+            <button type="button" class="meta-refresh" :disabled="loading" @click="loadAll">
+              {{ loading ? '刷新中…' : '刷新' }}
+            </button>
+          </span>
         </div>
 
         <div v-if="!filteredProducts.length" class="empty">
@@ -1213,11 +1262,11 @@ onUnmounted(() => {
               </div>
               <div>
                 <span>单位</span>
-                <strong>{{ product.unit || '—' }}<template v-if="product.specification"> · {{ product.specification }}</template></strong>
+                <strong>{{ product.unit || '—' }}</strong>
               </div>
-              <div>
-                <span>步长 / 系数</span>
-                <strong>{{ formatQty(product.order_step) }} / {{ formatQty(product.safety_factor) }}</strong>
+              <div v-if="product.specification">
+                <span>规格</span>
+                <strong>{{ product.specification }}</strong>
               </div>
               <div v-if="product.remark" class="product-field-remark">
                 <span>备注</span>
@@ -1255,9 +1304,11 @@ onUnmounted(() => {
             →
           </button>
         </nav>
+
+        <button type="button" class="product-fab" @click="openProductDialog(null)">+ 添加商品</button>
       </section>
 
-      <section v-else-if="activeTab === 'suppliers'" class="tab-panel" role="tabpanel" aria-label="供应商与分类">
+      <section v-else-if="activeTab === 'suppliers'" class="tab-panel" role="tabpanel" aria-label="供应商">
         <div class="toolbar">
           <p class="toolbar-note">
             供应商编码 2 位、分类编码 2 位；分类挂在供应商下面。停用不会动历史单据，新增分类的编码可以留空自动取。
@@ -1302,41 +1353,73 @@ onUnmounted(() => {
               </div>
             </header>
 
-            <div class="category-list">
-              <p v-if="!supplierCategories(supplier.id).length" class="category-empty">
-                还没有分类。分类编码留空时会自动取这个供应商的下一个 2 位码。
-              </p>
-              <div
-                v-for="category in supplierCategories(supplier.id)"
-                :key="category.id"
-                class="category-row"
-                :class="{ 'is-off': !category.active }"
-              >
-                <span class="code-chip">{{ pad2(category.code) }}</span>
-                <span class="category-name">{{ category.name }}</span>
-                <span class="muted">{{ categoryProductCountOf(category.id) }} 个商品</span>
-                <span class="pill" :class="category.active ? 'pill-on' : 'pill-off'">
-                  <i class="dot"></i>{{ category.active ? '启用中' : '已停用' }}
-                </span>
-                <div class="row-actions">
-                  <button type="button" class="btn" @click="openCategoryDialog(category, null)">编辑</button>
-                  <button
-                    type="button"
-                    class="btn"
-                    :class="category.active ? 'btn-danger' : 'btn-enable'"
-                    :disabled="categoryBusy === category.id"
-                    @click="toggleCategoryActive(category)"
-                  >
-                    {{ categoryBusy === category.id ? '保存中…' : category.active ? '停用' : '启用' }}
-                  </button>
-                </div>
+          </article>
+        </div>
+      </section>
+
+      <section v-else-if="activeTab === 'categories'" class="tab-panel" role="tabpanel" aria-label="分类">
+        <div class="toolbar">
+          <p class="toolbar-note">分类挂在供应商下面；编码是供应商 2 位 + 分类 2 位。停用分类不影响历史单据。</p>
+          <div class="toolbar-actions">
+            <select v-model.number="categorySupplierFilter" class="filter-chip" aria-label="按供应商筛选分类">
+              <option :value="0">全部供应商</option>
+              <option v-for="supplier in suppliers" :key="supplier.id" :value="supplier.id">
+                {{ supplier.name }}{{ supplier.active ? '' : '（停用）' }}
+              </option>
+            </select>
+            <button
+              type="button"
+              class="btn btn-primary"
+              @click="openCategoryDialog(null, categorySupplierFilter ? supplierById(categorySupplierFilter) : null)"
+            >
+              + 新建分类
+            </button>
+          </div>
+        </div>
+
+        <div v-if="!filteredCategories.length" class="empty">
+          还没有分类。先选一个供应商，再给它建分类；分类编码可以留空自动取。
+        </div>
+
+        <div v-else class="category-cards">
+          <article
+            v-for="category in filteredCategories"
+            :key="category.id"
+            class="category-card"
+            :class="{ 'is-off': !category.active }"
+          >
+            <header class="category-card-head">
+              <span class="code-chip">{{ categoryFullCode(category) }}</span>
+              <div class="category-card-main">
+                <h2 class="category-card-name">{{ category.name }}</h2>
+                <p class="category-card-meta">
+                  {{ supplierById(category.supplier_id)?.name || '供应商已删' }} · {{ categoryProductCountOf(category.id) }} 个商品
+                </p>
               </div>
-            </div>
+              <span class="pill" :class="category.active ? 'pill-on' : 'pill-off'">
+                <i class="dot"></i>{{ category.active ? '启用中' : '已停用' }}
+              </span>
+              <div class="row-actions">
+                <button type="button" class="btn" @click="openCategoryDialog(category, null)">编辑</button>
+                <button
+                  type="button"
+                  class="btn"
+                  :class="category.active ? 'btn-danger' : 'btn-enable'"
+                  :disabled="categoryBusy === category.id"
+                  @click="toggleCategoryActive(category)"
+                >
+                  {{ categoryBusy === category.id ? '保存中…' : category.active ? '停用' : '启用' }}
+                </button>
+              </div>
+            </header>
           </article>
         </div>
       </section>
 
       <section v-else-if="activeTab === 'positions'" class="tab-panel" role="tabpanel" aria-label="岗位">
+        <div class="subpage-head">
+          <button type="button" class="btn" @click="activeTab = 'products'">‹ 商品管理</button>
+        </div>
         <div class="toolbar">
           <p class="toolbar-note">
             按序号从小到大排；上移 / 下移会交换相邻两条的序号。岗位被商品占用时不要物理删除，用停用。
@@ -1860,7 +1943,7 @@ onUnmounted(() => {
           <div class="dialog-body">
             <p class="side-note">
               先预览再写入。供应商、分类、岗位必须已经在目录里；不会按表格自动新建。
-              表头用「模板」下载，导出文件也可以直接改完再导入。
+              导出文件也可以直接改完再导入。
             </p>
             <div class="form-grid">
               <label class="field">
@@ -1876,6 +1959,10 @@ onUnmounted(() => {
                   <span class="file-name">{{ importFile ? importFile.name : '选择 .xlsx 文件' }}</span>
                   <input ref="importFileInput" class="file-input" type="file" accept=".xlsx" @change="onImportFile" />
                 </label>
+              </div>
+              <div class="field">
+                <span class="field-label">空白模板</span>
+                <button type="button" class="btn" @click="downloadTemplate">下载模板</button>
               </div>
             </div>
 
@@ -3217,6 +3304,355 @@ onUnmounted(() => {
   border: 0;
 }
 
+/* 小程序式目录头：橙色实底 + 深墨字，和 luyun 的工作台主色一致。 */
+.cat-hero {
+  padding: 16px;
+  border: 1px solid var(--action);
+  border-radius: 16px;
+  background: var(--action);
+  color: var(--action-ink);
+  box-shadow: var(--paper-shadow-sm);
+}
+
+.cat-hero-copy {
+  min-width: 0;
+}
+
+.cat-eyebrow {
+  margin: 0 0 3px;
+  color: var(--action-ink);
+  font-size: var(--fs-11);
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  opacity: 0.72;
+}
+
+.cat-title {
+  margin: 0 0 4px;
+  color: var(--action-ink);
+  font-size: var(--fs-24);
+}
+
+.cat-sub {
+  max-width: none;
+  color: var(--action-ink);
+  font-size: var(--fs-12);
+  line-height: 1.5;
+  opacity: 0.76;
+}
+
+.cat-pos-link {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  min-height: 44px;
+  padding: 0 14px;
+  border: 1px solid var(--surface-1);
+  border-radius: 999px;
+  background: var(--surface-1);
+  color: var(--action-ink);
+  font-family: inherit;
+  font-size: var(--fs-13);
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.cat-pos-link:hover {
+  background: var(--surface-0);
+}
+
+.cat-hero-actions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.cat-hero-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
+  padding: 0 8px;
+  border: 1px solid var(--surface-1);
+  border-radius: var(--r-1);
+  background: var(--surface-1);
+  color: var(--action-ink);
+  font-family: inherit;
+  font-size: var(--fs-13);
+  font-weight: 700;
+  line-height: 1.2;
+  cursor: pointer;
+}
+
+.cat-hero-btn:hover {
+  background: var(--surface-0);
+}
+
+.cat-pos-link:focus-visible,
+.cat-hero-btn:focus-visible,
+.filter-chip:focus-visible,
+.filter-clear:focus-visible,
+.meta-refresh:focus-visible,
+.product-fab:focus-visible {
+  outline: 2px solid var(--action-ink);
+  outline-offset: 2px;
+}
+
+.tabs {
+  flex-wrap: nowrap;
+  gap: 0;
+  padding: 0;
+  overflow: hidden;
+  border-radius: var(--r-2);
+}
+
+.tab {
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 48px;
+  padding: 0 6px;
+  border: 0;
+  border-bottom: 3px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  font-size: var(--fs-13);
+  white-space: nowrap;
+}
+
+.tab:hover {
+  background: var(--surface-0);
+}
+
+.tab.is-active {
+  border: 0;
+  border-bottom: 3px solid var(--action);
+  background: transparent;
+  color: var(--action);
+  box-shadow: none;
+}
+
+.product-tools {
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-2);
+  background: var(--surface-1);
+  box-shadow: var(--paper-shadow-sm);
+}
+
+.search-box {
+  position: relative;
+}
+
+.product-search {
+  padding-right: 44px;
+  background: var(--surface-0);
+}
+
+.search-icon {
+  position: absolute;
+  top: 50%;
+  right: 13px;
+  width: 18px;
+  height: 18px;
+  transform: translateY(-50%);
+  stroke: var(--ink-faint);
+  stroke-width: 2;
+  stroke-linecap: round;
+  pointer-events: none;
+}
+
+.filter-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.filter-chip {
+  min-height: 44px;
+  max-width: 100%;
+  padding: 0 12px;
+  border: 1px solid transparent;
+  border-radius: var(--r-1);
+  background: var(--surface-2);
+  color: var(--ink-dim);
+  font-family: inherit;
+  font-size: var(--fs-12);
+  font-weight: 600;
+}
+
+.filter-chip.is-on {
+  border-color: var(--action);
+  background: var(--action);
+  color: var(--action-ink);
+}
+
+.filter-clear {
+  min-height: 44px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: var(--r-1);
+  background: transparent;
+  color: var(--danger-bright);
+  font-family: inherit;
+  font-size: var(--fs-12);
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.filter-clear:hover {
+  background: var(--wb-danger-a10);
+}
+
+.product-add-desktop {
+  margin-left: auto;
+}
+
+.list-meta-right {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.meta-refresh {
+  min-height: 44px;
+  padding: 0 6px;
+  border: 0;
+  background: transparent;
+  color: var(--ink-dim);
+  font-family: inherit;
+  font-size: var(--fs-11);
+  font-weight: 700;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.meta-refresh:hover {
+  color: var(--action);
+}
+
+.product {
+  gap: 0;
+  padding: 0;
+}
+
+.product-head {
+  align-items: center;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-0);
+}
+
+.product-head-main {
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+}
+
+.product-name {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+.product-head .badges {
+  flex: 0 0 auto;
+  justify-content: flex-end;
+  margin-left: auto;
+}
+
+.product-fields {
+  padding: 3px 14px 7px;
+  border-top: 0;
+}
+
+.product-fields > div {
+  grid-template-columns: 56px minmax(0, 1fr);
+  padding: 7px 0;
+}
+
+.product-actions {
+  margin: 0;
+}
+
+.supplier {
+  gap: 0;
+  padding: 14px;
+}
+
+.supplier-head {
+  align-items: center;
+}
+
+.supplier-main {
+  flex: 1 1 160px;
+}
+
+.supplier-name {
+  margin: 0 0 2px;
+}
+
+.category-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.category-card {
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--r-2);
+  background: var(--surface-1);
+  box-shadow: var(--paper-shadow-sm);
+}
+
+.category-card.is-off {
+  border-style: dashed;
+  background: var(--surface-0);
+}
+
+.category-card-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 12px;
+  padding: 12px 14px;
+}
+
+.category-card-main {
+  flex: 1 1 160px;
+  min-width: 0;
+}
+
+.category-card-name {
+  margin: 0;
+  font-size: var(--fs-14);
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.category-card-meta {
+  margin: 2px 0 0;
+  color: var(--ink-dim);
+  font-size: var(--fs-12);
+  line-height: 1.5;
+}
+
+.subpage-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+
+.product-fab {
+  display: none;
+}
+
 @media (max-width: 1024px) {
   .date-layout {
     grid-template-columns: 1fr;
@@ -3230,14 +3666,84 @@ onUnmounted(() => {
 }
 
 @media (max-width: 720px) {
-  .cat-head {
-    flex-direction: column;
-    align-items: stretch;
+  .cat-hero {
+    padding: 14px;
   }
 
   .toolbar {
     flex-direction: column;
     align-items: stretch;
+  }
+
+  .toolbar-note {
+    flex: 0 0 auto;
+  }
+
+  .toolbar-actions {
+    width: 100%;
+  }
+
+  .cat-hero-actions {
+    gap: 6px;
+    margin-top: 12px;
+  }
+
+  .cat-hero-btn {
+    padding: 0 4px;
+    font-size: var(--fs-12);
+  }
+
+  .cat-pos-link {
+    padding: 0 10px;
+    font-size: var(--fs-12);
+  }
+
+  .product-tools {
+    padding: 10px;
+  }
+
+  .product-add-desktop {
+    display: none !important;
+  }
+
+  .products-panel {
+    padding-bottom: 142px;
+  }
+
+  .product-fab {
+    position: fixed;
+    bottom: calc(68px + var(--safe-b));
+    left: 50%;
+    z-index: var(--z-shell);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 200px;
+    max-width: calc(100vw - 48px);
+    min-height: 50px;
+    padding: 0 24px;
+    transform: translateX(-50%);
+    border: 0;
+    border-radius: 999px;
+    background: var(--action);
+    color: var(--action-ink);
+    box-shadow: var(--paper-shadow);
+    font-family: inherit;
+    font-size: var(--fs-14);
+    font-weight: 700;
+    cursor: pointer;
+  }
+
+  .product-head {
+    padding: 10px 12px;
+  }
+
+  .product-fields {
+    padding: 2px 12px 6px;
+  }
+
+  .category-card-head {
+    padding: 12px;
   }
 
   .toolbar-filters {
@@ -3266,13 +3772,32 @@ onUnmounted(() => {
   }
 
   .tabs {
-    gap: 4px;
-    padding: 4px;
+    gap: 0;
+    padding: 0;
   }
 
   .tab {
-    flex: 1 1 calc(50% - 4px);
-    padding: 0 10px;
+    flex: 1 1 0;
+    padding: 0 4px;
+    font-size: var(--fs-11);
+  }
+
+  .filter-row {
+    gap: 6px;
+  }
+
+  .filter-chip {
+    flex: 1 1 120px;
+    min-width: 0;
+  }
+
+  .product-head .badges {
+    margin-left: 0;
+  }
+
+  .list-meta-right {
+    width: 100%;
+    justify-content: space-between;
   }
 
   .product-meta {
