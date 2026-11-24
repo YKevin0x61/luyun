@@ -165,7 +165,7 @@ export function cellBadgeText(row) {
  * 单日视图是页内状态、不拆子路由（ref 详情见 ADR 0135）：拆了以后「今天」这类入口
  * 与面包屑都要多认一层，而这一页的刷新落点永远是月历。
  */
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 
 import { api } from '../../api/client.js'
@@ -251,16 +251,35 @@ const deleteConfirm = ref(false)
 // 单位选择：不用原生 <select>（手机上原生 picker 会从底部盖住半屏、也跟工作台视觉不一致），
 // 改成底部弹层 + 流式按钮，点一下即选即关。unitPicker 存的是「正在改的那一行」的引用。
 const unitPicker = ref(null)
+// 常用项之外允许手输：库里 unit 本来就是自由文本，这里给一条「自定义」入口。
+const unitCustomOpen = ref(false)
+const unitCustomValue = ref('')
+const unitCustomInput = ref(null)
 function openUnitPicker(row) {
   if (!dayEditable.value) return
   unitPicker.value = row
+  unitCustomOpen.value = false
+  unitCustomValue.value = ''
 }
 function pickUnit(unit) {
   if (unitPicker.value) unitPicker.value.unit = unit
   unitPicker.value = null
+  unitCustomOpen.value = false
+}
+function openCustomUnit() {
+  unitCustomOpen.value = true
+  nextTick(() => unitCustomInput.value?.focus())
+}
+function applyCustomUnit() {
+  const value = String(unitCustomValue.value || '').trim()
+  if (!value || !unitPicker.value) return
+  unitPicker.value.unit = value.slice(0, Number(meta.value?.max_unit) || 10)
+  unitPicker.value = null
+  unitCustomOpen.value = false
 }
 function closeUnitPicker() {
   unitPicker.value = null
+  unitCustomOpen.value = false
 }
 
 // 导入
@@ -1457,6 +1476,30 @@ onBeforeUnmount(() => {
               {{ unit }}
             </button>
           </div>
+          <template v-if="unitCustomOpen">
+            <div class="sm-sheet-custom">
+              <input
+                ref="unitCustomInput"
+                v-model="unitCustomValue"
+                class="sm-input sm-sheet-custom-input"
+                type="text"
+                :maxlength="meta.max_unit || 10"
+                placeholder="输入单位，如 板"
+                @keyup.enter="applyCustomUnit"
+              />
+              <button type="button" class="sm-sheet-custom-ok" @click="applyCustomUnit">
+                确定
+              </button>
+            </div>
+          </template>
+          <button
+            v-else
+            type="button"
+            class="sm-sheet-clear sm-sheet-custom-trigger"
+            @click="openCustomUnit"
+          >
+            自定义单位
+          </button>
           <button type="button" class="sm-sheet-clear" @click="pickUnit('')">
             不填单位
           </button>
@@ -2081,6 +2124,28 @@ onBeforeUnmount(() => {
   background: transparent;
   color: var(--ink-dim);
   font-size: 14px;
+  font-family: inherit;
+  cursor: pointer;
+}
+.sm-sheet-custom {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+.sm-sheet-custom-input {
+  flex: 1;
+  min-width: 0;
+}
+.sm-sheet-custom-ok {
+  flex: none;
+  min-width: 88px;
+  min-height: 44px;
+  border: 0;
+  border-radius: 10px;
+  background: var(--action);
+  color: var(--action-ink);
+  font-size: var(--fs-14);
+  font-weight: 600;
   font-family: inherit;
   cursor: pointer;
 }

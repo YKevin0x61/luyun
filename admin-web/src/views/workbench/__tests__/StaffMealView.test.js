@@ -746,6 +746,32 @@ describe('员工餐页 · 单日流程（S3 重推确认 / S5 只读文案 / F14
     )
     expect(dayGets).toHaveLength(2)
   })
+
+  it('单位弹层支持自定义单位：手输「板」后回填到这一行', async () => {
+    const { wrapper } = await mountView({
+      identity: 'staff',
+      path: directPath(),
+      fetchOptions: { days: { [TODAY]: draftDay() } },
+    })
+
+    // 弹层走 Teleport 到 body，查 DOM 要用 document。
+    await wrapper.findAll('.sm-unit-btn')[0].trigger('click')
+    await flushPromises()
+    expect(document.body.querySelector('.sm-sheet')).toBeTruthy()
+
+    document.body.querySelector('.sm-sheet-custom-trigger').click()
+    await flushPromises()
+    const input = document.body.querySelector('.sm-sheet-custom-input')
+    input.value = '板'
+    input.dispatchEvent(new Event('input'))
+    await flushPromises()
+
+    document.body.querySelector('.sm-sheet-custom-ok').click()
+    await flushPromises()
+
+    expect(document.body.querySelector('.sm-sheet')).toBeFalsy()
+    expect(wrapper.findAll('.sm-unit-btn')[0].text()).toBe('板')
+  })
 })
 
 // ── 挂载：过去日（S6 day_expired）────────────────────────────────────

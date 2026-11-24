@@ -809,6 +809,7 @@ def test_meta_exposes_units_and_limits(staff_meal_http):
     assert meta.status_code == 200
     body = meta.json()
     assert body["units"][0] == "斤"
+    assert "板" in body["units"] and "把" not in body["units"]
     assert body["max_items"] >= 100
     assert body["max_quantity"] >= 9999
 
