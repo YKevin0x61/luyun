@@ -264,10 +264,13 @@ const productPreviewCode = computed(() =>
 
 const productPreviewHint = computed(() => {
   if (productForm.code_manual) return '手动编码按 7 位数字提交，不再跟随供应商/分类变化。'
-  if (!productSupplier.value || !productCategory.value) return '选好供应商和分类后显示编码。'
+  if (!productSupplier.value || !productCategory.value) return '选择供应商与分类后自动生成；序号为 3 位数字。'
   const raw = String(productForm.seq || '').trim()
-  if (raw) return '供应商 ' + productSupplierCodeText.value + ' + 分类 ' + productCategoryCodeText.value + ' + 序号 ' + pad3(raw)
-  return '留空按下一序号 ' + pad3(productNextSeq.value) + ' 自动生成'
+  if (raw) {
+    return '序号为 3 位数字；编码 = 供应商 ' + productSupplierCodeText.value + ' + 分类 '
+      + productCategoryCodeText.value + ' + 序号 ' + pad3(raw) + '。'
+  }
+  return '序号为 3 位数字；留空自动取下一序号 ' + pad3(productNextSeq.value) + '。'
 })
 
 function composeProductCode(supplierId, categoryId, seq) {
@@ -486,8 +489,8 @@ function openProductDialog(row) {
   productForm.supplier_id = supplier ? Number(supplier.id) : 0
   const category = selectableCategories(productForm.supplier_id, 0)[0]
   productForm.category_id = category ? Number(category.id) : 0
-  const firstPosition = positionsSorted.value.find((item) => item.active)
-  productForm.position_ids = firstPosition ? [Number(firstPosition.id)] : []
+  // 岗位默认全部不勾：挂哪个岗位由使用者自己决定，别替人预选。
+  productForm.position_ids = []
 }
 
 function openSupplierDialog(row) {
@@ -1656,8 +1659,8 @@ onUnmounted(() => {
               <section class="form-section">
                 <h3 class="form-section-title">归属与编码</h3>
                 <div class="form-grid">
-                  <label class="field">
-                    <span class="field-label">供应商</span>
+                  <label class="field field-full">
+                    <span class="field-label">供应商<em class="field-req" aria-hidden="true">*</em></span>
                     <select v-model.number="productForm.supplier_id" class="select" @change="onProductSupplierChange">
                       <option :value="0" disabled>请选择供应商</option>
                       <option v-for="supplier in suppliers" :key="supplier.id" :value="supplier.id">
@@ -1665,8 +1668,8 @@ onUnmounted(() => {
                       </option>
                     </select>
                   </label>
-                  <label class="field">
-                    <span class="field-label">分类</span>
+                  <label class="field field-full">
+                    <span class="field-label">分类<em class="field-req" aria-hidden="true">*</em></span>
                     <select
                       v-model.number="productForm.category_id"
                       class="select"
@@ -1683,46 +1686,67 @@ onUnmounted(() => {
                   </label>
 
                   <div class="field field-full">
-                    <div class="code-box">
-                      <div class="code-preview">
-                        <span class="code-preview-label">商品编码预览</span>
-                        <strong class="code-preview-value">{{ productPreviewCode || '待选择' }}</strong>
-                        <p class="code-preview-hint">{{ productPreviewHint }}</p>
+                    <span class="field-label">商品ID</span>
+                    <div class="code-card">
+                      <div class="code-segs">
+                        <div class="code-seg">
+                          <span class="code-seg-box seg-supplier">{{ productSupplierCodeText }}</span>
+                          <span class="code-seg-label">供应商</span>
+                        </div>
+                        <span class="code-dash" aria-hidden="true">-</span>
+                        <div class="code-seg">
+                          <span class="code-seg-box seg-category">{{ productCategoryCodeText }}</span>
+                          <span class="code-seg-label">分类</span>
+                        </div>
+                        <span class="code-dash" aria-hidden="true">-</span>
+                        <label class="code-seg">
+                          <span class="code-seg-box seg-seq" :class="{ 'is-empty': !productForm.seq }">
+                            <input
+                              v-if="!productForm.code_manual"
+                              class="code-seg-input"
+                              inputmode="numeric"
+                              maxlength="3"
+                              :placeholder="pad3(productNextSeq)"
+                              :value="productForm.seq"
+                              :disabled="!productForm.supplier_id || !productForm.category_id"
+                              aria-label="商品序号（3 位）"
+                              @input="onSeqInput"
+                            />
+                            <span v-else class="code-seg-num">--</span>
+                          </span>
+                          <span class="code-seg-label">
+                            序号<em v-if="!productForm.code_manual" class="field-req" aria-hidden="true">*</em>
+                          </span>
+                        </label>
                       </div>
-                      <label class="switch-line">
+                      <div class="code-full">
+                        <span class="code-full-label">完整ID:</span>
+                        <input
+                          v-if="productForm.code_manual"
+                          class="input mono code-full-input"
+                          inputmode="numeric"
+                          maxlength="7"
+                          placeholder="7 位数字"
+                          :value="productForm.manual_code"
+                          aria-label="完整商品编码"
+                          @input="onManualCodeInput"
+                        />
+                        <strong
+                          v-else
+                          class="code-full-value"
+                          :class="{ 'is-empty': !productPreviewCode }"
+                        >
+                          {{ productPreviewCode || '未生成' }}
+                        </strong>
+                      </div>
+                      <p class="code-tip">{{ productPreviewHint }}</p>
+                      <label class="switch-line code-manual">
                         <input
                           type="checkbox"
                           :checked="productForm.code_manual"
                           @change="onCodeManualChange"
                         />
                         手动填写完整编码
-                      </label>
-                      <input
-                        v-if="productForm.code_manual"
-                        class="input mono"
-                        inputmode="numeric"
-                        maxlength="7"
-                        placeholder="7 位数字"
-                        :value="productForm.manual_code"
-                        aria-label="完整商品编码"
-                        @input="onManualCodeInput"
-                      />
-                      <label v-else class="field">
-                        <span class="field-label">序号（3 位）</span>
-                        <input
-                          class="input mono"
-                          inputmode="numeric"
-                          maxlength="3"
-                          placeholder="留空自动"
-                          :value="productForm.seq"
-                          :disabled="!productForm.supplier_id || !productForm.category_id"
-                          aria-label="商品序号"
-                          @input="onSeqInput"
-                        />
-                        <span class="field-hint">
-                          留空按下一序号 {{ pad3(productNextSeq) }} 自动生成；编码 = 供应商
-                          {{ productSupplierCodeText }} + 分类 {{ productCategoryCodeText }} + 序号。
-                        </span>
                       </label>
                     </div>
                   </div>
@@ -3168,42 +3192,168 @@ onUnmounted(() => {
   line-height: 1.4;
 }
 
-.code-box {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
+.field-req {
+  margin-left: 4px;
+  color: var(--danger-bright);
+  font-size: var(--fs-13);
+  font-style: normal;
 }
 
-.code-preview {
+.code-card {
   display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 6px 12px;
-  padding: 10px 12px;
-  border: 1px dashed var(--line-strong);
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-4);
+  border: 1px solid var(--line);
   border-radius: var(--r-1);
   background: var(--surface-0);
 }
 
-.code-preview-label {
-  color: var(--ink-dim);
-  font-size: var(--fs-11);
-  font-weight: 700;
+.code-segs {
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  gap: var(--sp-3);
+  padding-bottom: var(--sp-1);
 }
 
-.code-preview-value {
+.code-seg {
+  display: flex;
+  flex: 1 1 0;
+  flex-direction: column;
+  gap: 6px;
+  align-items: center;
+  min-width: 0;
+  max-width: 180px;
+}
+
+.code-seg-box {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 56px;
+  border: 1px solid transparent;
+  border-radius: var(--r-1);
   color: var(--ink);
   font-family: var(--font-mono);
   font-size: var(--fs-20);
+  font-weight: 700;
+  line-height: 1;
   letter-spacing: 0.08em;
 }
 
-.code-preview-hint {
-  flex: 1 1 100%;
+.seg-supplier {
+  background: var(--surface-3);
+}
+
+.seg-category {
+  background: var(--surface-2);
+}
+
+.seg-seq {
+  border-color: var(--line-control);
+  background: var(--surface-1);
+}
+
+.seg-seq.is-empty {
+  color: var(--ink-faint);
+}
+
+.seg-seq:focus-within {
+  border-color: var(--action);
+}
+
+.code-seg-input {
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  border-radius: inherit;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  letter-spacing: inherit;
+  text-align: center;
+}
+
+.code-seg-input::placeholder {
+  color: var(--ink-faint);
+}
+
+.code-seg-input:focus-visible {
+  outline: none;
+}
+
+.code-seg-num {
+  color: var(--ink-faint);
+  font: inherit;
+  letter-spacing: inherit;
+}
+
+.code-seg-label {
+  color: var(--ink-dim);
+  font-size: var(--fs-12);
+  font-weight: 600;
+}
+
+.code-dash {
+  flex: 0 0 auto;
+  padding-top: 18px;
+  color: var(--ink-faint);
+  font-size: var(--fs-14);
+}
+
+.code-full {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+  padding-top: var(--sp-3);
+  border-top: 1px solid var(--line);
+}
+
+.code-full-label {
+  color: var(--ink-dim);
+  font-size: var(--fs-13);
+  font-weight: 600;
+}
+
+.code-full-value {
+  padding: 6px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-0);
+  background: var(--surface-1);
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: var(--fs-20);
+  font-weight: 800;
+  line-height: 1.4;
+  letter-spacing: 0.1em;
+}
+
+.code-full-value.is-empty {
+  color: var(--ink-faint);
+  font-weight: 600;
+}
+
+.code-full-input {
+  flex: 0 1 180px;
+  width: auto;
+  text-align: center;
+}
+
+.code-tip {
   margin: 0;
   color: var(--ink-faint);
-  font-size: var(--fs-11);
-  line-height: 1.5;
+  font-size: var(--fs-12);
+  line-height: 1.55;
+  text-align: center;
+}
+
+.code-manual {
+  justify-content: center;
 }
 
 .pos-picker {
