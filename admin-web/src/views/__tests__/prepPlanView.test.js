@@ -636,9 +636,9 @@ describe('时间跨度切换', () => {
       ),
     ).toBe(true)
     expect(wrapper.text()).toContain('未来 7 天参考值')
-    // 超过后天就不写「大后天」，直接给日期
-    const [month, day] = ENDS[168].slice(5, 10).split('-').map(Number)
-    expect(wrapper.text()).toContain(`${month}/${day} 14:00`)
+    // 超过后天就不写「大后天」，直接给日期。日期按 ISO 原样补零（12/01 不是 12/1）——
+    // 以前这里从 ISO 拆出数字再拼，只在结束日的「日」≥ 10 时才对得上，跨月那几天必红。
+    expect(wrapper.text()).toContain(`${ENDS[168].slice(5, 7)}/${ENDS[168].slice(8, 10)} 14:00`)
     expect(wrapper.text()).toContain('（未来 7 天）')
     expect(window.localStorage.getItem('prepPlanHorizon')).toBe('168')
   })
